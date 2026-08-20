@@ -24,7 +24,8 @@ from purra.contracts import (
 )
 from purra.events import CoreEventType
 from purra.errors import ContractViolationError
-from purra.ports import ToolExecutionGateway, ToolRegistration
+from purra.ports import ToolRegistration
+from purra.testing import assert_tool_execution_gateway_conforms
 from purra.operations import AgentOperationController, OperationStatus
 from purra.tools.approval import InMemoryApprovalGateway
 from purra.tools.executor import CoreToolExecutor
@@ -135,25 +136,23 @@ async def test_same_name_read_calls_execute_sequentially_with_shared_state():
         _registration("readA", _read, probe=Probe(True)),
     ))
     executor = CoreToolExecutor(catalog)
-    sink = RecordingSink()
     state = ExecutionState()
 
-    result = await executor.execute_batch(
-        _request(
+    result, events = await assert_tool_execution_gateway_conforms(
+        gateway=executor,
+        request=_request(
             _call("call-a", "readA", '{"value":"first"}'),
             _call("call-b", "readA", '{"value":"second"}'),
             state=state,
         ),
-        sink,
     )
 
-    assert isinstance(executor, ToolExecutionGateway)
     assert result.outcome is ToolBatchOutcome.COMPLETED
     assert observations == ["first", "second"]
     assert state.domain["last"] == "second"
     assert [item.tool_call_id for item in result.results] == ["call-a", "call-b"]
     assert result.cache_hits == (True, True)
-    assert [event.type for event in sink.events] == [
+    assert [event.type for event in events] == [
         CoreEventType.TOOL_CALL_COMPLETED,
         CoreEventType.TOOL_CALL_COMPLETED,
     ]

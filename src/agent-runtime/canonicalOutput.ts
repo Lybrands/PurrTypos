@@ -64,9 +64,8 @@ export type CanonicalCommentaryBlock = {
 export type CanonicalDelegation = {
   delegationId: string
   firstSequence: number
-  parentRunId: string
-  childRunId: string | null
-  agentRole: string
+  runId: string
+  agentName: string
   agentTitle: string | null
   objective: string
   status: string
@@ -471,34 +470,20 @@ function applyDelegationEvent(
 ): CanonicalOutputState {
   const eventType = stringValue(event.payload.eventType)
   const delegationId = stringValue(event.payload.delegationId)
-  const agentRole = stringValue(event.payload.agentRole)
-  if (!delegationId || !agentRole) return state
+  const agentName = stringValue(event.payload.agentName)
+  if (!delegationId || !agentName) return state
   const current = state.delegations[delegationId]
-  const childEvent = eventType === 'child_output'
-    && isCanonicalOutputEvent(event.payload.event)
-    ? event.payload.event
-    : null
-  if (eventType !== 'status' && childEvent == null) return state
-  const output = childEvent == null
-    ? current?.output ?? initialCanonicalOutputState()
-    : reduceCanonicalOutput(
-        current?.output ?? initialCanonicalOutputState(),
-        childEvent,
-      )
+  if (eventType !== 'status') return state
   const delegation: CanonicalDelegation = {
     delegationId,
     firstSequence: current?.firstSequence ?? event.sequence,
-    parentRunId: stringValue(event.payload.parentRunId) || event.runId,
-    childRunId: stringValue(event.payload.childRunId)
-      || stringValue(event.payload.sourceRunId)
-      || current?.childRunId
-      || null,
-    agentRole,
+    runId: stringValue(event.payload.runId) || event.runId,
+    agentName,
     agentTitle: stringValue(event.payload.agentTitle) || null,
     objective: stringValue(event.payload.objective),
     status: stringValue(event.payload.status) || current?.status || 'queued',
     errorCode: stringValue(event.payload.errorCode) || null,
-    output,
+    output: current?.output ?? initialCanonicalOutputState(),
   }
   return {
     ...state,

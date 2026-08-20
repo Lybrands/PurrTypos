@@ -77,7 +77,7 @@ export default function DelegationStatus({
               <div className="work-log__subagent-content">
                 <div className="work-log__subagent-line">
                   <span className="work-log__subagent-role">
-                    {item.agentTitle || item.agentRole}
+                    {item.agentTitle || item.agentName}
                   </span>
                   <span className="work-log__subagent-status">
                     {STATUS_LABELS[item.status]}

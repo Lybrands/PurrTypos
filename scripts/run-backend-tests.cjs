@@ -46,7 +46,7 @@ const hasExplicitTarget = forwardedArgs.some((argument) => {
   return selector.includes('::') || fs.existsSync(path.resolve(projectRoot, selector))
 })
 const pytestArgs = [
-  ...(hasExplicitTarget ? [] : ['backend/tests']),
+  ...(hasExplicitTarget ? [] : ['backend/tests', 'packages/purra/tests']),
   ...forwardedArgs,
 ]
 

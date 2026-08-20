@@ -208,7 +208,6 @@ export const services = {
     submitAiErrorReport: backendApi.submitAiErrorReport,
     cancelAgentRun: backendApi.cancelAgentRun,
     cancelWritingChatRequest: backendApi.cancelWritingChatRequest,
-    createAgentDelegation: backendApi.createAgentDelegation,
     resolveAiToolApproval: backendApi.resolveAiToolApproval,
     aiChatStream: backendApi.aiChatStream,
     abortAiStream: backendApi.abortAiStream,

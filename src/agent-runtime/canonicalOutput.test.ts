@@ -124,17 +124,7 @@ test('duplicates are ignored while private journal gaps stay hidden', () => {
   assert.equal(reduceCanonicalOutput(first, events[2]).lastSequence, 3)
 })
 
-test('federated child output reuses the same canonical reducer', () => {
-  const childDelta = event(1, {
-    eventId: 'child-event-1',
-    runId: 'child-run-1',
-    source: 'provider',
-    kind: 'provider.content_delta',
-    channel: 'final',
-    outputStreamId: 'child-stream',
-    invocationId: 'child-invocation',
-    payload: { delta: '子任务真实输出' },
-  })
+test('delegation status remains scoped to the owning Run', () => {
   const state = replayCanonicalOutput([
     event(1, {
       kind: 'delegation.event',
@@ -142,34 +132,17 @@ test('federated child output reuses the same canonical reducer', () => {
       payload: {
         eventType: 'status',
         delegationId: 'delegation-1',
-        parentRunId: 'run-1',
-        childRunId: 'child-run-1',
-        agentRole: 'reviewer',
+        runId: 'run-1',
+        agentName: 'reviewer',
         agentTitle: '审阅 Agent',
         objective: '独立审阅',
         status: 'running',
       },
     }),
-    event(2, {
-      kind: 'delegation.event',
-      channel: 'delegation',
-      payload: {
-        eventType: 'child_output',
-        delegationId: 'delegation-1',
-        parentRunId: 'run-1',
-        sourceRunId: 'child-run-1',
-        agentRole: 'reviewer',
-        agentTitle: '审阅 Agent',
-        objective: '独立审阅',
-        event: childDelta,
-      },
-    }),
   ])
 
-  assert.equal(
-    state.delegations['delegation-1']?.output.finalText,
-    '子任务真实输出',
-  )
+  assert.equal(state.delegations['delegation-1']?.runId, 'run-1')
+  assert.equal(state.delegations['delegation-1']?.status, 'running')
 })
 
 test('approval lifecycle is replayed from canonical runtime events', () => {

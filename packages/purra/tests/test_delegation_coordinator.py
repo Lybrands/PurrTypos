@@ -9,81 +9,34 @@ import pytest
 
 from purra.contracts import (
     AgentDelegation,
-    AgentMessage,
-    AgentRunRequest,
-    AgentRunResult,
     DelegationAggregation,
-    DelegationClaim,
-    DomainContext,
+    DelegationContextMode,
+    DelegationStatus,
     ExecutionState,
-    ModelRequest,
-    RunLineage,
-    RunStatus,
+    RuntimeOutcome,
 )
-from purra.model_protocol import generic_capability_snapshot
+from purra.delegation import (
+    DelegatedAgentRequest,
+    DelegatedAgentResult,
+    DelegationCoordinator,
+    DelegationPolicy,
+    build_delegation_tool_registration,
+)
+from purra.errors import ContractViolationError
 from purra.operations import AgentOperationController
-from purra.output import (
-    AgentOutputEvent,
-    OutputChannel,
-    OutputEventKind,
-    OutputSource,
-    OutputVisibility,
-)
+from purra.output import AgentOutputEvent
 from purra.output.processor import AgentOutputProcessor
-
-
-def _coordinator_type():
-    try:
-        from purra.delegation import AgentDelegationCoordinator
-    except ImportError as error:
-        pytest.fail(f"delegation coordinator is missing: {error}")
-    return AgentDelegationCoordinator
-
-
-def _request() -> AgentRunRequest:
-    return AgentRunRequest(
-        messages=(AgentMessage(role="user", content="child"),),
-        model=ModelRequest(
-            provider="test",
-            model="model",
-            capability_snapshot=replace(
-                generic_capability_snapshot(),
-                profile_id="test:model",
-                max_output_tokens=1_024,
-            ),
-        ),
-        domain_context=DomainContext(namespace="test"),
-    )
-
-
-def _event(run_id: str, sequence: int) -> AgentOutputEvent:
-    now = datetime.now(timezone.utc)
-    return AgentOutputEvent(
-        event_id=f"{run_id}-event-{sequence}",
-        output_stream_id=None,
-        run_id=run_id,
-        turn_id=None,
-        invocation_id=None,
-        sequence=sequence,
-        source=OutputSource.RUNTIME,
-        kind=OutputEventKind.RUN_LIFECYCLE,
-        channel=OutputChannel.LIFECYCLE,
-        visibility=OutputVisibility.PUBLIC,
-        payload={"sourceSequence": sequence},
-        occurred_at=now,
-        emitted_at=now,
-    )
 
 
 class _OutputRepository:
     def __init__(self) -> None:
-        self.events = {}
+        self.events: dict[str, list[AgentOutputEvent]] = {}
 
     async def append_event(self, draft):
         rows = self.events.setdefault(draft.run_id, [])
         now = datetime.now(timezone.utc)
         event = AgentOutputEvent(
-            event_id=f"parent-event-{len(rows) + 1}",
+            event_id=f"event-{len(rows) + 1}",
             output_stream_id=draft.output_stream_id,
             run_id=draft.run_id,
             turn_id=draft.turn_id,
@@ -118,232 +71,302 @@ class _Publisher:
 
 class _Delegations:
     def __init__(self) -> None:
+        self.rows: dict[str, AgentDelegation] = {}
+        self.next_id = 1
+
+    async def create(self, **values):
         delegation = AgentDelegation(
-            id="delegation-1",
-            parent_run_id="parent-1",
-            root_run_id="parent-1",
-            agent_role="researcher",
-            objective="collect facts",
+            id=f"delegation-{self.next_id}",
+            **values,
         )
-        self.claim_record = DelegationClaim(
-            delegation=delegation,
-            lineage=RunLineage(
-                parent_run_id="parent-1",
-                root_run_id="parent-1",
-                delegation_id="delegation-1",
-                agent_role="researcher",
-                depth=1,
+        self.next_id += 1
+        self.rows[delegation.id] = delegation
+        return delegation
+
+    async def start(self, delegation_id, *, run_id, batch_id):
+        row = self._owned(delegation_id, run_id, batch_id)
+        if row.status is not DelegationStatus.QUEUED:
+            return None
+        row = replace(row, status=DelegationStatus.RUNNING)
+        self.rows[row.id] = row
+        return row
+
+    async def complete(
+        self,
+        delegation_id,
+        *,
+        run_id,
+        batch_id,
+        result_summary,
+    ):
+        row = self._owned(delegation_id, run_id, batch_id)
+        if row.status is not DelegationStatus.RUNNING:
+            return False
+        self.rows[row.id] = replace(
+            row,
+            status=DelegationStatus.DONE,
+            result_summary=result_summary,
+        )
+        return True
+
+    async def fail(self, delegation_id, *, run_id, batch_id, error):
+        row = self._owned(delegation_id, run_id, batch_id)
+        if row.status not in {DelegationStatus.QUEUED, DelegationStatus.RUNNING}:
+            return False
+        self.rows[row.id] = replace(
+            row,
+            status=DelegationStatus.FAILED,
+            error=error,
+        )
+        return True
+
+    async def cancel(self, delegation_id, *, run_id, batch_id, reason):
+        row = self._owned(delegation_id, run_id, batch_id)
+        if row.status not in {DelegationStatus.QUEUED, DelegationStatus.RUNNING}:
+            return False
+        self.rows[row.id] = replace(
+            row,
+            status=DelegationStatus.CANCELED,
+            error=reason,
+        )
+        return True
+
+    async def list_for_run(self, run_id):
+        return tuple(row for row in self.rows.values() if row.run_id == run_id)
+
+    async def aggregate_batch(self, run_id, batch_id):
+        rows = tuple(
+            row
+            for row in self.rows.values()
+            if row.run_id == run_id and row.batch_id == batch_id
+        )
+        counts = {
+            status.value: sum(row.status is status for row in rows)
+            for status in DelegationStatus
+        }
+        failures = tuple(
+            row.id
+            for row in rows
+            if row.required
+            and row.status in {DelegationStatus.FAILED, DelegationStatus.CANCELED}
+        )
+        pending = counts["queued"] + counts["running"]
+        return DelegationAggregation(
+            state="pending" if pending else ("blocked" if failures else "ready"),
+            counts=counts,
+            required_failures=failures,
+            results=tuple(
+                {
+                    "delegationId": row.id,
+                    "agentName": row.agent_name,
+                    "agentTitle": row.agent_title,
+                    "summary": row.result_summary or "",
+                }
+                for row in rows
+                if row.status is DelegationStatus.DONE
             ),
         )
-        self.results = []
-        self.attached = []
-        self.cancel_calls = 0
 
-    async def create(self, **kwargs):
-        del kwargs
-        return self.claim_record.delegation
+    async def cancel_batch(self, run_id, batch_id):
+        canceled = 0
+        for row in tuple(self.rows.values()):
+            if row.run_id != run_id or row.batch_id != batch_id:
+                continue
+            canceled += await self.cancel(
+                row.id,
+                run_id=run_id,
+                batch_id=batch_id,
+                reason="delegation_canceled",
+            )
+        return canceled
 
-    async def claim(self, **kwargs):
-        del kwargs
-        return self.claim_record
-
-    async def record_result(self, **kwargs):
-        self.results.append(kwargs)
-        return True
-
-    async def attach_child_run(self, **kwargs):
-        self.attached.append(kwargs)
-        return True
-
-    async def fail(self, **kwargs):
-        raise AssertionError(f"unexpected delegation failure: {kwargs}")
-
-    async def cancel_children(self, parent_run_id):
-        del parent_run_id
-        self.cancel_calls += 1
-        return 1
-
-    async def aggregate(self, parent_run_id):
-        del parent_run_id
-        return DelegationAggregation(state="ready", counts={"done": 1})
+    def _owned(self, delegation_id, run_id, batch_id):
+        row = self.rows[delegation_id]
+        if row.run_id != run_id or row.batch_id != batch_id:
+            raise AssertionError("delegation escaped its Root Run batch")
+        return row
 
 
-class _Factory:
-    async def build(self, claim):
-        del claim
-        return _request(), object()
+class _Executor:
+    def __init__(self) -> None:
+        self.requests: list[DelegatedAgentRequest] = []
+
+    async def execute(self, request, signal=None):
+        del signal
+        self.requests.append(request)
+        return DelegatedAgentResult(
+            outcome=RuntimeOutcome.COMPLETED,
+            content=f"result:{request.objective}",
+        )
 
 
-class _ChildHandle:
-    def __init__(self, *, pending=False) -> None:
-        self._events = (_event("child-1", 1), _event("child-1", 2))
-        self._result = asyncio.get_running_loop().create_future()
-        self.cancel_calls = 0
-        if not pending:
-            self._result.set_result(AgentRunResult(
-                run_id="child-1",
-                status=RunStatus.DONE,
-                final_response="verified facts",
-            ))
+class _PendingExecutor(_Executor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.canceled = asyncio.Event()
 
-    @property
-    def run_id(self):
-        return "child-1"
-
-    async def _subscribe(self, after_sequence=0):
-        for event in self._events:
-            if event.sequence > after_sequence:
-                yield event
-
-    def subscribe(self, after_sequence=0):
-        return self._subscribe(after_sequence)
-
-    async def wait(self):
-        return await asyncio.shield(self._result)
-
-    async def cancel(self, reason):
-        del reason
-        self.cancel_calls += 1
-        if not self._result.done():
-            self._result.set_result(AgentRunResult(
-                run_id="child-1",
-                status=RunStatus.CANCELED,
-                error="parent_canceled",
-            ))
+    async def execute(self, request, signal=None):
+        del signal
+        self.requests.append(request)
+        self.started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.canceled.set()
+            raise
 
 
-class _Core:
-    def __init__(self, handle):
-        self.handle = handle
-
-    async def submit(self, request, *, options=None):
-        del request, options
-        return self.handle
-
-
-def _fixture(*, pending=False):
+def _fixture(executor=None):
     output_repository = _OutputRepository()
     publisher = _Publisher()
     processor = AgentOutputProcessor(output_repository, publisher)
-    operations = AgentOperationController(processor)
-    delegations = _Delegations()
-    child = _ChildHandle(pending=pending)
-    coordinator = _coordinator_type()(
-        repository=delegations,
-        core=_Core(child),
+    repository = _Delegations()
+    executor = executor or _Executor()
+    coordinator = DelegationCoordinator(
+        repository=repository,
+        executor=executor,
         output_processor=processor,
-        operation_controller=operations,
-        child_request_factory=_Factory(),
-        worker_id="worker-1",
-        max_parallel_children=2,
+        operation_controller=AgentOperationController(processor),
+        max_parallel=2,
     )
-    return coordinator, output_repository, delegations, child
+    return coordinator, output_repository, repository, executor
 
 
 @pytest.mark.asyncio
-async def test_child_events_receive_parent_sequence_and_keep_source_ids():
-    coordinator, output, delegations, _child = _fixture()
+async def test_delegation_executes_inside_one_root_run_without_child_identity():
+    coordinator, output, repository, executor = _fixture()
+    delegation = await coordinator.create(
+        run_id="run-root",
+        batch_id="batch-1",
+        agent_name="evidence-researcher",
+        agent_title="Evidence researcher",
+        agent_instruction="Collect evidence and report uncertainty.",
+        objective="collect facts",
+        input_payload={"topic": "PurrA"},
+    )
 
-    handle = await coordinator.claim_and_submit(
-        "delegation-1",
-        parent_run_id="parent-1",
-    )
-    result = await handle.wait()
-    parent_events = await output.list_events(
-        "parent-1",
-        after_sequence=0,
-    )
+    results = await coordinator.execute_batch((delegation,))
 
-    assert result.status is RunStatus.DONE
-    assert [event.sequence for event in parent_events] == list(
-        range(1, len(parent_events) + 1)
+    assert results == (DelegatedAgentResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        content="result:collect facts",
+    ),)
+    request = executor.requests[0]
+    assert request.run_id == "run-root"
+    assert request.delegation_id == delegation.id
+    assert request.context_mode is DelegationContextMode.ISOLATED
+    assert request.agent_title == "Evidence researcher"
+    assert request.agent_instruction == (
+        "Collect evidence and report uncertainty."
     )
-    delegation_events = [
-        event
-        for event in parent_events
-        if event.kind is OutputEventKind.DELEGATION
-    ]
+    assert not hasattr(delegation, "child_run_id")
+    assert not hasattr(delegation, "root_run_id")
+    assert repository.rows[delegation.id].status is DelegationStatus.DONE
+
     statuses = [
         event.payload["status"]
-        for event in delegation_events
+        for event in await output.list_events("run-root", after_sequence=0)
         if event.payload.get("eventType") == "status"
     ]
-    assert statuses == ["claimed", "running", "done"]
-    federated = [
-        event
-        for event in delegation_events
-        if event.payload.get("eventType") == "child_output"
-    ]
-    assert [event.payload["sourceSequence"] for event in federated] == [1, 2]
-    assert all(event.payload["sourceRunId"] == "child-1" for event in federated)
-    assert all(event.payload["parentRunId"] == "parent-1" for event in federated)
-    assert delegations.attached == [{
-        "delegation_id": "delegation-1",
-        "child_run_id": "child-1",
-        "worker_id": "worker-1",
-    }]
-    assert len(delegations.results) == 1
-
-
-@pytest.mark.asyncio
-async def test_cancel_parent_cancels_active_child_once():
-    coordinator, _output, delegations, child = _fixture(pending=True)
-    handle = await coordinator.claim_and_submit(
-        "delegation-1",
-        parent_run_id="parent-1",
+    assert statuses == ["queued", "running", "done"]
+    assert all(
+        event.run_id == "run-root"
+        for event in await output.list_events("run-root", after_sequence=0)
     )
 
-    first = await coordinator.cancel_children("parent-1")
-    second = await coordinator.cancel_children("parent-1")
-    await handle.wait()
-
-    assert first == 1
-    assert second == 0
-    assert child.cancel_calls == 1
-    assert delegations.cancel_calls == 1
-
 
 @pytest.mark.asyncio
-async def test_generic_delegation_tool_uses_coordinator_and_returns_aggregate():
-    from purra.delegation import build_delegation_tool_registration
-
-    coordinator, output, _delegations, _child = _fixture()
+async def test_tool_results_are_scoped_to_the_current_delegation_batch():
+    coordinator, _output, _repository, executor = _fixture()
     registration = build_delegation_tool_registration(
         coordinator,
-        role_guidance={
-            "researcher": {
-                "title": "Researcher",
-                "description": "Collect independent evidence",
-            },
-        },
     )
-    state = ExecutionState(run_id="parent-1")
+    assert registration.host_managed_durability is True
+    state = ExecutionState(run_id="run-root")
 
-    result = await registration.handler(
-        state,
-        {
+    first = await registration.handler(state, {
+        "delegations": [{
+            "agentName": "first-reviewer",
+            "title": "First reviewer",
+            "instruction": "Review the first claim independently.",
+            "objective": "first",
+        }],
+    })
+    second = await registration.handler(state, {
+        "delegations": [{
+            "agentName": "second-reviewer",
+            "title": "Second reviewer",
+            "instruction": "Review the second claim independently.",
+            "objective": "second",
+        }],
+    })
+
+    first_payload = json.loads(first.content)
+    second_payload = json.loads(second.content)
+    assert [item["summary"] for item in first_payload["results"]] == [
+        "result:first"
+    ]
+    assert [item["summary"] for item in second_payload["results"]] == [
+        "result:second"
+    ]
+    assert all(
+        request.run_id == "run-root"
+        and request.context_mode is DelegationContextMode.ISOLATED
+        for request in executor.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_delegation_policy_bounds_model_defined_agents():
+    coordinator, _output, _repository, _executor = _fixture()
+    policy = DelegationPolicy(
+        max_agents_per_call=1,
+        max_parallel=1,
+        max_agent_name_chars=8,
+    )
+    registration = build_delegation_tool_registration(coordinator, policy)
+    schema = registration.schema.parameters
+    assert schema["properties"]["delegations"]["maxItems"] == 1
+    assert (
+        schema["properties"]["delegations"]["items"]["properties"]
+        ["agentName"]["maxLength"]
+    ) == 8
+    with pytest.raises(ContractViolationError, match="between one and 1"):
+        await registration.handler(ExecutionState(run_id="run-root"), {
             "delegations": [{
-                "agentRole": "researcher",
-                "objective": "collect facts",
+                "agentName": "first",
+                "title": "First",
+                "instruction": "Review.",
+                "objective": "first",
+            }, {
+                "agentName": "second",
+                "title": "Second",
+                "instruction": "Review.",
+                "objective": "second",
             }],
-        },
-    )
+        })
 
-    assert json.loads(result.content) == {
-        "state": "ready",
-        "counts": {"done": 1},
-        "requiredFailures": [],
-        "results": [],
-    }
-    status_events = [
-        event
-        for event in await output.list_events("parent-1", after_sequence=0)
-        if event.kind is OutputEventKind.DELEGATION
-        and event.payload.get("eventType") == "status"
-    ]
-    assert [event.payload["status"] for event in status_events] == [
-        "queued",
-        "claimed",
-        "running",
-        "done",
-    ]
+
+@pytest.mark.asyncio
+async def test_cancel_batch_stops_only_its_active_delegated_execution():
+    executor = _PendingExecutor()
+    coordinator, _output, repository, _executor = _fixture(executor)
+    delegation = await coordinator.create(
+        run_id="run-root",
+        batch_id="batch-cancel",
+        agent_name="researcher",
+        agent_title="Researcher",
+        agent_instruction="Wait until canceled.",
+        objective="wait",
+    )
+    execution = asyncio.create_task(coordinator.execute_batch((delegation,)))
+    await executor.started.wait()
+
+    assert await coordinator.cancel_batch("run-root", "batch-cancel") == 1
+    with pytest.raises(asyncio.CancelledError):
+        await execution
+
+    assert executor.canceled.is_set()
+    assert repository.rows[delegation.id].status is DelegationStatus.CANCELED
+    await coordinator.close()

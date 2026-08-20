@@ -12,7 +12,6 @@ from application.agent_composition import set_agent_composition
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from dependencies import set_db
-from domains.writing.agent_roles import build_writing_agent_role_registry
 from infrastructure.persistence.run_store import create_run
 from purra.contracts import RunBinding
 import routers.ai as ai_routes
@@ -80,36 +79,6 @@ def _lexical(text: str) -> str:
             }],
         },
     }, ensure_ascii=False)
-
-
-async def test_writing_routes_resolve_roles_from_persisted_profile_identity():
-    registry = build_writing_agent_role_registry()
-    seen_profiles: list[tuple[str, str]] = []
-
-    class _Composition:
-        def agent_role_registry_for_persisted_profile(
-            self,
-            *,
-            profile_id,
-            domain_namespace,
-        ):
-            seen_profiles.append((profile_id, domain_namespace))
-            return registry
-
-    resolved = await ai_routes._persisted_run_role_registry(
-        _Composition(),
-        None,
-        {
-            "id": "writing-run",
-            "binding_attributes_json": (
-                '{"agentProfile":"writing",'
-                '"domainNamespace":"purrtypos.writing"}'
-            ),
-        },
-    )
-
-    assert resolved is registry
-    assert seen_profiles == [("writing", "purrtypos.writing")]
 
 
 async def test_reserve_route_replays_response_loss_and_rejects_changed_input(
@@ -511,13 +480,10 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
         ensure_ascii=False,
     )
     root_run_id = observed_runs[0]["id"]
-    runs = await db.fetch_all(
-        "SELECT id, status, parent_run_id FROM ai_agent_runs"
-    )
+    runs = await db.fetch_all("SELECT id, status FROM ai_agent_runs")
     assert runs == [{
         "id": root_run_id,
         "status": "done",
-        "parent_run_id": None,
     }]
 
 

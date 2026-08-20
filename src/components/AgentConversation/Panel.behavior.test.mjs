@@ -7,6 +7,10 @@ import { createServer } from 'vite'
 
 let vite
 let AgentConversationPanel
+let AgentMessageFooter
+let ExecutionLog
+let buildAgentModelLabels
+let formatAgentMessageTime
 
 before(async () => {
   vite = await createServer({
@@ -16,6 +20,15 @@ before(async () => {
   })
   ;({ default: AgentConversationPanel } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/Panel.tsx',
+  ))
+  ;({ default: AgentMessageFooter } = await vite.ssrLoadModule(
+    '/src/components/AgentConversation/MessageFooter.tsx',
+  ))
+  ;({ default: ExecutionLog } = await vite.ssrLoadModule(
+    '/src/components/AgentConversation/ExecutionLog/index.tsx',
+  ))
+  ;({ buildAgentModelLabels, formatAgentMessageTime } = await vite.ssrLoadModule(
+    '/src/components/AgentConversation/messageMetadata.ts',
   ))
 })
 
@@ -85,6 +98,122 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   assert.ok(send)
   assert.match(send, /\bdisabled(?:=|\s|>)/)
   assert.match(markup, /正在恢复对话/)
+})
+
+test('message time always uses local HH:mm without a date', () => {
+  assert.equal(formatAgentMessageTime('2024-01-02T08:43:00'), '08:43')
+})
+
+test('active execution log title does not append animated ellipsis', () => {
+  const markup = renderToStaticMarkup(React.createElement(ExecutionLog, {
+    logKey: 'active-without-dots',
+    title: '正在进行',
+    active: true,
+    autoOpen: true,
+  }))
+
+  assert.match(markup, /正在进行/)
+  assert.doesNotMatch(markup, /a-blink-dots|\.\.\./)
+})
+
+test('assistant footer places actions before hover-only time', () => {
+  const model = {
+    id: 'model-1',
+    name: 'deepseek-v4-flash',
+    nickname: 'DeepSeek V4 Flash',
+    supportsThinking: false,
+    thinkingOnly: false,
+    apiKey: 'test',
+    baseUrl: '',
+  }
+  const userFooter = React.createElement(AgentMessageFooter, {
+    side: 'user',
+    sentAt: '2024-01-02T08:43:00',
+    actions: React.createElement('button', { 'aria-label': '复制消息' }, '复制'),
+  })
+  const assistantFooter = React.createElement(AgentMessageFooter, {
+    side: 'assistant',
+    sentAt: '2024-01-02T08:43:00',
+    model: 'deepseek-v4-flash',
+    modelLabels: buildAgentModelLabels([model]),
+    actionsPersistent: true,
+    actions: React.createElement(
+      React.Fragment,
+      null,
+      React.createElement('button', { 'aria-label': '收藏回复' }, '收藏'),
+      React.createElement('button', { 'aria-label': '复制回复纯文本' }, '复制'),
+    ),
+  })
+  const markup = renderToStaticMarkup(React.createElement(
+    'article',
+    null,
+    userFooter,
+    assistantFooter,
+  ))
+  const { document } = parseHTML(`<html><body>${markup}</body></html>`)
+  const userFooterElement = document.querySelector('.agent-message-footer.is-user')
+  const assistantFooterElement = document.querySelector('.agent-message-footer.is-assistant')
+
+  assert.ok(userFooterElement)
+  assert.ok(assistantFooterElement)
+  assert.equal(userFooterElement.querySelector('.agent-message-footer__time')?.textContent, '08:43')
+  assert.equal(
+    assistantFooterElement.querySelector('.agent-message-footer__persistent')?.textContent,
+    'DeepSeek V4 Flash',
+  )
+  assert.equal(assistantFooterElement.querySelector('.agent-message-footer__persistent time'), null)
+  const assistantActions = assistantFooterElement.querySelector('.agent-message-footer__actions')
+  const assistantTime = assistantFooterElement.querySelector('.agent-message-footer__time')
+  const assistantFooterChildren = [...assistantFooterElement.children]
+
+  assert.ok(assistantActions)
+  assert.ok(assistantTime)
+  assert.equal(assistantTime.textContent, '08:43')
+  assert.ok(
+    assistantFooterChildren.indexOf(assistantActions)
+      < assistantFooterChildren.indexOf(assistantTime),
+  )
+  assert.equal(assistantActions.classList.contains('is-persistent'), true)
+  assert.deepEqual(
+    [...assistantActions.querySelectorAll('button')]
+      .map((button) => button.getAttribute('aria-label')),
+    ['收藏回复', '复制回复纯文本'],
+  )
+})
+
+test('historical assistant actions are not persistent', () => {
+  const markup = renderToStaticMarkup(React.createElement(AgentMessageFooter, {
+    side: 'assistant',
+    sentAt: '2024-01-02T08:43:00',
+    actions: React.createElement('button', { 'aria-label': '复制回复纯文本' }, '复制'),
+  }))
+  const { document } = parseHTML(`<html><body>${markup}</body></html>`)
+  const actions = document.querySelector('.agent-message-footer__actions')
+
+  assert.ok(actions)
+  assert.equal(actions.classList.contains('is-persistent'), false)
+})
+
+test('active assistant footer omits metadata without hiding actions', () => {
+  const markup = renderToStaticMarkup(React.createElement(AgentMessageFooter, {
+    side: 'assistant',
+    sentAt: '2024-01-02T08:43:00',
+    model: 'deepseek-v4-flash',
+    modelLabels: { 'deepseek-v4-flash': 'DeepSeek V4 Flash' },
+    metadataVisible: false,
+    actionsPersistent: true,
+    actions: React.createElement('button', { 'aria-label': '收藏回复' }, '收藏'),
+  }))
+  const { document } = parseHTML(`<html><body>${markup}</body></html>`)
+  const footer = document.querySelector('.agent-message-footer.is-assistant')
+
+  assert.ok(footer)
+  assert.equal(footer.querySelector('.agent-message-footer__persistent'), null)
+  assert.equal(footer.querySelector('.agent-message-footer__time'), null)
+  assert.equal(
+    footer.querySelector('.agent-message-footer__actions button')?.getAttribute('aria-label'),
+    '收藏回复',
+  )
 })
 
 test('mounted initializing panel rejects real Enter and click until current session is ready', async () => {

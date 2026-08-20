@@ -21,7 +21,7 @@
 - 数据清理先生成功 dry-run 清单；真正删除数据必须单独获得用户确认，且整笔事务回滚安全。
 - 现有工作树含用户未提交改动；执行时先用 superpowers:using-git-worktrees 或明确文件范围隔离，不覆盖、不顺带提交无关文件。
 - Agent Core 架构改动执行 @ponytail off；以所有权、确定性、原子性、恢复和回归门禁为准，不以最小 diff 为目标。
-- Python 直接测试使用 .venv/bin/python -m pytest；真实 Provider E2E 如因凭据缺失跳过，必须标记为 RELEASE BLOCKER。
+- Python 直接测试使用 .venv/bin/python -m pytest；真实 Provider 验证由项目所有者在仓库自动化之外手工执行。
 
 ---
 
@@ -1249,17 +1249,15 @@ git add backend/database/crud/screenplay_agent_runtime_cleanup.py backend/tests/
 git commit -m "refactor(screenplay): retire legacy agent output stores"
 ~~~
 
-### Task 12: Run Release Gates and Prove Real Provider Timing
+### Task 12: Run Offline Release Gates and Hand Off Provider Timing Validation
 
 **Files:**
-- Modify: backend/tests/test_screenplay_multi_model_e2e.py
 - Modify: backend/tests/test_agent_refactor_boundaries.py
 - Modify: backend/tests/test_purra_incident_replay.py
-- Create: docs/superpowers/evidence/2026-08-11-agent-output-real-provider-e2e.md
 
 **Interfaces:**
 - Consumes: complete canonical architecture from Tasks 1-11.
-- Produces: automated gate evidence plus one real Provider timestamp trace proving pre-finish visibility and no fake stream.
+- Produces: deterministic automated gate evidence plus a handoff checklist for project-owner Provider validation.
 
 - [ ] **Step 1: Add release-level assertions**
 
@@ -1286,13 +1284,9 @@ Run: npm run check:agent-refactor
 
 Expected: PASS for boundary, model-contract, Screenplay acceptance, typecheck, frontend unit and full backend suites.
 
-- [ ] **Step 4: Run a real Provider E2E**
+- [ ] **Step 4: Hand off real Provider validation**
 
-Run: npm run test:screenplay-real-e2e
-
-Expected: at least one configured Provider test PASS and the evidence file records Provider first delta, first canonical persistence, first frontend-visible delta, Provider finish, tool start/finish, Revision publish, final-answer first delta and final stream commit.
-
-If the test is skipped for missing credentials, write RELEASE BLOCKER in the evidence file and do not claim the refactor is publishable.
+项目所有者手工记录 Provider first delta、first canonical persistence、first frontend-visible delta、Provider finish、tool start/finish、Revision publish、final-answer first delta 和 final stream commit；仓库不提供或运行付费 Provider 测试。
 
 - [ ] **Step 5: Check repository diff and production symbol absence**
 
@@ -1305,7 +1299,7 @@ Expected: git diff check PASS and no production matches. Schema migration eviden
 - [ ] **Step 6: Commit release evidence**
 
 ~~~bash
-git add backend/tests/test_screenplay_multi_model_e2e.py backend/tests/test_agent_refactor_boundaries.py backend/tests/test_purra_incident_replay.py docs/superpowers/evidence/2026-08-11-agent-output-real-provider-e2e.md
+git add backend/tests/test_agent_refactor_boundaries.py backend/tests/test_purra_incident_replay.py
 git commit -m "test(agent): gate canonical real-time output"
 ~~~
 

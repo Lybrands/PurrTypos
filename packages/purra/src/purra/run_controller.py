@@ -7,10 +7,11 @@ from collections.abc import Mapping
 from typing import Awaitable, TypeVar
 
 from purra.contracts import (
+    ExecutionTransition,
     RunCreateParams,
     RunStatus,
     StepStatus,
-    TaskPlan,
+    ExecutionPlan,
     TaskStep,
     ToolBatchOutcome,
     TraceRecord,
@@ -58,7 +59,7 @@ class AgentRunController:
     async def start(
         self,
         params: RunCreateParams,
-        plan: TaskPlan | None = None,
+        plan: ExecutionPlan | None = None,
     ) -> RunSnapshot:
         async with self._mutation_lock:
             await self._begin_unlocked(params)
@@ -79,6 +80,15 @@ class AgentRunController:
             "status": RunStatus.RUNNING.value,
             "title": "To-dos",
             "goal": None,
+            **(
+                {
+                    "agentPreset": thaw_json_mapping(
+                        params.agent_preset_snapshot
+                    )
+                }
+                if params.agent_preset_snapshot
+                else {}
+            ),
         })
         begun, canceled = await _await_repository_receipt(
             self._repository.begin(params, event_template)
@@ -93,7 +103,7 @@ class AgentRunController:
         state = self._require_started()
         await self._repository.bind_conversation(state.run_id, conversation_id)
 
-    async def install_plan(self, plan: TaskPlan) -> RunSnapshot:
+    async def install_plan(self, plan: ExecutionPlan) -> RunSnapshot:
         """Install the validated plan after the run has become observable.
 
         Starting before model planning lets a host receive ``run.started`` and
@@ -107,7 +117,7 @@ class AgentRunController:
 
     async def revise_plan(
         self,
-        plan: TaskPlan,
+        plan: ExecutionPlan,
         *,
         revision_metadata: Mapping[str, object] | None = None,
     ) -> RunSnapshot:
@@ -121,7 +131,7 @@ class AgentRunController:
 
     async def _revise_plan_unlocked(
         self,
-        plan: TaskPlan,
+        plan: ExecutionPlan,
         *,
         revision_metadata: Mapping[str, object] | None,
     ) -> RunSnapshot:
@@ -139,7 +149,7 @@ class AgentRunController:
         persisted, canceled = await _await_repository_receipt(
             self._repository.commit(
                 state.run_id,
-                RunCommit(replace_steps=revised.steps, events=(event,)),
+                RunCommit(replace_plan=_require_plan(revised), events=(event,)),
             )
         )
         if self._snapshot is not state:
@@ -149,7 +159,7 @@ class AgentRunController:
         await self._publish(persisted)
         return revised
 
-    async def _install_plan_unlocked(self, plan: TaskPlan) -> RunSnapshot:
+    async def _install_plan_unlocked(self, plan: ExecutionPlan) -> RunSnapshot:
         state = self._require_started()
         if state.terminal:
             raise RuntimeError("cannot install a plan on a terminal run")
@@ -164,7 +174,7 @@ class AgentRunController:
         persisted, canceled = await _await_repository_receipt(
             self._repository.commit(
                 state.run_id,
-                RunCommit(replace_steps=planned.steps, events=(event,)),
+                RunCommit(replace_plan=_require_plan(planned), events=(event,)),
             )
         )
         self._snapshot = planned
@@ -172,17 +182,11 @@ class AgentRunController:
         await self._publish(persisted)
         return planned
 
-    def current_allowed_tool_names(self) -> frozenset[str]:
+    def current_execution_transition(self) -> ExecutionTransition | None:
         state = self._snapshot
         if state is None:
-            return frozenset()
-        return RunStateMachine.allowed_tool_names_for_current_transition(state)
-
-    def future_allowed_tool_names(self) -> frozenset[str]:
-        state = self._snapshot
-        if state is None:
-            return frozenset()
-        return RunStateMachine.future_allowed_tool_names(state)
+            raise RuntimeError("execution transition requires a live run")
+        return RunStateMachine.execution_transition(state)
 
     def allowed_tool_names(self) -> frozenset[str]:
         state = self._snapshot
@@ -403,6 +407,13 @@ def _raise_if_canceled(canceled: bool) -> None:
         raise asyncio.CancelledError
 
 
+def _require_plan(snapshot: RunSnapshot) -> ExecutionPlan:
+    plan = snapshot.execution_plan
+    if plan is None:
+        raise RuntimeError("planned run snapshot has no ExecutionPlan")
+    return plan
+
+
 def _todos_payload(state: RunSnapshot) -> dict[str, object]:
     return {
         "title": state.title,
@@ -413,7 +424,11 @@ def _todos_payload(state: RunSnapshot) -> dict[str, object]:
             if state.task_spec is not None
             else {}
         ),
-        "steps": [_step_payload(step) for step in state.steps],
+        "steps": [
+            _step_payload(step, state.work_step_ids)
+            for step in state.steps
+            if step.id in state.work_step_ids
+        ],
     }
 
 
@@ -425,11 +440,12 @@ def _transition_events(transition: RunTransition) -> tuple[AgentEvent, ...]:
             run_id=state.run_id,
             payload={
                 "step_id": step.id,
-                "step": _step_payload(step),
+                "step": _step_payload(step, state.work_step_ids),
                 "status": state.status.value,
             },
         )
         for update in transition.step_updates
+        if update.step_id in state.work_step_ids
         for step in state.steps
         if step.id == update.step_id
     ]
@@ -457,24 +473,23 @@ def _transition_events(transition: RunTransition) -> tuple[AgentEvent, ...]:
     return tuple(events)
 
 
-def _step_payload(step: TaskStep) -> dict[str, object]:
-    payload: dict[str, object] = {
+def _step_payload(
+    step: TaskStep,
+    work_step_ids: tuple[str, ...],
+) -> dict[str, object]:
+    return {
         "id": step.id,
         "title": step.title,
         "type": step.type.value,
         "executor": step.executor.value,
         "status": step.status.value,
         "risk_level": step.risk_level.value if step.risk_level else None,
-        "suggested_tools": list(step.suggested_tools),
-        "agent_role": step.agent_role,
-        "assignment": thaw_json_mapping(step.assignment),
-        "depends_on": list(step.depends_on),
+        "depends_on": [
+            dependency
+            for dependency in step.depends_on
+            if dependency in work_step_ids
+        ],
         "description": step.description,
         "result_summary": step.result_summary,
         "error": step.error,
     }
-    if step.protocol_private:
-        payload["protocol_private"] = True
-    if step.planning_capability is not None:
-        payload["planning_capability"] = step.planning_capability
-    return payload

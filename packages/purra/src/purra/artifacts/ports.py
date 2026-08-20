@@ -15,7 +15,9 @@ from purra.artifacts.contracts import (
     ArtifactValidationResult,
 )
 from purra.artifacts.continuity import (
+    ArtifactAccessRequest,
     ArtifactClaimLeaseCommand,
+    ArtifactResumeCandidate,
     ArtifactWriteClaim,
     ArtifactWriteClaimCommand,
 )
@@ -24,6 +26,7 @@ from purra.artifacts.maintenance import (
     ArtifactMaintenanceReport,
     ArtifactMaintenanceSnapshot,
 )
+from purra.artifacts.ownership import ArtifactOwnerRef
 
 
 @runtime_checkable
@@ -36,22 +39,13 @@ class ArtifactRepository(Protocol):
 
     async def load(self, artifact_id: str) -> ArtifactRecord | None: ...
 
-    async def find_for_run(
+    async def find_for_owner(
         self,
         *,
         namespace: str,
         kind: str,
         owner_id: str,
-        run_id: str,
-    ) -> ArtifactRecord | None: ...
-
-    async def find_for_work_item(
-        self,
-        *,
-        namespace: str,
-        kind: str,
-        owner_id: str,
-        work_item_id: str,
+        owner_ref: ArtifactOwnerRef,
     ) -> ArtifactRecord | None: ...
 
     async def replay_receipt(
@@ -78,7 +72,7 @@ class ArtifactRepository(Protocol):
         artifact_id: str,
         *,
         expected_revision: int,
-        write_lease: ArtifactMutationLease | None = None,
+        write_lease: ArtifactMutationLease,
     ) -> ArtifactRecord: ...
 
 
@@ -100,7 +94,7 @@ class ArtifactValidator(Protocol):
 
 @runtime_checkable
 class ArtifactClaimRepository(Protocol):
-    """Atomic, exclusive writer claims for Work Item-scoped Artifacts.
+    """Atomic, exclusive writer claims for Artifacts.
 
     ``acquire`` must verify the expected Artifact revision and either return
     the one active claim for the same Run or reject a competing unexpired
@@ -131,6 +125,17 @@ class ArtifactClaimRepository(Protocol):
 
 
 @runtime_checkable
+class ArtifactAccessAuthorizer(Protocol):
+    """Host policy for granting Artifact access to a different Run."""
+
+    async def authorize(
+        self,
+        candidate: ArtifactResumeCandidate,
+        request: ArtifactAccessRequest,
+    ) -> bool: ...
+
+
+@runtime_checkable
 class ArtifactMaintenanceRepository(Protocol):
     """Atomic storage adapter for lease cleanup and explicit retention GC."""
 
@@ -150,6 +155,7 @@ class ArtifactMaintenanceRepository(Protocol):
 
 
 __all__ = [
+    "ArtifactAccessAuthorizer",
     "ArtifactClaimRepository",
     "ArtifactMaintenanceRepository",
     "ArtifactRepository",

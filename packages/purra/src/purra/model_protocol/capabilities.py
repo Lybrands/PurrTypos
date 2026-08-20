@@ -142,7 +142,7 @@ class ModelProtocolCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class ModelOutputCapabilities:
-    """Compatibility view of objective output facts during the v1 migration."""
+    """Objective model output limits and token-accounting facts."""
 
     max_output_tokens: int | None = None
     thinking_token_accounting: ThinkingTokenAccounting = (

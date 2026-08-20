@@ -10,18 +10,20 @@ from purra.contracts import (
     StepExecutor,
     StepStatus,
     StepType,
-    TaskPlan,
+    ExecutionPlan,
     TaskStep,
     ToolExecutionMode,
     ToolSchema,
+    WorkPlan,
+    WorkStep,
 )
 from purra.errors import ContractViolationError
 from purra.ports import ToolRegistration
 
 
 @dataclass(frozen=True, slots=True)
-class CompiledTaskPlan:
-    plan: TaskPlan
+class CompiledExecutionPlan:
+    execution_plan: ExecutionPlan
     inserted_tool_names: tuple[str, ...] = ()
     lowered_tool_names: tuple[str, ...] = ()
 
@@ -142,20 +144,21 @@ def project_completed_steps_for_planning(
     return tuple(projected)
 
 
-def compile_task_plan(
-    plan: TaskPlan,
+def compile_work_plan(
+    plan: WorkPlan,
     registrations: Sequence[ToolRegistration],
     *,
     constraints: PlanningConstraints = PlanningConstraints(),
     satisfied_tool_names: frozenset[str] = frozenset(),
     enabled_tool_names: frozenset[str] | None = None,
-) -> CompiledTaskPlan:
+) -> CompiledExecutionPlan:
     """Lower public capabilities and insert runtime prerequisites.
 
-    Legacy plans that already name runtime tools are preserved.  New plans may
-    name a registration's public ``planning_capability``; Core deterministically
-    expands that single business step into its private runtime protocol.  Every
-    lowered or synthesized step remains subject to normal runtime authority.
+    Public runtime tools without a planning capability may be named directly.
+    Registrations with a ``planning_capability`` must be selected through that
+    public capability, which Core deterministically expands into its private
+    runtime protocol. Every lowered or synthesized step remains subject to
+    normal runtime authority.
     """
 
     by_name = {item.schema.name: item for item in registrations}
@@ -223,6 +226,7 @@ def compile_task_plan(
                 status=StepStatus.PENDING,
                 risk_level=dependency_registration.policy.risk_level,
                 suggested_tools=(dependency,),
+                protocol_private=True,
                 description=(
                     f"Host-inserted prerequisite for {tool_name}; derived from "
                     "the registered tool context contract."
@@ -232,18 +236,30 @@ def compile_task_plan(
             inserted.append(dependency)
 
     for step in plan.steps:
+        execution_step = _to_execution_step(step)
         if step.executor is not StepExecutor.TOOL:
-            expanded.append(step)
+            expanded.append(execution_step)
             continue
-        if len(step.suggested_tools) != 1:
+        if len(step.capability_names) != 1:
             raise ContractViolationError(
                 "host plan compilation requires exactly one tool per step"
             )
-        selected_name = step.suggested_tools[0]
-        if selected_name in by_name:
+        selected_name = step.capability_names[0]
+        registration = by_name.get(selected_name)
+        if registration is not None:
+            if selected_name not in enabled:
+                raise ContractViolationError(
+                    f"plan names disabled tool {selected_name!r}"
+                )
+            if registration.planning_capability is not None:
+                raise ContractViolationError(
+                    "plan must select public planning capability "
+                    f"{registration.planning_capability.name!r} instead of "
+                    f"private runtime tool {selected_name!r}"
+                )
             append_prerequisites(selected_name, ())
             completed.add(selected_name)
-            expanded.append(step)
+            expanded.append(execution_step)
             continue
         members = capabilities.get(selected_name)
         if members is None:
@@ -274,7 +290,7 @@ def compile_task_plan(
             )
             existing_ids.add(runtime_step_id)
             expanded.append(replace(
-                step,
+                execution_step,
                 id=runtime_step_id,
                 title=(
                     step.title
@@ -300,10 +316,29 @@ def compile_task_plan(
             lowered.append(runtime_name)
             previous_step_id = runtime_step_id
 
-    return CompiledTaskPlan(
-        plan=replace(plan, steps=tuple(expanded)),
+    return CompiledExecutionPlan(
+        execution_plan=ExecutionPlan(
+            title=plan.title,
+            goal=plan.goal,
+            task_spec=plan.task_spec,
+            steps=tuple(expanded),
+            work_step_ids=tuple(step.id for step in plan.steps),
+        ),
         inserted_tool_names=tuple(inserted),
         lowered_tool_names=tuple(lowered),
+    )
+
+
+def _to_execution_step(step: WorkStep) -> TaskStep:
+    return TaskStep(
+        id=step.id,
+        title=step.title,
+        type=step.type,
+        executor=step.executor,
+        risk_level=step.risk_level,
+        suggested_tools=step.capability_names,
+        depends_on=step.depends_on,
+        description=step.description,
     )
 
 
@@ -396,8 +431,8 @@ def _unique_step_id(candidate: str, existing: set[str]) -> str:
 
 
 __all__ = [
-    "CompiledTaskPlan",
-    "compile_task_plan",
+    "CompiledExecutionPlan",
+    "compile_work_plan",
     "project_completed_steps_for_planning",
     "projected_planning_tool_names",
     "projected_planning_tool_schemas",

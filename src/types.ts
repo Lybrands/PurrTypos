@@ -1053,7 +1053,6 @@ export interface AiTaskPlanChunk {
     executor?: 'model' | 'tool' | 'agent';
     riskLevel?: 'read' | 'write' | 'destructive';
     suggestedTools?: string[];
-    agentRole?: string;
     assignment?: Record<string, unknown>;
     dependsOn?: string[];
     resultSummary?: string;
@@ -1095,14 +1094,6 @@ export interface AiAgentRunSnapshot {
     conversationId?: number | null;
     status: 'running' | 'done' | 'blocked' | 'failed' | 'canceled';
     mode?: string | null;
-    lineage: {
-      parentRunId?: string | null;
-      rootRunId: string;
-      delegationId?: string | null;
-      agentRole?: string | null;
-      agentTitle?: string | null;
-      depth: number;
-    };
     finalResponse: string;
     createdAt?: string | null;
     updatedAt?: string | null;
@@ -1160,10 +1151,8 @@ export type AiLongTaskUnitStatus =
 
 export interface AiAgentDelegation {
   delegationId: string;
-  parentRunId: string;
-  rootRunId: string;
-  childRunId?: string | null;
-  agentRole: string;
+  runId: string;
+  agentName: string;
   agentTitle?: string | null;
   objective: string;
   /** Planner step identity bound to a durable unit for this delegation. */
@@ -1183,9 +1172,8 @@ export interface AiAgentDelegationAggregate {
   requiredFailures: string[];
   results: Array<{
     delegationId: string;
-    agentRole: string;
+    agentName: string;
     agentTitle?: string | null;
-    childRunId?: string | null;
     summary: string;
   }>;
 }
@@ -1395,10 +1383,10 @@ export interface AiAgentRunArtifactMetrics {
     namespace: string;
     kind: string;
     status: string;
-    scope: "run" | "work_item" | string;
-    workItemId?: string | null;
-    workItemStatus?: string | null;
-    runRelation?: "created" | "continuation" | "reference" | string | null;
+    ownerRef: {
+      kind: string;
+      id: string;
+    };
     revision: number;
     committedItemCount: number;
     expectedItemCount?: number | null;
@@ -1410,11 +1398,6 @@ export interface AiAgentRunArtifactMetrics {
 export interface AiArtifactMaintenanceSnapshot {
   checkedAtMs: number;
   scopeRunId?: string | null;
-  workItemCount: number;
-  openWorkItems: number;
-  completedWorkItems: number;
-  canceledWorkItems: number;
-  unknownWorkItems: number;
   artifactCount: number;
   openArtifacts: number;
   finalizedArtifacts: number;
@@ -1435,7 +1418,6 @@ export interface AiArtifactMaintenanceReport {
   unavailableRunClaimsReleased: number;
   invalidTargetClaimsReleased: number;
   releasedClaims: number;
-  purgedWorkItems: number;
   purgedArtifacts: number;
   consistencyIssues: number;
   changed: boolean;
@@ -2257,14 +2239,6 @@ export interface ElectronAPI {
   cancelWritingChatRequest: (data: {
     requestId: string;
   }) => Promise<ApiResult<AiWritingChatRequestReceipt | null>>;
-  createAgentDelegation: (data: {
-    runId: string;
-    agentRole: string;
-    objective: string;
-    input?: Record<string, unknown>;
-    required?: boolean;
-    priority?: number;
-  }) => Promise<ApiResult<AiAgentDelegation>>;
   aiChatStream: (data: {
     /** Renderer-generated identifier used to isolate concurrent streams. */
     streamId?: string;

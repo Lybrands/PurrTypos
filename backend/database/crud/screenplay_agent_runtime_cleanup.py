@@ -215,9 +215,6 @@ async def build_cleanup_plan(
         "conversation_id",
         "binding_namespace",
         "binding_aggregate_id",
-        "parent_run_id",
-        "root_run_id",
-        "delegation_id",
     ))
     for row in run_rows:
         namespace = str(row.get("binding_namespace") or "")
@@ -231,19 +228,15 @@ async def build_cleanup_plan(
         ):
             run_ids.update(_texts((row.get("id"),)))
 
-    work_item_rows = await _rows(db, tables, "ai_agent_work_items", (
-        "id",
-        "namespace",
-        "owner_id",
-        "created_by_run_id",
-    ))
     long_task_rows = await _rows(db, tables, "ai_agent_long_tasks", (
         "id",
-        "work_item_id",
         "namespace",
         "owner_id",
         "created_by_run_id",
     ))
+    long_task_run_rows = await _rows(
+        db, tables, "ai_agent_long_task_runs", ("task_id", "run_id")
+    )
     long_task_unit_rows = await _rows(
         db,
         tables,
@@ -256,21 +249,6 @@ async def build_cleanup_plan(
         "ai_agent_long_task_usage",
         ("task_id", "run_id"),
     )
-    delegation_rows = await _rows(db, tables, "ai_agent_delegations", (
-        "id",
-        "parent_run_id",
-        "root_run_id",
-        "child_run_id",
-    ))
-
-    work_item_ids = {
-        str(row["id"])
-        for row in work_item_rows
-        if (
-            str(row.get("namespace") or "") == "purrtypos.screenplay"
-            and str(row.get("owner_id") or "") in requested
-        )
-    }
     task_ids.update(
         str(row["id"])
         for row in long_task_rows
@@ -282,27 +260,27 @@ async def build_cleanup_plan(
 
     changed = True
     while changed:
-        before = (len(run_ids), len(task_ids), len(work_item_ids))
+        before = (len(run_ids), len(task_ids))
         for row in long_task_rows:
             task_id = str(row.get("id") or "")
             created_by = str(row.get("created_by_run_id") or "")
             if task_id in task_ids or created_by in run_ids:
                 task_ids.add(task_id)
-                work_item_ids.update(_texts((row.get("work_item_id"),)))
                 run_ids.update(_texts((created_by,)))
+        for row in long_task_run_rows:
+            if (
+                str(row.get("task_id") or "") in task_ids
+                or str(row.get("run_id") or "") in run_ids
+            ):
+                task_ids.update(_texts((row.get("task_id"),)))
+                run_ids.update(_texts((row.get("run_id"),)))
         for row in long_task_unit_rows:
             if str(row.get("task_id") or "") in task_ids:
                 run_ids.update(_texts((row.get("run_id"),)))
         for row in long_task_usage_rows:
             if str(row.get("task_id") or "") in task_ids:
                 run_ids.update(_texts((row.get("run_id"),)))
-        for row in work_item_rows:
-            created_by = str(row.get("created_by_run_id") or "")
-            if str(row.get("id") or "") in work_item_ids or created_by in run_ids:
-                work_item_ids.update(_texts((row.get("id"),)))
-                run_ids.update(_texts((created_by,)))
-        _expand_run_graph(run_ids, run_rows, delegation_rows)
-        changed = before != (len(run_ids), len(task_ids), len(work_item_ids))
+        changed = before != (len(run_ids), len(task_ids))
 
     for row in run_rows:
         if str(row.get("id") or "") in run_ids:
@@ -314,7 +292,6 @@ async def build_cleanup_plan(
         "id",
         "namespace",
         "owner_id",
-        "work_item_id",
     ))
     protected_artifact_ids = {
         str(row["id"])
@@ -324,20 +301,6 @@ async def build_cleanup_plan(
             and str(row.get("owner_id") or "") in requested
         )
     }
-    protected_work_item_ids = _texts(
-        row.get("work_item_id")
-        for row in artifact_rows
-        if str(row.get("id") or "") in protected_artifact_ids
-    )
-    claim_rows = await _rows(db, tables, "ai_agent_artifact_claims", (
-        "artifact_id",
-        "work_item_id",
-    ))
-    for row in claim_rows:
-        if str(row.get("artifact_id") or "") in protected_artifact_ids:
-            protected_work_item_ids.update(_texts((row.get("work_item_id"),)))
-    deletable_work_item_ids = work_item_ids.difference(protected_work_item_ids)
-
     selections = await _delete_selections(
         db,
         tables,
@@ -348,14 +311,12 @@ async def build_cleanup_plan(
         task_ids=task_ids,
         run_ids=run_ids,
         conversation_ids=conversation_ids,
-        work_item_ids=deletable_work_item_ids,
     )
     protected_counts = await _protected_counts(
         db,
         tables,
         requested,
         protected_artifact_ids,
-        protected_work_item_ids,
     )
     digest_payload = _digest_payload(
         projects,
@@ -594,33 +555,6 @@ async def _column_values(db, tables, table: str, column: str) -> tuple[Scalar, .
     return tuple(row[column] for row in rows)
 
 
-def _expand_run_graph(
-    run_ids: set[str],
-    run_rows: Sequence[dict[str, Any]],
-    delegation_rows: Sequence[dict[str, Any]],
-) -> None:
-    changed = True
-    while changed:
-        before = len(run_ids)
-        for row in run_rows:
-            linked = _texts((
-                row.get("id"),
-                row.get("parent_run_id"),
-                row.get("root_run_id"),
-            ))
-            if linked.intersection(run_ids):
-                run_ids.update(linked)
-        for row in delegation_rows:
-            linked = _texts((
-                row.get("parent_run_id"),
-                row.get("root_run_id"),
-                row.get("child_run_id"),
-            ))
-            if linked.intersection(run_ids):
-                run_ids.update(linked)
-        changed = len(run_ids) != before
-
-
 async def _delete_selections(
     db,
     tables,
@@ -632,13 +566,12 @@ async def _delete_selections(
     task_ids: set[str],
     run_ids: set[str],
     conversation_ids: set[int],
-    work_item_ids: set[str],
 ) -> tuple[CleanupTableSelection, ...]:
     specs: list[tuple[str, tuple[str, ...], Any]] = [
         (
             "ai_agent_run_cancellations",
-            ("root_run_id",),
-            lambda row: str(row.get("root_run_id") or "") in run_ids,
+            ("run_id",),
+            lambda row: str(row.get("run_id") or "") in run_ids,
         ),
         ("ai_error_reports", ("id",), lambda row: (
             str(row.get("agent_run_id") or "") in run_ids
@@ -650,14 +583,12 @@ async def _delete_selections(
         ("ai_agent_tool_receipts", ("run_id", "tool_call_id"), lambda row: str(row.get("run_id") or "") in run_ids),
         ("ai_agent_run_todos", ("id",), lambda row: str(row.get("run_id") or "") in run_ids),
         ("ai_agent_run_events", ("id",), lambda row: str(row.get("run_id") or "") in run_ids),
-        ("ai_agent_delegations", ("id",), lambda row: bool(_texts((row.get("parent_run_id"), row.get("root_run_id"), row.get("child_run_id"))).intersection(run_ids))),
-        ("ai_agent_host_child_runs", ("host_child_key",), lambda row: str(row.get("run_id") or "") in run_ids),
+        ("ai_agent_delegations", ("id",), lambda row: str(row.get("run_id") or "") in run_ids),
         ("ai_agent_long_task_usage", ("task_id", "run_id"), lambda row: str(row.get("task_id") or "") in task_ids or str(row.get("run_id") or "") in run_ids),
         ("ai_agent_long_task_units", ("task_id", "unit_id"), lambda row: str(row.get("task_id") or "") in task_ids),
-        ("ai_agent_work_item_runs", ("work_item_id", "run_id"), lambda row: str(row.get("work_item_id") or "") in work_item_ids or str(row.get("run_id") or "") in run_ids),
+        ("ai_agent_long_task_runs", ("task_id", "run_id"), lambda row: str(row.get("task_id") or "") in task_ids or str(row.get("run_id") or "") in run_ids),
         ("screenplay_checkpoint_plans", ("operation_id", "checkpoint_key"), lambda row: str(row.get("task_id") or "") in task_ids or str(row.get("operation_id") or "") in operation_ids or str(row.get("root_run_id") or "") in run_ids),
         ("ai_agent_long_tasks", ("id",), lambda row: str(row.get("id") or "") in task_ids),
-        ("ai_agent_work_items", ("id",), lambda row: str(row.get("id") or "") in work_item_ids),
         ("screenplay_agent_operation_usage", ("operation_id", "run_id"), lambda row: str(row.get("operation_id") or "") in operation_ids),
         ("screenplay_agent_operation_commands", ("command_id",), lambda row: str(row.get("operation_id") or "") in operation_ids),
         ("screenplay_agent_cancel_commands", ("command_id",), lambda row: str(row.get("turn_id") or "") in turn_ids or str(row.get("operation_id") or "") in operation_ids),
@@ -670,7 +601,7 @@ async def _delete_selections(
         ("ai_agent_runs", ("id",), lambda row: str(row.get("id") or "") in run_ids),
     ]
     relationship_columns = {
-        "ai_agent_run_cancellations": ("root_run_id",),
+        "ai_agent_run_cancellations": ("run_id",),
         "ai_error_reports": ("agent_run_id", "conversation_id"),
         "ai_agent_run_reviews": ("run_id",),
         "ai_agent_output_streams": ("run_id",),
@@ -678,14 +609,12 @@ async def _delete_selections(
         "ai_agent_tool_receipts": ("run_id",),
         "ai_agent_run_todos": ("run_id",),
         "ai_agent_run_events": ("run_id",),
-        "ai_agent_delegations": ("parent_run_id", "root_run_id", "child_run_id"),
-        "ai_agent_host_child_runs": ("run_id",),
+        "ai_agent_delegations": ("run_id",),
         "ai_agent_long_task_usage": ("task_id", "run_id"),
         "ai_agent_long_task_units": ("task_id",),
-        "ai_agent_work_item_runs": ("work_item_id", "run_id"),
+        "ai_agent_long_task_runs": ("task_id", "run_id"),
         "screenplay_checkpoint_plans": ("task_id", "operation_id", "root_run_id"),
         "ai_agent_long_tasks": (),
-        "ai_agent_work_items": (),
         "screenplay_agent_operation_usage": ("operation_id",),
         "screenplay_agent_operation_commands": ("operation_id",),
         "screenplay_agent_cancel_commands": ("turn_id", "operation_id"),
@@ -733,7 +662,6 @@ async def _protected_counts(
     tables,
     project_ids: set[str],
     artifact_ids: set[str],
-    protected_work_item_ids: set[str],
 ) -> dict[str, int]:
     revision_rows = await _rows(
         db,
@@ -774,15 +702,10 @@ async def _protected_counts(
         "ai_agent_artifact_batches": (("artifact_id",), lambda row: str(row.get("artifact_id") or "") in artifact_ids),
         "ai_agent_artifact_claims": (("artifact_id",), lambda row: str(row.get("artifact_id") or "") in artifact_ids),
         "ai_agent_artifact_projections": (("artifact_id",), lambda row: str(row.get("artifact_id") or "") in artifact_ids),
-        "ai_agent_work_items_referenced_by_artifacts": (("id",), lambda row: str(row.get("id") or "") in protected_work_item_ids),
     }
     counts: dict[str, int] = {}
     for report_name, (columns, predicate) in specs.items():
-        table = (
-            "ai_agent_work_items"
-            if report_name == "ai_agent_work_items_referenced_by_artifacts"
-            else report_name
-        )
+        table = report_name
         rows = await _rows(db, tables, table, columns)
         counts[report_name] = sum(1 for row in rows if predicate(row))
     return counts

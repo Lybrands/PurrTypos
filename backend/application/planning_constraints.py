@@ -11,7 +11,7 @@ from purra.contracts import (
     PlanningConstraints,
     TaskSpec,
 )
-from purra.ports import TaskPlanningConstraintProvider
+from purra.ports import WorkPlanningConstraintProvider
 
 
 class RequiredToolPlanningPolicy:
@@ -56,7 +56,7 @@ class RequiredToolPlanningPolicy:
             )
             if isinstance(
                 self._delegate,
-                TaskPlanningConstraintProvider,
+                WorkPlanningConstraintProvider,
             )
             else capabilities.constraints
         )

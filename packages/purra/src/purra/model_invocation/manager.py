@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from hashlib import sha256
+import json
 from typing import Protocol
 from uuid import uuid4
 
@@ -16,6 +18,8 @@ from purra.contracts import (
     ToolCallDelta,
 )
 from purra.errors import ContractViolationError, ModelGatewayError
+from purra.evidence import context_evidence_receipts
+from purra.json_values import thaw_json_mapping
 from purra.model_call_parameters import describe_model_call
 from purra.model_invocation.contracts import (
     AgentModelCall,
@@ -65,6 +69,11 @@ class ModelInvocationOutputObserver(Protocol):
         error_code: str,
     ) -> object: ...
 
+    async def publish_model_stream_commentary(
+        self,
+        output_stream_id: str,
+    ) -> object: ...
+
 
 class _NullOutputObserver:
     async def open_model_stream(self, receipt, spec):
@@ -78,6 +87,9 @@ class _NullOutputObserver:
 
     async def abort_model_stream(self, output_stream_id, error_code):
         del output_stream_id, error_code
+
+    async def publish_model_stream_commentary(self, output_stream_id):
+        del output_stream_id
 
 
 class AgentModelInvocationManager:
@@ -141,6 +153,14 @@ class AgentModelInvocationManager:
                 terminal_predicate=lambda chunk: chunk.finish_reason is not None,
             ),
             receipt=receipt,
+        )
+
+    async def publish_model_stream_commentary(
+        self,
+        output_stream_id: str,
+    ) -> object:
+        return await self._output.publish_model_stream_commentary(
+            str(output_stream_id)
         )
 
     async def complete(
@@ -264,6 +284,18 @@ class AgentModelInvocationManager:
             output_intent=call.output_intent,
             commit_mode=call.commit_mode,
             output_limit=call.output_limit,
+            input_fingerprint=_fingerprint([
+                message.to_mapping() for message in messages
+            ]),
+            tool_schema_fingerprint=_fingerprint([
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": thaw_json_mapping(tool.parameters),
+                }
+                for tool in invocation.tools
+            ]),
+            context_evidence=context_evidence_receipts(messages),
             call_parameters=(parameters,),
         )
         return receipt, OutputStreamSpec(
@@ -421,6 +453,17 @@ def _invocation(call: AgentModelCall) -> ModelInvocation:
         output_limit=call.output_limit,
         reasoning_mode=call.reasoning_mode,
     )
+
+
+def _fingerprint(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def _completion_chunk(completion: ModelCompletion) -> ModelStreamChunk | None:

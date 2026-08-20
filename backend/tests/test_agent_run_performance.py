@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from purra.evaluation import evaluate_agent_run_performance
+from purra.observability import evaluate_agent_run_performance
 from infrastructure.persistence.run_store import TRACE_EVENT_TYPE
 
 

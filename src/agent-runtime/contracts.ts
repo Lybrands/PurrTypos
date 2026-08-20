@@ -58,7 +58,6 @@ export interface AiTaskStep {
   suggestedTools?: string[];
   planningCapability?: string;
   protocolPrivate?: boolean;
-  agentRole?: string;
   assignment?: Record<string, unknown>;
   dependsOn?: string[];
   resultSummary?: string;
@@ -66,7 +65,7 @@ export interface AiTaskStep {
 }
 
 export interface AiTaskPlan {
-  /** Owns lifecycle updates for this plan; child Runs must not terminalize it. */
+  /** Owns lifecycle updates for this plan within one canonical Run. */
   runId?: string;
   title: string;
   goal?: string;
@@ -130,10 +129,8 @@ export interface AgentConversationMessage {
 
 export interface AiSubAgentActivity {
   delegationId: string;
-  parentRunId: string;
-  rootRunId: string;
-  childRunId?: string | null;
-  agentRole: string;
+  runId: string;
+  agentName: string;
   agentTitle?: string | null;
   objective?: string;
   status: AiAgentDelegation['status'];

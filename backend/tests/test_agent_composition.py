@@ -13,6 +13,7 @@ import pytest_asyncio
 from purra.context_orchestration.compaction import (
     ContextCompressionCoordinator,
 )
+from purra.context_strategies import ContextStrategy
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
@@ -30,6 +31,7 @@ from purra.contracts import (
 from purra.events import AgentEvent, CoreEventType
 from purra.api import AgentModelTaskRunner
 from purra.api import AgentCoreRunOptions
+from purra.api import DelegationPolicy
 from purra.model_invocation import ModelInvocationContext
 from purra.tools import InMemoryApprovalGateway
 from purra.tools import InMemoryToolCatalog
@@ -40,15 +42,14 @@ from application.agent_composition import (
 )
 from application.composition_factory import create_agent_composition
 from application.agent_profile_registry import (
-    AgentProfileExtension,
-    AgentProfileRegistration,
-    StaticAgentProfileExtension,
+    AgentProfile,
+    AgentProfileRegistry,
+    StaticAgentProfile,
 )
 from application.agent_run_service import AgentRunService
-from domains.agent_roles import AgentRoleDefinition, AgentRoleRegistry
 from application.conversation_compaction import ConversationCompactionService
 from application.memory_reranking import ModelBackedMemoryReranker
-from application.writing_agent_profile import build_writing_profile_extension
+from application.writing_agent_profile import build_writing_agent_profile
 from application.request_mapping import (
     context_window_tokens,
     to_writing_agent_request,
@@ -75,7 +76,10 @@ from tests.support.canonical_wire import (
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
-class _FakeProfileExtension:
+class _FakeAgentProfile:
+    id = "fake"
+    domain_namespace = "test.fake"
+
     def __init__(self, factory_dependencies: dict[str, object]):
         self.factory_dependencies = factory_dependencies
         self.context_provider = object()
@@ -88,17 +92,9 @@ class _FakeProfileExtension:
             planning_policy=None,
             execution_state_factory=None,
             tool_catalog=InMemoryToolCatalog(()),
-            agent_role_registry=None,
             context_provider=None,
             runtime_limits=RuntimeLimits(),
             recovery_policy=RecoveryPolicy(),
-        )
-
-    def profile_registration(self):
-        return AgentProfileRegistration(
-            id="fake",
-            domain_namespace="test.fake",
-            adapter=self.adapter,
         )
 
     async def prepare_request(
@@ -187,19 +183,19 @@ async def _collect(response) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_composition_consumes_explicit_profile_extension_capabilities(
+async def test_composition_consumes_explicit_profile_capabilities(
     temp_db: DatabaseConnection,
 ):
-    created: list[_FakeProfileExtension] = []
+    created: list[_FakeAgentProfile] = []
 
     def factory(**dependencies):
-        extension = _FakeProfileExtension(dependencies)
-        created.append(extension)
-        return extension
+        profile = _FakeAgentProfile(dependencies)
+        created.append(profile)
+        return profile
 
     composition = AgentComposition(
         temp_db,
-        profile_extension_factories=(factory,),
+        profile_factories=(factory,),
     )
     request = _fake_request()
 
@@ -211,22 +207,25 @@ async def test_composition_consumes_explicit_profile_extension_capabilities(
         long_task_executor=object(),
     )
 
-    extension = created[0]
+    profile = created[0]
     assert composition.agent_profile_ids == ("fake",)
     assert prepared.metadata == {"prepared": True}
-    assert policies == (extension.judge_policy,)
-    assert core._context_provider_factory is extension.context_factory
-    assert core._task_admission_evaluator is extension.admission
-    assert core._long_task_dispatcher is extension.dispatcher
-    assert set(extension.factory_dependencies) == {
+    assert policies == (profile.judge_policy,)
+    assert core._preset is not None
+    assert core._preset.id == "fake"
+    assert core._context_provider_factory is profile.context_factory
+    assert core._execution_profile.task_admission_evaluator is profile.admission
+    assert core._execution_profile.long_task_dispatcher is profile.dispatcher
+    assert core._task_admission_evaluator is profile.admission
+    assert core._long_task_dispatcher is profile.dispatcher
+    assert core._task_orchestration is not None
+    assert set(profile.factory_dependencies) == {
         "db",
         "artifact_continuity",
-        "work_item_repository",
         "long_task_repository",
         "execution_lease_store",
     }
-    assert set(extension.dispatcher_dependencies or {}) == {
-        "work_item_repository",
+    assert set(profile.dispatcher_dependencies or {}) == {
         "long_task_repository",
         "executor",
     }
@@ -238,8 +237,8 @@ async def test_composition_create_core_requires_an_explicit_profile(
 ):
     composition = AgentComposition(
         temp_db,
-        profile_extension_factories=(
-            lambda **dependencies: _FakeProfileExtension(dependencies),
+        profile_factories=(
+            lambda **dependencies: _FakeAgentProfile(dependencies),
         ),
     )
     try:
@@ -250,74 +249,88 @@ async def test_composition_create_core_requires_an_explicit_profile(
 
 
 @pytest.mark.asyncio
-async def test_static_profile_extension_defaults_have_no_side_effects(
+async def test_static_profile_defaults_have_no_side_effects(
     temp_db: DatabaseConnection,
 ):
-    extension = StaticAgentProfileExtension(
-        AgentProfileRegistration(
-            id="fake",
-            domain_namespace="test.fake",
-            adapter=_FakeProfileExtension({}).adapter,
-        )
+    profile = StaticAgentProfile(
+        id="fake",
+        domain_namespace="test.fake",
+        adapter=_FakeAgentProfile({}).adapter,
     )
     request = _fake_request()
 
     composition = AgentComposition(
         temp_db,
-        profile_extension_factories=(lambda **_kwargs: extension,),
+        profile_factories=(lambda **_kwargs: profile,),
     )
 
-    assert isinstance(extension, AgentProfileExtension)
+    assert isinstance(profile, AgentProfile)
     assert await composition.prepare_request(request) is request
     assert composition.create_response_judge_policies(request) == ()
-    assert extension.context_provider_factory() is None
-    assert extension.task_admission() is None
-    assert extension.create_long_task_dispatcher() is None
+    assert profile.context_provider_factory() is None
+    assert profile.task_admission() is None
+    assert profile.create_long_task_dispatcher() is None
+
+
+def test_profile_registry_stores_the_profile_as_the_registration():
+    profile = StaticAgentProfile(
+        id="fake",
+        domain_namespace="test.fake",
+        adapter=_FakeAgentProfile({}).adapter,
+    )
+    registry = AgentProfileRegistry((profile,))
+
+    assert registry.require("fake") is profile
+    assert registry.for_request(_fake_request()) is profile
 
 
 @pytest.mark.asyncio
-async def test_writing_profile_extension_owns_product_capabilities(
+async def test_writing_profile_owns_product_capabilities(
     temp_db: DatabaseConnection,
 ):
-    extension = build_writing_profile_extension(
+    profile = build_writing_agent_profile(
         db=temp_db,
         skills_dir=BACKEND_DIR / "skills",
     )
-    registration = extension.profile_registration()
     composition = AgentComposition(
         temp_db,
-        profile_extension_factories=(lambda **_dependencies: extension,),
+        profile_factories=(lambda **_dependencies: profile,),
     )
     try:
-        core = composition.create_core("key", agent_profile="writing")
+        core = composition.create_core(
+            "key",
+            agent_profile="writing",
+        )
         model_tasks = AgentModelTaskRunner(
             core._model_invocations,
             ModelInvocationContext(run_id="writing-profile-test"),
         )
-        provider = extension.context_provider_factory()(model_tasks)
+        provider = profile.context_provider_factory()(model_tasks)
         tool_names = {
             item.schema.name
-            for item in registration.adapter.tool_catalog.registrations()
+            for item in profile.adapter.tool_catalog.registrations()
         }
         declared_skill_names = {
             path.parent.name
             for path in (BACKEND_DIR / "skills").glob("*/SKILL.md")
         }
 
-        assert isinstance(extension, AgentProfileExtension)
-        assert registration.id == "writing"
-        assert registration.domain_namespace == "purrtypos.writing"
+        assert isinstance(profile, AgentProfile)
+        assert profile.id == "writing"
+        assert profile.domain_namespace == "purrtypos.writing"
+        assert profile.adapter.context_strategy is ContextStrategy.STAGED
+        assert core._context_strategy is ContextStrategy.STAGED
         assert tool_names == declared_skill_names
-        assert {
-            definition.id
-            for definition in registration.adapter.agent_role_registry.definitions
-        } == {"researcher", "reviewer", "analyst"}
+        assert not hasattr(core._preset, "delegated_agents")
+        assert "delegateToAgents" in {
+            item.schema.name for item in core._tool_catalog.registrations()
+        }
         assert isinstance(
-            registration.adapter.context_provider,
+            profile.adapter.context_provider,
             WritingContextProvider,
         )
         assert isinstance(
-            registration.adapter.context_provider._source,
+            profile.adapter.context_provider._source,
             RepositoryWritingContextSource,
         )
         assert isinstance(provider, WritingContextProvider)
@@ -325,14 +338,14 @@ async def test_writing_profile_extension_owns_product_capabilities(
         reranker = provider._source._memory._semantic._reranker
         assert isinstance(reranker, ModelBackedMemoryReranker)
         assert provider._source._memory._story._reranker is reranker
-        assert extension.task_admission() is None
-        assert extension.create_long_task_dispatcher() is None
+        assert profile.task_admission() is None
+        assert profile.create_long_task_dispatcher() is None
     finally:
         await composition.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_product_composition_registers_writing_and_static_screenplay_profiles(
+async def test_product_composition_registers_writing_and_screenplay_profiles(
     temp_db: DatabaseConnection,
 ):
     composition = create_agent_composition(temp_db)
@@ -345,10 +358,10 @@ async def test_product_composition_registers_writing_and_static_screenplay_profi
 def test_product_composition_rejects_additional_profile_factories(
     temp_db: DatabaseConnection,
 ):
-    with pytest.raises(TypeError, match="profile_extension_factories"):
+    with pytest.raises(TypeError, match="profile_factories"):
         create_agent_composition(
             temp_db,
-            profile_extension_factories=(),
+            profile_factories=(),
         )
 
 
@@ -387,50 +400,7 @@ async def test_product_composition_consumes_configured_writing_skills_dir(
 
 
 @pytest.mark.asyncio
-async def test_agent_run_service_requires_request_scoped_role_registry():
-    from infrastructure.models.provider_capabilities import (
-        ProviderCapabilityCache,
-    )
-
-    class _CompositionWithoutRoleResolver:
-        provider_capabilities = ProviderCapabilityCache()
-        delegation_repository = object()
-        agent_role_registry_for_request = None
-
-        @property
-        def agent_role_registry(self):
-            raise AssertionError("global Writing role fallback was used")
-
-        def create_response_judge_policies(self, _request):
-            return ()
-
-        def bind_run_profile(self, _request, options):
-            return options
-
-    body = ChatStreamRequest(
-        messages=[{"role": "user", "content": "委派只读研究"}],
-        apiKey="key",
-        apiProvider="openai",
-        options=_fixture_model_options(),
-        enableAgentTools=True,
-        bookId="book-1",
-        chatAgentMode="agent",
-    )
-    updates = AgentRunService(
-        _CompositionWithoutRoleResolver()  # type: ignore[arg-type]
-    ).run(
-        body=body,
-        api_key="key",
-        provider_options={"model": "model"},
-        signal=asyncio.Event(),
-    )
-
-    with pytest.raises(TypeError):
-        await anext(updates)
-
-
-@pytest.mark.asyncio
-async def test_agent_run_service_disables_delegation_when_profile_has_no_roles():
+async def test_agent_run_service_leaves_delegation_to_composition():
     from infrastructure.models.provider_capabilities import (
         ProviderCapabilityCache,
     )
@@ -440,92 +410,14 @@ async def test_agent_run_service_disables_delegation_when_profile_has_no_roles()
 
     captured: dict[str, object] = {}
 
-    class _NoRoleComposition:
+    class _Composition:
         provider_capabilities = ProviderCapabilityCache()
-        delegation_repository = object()
+
+        def create_response_judge_policies(self, _request):
+            return ()
 
         async def prepare_request(self, request):
             return request
-
-        def create_response_judge_policies(self, _request):
-            return ()
-
-        def agent_role_registry_for_request(self, _request):
-            return None
-
-        def bind_run_profile(self, _request, options):
-            return options
-
-        def create_core_for_request(self, request, _api_key, **kwargs):
-            captured["request"] = request
-            captured["kwargs"] = kwargs
-            raise _CoreCreated
-
-    body = ChatStreamRequest(
-        messages=[{"role": "user", "content": "分析剧本"}],
-        apiKey="key",
-        apiProvider="openai",
-        options=_fixture_model_options(),
-        enableAgentTools=True,
-        chatAgentMode="agent",
-    )
-    request = AgentRunRequest(
-        messages=(AgentMessage(role="user", content="分析剧本"),),
-        model=ModelRequest(provider="openai", model="model"),
-        domain_context=DomainContext(namespace="purrtypos.screenplay"),
-        mode="agent",
-        tools_enabled=True,
-    )
-    updates = AgentRunService(
-        _NoRoleComposition(),  # type: ignore[arg-type]
-    ).run(
-        body=body,
-        api_key="key",
-        provider_options={"model": "model"},
-        signal=asyncio.Event(),
-        mapped_request=request,
-        base_options=AgentCoreRunOptions(),
-    )
-
-    with pytest.raises(_CoreCreated):
-        await anext(updates)
-
-    assert captured["request"] is request
-    kwargs = captured["kwargs"]
-    assert isinstance(kwargs, dict)
-    assert "agent_role_guidance" not in kwargs
-    assert "delegation_repository" not in kwargs
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("enabled", "expected"), ((False, False), (True, True)))
-async def test_agent_run_service_requires_both_roles_and_explicit_delegation_enablement(
-    enabled,
-    expected,
-):
-    from infrastructure.models.provider_capabilities import (
-        ProviderCapabilityCache,
-    )
-
-    class _CoreCreated(Exception):
-        pass
-
-    captured: dict[str, object] = {}
-
-    class _RoleComposition:
-        provider_capabilities = ProviderCapabilityCache()
-        delegation_repository = object()
-
-        def create_response_judge_policies(self, _request):
-            return ()
-
-        def agent_role_registry_for_request(self, _request):
-            return AgentRoleRegistry((AgentRoleDefinition(
-                id="researcher",
-                title="Researcher",
-                delegation_description="Research one explicit subtask",
-                instruction="Research only the delegated objective.",
-            ),))
 
         def bind_run_profile(self, _request, options):
             return options
@@ -544,12 +436,12 @@ async def test_agent_run_service_requires_both_roles_and_explicit_delegation_ena
         bookId="book-1",
         chatAgentMode="agent",
     )
-    updates = AgentRunService(_RoleComposition()).run(  # type: ignore[arg-type]
-        body=body,
+    request = to_writing_agent_request(body, {"model": "model"})
+    updates = AgentRunService(_Composition()).run(  # type: ignore[arg-type]
+        request=request,
         api_key="key",
-        provider_options={"model": "model"},
+        options=writing_run_options(request, {"model": "model"}),
         signal=asyncio.Event(),
-        enable_delegation=enabled,
     )
 
     with pytest.raises(_CoreCreated):
@@ -557,8 +449,8 @@ async def test_agent_run_service_requires_both_roles_and_explicit_delegation_ena
 
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
-    assert ("child_core_submitter" in kwargs) is expected
-    assert ("delegation_repository" in kwargs) is expected
+    assert "delegation_repository" not in kwargs
+    assert "delegation_policy" not in kwargs
 
 
 def test_request_mapping_supports_kimi_256k_context_window():
@@ -953,13 +845,13 @@ async def test_composed_core_consumes_configured_approval_timeout(
 
 
 @pytest.mark.asyncio
-async def test_composition_filters_child_tools_from_business_role_policy(
+async def test_composition_uses_model_defined_read_only_delegation(
     temp_db: DatabaseConnection,
 ):
     composition = _writing_composition(temp_db)
     request = to_writing_agent_request(
         ChatStreamRequest(
-            messages=[{"role": "user", "content": "读取当前章节"}],
+            messages=[{"role": "user", "content": "研究当前章节证据"}],
             apiKey="key",
             apiProvider="openai",
             options=_fixture_model_options(),
@@ -970,27 +862,56 @@ async def test_composition_filters_child_tools_from_business_role_policy(
         ),
         {"model": "model"},
     )
-    role = composition.agent_role_registry_for_request(request).require(
-        "researcher"
-    )
     core = composition.create_core(
         "key",
         agent_profile="writing",
-        allowed_tool_modes=role.allowed_tool_modes,
     )
-    enabled = core._tool_catalog.enabled_names(request)
-    registration_by_name = {
-        item.schema.name: item
-        for item in core._tool_catalog.registrations()
-    }
 
-    assert enabled
+    assert core._preset is not None
+    assert not hasattr(core._preset, "delegated_agents")
+    executor = core._dynamic_delegated_executor
+    assert executor is not None
+    registrations, enabled = executor._read_capabilities(request)
+    by_name = {item.schema.name: item for item in registrations}
     assert "getChapterContent" in enabled
     assert "editChapterContent" not in enabled
+    assert "editChapterContent" not in by_name
+    assert "delegateToAgents" not in by_name
     assert all(
-        registration_by_name[name].policy.mode is ToolExecutionMode.READ
+        by_name[name].policy.mode is ToolExecutionMode.READ
         for name in enabled
     )
+    delegation_schema = next(
+        item.schema
+        for item in core._tool_catalog.registrations()
+        if item.schema.name == "delegateToAgents"
+    )
+    item_properties = delegation_schema.parameters["properties"][
+        "delegations"
+    ]["items"]["properties"]
+    assert "agentName" in item_properties
+    assert "instruction" in item_properties
+    assert "enum" not in item_properties["agentName"]
+
+
+@pytest.mark.asyncio
+async def test_composition_owns_the_delegation_policy(
+    temp_db: DatabaseConnection,
+):
+    policy = DelegationPolicy(max_agents_per_call=1, max_parallel=1)
+    composition = _writing_composition(temp_db, delegation_policy=policy)
+    try:
+        core = composition.create_core("key", agent_profile="writing")
+        schema = next(
+            item.schema
+            for item in core._tool_catalog.registrations()
+            if item.schema.name == "delegateToAgents"
+        ).parameters
+
+        assert composition.delegation_policy is policy
+        assert schema["properties"]["delegations"]["maxItems"] == 1
+    finally:
+        await composition.shutdown()
 
 
 def test_request_mapping_rejects_caller_owned_tool_contract():
@@ -1081,236 +1002,6 @@ def test_caller_output_limit_is_preserved_for_invocation_limit_resolution():
     assert request.model.options["max_tokens"] == 1_000
     assert options.output_limit is not None
     assert options.output_limit.max_tokens == 1_000
-
-
-def _legacy_sse_mapping_reference():
-    started = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.RUN_STARTED,
-            run_id="run-1",
-            payload={"status": "running"},
-        ),
-        model="model",
-    )
-    effect = core_update_to_sse_chunk(
-        AgentEvent(
-            type="writing.proposed_setting_diff",
-            run_id="run-1",
-            payload={"kind": "character"},
-        ),
-        model="model",
-    )
-    screenplay_effect = core_update_to_sse_chunk(
-        AgentEvent(
-            type="screenplay.document_proposal",
-            run_id="run-1",
-            payload={"kind": "creative_brief", "title": "创作简报"},
-        ),
-        model="model",
-    )
-    done = core_update_to_sse_chunk(
-        AgentRunResult(
-            run_id="run-1",
-            status=RunStatus.DONE,
-            model="provider-resolved-model",
-        ),
-        model="model",
-    )
-    cached = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.TOOL_CALL_COMPLETED,
-            run_id="run-1",
-            payload={"index": 2, "fromCache": True},
-        ),
-        model="model",
-    )
-    tool_started = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.TOOL_CALLS_STARTED,
-            run_id="run-1",
-            payload={
-                "calls": [{
-                    "id": "call-1",
-                    "name": "readSource",
-                    "arguments_json": "{}",
-                    "display_names": {
-                        "zh-CN": "读取原作",
-                        "en-US": "Read Source",
-                    },
-                }],
-                "in_progress": True,
-            },
-        ),
-        model="model",
-    )
-    delegation_created = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.DELEGATION_CREATED,
-            run_id="run-1",
-            payload={
-                "delegationId": "delegation-1",
-                "agentRole": "researcher",
-                "status": "queued",
-            },
-        ),
-        model="model",
-    )
-    delegation_updated = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.DELEGATION_COMPLETED,
-            run_id="run-1",
-            payload={
-                "delegationId": "delegation-1",
-                "agentRole": "researcher",
-                "status": "done",
-                "resultSummary": "verified",
-            },
-        ),
-        model="model",
-    )
-    delegated_tool_event = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.DELEGATION_EVENT,
-            run_id="run-1",
-            payload={
-                "delegationId": "delegation-1",
-                "parentRunId": "run-1",
-                "rootRunId": "run-1",
-                "childRunId": "child-1",
-                "agentRole": "researcher",
-                "agentTitle": "研究 Agent",
-                "objective": "核验事实",
-                "event": {
-                    "type": CoreEventType.TOOL_CALLS_STARTED,
-                    "runId": "child-1",
-                    "payload": {
-                        "calls": [{
-                            "id": "call-child",
-                            "name": "readSource",
-                            "arguments_json": "{}",
-                        }],
-                        "in_progress": True,
-                    },
-                },
-            },
-        ),
-        model="model",
-    )
-    compaction = core_update_to_sse_chunk(
-        AgentEvent(
-            type="conversation.compaction.started",
-            payload={"status": "running", "selectedTurnCount": 4},
-        ),
-        model="model",
-    )
-    usage = core_update_to_sse_chunk(
-        AgentEvent(
-            type=CoreEventType.CONTEXT_USAGE_RECORDED,
-            run_id="run-1",
-            payload={
-                "actualInputTokens": 12_345,
-                "actualOutputTokens": 678,
-                "actualTotalTokens": 13_023,
-                "cachedInputTokens": 2_000,
-                "reasoningOutputTokens": 50,
-                "actualUsageRound": 1,
-                "inputTokenEstimateAtUsage": 12_000,
-                "usageSource": "provider",
-            },
-        ),
-        model="model",
-    )
-
-    assert started == {
-        "agentRunStarted": {"runId": "run-1", "status": "running"},
-    }
-    assert effect == {"proposedSettingDiff": {"kind": "character"}}
-    assert screenplay_effect is None
-    assert done == {"done": True, "model": "provider-resolved-model"}
-    assert compaction == {
-        "contextCompaction": {
-            "status": "running",
-            "selectedTurnCount": 4,
-        },
-    }
-    assert usage == {
-        "contextBudget": {
-            "actualInputTokens": 12_345,
-            "actualOutputTokens": 678,
-            "actualTotalTokens": 13_023,
-            "cachedInputTokens": 2_000,
-            "reasoningOutputTokens": 50,
-            "actualUsageRound": 1,
-            "inputTokenEstimateAtUsage": 12_000,
-            "usageSource": "provider",
-        },
-    }
-    assert cached == {"toolIndexCompleted": 2, "toolFromCache": True}
-    assert tool_started is not None
-    assert tool_started["toolCalls"][0]["function"]["name"] == "readSource"
-    assert tool_started["toolCalls"][0]["displayNames"] == {
-        "zh-CN": "读取原作",
-        "en-US": "Read Source",
-    }
-    assert delegation_created == {
-        "agentDelegationCreated": {
-            "runId": "run-1",
-            "delegationId": "delegation-1",
-            "agentRole": "researcher",
-            "status": "queued",
-        },
-    }
-    assert delegation_updated == {
-        "agentDelegationUpdated": {
-            "runId": "run-1",
-            "delegationId": "delegation-1",
-            "agentRole": "researcher",
-            "status": "done",
-            "resultSummary": "verified",
-        },
-    }
-    assert delegated_tool_event == {
-        "agentSubRunEvent": {
-            "runId": "run-1",
-            "parentRunId": "run-1",
-            "rootRunId": "run-1",
-            "delegationId": "delegation-1",
-            "childRunId": "child-1",
-            "agentRole": "researcher",
-            "agentTitle": "研究 Agent",
-            "objective": "核验事实",
-            "chunk": {
-                "toolCalls": [{
-                    "id": "call-child",
-                    "type": "function",
-                    "displayNames": {},
-                    "function": {
-                        "name": "readSource",
-                        "arguments": "{}",
-                    },
-                }],
-                "toolCallsInProgress": True,
-                "model": None,
-            },
-        },
-    }
-
-
-def _legacy_sse_mapping_cannot_create_public_output():
-    def mapped(event_type: CoreEventType, delta: str):
-        return core_update_to_sse_chunk(
-            AgentEvent(
-                type=event_type,
-                run_id="run-visibility",
-                payload={"delta": delta},
-            ),
-            model="model",
-        )
-
-    assert mapped(
-        "assistant.commentary_delta",
-        "正在核对人物关系。",
-    ) is None
 
 
 def test_sse_mapping_rejects_legacy_agent_events():
@@ -1434,8 +1125,8 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
         def create_response_judge_policies(self, _request):
             return ()
 
-        def agent_role_registry_for_request(self, _request):
-            return None
+        async def prepare_request(self, request):
+            return request
 
         def bind_run_profile(self, _request, options):
             return options

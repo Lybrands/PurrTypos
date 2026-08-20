@@ -6,7 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 
 from purra.contracts import AgentRunRequest
-from application.agent_profile_registry import AgentProfileRegistration
 from application.memory_reranking import ModelBackedMemoryReranker
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.context import WritingContextProvider
@@ -30,7 +29,10 @@ from infrastructure.writing import (
 )
 
 
-class WritingAgentProfileExtension:
+class WritingAgentProfile:
+    id = "writing"
+    domain_namespace = WRITING_DOMAIN_NAMESPACE
+
     def __init__(self, db, *, skills_dir: Path) -> None:
         self._catalog_repository = SqliteWritingCatalogRepository(db)
         self._context_source = RepositoryWritingContextSource(
@@ -50,12 +52,9 @@ class WritingAgentProfileExtension:
             context_provider=WritingContextProvider(self._context_source),
         )
 
-    def profile_registration(self) -> AgentProfileRegistration:
-        return AgentProfileRegistration(
-            id="writing",
-            domain_namespace=WRITING_DOMAIN_NAMESPACE,
-            adapter=self._adapter,
-        )
+    @property
+    def adapter(self) -> WritingDomainAdapter:
+        return self._adapter
 
     async def prepare_request(
         self,
@@ -98,24 +97,23 @@ class WritingAgentProfileExtension:
     def create_long_task_dispatcher(
         self,
         *,
-        work_item_repository=None,
         long_task_repository=None,
         executor=None,
     ):
-        del work_item_repository, long_task_repository, executor
+        del long_task_repository, executor
         return None
 
     def clear_active_executions(self) -> None:
         return None
 
 
-def build_writing_profile_extension(
+def build_writing_agent_profile(
     *,
     db,
     skills_dir: Path | None = None,
     **_dependencies,
-) -> WritingAgentProfileExtension:
-    return WritingAgentProfileExtension(
+) -> WritingAgentProfile:
+    return WritingAgentProfile(
         db,
         skills_dir=(
             skills_dir
@@ -125,6 +123,6 @@ def build_writing_profile_extension(
 
 
 __all__ = [
-    "WritingAgentProfileExtension",
-    "build_writing_profile_extension",
+    "WritingAgentProfile",
+    "build_writing_agent_profile",
 ]

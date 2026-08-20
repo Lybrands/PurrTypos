@@ -10,6 +10,7 @@ from purra.output.contracts import DomainEffectOutput
 if TYPE_CHECKING:
     from purra.contracts import RunCreateParams
     from purra.ports.run_lifecycle import RunCommit
+    from purra.run_control import RunCancellationReceipt
 
 
 @runtime_checkable
@@ -44,4 +45,20 @@ class RunBeginProjector(Protocol):
     ) -> None: ...
 
 
-__all__ = ["DomainEventProjector", "RunBeginProjector", "RunCommitProjector"]
+@runtime_checkable
+class RunCancellationProjector(Protocol):
+    """Project a trusted cancellation fence inside its host transaction."""
+
+    async def project(
+        self,
+        run_id: RunId,
+        receipt: "RunCancellationReceipt",
+    ) -> None: ...
+
+
+__all__ = [
+    "DomainEventProjector",
+    "RunBeginProjector",
+    "RunCancellationProjector",
+    "RunCommitProjector",
+]

@@ -222,7 +222,7 @@ async def save_conversation(body: SaveConversationRequest):
                         )
                 pending_agent_projection = await db.fetch_one(
                     "SELECT id FROM ai_agent_runs WHERE session_id = ? "
-                    "AND parent_run_id IS NULL AND ("
+                    "AND ("
                     "conversation_id IS NULL OR "
                     "status IN ('pending', 'queued', 'running', 'paused')"
                     ") LIMIT 1",
@@ -452,8 +452,8 @@ async def get_conversations(sessionId: str):
         "  WHERE r.conversation_id = c.id "
         "  ORDER BY r.update_time DESC LIMIT 1) AS agent_run_id, "
         "(SELECT lt.id FROM ai_agent_runs AS r "
-        "  JOIN ai_agent_work_item_runs AS wir ON wir.run_id = r.id "
-        "  JOIN ai_agent_long_tasks AS lt ON lt.work_item_id = wir.work_item_id "
+        "  JOIN ai_agent_long_task_runs AS ltr ON ltr.run_id = r.id "
+        "  JOIN ai_agent_long_tasks AS lt ON lt.id = ltr.task_id "
         "  WHERE r.conversation_id = c.id "
         "    AND ((json_extract(lt.metadata_json, '$.sessionId') IS NOT NULL "
         "      AND CAST(json_extract(lt.metadata_json, '$.sessionId') AS INTEGER) = c.session_id) "
@@ -517,8 +517,7 @@ async def delete_after_turn(
             current_run_ids = {
                 str(row["id"])
                 for row in await db.fetch_all(
-                    "SELECT id FROM ai_agent_runs WHERE session_id = ? "
-                    "AND parent_run_id IS NULL",
+                    "SELECT id FROM ai_agent_runs WHERE session_id = ?",
                     [sessionId],
                 )
             }
@@ -696,9 +695,9 @@ async def delete_after_turn(
                 "WHERE lt.status IN ('pending', 'queued', 'running', 'paused') "
                 "AND ("
                 f"lt.created_by_run_id IN ({run_placeholders}) OR EXISTS ("
-                " SELECT 1 FROM ai_agent_work_item_runs AS wir "
-                " WHERE wir.work_item_id = lt.work_item_id "
-                f" AND wir.run_id IN ({run_placeholders})"
+                " SELECT 1 FROM ai_agent_long_task_runs AS ltr "
+                " WHERE ltr.task_id = lt.id "
+                f" AND ltr.run_id IN ({run_placeholders})"
                 ")) LIMIT 1",
                 [*tail_run_ids, *tail_run_ids],
             )
@@ -711,9 +710,9 @@ async def delete_after_turn(
                 "UPDATE ai_agent_long_tasks SET "
                 "metadata_json = json_remove(metadata_json, '$.sessionId') "
                 f"WHERE created_by_run_id IN ({run_placeholders}) OR EXISTS ("
-                " SELECT 1 FROM ai_agent_work_item_runs AS wir "
-                " WHERE wir.work_item_id = ai_agent_long_tasks.work_item_id "
-                f" AND wir.run_id IN ({run_placeholders})"
+                " SELECT 1 FROM ai_agent_long_task_runs AS ltr "
+                " WHERE ltr.task_id = ai_agent_long_tasks.id "
+                f" AND ltr.run_id IN ({run_placeholders})"
                 ")",
                 [*tail_run_ids, *tail_run_ids],
             )

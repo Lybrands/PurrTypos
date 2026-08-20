@@ -6,12 +6,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from purra.evaluation._values import as_mapping as _mapping
-from purra.evaluation.diagnostics import (
+from purra.observability._values import as_mapping as _mapping
+from purra.observability.diagnostics import (
     build_canonical_run_observation,
     evaluate_agent_run,
 )
-from purra.evaluation.failure_classification import (
+from purra.observability.failure_classification import (
     classify_agent_run_failures,
 )
 

@@ -44,8 +44,8 @@ async def resolve_context_budget_claims(
     """Resolve dynamic demand through an optional provider capability.
 
     Core owns this resolution contract so application entry points and the
-    engine use the same demand source.  Providers without the optional method
-    retain the legacy static-claim path.
+    engine use the same demand source. Providers without the optional method
+    use the host's configured static claims.
     """
 
     resolver = getattr(provider, "describe_context_demands", None)
@@ -152,6 +152,27 @@ def estimate_tool_schema_tokens(tools: Iterable[ToolSchema]) -> int:
         for schema in tools
     ]
     return 0 if not rows else estimate_json_tokens(rows) + 8 * len(rows)
+
+
+def context_budget_contract_error(
+    request: AgentRunRequest,
+    budget: ContextBudget | None,
+    configured_tools: Sequence[ToolSchema],
+) -> str | None:
+    """Validate that a host budget still describes the runtime invocation."""
+
+    if budget is None:
+        return None
+    if (
+        request.context_window is None
+        or int(request.context_window) != budget.window_tokens
+    ):
+        return "context_budget_window_mismatch"
+    if estimate_tool_schema_tokens(configured_tools) != budget.tool_schema_tokens:
+        return "context_budget_tool_schema_mismatch"
+    if budget.output_reserve_tokens <= 0:
+        return "context_budget_output_reserve_invalid"
+    return None
 
 
 def allocate_context_budget(

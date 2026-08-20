@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from purra.evaluation import (
+from purra.observability import (
     StabilityTrendPolicy,
     evaluate_agent_run_stability,
     evaluate_agent_run_stability_trend,

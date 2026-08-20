@@ -79,20 +79,7 @@ class ProviderModelGateway:
                 signal,  # type: ignore[arg-type]
             )
         except Exception as error:
-            if (
-                invocation.tool_choice is ToolChoiceMode.REQUIRED
-                and _is_required_tool_choice_compatibility_error(error)
-            ):
-                if self._on_required_tool_choice_unsupported is not None:
-                    self._on_required_tool_choice_unsupported()
-                raise UnsupportedModelFeatureError(
-                    "required tool choice is unsupported"
-                ) from error
-            raise ModelGatewayError(
-                "model provider request failed",
-                code=_provider_error_code(error),
-                retryable=_provider_error_code(error) == "upstream_stream_interrupted",
-            ) from error
+            raise self._request_error(invocation, error) from error
         return ModelStream(
             chunks=_normalize_openai_stream(result["stream"]),
             model=str(result.get("model") or request.model),
@@ -105,27 +92,52 @@ class ProviderModelGateway:
         signal: CancellationSignal | None = None,
     ) -> ModelCompletion:
         request = invocation.request
-        result = await provider_router.create_chat_no_stream(
-            self._api_key,
-            [
-                _provider_message(
-                    message,
-                    reasoning_replay=(
-                        request.protocol_capabilities.reasoning_replay
-                    ),
-                )
-                for message in messages
-            ],
-            _provider_options(invocation),
-            request.provider,
-            signal,  # type: ignore[arg-type]
-        )
+        options = _provider_options(invocation)
+        try:
+            result = await provider_router.create_chat_no_stream(
+                self._api_key,
+                [
+                    _provider_message(
+                        message,
+                        reasoning_replay=(
+                            request.protocol_capabilities.reasoning_replay
+                        ),
+                    )
+                    for message in messages
+                ],
+                options,
+                request.provider,
+                signal,  # type: ignore[arg-type]
+            )
+        except Exception as error:
+            raise self._request_error(invocation, error) from error
         raw_message = result.get("message") or {}
         return ModelCompletion(
             message=AgentMessage.from_mapping(raw_message),
             model=str(result.get("model") or request.model),
             finish_reason=_normalize_finish_reason(result.get("finish_reason")),
             usage=_normalize_model_usage(result.get("usage")),
+        )
+
+    def _request_error(
+        self,
+        invocation: ModelInvocation,
+        error: Exception,
+    ) -> ModelGatewayError:
+        if (
+            invocation.tool_choice is ToolChoiceMode.REQUIRED
+            and _is_required_tool_choice_compatibility_error(error)
+        ):
+            if self._on_required_tool_choice_unsupported is not None:
+                self._on_required_tool_choice_unsupported()
+            return UnsupportedModelFeatureError(
+                "required tool choice is unsupported"
+            )
+        code = _provider_error_code(error)
+        return ModelGatewayError(
+            "model provider request failed",
+            code=code,
+            retryable=code == "upstream_stream_interrupted",
         )
 
 

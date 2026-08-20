@@ -150,7 +150,7 @@ test('durable screenplay turn ids distinguish fast turns with the same timestamp
   const first = advanceLiveTurnCursor(undefined, firstTurn)
   const second = advanceLiveTurnCursor(first.cursor, secondTurn)
 
-  assert.deepEqual(first.cursor, { key: 'client:turn-1' })
-  assert.deepEqual(second.cursor, { key: 'client:turn-2' })
+  assert.deepEqual(first.cursor, { key: 'user-client:turn-1' })
+  assert.deepEqual(second.cursor, { key: 'user-client:turn-2' })
   assert.equal(second.anchorIndex, 2)
 })

@@ -11,6 +11,7 @@ from purra.contracts import (
     AgentRunRequest,
     AgentRuntimeResult,
     DomainContext,
+    ExecutionTransition,
     MessageRole,
     ModelCompletion,
     ModelFinishReason,
@@ -21,13 +22,14 @@ from purra.contracts import (
     ResponseConstraints,
     ResponseValidationResult,
     RuntimeOutcome,
+    StepExecutor,
     ToolBatchOutcome,
     ToolBatchResult,
     ToolCallDelta,
     ToolCallResult,
     ToolSchema,
 )
-from purra.engine import AgentCoreRunOptions
+from purra.api import AgentCoreRunOptions
 from purra.errors import ResponseJudgeContractError
 from purra.events import AgentEvent, CoreEventType
 from purra.model_protocol import generic_capability_snapshot
@@ -125,6 +127,17 @@ class _TraceObserver:
 
     def future_allowed_tool_names(self):
         return frozenset()
+
+    def current_execution_transition(self):
+        return ExecutionTransition(
+            step_id="response-validation-test",
+            executor=(
+                StepExecutor.TOOL
+                if self.allowed_tool_names
+                else StepExecutor.MODEL
+            ),
+            allowed_tool_names=self.allowed_tool_names,
+        )
 
     async def record_trace(self, trace):
         self.traces.append(trace)

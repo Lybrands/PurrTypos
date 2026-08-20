@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from purra.evaluation import TRACE_EVENT_TYPE
+from purra.observability import TRACE_EVENT_TYPE
 from purra.events import CoreEventType
 
 
@@ -78,7 +78,6 @@ async def list_recent_run_stability_evidence(
     status_placeholders = ", ".join("?" for _ in _TREND_STATUSES)
     clauses = [
         f"r.status IN ({status_placeholders})",
-        "(r.parent_run_id IS NULL OR r.parent_run_id = '')",
     ]
     params: list[Any] = list(_TREND_STATUSES)
     if session_id is not None:

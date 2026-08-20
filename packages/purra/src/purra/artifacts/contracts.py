@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping
 
-from purra.artifacts.scope import ArtifactScope
+from purra.artifacts.ownership import ArtifactOwnerRef
 from purra.normalization import (
     non_negative_int,
     optional_non_negative_int,
@@ -29,56 +29,16 @@ class ArtifactStatus(StrEnum):
     ABORTED = "aborted"
 
 
-def _normalize_scope(
-    *,
-    scope: ArtifactScope | str,
-    run_id: str | None,
-    work_item_id: str | None,
-    created_by_run_id: str | None,
-) -> tuple[ArtifactScope, str | None, str | None, str | None]:
-    normalized_scope = ArtifactScope(scope)
-    normalized_run = optional_text(run_id)
-    normalized_work_item = optional_text(work_item_id)
-    normalized_creator = optional_text(created_by_run_id)
-    if normalized_scope is ArtifactScope.RUN:
-        if normalized_work_item is not None:
-            raise ValueError("Run-scoped artifact cannot have work_item_id")
-        if (
-            normalized_run is not None
-            and normalized_creator is not None
-            and normalized_run != normalized_creator
-        ):
-            raise ValueError(
-                "Run-scoped artifact must be owned by its creating Run"
-            )
-        owner_run = normalized_run or normalized_creator
-        return normalized_scope, owner_run, None, owner_run
-    creator_run = normalized_creator or normalized_run
-    if normalized_work_item is None:
-        raise ValueError("Work Item-scoped artifact requires work_item_id")
-    if creator_run is None:
-        raise ValueError(
-            "Work Item-scoped artifact requires created_by_run_id"
-        )
-    if normalized_run is not None and normalized_run != creator_run:
-        raise ValueError(
-            "artifact run_id must match created_by_run_id provenance"
-        )
-    return normalized_scope, creator_run, normalized_work_item, creator_run
-
-
 @dataclass(frozen=True, slots=True)
 class ArtifactCreateCommand:
     namespace: str
     kind: str
     owner_id: str
-    run_id: str | None = None
+    owner_ref: ArtifactOwnerRef
+    created_by_run_id: str
     schema_version: int = 1
     expected_item_count: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
-    scope: ArtifactScope = ArtifactScope.RUN
-    work_item_id: str | None = None
-    created_by_run_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("namespace", "kind", "owner_id"):
@@ -87,16 +47,12 @@ class ArtifactCreateCommand:
                 name,
                 required_text(getattr(self, name), f"artifact {name}"),
             )
-        scope, run_id, work_item_id, created_by_run_id = _normalize_scope(
-            scope=self.scope,
-            run_id=self.run_id,
-            work_item_id=self.work_item_id,
-            created_by_run_id=self.created_by_run_id,
-        )
-        object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "work_item_id", work_item_id)
-        object.__setattr__(self, "created_by_run_id", created_by_run_id)
+        if not isinstance(self.owner_ref, ArtifactOwnerRef):
+            raise TypeError("artifact owner_ref must be an ArtifactOwnerRef")
+        object.__setattr__(self, "created_by_run_id", required_text(
+            self.created_by_run_id,
+            "artifact created_by_run_id",
+        ))
         object.__setattr__(
             self,
             "schema_version",
@@ -119,7 +75,8 @@ class ArtifactRecord:
     namespace: str
     kind: str
     owner_id: str
-    run_id: str | None
+    owner_ref: ArtifactOwnerRef
+    created_by_run_id: str
     schema_version: int
     status: ArtifactStatus = ArtifactStatus.OPEN
     revision: int = 1
@@ -129,9 +86,6 @@ class ArtifactRecord:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     resource_ref: str | None = None
     coverage_digest: str | None = None
-    scope: ArtifactScope = ArtifactScope.RUN
-    work_item_id: str | None = None
-    created_by_run_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("id", "namespace", "kind", "owner_id"):
@@ -140,16 +94,12 @@ class ArtifactRecord:
                 name,
                 required_text(getattr(self, name), f"artifact {name}"),
             )
-        scope, run_id, work_item_id, created_by_run_id = _normalize_scope(
-            scope=self.scope,
-            run_id=self.run_id,
-            work_item_id=self.work_item_id,
-            created_by_run_id=self.created_by_run_id,
-        )
-        object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "work_item_id", work_item_id)
-        object.__setattr__(self, "created_by_run_id", created_by_run_id)
+        if not isinstance(self.owner_ref, ArtifactOwnerRef):
+            raise TypeError("artifact owner_ref must be an ArtifactOwnerRef")
+        object.__setattr__(self, "created_by_run_id", required_text(
+            self.created_by_run_id,
+            "artifact created_by_run_id",
+        ))
         object.__setattr__(self, "status", ArtifactStatus(self.status))
         for name in ("schema_version", "revision", "next_sequence"):
             object.__setattr__(
@@ -185,16 +135,9 @@ class ArtifactRecord:
             optional_text(self.coverage_digest),
         )
 
-    @property
-    def scope_id(self) -> str | None:
-        if self.scope is ArtifactScope.RUN:
-            return self.run_id
-        return self.work_item_id
-
-
 @dataclass(frozen=True, slots=True)
 class ArtifactMutationLease:
-    """Opaque proof that one Run currently owns a Work Item Artifact write.
+    """Opaque proof that one Run currently owns an Artifact write.
 
     The repository, rather than a caller, decides whether the token is live and
     belongs to the Artifact.  ``lease_duration_ms`` is only a bounded renewal
@@ -233,8 +176,8 @@ class ArtifactAppendCommand:
     batch_id: str
     idempotency_key: str
     items: tuple[Mapping[str, Any], ...]
+    write_lease: ArtifactMutationLease
     coverage_keys: tuple[str, ...] = ()
-    write_lease: ArtifactMutationLease | None = None
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "batch_id", "idempotency_key"):
@@ -257,10 +200,7 @@ class ArtifactAppendCommand:
             str(value or "").strip() for value in self.coverage_keys
         )
         object.__setattr__(self, "coverage_keys", coverage)
-        if self.write_lease is not None and not isinstance(
-            self.write_lease,
-            ArtifactMutationLease,
-        ):
+        if not isinstance(self.write_lease, ArtifactMutationLease):
             raise TypeError("artifact append write_lease is invalid")
 
     @property
@@ -353,11 +293,10 @@ class ArtifactBatchReceipt:
 class ArtifactFinalizeCommand:
     artifact_id: str
     expected_revision: int
+    write_lease: ArtifactMutationLease
     expected_item_count: int | None = None
     expected_coverage_keys: tuple[str, ...] = ()
     resource_ref: str | None = None
-    write_lease: ArtifactMutationLease | None = None
-    complete_work_item: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -391,16 +330,8 @@ class ArtifactFinalizeCommand:
             "resource_ref",
             optional_text(self.resource_ref),
         )
-        if self.write_lease is not None and not isinstance(
-            self.write_lease,
-            ArtifactMutationLease,
-        ):
+        if not isinstance(self.write_lease, ArtifactMutationLease):
             raise TypeError("artifact finalize write_lease is invalid")
-        object.__setattr__(
-            self,
-            "complete_work_item",
-            bool(self.complete_work_item),
-        )
 
 
 @dataclass(frozen=True, slots=True)

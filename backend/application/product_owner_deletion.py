@@ -48,7 +48,7 @@ async def prepare_session_owner_deletion(
     conversation_ids = tuple(sorted(int(row["id"]) for row in conversations))
     conversation_marks = _marks(conversation_ids)
     owned_run_ids = await _owned_run_ids(db, sessions, conversation_ids)
-    work_item_ids, task_ids, open_work_item = await _owned_work_and_task_ids(
+    task_ids = await _owned_task_ids(
         db,
         owned_run_ids,
         projects,
@@ -103,7 +103,6 @@ async def prepare_session_owner_deletion(
         or active_operation
         or active_turn
         or active_long_task
-        or open_work_item
     ):
         raise ProductOwnerActiveError()
 
@@ -149,7 +148,7 @@ async def prepare_session_owner_deletion(
     # metadata above. Aggregate deletion owns and removes the product tasks.
     if projects or books:
         await _delete_owned_run_cancellations(db, owned_run_ids)
-        await _delete_owned_work(db, work_item_ids, task_ids)
+        await _delete_owned_tasks(db, task_ids)
 
     if sessions:
         for table in (
@@ -208,24 +207,12 @@ async def _delete_owned_run_cancellations(db, owned_run_ids) -> None:
     marks = _marks(owned_run_ids)
     await db.execute(
         "DELETE FROM ai_agent_run_cancellations "
-        f"WHERE root_run_id IN ({marks})",
+        f"WHERE run_id IN ({marks})",
         list(owned_run_ids),
     )
 
 
-async def _owned_work_and_task_ids(db, owned_run_ids, projects, books):
-    related_clauses: list[str] = []
-    related_params: list[object] = []
-    if owned_run_ids:
-        marks = _marks(owned_run_ids)
-        related_clauses.extend([
-            f"created_by_run_id IN ({marks})",
-            "EXISTS (SELECT 1 FROM ai_agent_work_item_runs AS wir "
-            "WHERE wir.work_item_id = ai_agent_work_items.id "
-            f"AND wir.run_id IN ({marks}))",
-        ])
-        related_params.extend(owned_run_ids)
-        related_params.extend(owned_run_ids)
+async def _owned_task_ids(db, owned_run_ids, projects, books):
     owned_clauses: list[str] = []
     owned_params: list[object] = []
     if projects:
@@ -241,50 +228,34 @@ async def _owned_work_and_task_ids(db, owned_run_ids, projects, books):
             f"AND owner_id IN ({marks}))"
         )
         owned_params.extend(books)
-    related_rows = await db.fetch_all(
-        "SELECT id, status FROM ai_agent_work_items WHERE "
-        + " OR ".join([*related_clauses, *owned_clauses]),
-        [*related_params, *owned_params],
-    ) if related_clauses or owned_clauses else []
-    open_work = next(
-        (row for row in related_rows if str(row.get("status") or "") == "open"),
-        None,
-    )
-    # Run links express continuity, including cross-owner references. They are
-    # relevant to the active guard but never transfer physical ownership.
-    owned_work_rows = await db.fetch_all(
-        "SELECT id FROM ai_agent_work_items WHERE " + " OR ".join(owned_clauses),
-        owned_params,
-    ) if owned_clauses else []
-    work_ids = tuple(sorted(str(row["id"]) for row in owned_work_rows))
-
-    task_clauses: list[str] = []
-    task_params: list[object] = []
-    if projects:
-        marks = _marks(projects)
-        task_clauses.append(
-            f"(namespace = 'purrtypos.screenplay' AND owner_id IN ({marks}))"
-        )
-        task_params.extend(projects)
-    if books:
-        marks = _marks(books)
-        task_clauses.append(
-            f"(namespace IN ('purrtypos.writing', 'writing.book') "
-            f"AND owner_id IN ({marks}))"
-        )
-        task_params.extend(books)
+    task_clauses = list(owned_clauses)
+    task_params = list(owned_params)
+    if owned_run_ids:
+        marks = _marks(owned_run_ids)
+        task_clauses.extend([
+            f"created_by_run_id IN ({marks})",
+            "EXISTS (SELECT 1 FROM ai_agent_long_task_runs AS ltr "
+            "WHERE ltr.task_id = ai_agent_long_tasks.id "
+            f"AND ltr.run_id IN ({marks}))",
+        ])
+        task_params.extend(owned_run_ids)
+        task_params.extend(owned_run_ids)
     tasks = await db.fetch_all(
         "SELECT id FROM ai_agent_long_tasks WHERE " + " OR ".join(task_clauses),
         task_params,
     ) if task_clauses else []
     task_ids = tuple(sorted(str(row["id"]) for row in tasks))
-    return work_ids, task_ids, open_work
+    return task_ids
 
 
-async def _delete_owned_work(db, work_item_ids, task_ids) -> None:
+async def _delete_owned_tasks(db, task_ids) -> None:
     if task_ids:
         marks = _marks(task_ids)
-        for table in ("ai_agent_long_task_usage", "ai_agent_long_task_units"):
+        for table in (
+            "ai_agent_long_task_usage",
+            "ai_agent_long_task_units",
+            "ai_agent_long_task_runs",
+        ):
             await db.execute(
                 f"DELETE FROM {table} WHERE task_id IN ({marks})",
                 list(task_ids),
@@ -292,16 +263,6 @@ async def _delete_owned_work(db, work_item_ids, task_ids) -> None:
         await db.execute(
             f"DELETE FROM ai_agent_long_tasks WHERE id IN ({marks})",
             list(task_ids),
-        )
-    if work_item_ids:
-        marks = _marks(work_item_ids)
-        await db.execute(
-            f"DELETE FROM ai_agent_work_item_runs WHERE work_item_id IN ({marks})",
-            list(work_item_ids),
-        )
-        await db.execute(
-            f"DELETE FROM ai_agent_work_items WHERE id IN ({marks})",
-            list(work_item_ids),
         )
 
 
@@ -322,9 +283,9 @@ async def _active_long_task(db, sessions, owned_run_ids, projects, books):
         )
         params.extend(owned_run_ids)
         clauses.append(
-            "EXISTS (SELECT 1 FROM ai_agent_work_item_runs AS wir "
-            "WHERE wir.work_item_id = lt.work_item_id "
-            f"AND wir.run_id IN ({run_marks}))"
+            "EXISTS (SELECT 1 FROM ai_agent_long_task_runs AS ltr "
+            "WHERE ltr.task_id = lt.id "
+            f"AND ltr.run_id IN ({run_marks}))"
         )
         params.extend(owned_run_ids)
     if projects:
@@ -364,9 +325,9 @@ async def _clear_long_task_session_metadata(db, sessions, owned_run_ids) -> None
         run_marks = _marks(owned_run_ids)
         clauses.extend([
             f"created_by_run_id IN ({run_marks})",
-            "EXISTS (SELECT 1 FROM ai_agent_work_item_runs AS wir "
-            "WHERE wir.work_item_id = ai_agent_long_tasks.work_item_id AND "
-            f"wir.run_id IN ({run_marks}))",
+            "EXISTS (SELECT 1 FROM ai_agent_long_task_runs AS ltr "
+            "WHERE ltr.task_id = ai_agent_long_tasks.id AND "
+            f"ltr.run_id IN ({run_marks}))",
         ])
         params.extend(owned_run_ids)
         params.extend(owned_run_ids)
@@ -396,11 +357,7 @@ async def _owned_run_ids(db, sessions, conversations) -> tuple[str, ...]:
     if not direct_sql:
         return ()
     rows = await db.fetch_all(
-        "WITH RECURSIVE owned(id) AS ("
-        " SELECT id FROM ai_agent_runs WHERE " + direct_sql
-        + " UNION SELECT child.id FROM ai_agent_runs AS child "
-        " JOIN owned AS parent ON child.parent_run_id = parent.id"
-        ") SELECT id FROM owned ORDER BY id",
+        "SELECT id FROM ai_agent_runs WHERE " + direct_sql + " ORDER BY id",
         direct_params,
     )
     return tuple(str(row["id"]) for row in rows)

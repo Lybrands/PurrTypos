@@ -46,7 +46,6 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             session_ids,
             screenplay_project_ids=[project_id],
         )
-        await _delete_host_child_receipts(db, project_id)
         if turn_ids:
             turn_marks = ",".join("?" for _ in turn_ids)
             await db.execute(
@@ -174,18 +173,13 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
             [project_id],
         )
         await db.execute(
-            "DELETE FROM ai_agent_long_tasks "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
-            [project_id],
-        )
-        await db.execute(
-            "DELETE FROM ai_agent_work_item_runs WHERE work_item_id IN ("
-            "SELECT id FROM ai_agent_work_items "
+            "DELETE FROM ai_agent_long_task_runs WHERE task_id IN ("
+            "SELECT id FROM ai_agent_long_tasks "
             "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
             [project_id],
         )
         await db.execute(
-            "DELETE FROM ai_agent_work_items "
+            "DELETE FROM ai_agent_long_tasks "
             "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
             [project_id],
         )
@@ -241,12 +235,7 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         direct_clauses.insert(0, f"session_id IN ({session_marks})")
         direct_params = [*session_ids, *direct_params]
     run_rows = await db.fetch_all(
-        "WITH RECURSIVE owned(id) AS ("
-        "SELECT id FROM ai_agent_runs WHERE "
-        + " OR ".join(direct_clauses)
-        + " UNION SELECT child.id FROM ai_agent_runs AS child "
-        "JOIN owned AS parent ON child.parent_run_id = parent.id"
-        ") SELECT id FROM owned",
+        "SELECT id FROM ai_agent_runs WHERE " + " OR ".join(direct_clauses),
         direct_params,
     )
     run_ids = [str(row["id"]) for row in run_rows]
@@ -266,13 +255,6 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         [project_id],
     )
     task_ids = [str(row["id"]) for row in task_rows]
-    work_rows = await db.fetch_all(
-        "SELECT id FROM ai_agent_work_items "
-        "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
-        [project_id],
-    )
-    work_ids = [str(row["id"]) for row in work_rows]
-    await _delete_host_child_receipts(db, project_id)
     await _delete_run_cancellation_receipts(db, run_ids)
 
     if turn_ids:
@@ -309,7 +291,11 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         )
     if task_ids:
         marks = ",".join("?" for _ in task_ids)
-        for table in ("ai_agent_long_task_usage", "ai_agent_long_task_units"):
+        for table in (
+            "ai_agent_long_task_usage",
+            "ai_agent_long_task_units",
+            "ai_agent_long_task_runs",
+        ):
             await db.execute(
                 f"DELETE FROM {table} WHERE task_id IN ({marks})",
                 task_ids,
@@ -317,16 +303,6 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         await db.execute(
             f"DELETE FROM ai_agent_long_tasks WHERE id IN ({marks})",
             task_ids,
-        )
-    if work_ids:
-        marks = ",".join("?" for _ in work_ids)
-        await db.execute(
-            f"DELETE FROM ai_agent_work_item_runs WHERE work_item_id IN ({marks})",
-            work_ids,
-        )
-        await db.execute(
-            f"DELETE FROM ai_agent_work_items WHERE id IN ({marks})",
-            work_ids,
         )
     report_clauses: list[str] = []
     report_params: list[object] = []
@@ -458,24 +434,13 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
     )
 
 
-async def _delete_host_child_receipts(db, project_id: str) -> None:
-    # Foreign keys are intentionally disabled for the legacy SQLite schema.
-    # Aggregate deletion therefore owns this durable identity cleanup; normal
-    # session unlinking retains the receipt together with the terminal Run.
-    await db.execute(
-        "DELETE FROM ai_agent_host_child_runs WHERE "
-        "json_extract(contract_json, '$.bindingAggregateId') = ?",
-        [project_id],
-    )
-
-
 async def _delete_run_cancellation_receipts(db, run_ids) -> None:
     if not run_ids:
         return
     marks = ",".join("?" for _ in run_ids)
     await db.execute(
         "DELETE FROM ai_agent_run_cancellations "
-        f"WHERE root_run_id IN ({marks})",
+        f"WHERE run_id IN ({marks})",
         list(run_ids),
     )
 

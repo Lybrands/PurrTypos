@@ -21,6 +21,50 @@ async def _try_exec(db: DatabaseConnection, sql: str) -> None:
         pass
 
 
+async def _drop_agent_run_lineage_columns(db: DatabaseConnection) -> None:
+    columns = {
+        str(row["name"])
+        for row in await db.fetch_all("PRAGMA table_info(ai_agent_runs)")
+    }
+    obsolete = (
+        "parent_run_id",
+        "root_run_id",
+        "delegation_id",
+        "agent_role",
+        "run_depth",
+    )
+    if not columns.intersection(obsolete):
+        return
+    await db.execute("DROP INDEX IF EXISTS idx_ai_agent_runs_parent")
+    for column in obsolete:
+        if column in columns:
+            await db.execute(f"ALTER TABLE ai_agent_runs DROP COLUMN {column}")
+
+
+async def _migrate_run_cancellation_receipts(db: DatabaseConnection) -> None:
+    columns = {
+        str(row["name"])
+        for row in await db.fetch_all(
+            "PRAGMA table_info(ai_agent_run_cancellations)"
+        )
+    }
+    if "root_run_id" in columns:
+        await db.execute(
+            "ALTER TABLE ai_agent_run_cancellations "
+            "RENAME COLUMN root_run_id TO run_id"
+        )
+    if "children_canceled" in columns:
+        await db.execute(
+            "ALTER TABLE ai_agent_run_cancellations "
+            "RENAME COLUMN children_canceled TO delegations_canceled"
+        )
+    if "final_status" not in columns:
+        await db.execute(
+            "ALTER TABLE ai_agent_run_cancellations "
+            "ADD COLUMN final_status TEXT DEFAULT NULL"
+        )
+
+
 def _utc_iso(value: object) -> str:
     try:
         parsed = datetime.fromisoformat(str(value or ""))
@@ -386,11 +430,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         binding_aggregate_id TEXT DEFAULT NULL,
         binding_command_id TEXT DEFAULT NULL,
         binding_attributes_json TEXT DEFAULT NULL,
-        parent_run_id TEXT DEFAULT NULL,
-        root_run_id TEXT DEFAULT NULL,
-        delegation_id TEXT DEFAULT NULL,
-        agent_role TEXT DEFAULT NULL,
-        run_depth INTEGER NOT NULL DEFAULT 0,
         execution_owner_id TEXT DEFAULT NULL,
         lease_expires_at_ms INTEGER DEFAULT NULL,
         heartbeat_at_ms INTEGER DEFAULT NULL,
@@ -420,11 +459,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         "binding_aggregate_id TEXT DEFAULT NULL",
         "binding_command_id TEXT DEFAULT NULL",
         "binding_attributes_json TEXT DEFAULT NULL",
-        "parent_run_id TEXT DEFAULT NULL",
-        "root_run_id TEXT DEFAULT NULL",
-        "delegation_id TEXT DEFAULT NULL",
-        "agent_role TEXT DEFAULT NULL",
-        "run_depth INTEGER NOT NULL DEFAULT 0",
         "execution_owner_id TEXT DEFAULT NULL",
         "lease_expires_at_ms INTEGER DEFAULT NULL",
         "heartbeat_at_ms INTEGER DEFAULT NULL",
@@ -436,16 +470,19 @@ async def init_schema(db: DatabaseConnection) -> None:
             db,
             f"ALTER TABLE ai_agent_runs ADD COLUMN {column}",
         )
+    await _drop_agent_run_lineage_columns(db)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_cancellations (
-        root_run_id TEXT PRIMARY KEY NOT NULL,
+        run_id TEXT PRIMARY KEY NOT NULL,
         cancellation_epoch INTEGER NOT NULL CHECK (cancellation_epoch >= 1),
         status TEXT NOT NULL CHECK (status IN ('draining', 'completed')),
-        children_canceled INTEGER NOT NULL DEFAULT 0,
+        delegations_canceled INTEGER NOT NULL DEFAULT 0,
         requested_at_ms INTEGER NOT NULL,
         completed_at_ms INTEGER DEFAULT NULL,
+        final_status TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await _migrate_run_cancellation_receipts(db)
     # Recreate the trigger so databases that once included additional routing
     # metadata enforce only the current model-request provenance contract.
     await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_provenance_immutable")
@@ -509,10 +546,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         ON ai_agent_runs(status, lease_expires_at_ms)
     """)
     await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_runs_parent
-        ON ai_agent_runs(parent_run_id, create_time)
-    """)
-    await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_runs_terminal_time
         ON ai_agent_runs(status, update_time DESC)
     """)
@@ -543,33 +576,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_writing_chat_requests_run
         ON ai_writing_chat_requests(run_id)
     """)
-    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_host_child_runs (
-        host_child_key TEXT PRIMARY KEY NOT NULL,
-        identity_digest TEXT NOT NULL,
-        contract_json TEXT NOT NULL,
-        generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
-        attempt_key TEXT NOT NULL UNIQUE,
-        reservation_owner TEXT DEFAULT NULL,
-        reservation_expires_at_ms INTEGER DEFAULT NULL,
-        run_id TEXT DEFAULT NULL UNIQUE,
-        terminal_status TEXT DEFAULT NULL CHECK (
-            terminal_status IS NULL OR terminal_status IN (
-                'done', 'failed', 'blocked', 'canceled'
-            )
-        ),
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
-        idx_ai_agent_runs_host_child_attempt
-        ON ai_agent_runs(
-            json_extract(binding_attributes_json, '$.hostChild.attemptKey')
-        )
-        WHERE json_extract(
-            binding_attributes_json,
-            '$.hostChild.attemptKey'
-        ) IS NOT NULL
-    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_todos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -581,7 +587,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         risk_level TEXT DEFAULT NULL,
         description TEXT DEFAULT NULL,
         expected_tools TEXT DEFAULT NULL,
-        agent_role TEXT DEFAULT NULL,
         assignment_json TEXT DEFAULT NULL,
         depends_on_json TEXT DEFAULT NULL,
         result_summary TEXT DEFAULT NULL,
@@ -596,7 +601,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         "step_type TEXT NOT NULL DEFAULT 'analyze'",
         "risk_level TEXT DEFAULT NULL",
         "description TEXT DEFAULT NULL",
-        "agent_role TEXT DEFAULT NULL",
         "assignment_json TEXT DEFAULT NULL",
         "depends_on_json TEXT DEFAULT NULL",
         "protocol_private INTEGER NOT NULL DEFAULT 0",
@@ -606,6 +610,10 @@ async def init_schema(db: DatabaseConnection) -> None:
             db,
             f"ALTER TABLE ai_agent_run_todos ADD COLUMN {column}",
         )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_run_todos DROP COLUMN agent_role",
+    )
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL,
@@ -799,38 +807,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         "ALTER TABLE ai_agent_tool_receipts ADD COLUMN "
         "planning_disposition TEXT NOT NULL DEFAULT 'keep_plan'",
     )
-    # ── durable Agent Work Items / recoverable artifacts ─────────
-    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_work_items (
-        id TEXT PRIMARY KEY NOT NULL,
-        namespace TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        owner_id TEXT NOT NULL,
-        created_by_run_id TEXT DEFAULT NULL,
-        status TEXT NOT NULL DEFAULT 'open',
-        revision INTEGER NOT NULL DEFAULT 1,
-        metadata_json TEXT NOT NULL DEFAULT '{}',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_work_items_owner_status
-        ON ai_agent_work_items(namespace, owner_id, kind, status, update_time DESC)
-    """)
-    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_work_item_runs (
-        work_item_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        relation TEXT NOT NULL,
-        work_item_revision INTEGER NOT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (work_item_id, run_id)
-    )""")
-    await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_work_item_runs_run
-        ON ai_agent_work_item_runs(run_id, create_time DESC)
-    """)
+    # ── durable Agent tasks / recoverable artifacts ──────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_tasks (
         id TEXT PRIMARY KEY NOT NULL,
-        work_item_id TEXT NOT NULL,
         namespace TEXT NOT NULL,
         kind TEXT NOT NULL,
         owner_id TEXT NOT NULL,
@@ -847,6 +826,17 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_runs (
+        task_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (task_id, run_id)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_long_task_runs_run
+        ON ai_agent_long_task_runs(run_id, create_time DESC)
+    """)
     await _try_exec(
         db,
         "ALTER TABLE ai_agent_long_tasks ADD COLUMN "
@@ -989,10 +979,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         namespace TEXT NOT NULL,
         kind TEXT NOT NULL,
         owner_id TEXT NOT NULL,
-        run_id TEXT DEFAULT NULL,
-        artifact_scope TEXT NOT NULL DEFAULT 'run',
-        work_item_id TEXT DEFAULT NULL,
-        created_by_run_id TEXT DEFAULT NULL,
+        owner_ref_kind TEXT NOT NULL,
+        owner_ref_id TEXT NOT NULL,
+        created_by_run_id TEXT NOT NULL,
         schema_version INTEGER NOT NULL DEFAULT 1,
         status TEXT NOT NULL DEFAULT 'open',
         revision INTEGER NOT NULL DEFAULT 1,
@@ -1005,46 +994,17 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
-    for column in (
-        "artifact_scope TEXT NOT NULL DEFAULT 'run'",
-        "work_item_id TEXT DEFAULT NULL",
-        "created_by_run_id TEXT DEFAULT NULL",
-    ):
-        await _try_exec(
-            db,
-            f"ALTER TABLE ai_agent_artifacts ADD COLUMN {column}",
-        )
-    # Legacy artifacts were all Run-scoped. Preserve their original Run as
-    # immutable creator provenance while making the new scope explicit.
-    await db.execute(
-        "UPDATE ai_agent_artifacts SET artifact_scope = 'run' "
-        "WHERE artifact_scope IS NULL OR artifact_scope = ''"
-    )
-    await db.execute(
-        "UPDATE ai_agent_artifacts SET created_by_run_id = run_id "
-        "WHERE created_by_run_id IS NULL AND run_id IS NOT NULL"
-    )
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_artifacts_owner_status
         ON ai_agent_artifacts(namespace, owner_id, kind, status, update_time DESC)
     """)
-    await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_artifacts_run
-        ON ai_agent_artifacts(run_id, update_time DESC)
-    """)
-    # The legacy index did not understand Work Item scope. Recreate it with a
-    # scope predicate so creator provenance cannot make a Work Item artifact
-    # collide with a Run-owned artifact.
     await db.execute("DROP INDEX IF EXISTS idx_ai_agent_artifacts_run_kind_unique")
+    await db.execute("DROP INDEX IF EXISTS idx_ai_agent_artifacts_run_scope_unique")
     await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
-        idx_ai_agent_artifacts_run_scope_unique
-        ON ai_agent_artifacts(namespace, owner_id, kind, run_id)
-        WHERE artifact_scope = 'run' AND run_id IS NOT NULL
-    """)
-    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
-        idx_ai_agent_artifacts_work_item_kind_unique
-        ON ai_agent_artifacts(namespace, owner_id, kind, work_item_id)
-        WHERE artifact_scope = 'work_item' AND work_item_id IS NOT NULL
+        idx_ai_agent_artifacts_owner_ref_unique
+        ON ai_agent_artifacts(
+            namespace, owner_id, kind, owner_ref_kind, owner_ref_id
+        )
     """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifact_batches (
         artifact_id TEXT NOT NULL,
@@ -1068,7 +1028,6 @@ async def init_schema(db: DatabaseConnection) -> None:
     """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_artifact_claims (
         artifact_id TEXT PRIMARY KEY NOT NULL,
-        work_item_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         claim_token TEXT NOT NULL,
         acquired_revision INTEGER NOT NULL,
@@ -1098,35 +1057,63 @@ async def init_schema(db: DatabaseConnection) -> None:
     """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_delegations (
         id TEXT PRIMARY KEY NOT NULL,
-        parent_run_id TEXT NOT NULL,
-        root_run_id TEXT NOT NULL,
-        child_run_id TEXT DEFAULT NULL,
-        agent_role TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        agent_title TEXT NOT NULL,
+        agent_instruction TEXT NOT NULL,
         objective TEXT NOT NULL,
         input_json TEXT NOT NULL DEFAULT '{}',
+        context_mode TEXT NOT NULL DEFAULT 'isolated',
         status TEXT NOT NULL DEFAULT 'queued',
         required INTEGER NOT NULL DEFAULT 1,
         priority INTEGER NOT NULL DEFAULT 0,
-        worker_id TEXT DEFAULT NULL,
-        claim_expires_at_ms INTEGER DEFAULT NULL,
-        claim_attempt INTEGER NOT NULL DEFAULT 0,
         result_summary TEXT DEFAULT NULL,
         error TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
-    for column in (
-        "claim_expires_at_ms INTEGER DEFAULT NULL",
-        "claim_attempt INTEGER NOT NULL DEFAULT 0",
-    ):
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_delegations_run_batch_status
+        ON ai_agent_delegations(run_id, batch_id, status, priority DESC, create_time)
+    """)
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_delegations ADD COLUMN agent_name TEXT NOT NULL "
+        "DEFAULT ''",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_delegations ADD COLUMN agent_title TEXT NOT NULL "
+        "DEFAULT ''",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_delegations ADD COLUMN agent_instruction TEXT "
+        "NOT NULL DEFAULT ''",
+    )
+    delegation_columns = {
+        str(row["name"])
+        for row in await db.fetch_all("PRAGMA table_info(ai_agent_delegations)")
+    }
+    if "agent_role" in delegation_columns:
+        await db.execute(
+            "UPDATE ai_agent_delegations SET agent_name = agent_role "
+            "WHERE agent_name = ''"
+        )
+    await db.execute(
+        "UPDATE ai_agent_delegations SET agent_title = agent_name "
+        "WHERE agent_title = ''"
+    )
+    await db.execute(
+        "UPDATE ai_agent_delegations SET agent_instruction = "
+        "'Execute the delegated objective.' WHERE agent_instruction = ''"
+    )
+    if "agent_role" in delegation_columns:
         await _try_exec(
             db,
-            f"ALTER TABLE ai_agent_delegations ADD COLUMN {column}",
+            "ALTER TABLE ai_agent_delegations DROP COLUMN agent_role",
         )
-    await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_delegations_parent_status
-        ON ai_agent_delegations(parent_run_id, status, priority DESC, create_time)
-    """)
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

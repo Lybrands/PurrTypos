@@ -646,14 +646,6 @@ export const backendApi: BackendApi = {
     }
     return sendWritingRequestCancel(data.requestId)
   },
-  createAgentDelegation: (data) =>
-    apiPost(`/ai/agent-runs/${encodeURIComponent(data.runId)}/delegations`, {
-      agentRole: data.agentRole,
-      objective: data.objective,
-      input: data.input || {},
-      required: data.required !== false,
-      priority: data.priority || 0,
-    }),
   resolveAiToolApproval: (data) =>
     apiPost(`/ai/tool-approvals/${data.approvalId}`, {
       approved: Boolean(data.approved),

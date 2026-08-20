@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from dataclasses import replace
 
 from purra.contracts import (
     AgentRunRequest,
@@ -10,6 +12,7 @@ from purra.contracts import (
     PlanningConstraints,
 )
 from domains.writing.contracts import WritingDomainContext
+from domains.writing.context import WRITING_PLANNING_FACTS_CONTEXT
 
 
 WRITING_TOOL_PLANNING_DEPENDENCIES: dict[str, tuple[str, ...]] = {
@@ -52,28 +55,9 @@ class WritingPlanningPolicy:
                 "listWritingChapters",
             ))
 
-        return PlanningConstraints(
-            context_satisfied_tool_names=base.context_satisfied_tool_names,
-            planning_excluded_tool_names=base.planning_excluded_tool_names,
+        return replace(
+            base,
             satisfied_tool_dependency_edges=frozenset(satisfied_edges),
-            required_any_tool_names=base.required_any_tool_names,
-            execution_satisfied_tool_names=(
-                base.execution_satisfied_tool_names
-            ),
-            planning_excluded_agent_roles=(
-                base.planning_excluded_agent_roles
-            ),
-            required_any_agent_roles=base.required_any_agent_roles,
-            minimum_root_agent_count=(
-                base.minimum_root_agent_count
-            ),
-            agent_assignment_coverages=(
-                base.agent_assignment_coverages
-            ),
-            planning_excluded_executors=(
-                base.planning_excluded_executors
-            ),
-            allow_model_only_fallback=base.allow_model_only_fallback,
         )
 
     def should_plan(
@@ -104,7 +88,23 @@ def _bound_current_chapter_satisfies_catalog_dependency(
     if not _bound_chapter_locator_is_consistent(context):
         return False
 
-    current_fact = capabilities.host_planning_facts.get("currentChapter")
+    planning_facts: Mapping[str, object] = {}
+    block = next(
+        (
+            item
+            for item in capabilities.planning_context_blocks
+            if item.name == WRITING_PLANNING_FACTS_CONTEXT
+        ),
+        None,
+    )
+    if block is not None:
+        try:
+            parsed = json.loads(block.content)
+        except (TypeError, ValueError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            planning_facts = parsed
+    current_fact = planning_facts.get("currentChapter")
     if not isinstance(current_fact, Mapping):
         return False
     return (

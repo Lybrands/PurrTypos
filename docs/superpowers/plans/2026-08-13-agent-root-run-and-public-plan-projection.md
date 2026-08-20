@@ -80,7 +80,7 @@ git commit -m "fix(agent-ui): keep durable progress out of public plans"
 - [ ] 将 `AgentComposition.__init__()` 改为只接收 `profile_extension_factories` 产生的 extension，并从 extension 的 `profile_registration()` 建立 registry；删除 `skills_dir`、`writing` 和默认 Writing registration。
 - [ ] 将 `prepare_request()` 改为始终委托当前 Profile Extension；若 extension 不改变请求，返回原请求。
 - [ ] 将 Writing 特有的 context-provider factory 与 response judge 分支替换为 extension 方法；`create_core()` 只消费 extension 返回的通用 ports。
-- [ ] 保留 `agent_role_registry_for_request()`，删除 Writing 专用的 `writing`、`skill_catalog`、`agent_role_registry` 属性。调用方不得通过默认 Writing 属性绕过请求 Profile。
+- [x] 后续阶段一归位已删除 `agent_role_registry_for_request()` 及业务 Role Registry；通用委派风格直接使用 PurrA `AgentPreset`。
 - [ ] 运行失败后转绿的测试：
 
 ```bash
@@ -104,11 +104,11 @@ git commit -m "refactor(agent): type product profile extensions"
 - Modify: `backend/tests/test_agent_composition.py`
 - Modify: `backend/tests/test_writing_chat_request_routes.py`
 
-- [ ] 先写 `WritingAgentProfileExtension` 的测试，要求它拥有当前 Writing 装配的全部职责：Writing catalog hydration、`WritingSkillCatalog`、Writing tool catalog、`RepositoryWritingContextSource`、model-backed memory reranker、Writing response judge policies和 Writing role registry。
+- [x] Writing Profile 只保留 catalog hydration、Writing 工具、上下文来源、memory reranker 和 response judge；通用角色不再属于 Writing。
 - [ ] 在 `writing_agent_profile.py` 实现 `build_writing_profile_extension(db, ...)`；把从 `AgentComposition` 移出的 Writing imports 和对象创建完整迁入，不复制同一依赖构造。
 - [ ] 在 `composition_factory.py` 注册 Writing extension；用无业务钩子的 `StaticAgentProfileExtension` 包装当前 Screenplay adapter，直到剧本动态计划实施计划将其替换为完整 Screenplay extension。
-- [ ] 修改 `agent_run_service.py`：始终调用 `agent_role_registry_for_request(request)`，删除回退到 `composition.agent_role_registry` 的兼容分支。
-- [ ] 修改 `routers/ai.py` 的 Writing 查询/审批调用：根据已构造的 Writing request 或明确的 Writing namespace 获取 role registry，不再访问已删除的默认属性。
+- [x] `agent_run_service.py` 只按显式 delegation 开关接入 PurrA 原生委派仓库，不再查询业务角色。
+- [x] `routers/ai.py` 从 Run 持久化的 `AgentPresetSnapshot` 读取角色标题，不再按当前业务 Profile 反推历史 Run。
 - [ ] 将需要产品 Profile 的测试统一改用 `create_agent_composition()`；纯装配单元测试显式传 fake extension，确保无隐式 Writing 默认值。
 - [ ] 运行定向测试：
 

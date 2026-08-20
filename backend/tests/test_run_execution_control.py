@@ -8,16 +8,26 @@ import pytest_asyncio
 
 from purra.contracts import RunBinding, RunCreateParams
 from purra.errors import RunCommitProjectionError
+from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
+from purra.output import (
+    AgentOutputIntent,
+    OutputCommitMode,
+    OutputStreamSpec,
+)
+from application.agent_cancellation_service import AgentCancellationService
 from application.agent_orphan_recovery_service import AgentOrphanRecoveryService
 from application.composition_factory import create_agent_composition
 from application.run_execution_control import RunExecutionSession
 from database.connection import DatabaseConnection
-from infrastructure.persistence import run_execution_store, run_store
+from infrastructure.persistence import run_store
 from infrastructure.persistence.run_execution_store import (
-    SqliteExecutionLeaseStore,
+    SqliteRunControlStore,
 )
 from infrastructure.persistence.orphan_run_monitor import monitor_orphaned_runs
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
 
 
 @pytest_asyncio.fixture
@@ -49,32 +59,19 @@ async def _unowned_run(db: DatabaseConnection) -> str:
 
 
 async def _seed_orphan_artifact_claim(db, run_id: str, suffix: str) -> None:
-    work_item_id = f"orphan-item-{suffix}"
     artifact_id = f"orphan-artifact-{suffix}"
     await db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, created_by_run_id) "
-        "VALUES (?, 'test', 'draft', 'owner', ?)",
-        [work_item_id, run_id],
-    )
-    await db.execute(
-        "INSERT INTO ai_agent_work_item_runs "
-        "(work_item_id, run_id, relation, work_item_revision) "
-        "VALUES (?, ?, 'created', 1)",
-        [work_item_id, run_id],
-    )
-    await db.execute(
         "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, run_id, artifact_scope, "
-        "work_item_id, created_by_run_id) VALUES "
-        "(?, 'test', 'draft', 'owner', ?, 'work_item', ?, ?)",
-        [artifact_id, run_id, work_item_id, run_id],
+        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+        "created_by_run_id) VALUES "
+        "(?, 'test', 'draft', 'owner', 'run', ?, ?)",
+        [artifact_id, run_id, run_id],
     )
     await db.execute(
         "INSERT INTO ai_agent_artifact_claims "
-        "(artifact_id, work_item_id, run_id, claim_token, "
-        "acquired_revision, expires_at_ms) VALUES (?, ?, ?, ?, 1, 999999)",
-        [artifact_id, work_item_id, run_id, f"claim-{suffix}"],
+        "(artifact_id, run_id, claim_token, acquired_revision, expires_at_ms) "
+        "VALUES (?, ?, ?, 1, 999999)",
+        [artifact_id, run_id, f"claim-{suffix}"],
     )
 
 
@@ -89,72 +86,67 @@ def _writing_binding(session_id: int, command_id: str) -> RunBinding:
 @pytest.mark.asyncio
 async def test_concurrent_claim_has_one_winner(db):
     run_id = await _unowned_run(db)
+    control = SqliteRunControlStore(db)
 
     claims = await asyncio.gather(
-        run_execution_store.claim_run(
-            db,
-            run_id=run_id,
-            owner_id="worker-a",
+        control.claim(
+            run_id,
+            "worker-a",
             lease_duration_ms=1_000,
             timestamp_ms=100,
         ),
-        run_execution_store.claim_run(
-            db,
-            run_id=run_id,
-            owner_id="worker-b",
+        control.claim(
+            run_id,
+            "worker-b",
             lease_duration_ms=1_000,
             timestamp_ms=100,
         ),
     )
-    state = await run_execution_store.get_execution_state(db, run_id)
+    state = await control.get(run_id)
 
     assert claims.count(True) == 1
     assert claims.count(False) == 1
     assert state is not None
-    assert state["execution_owner_id"] in {"worker-a", "worker-b"}
-    assert state["execution_attempt"] == 1
+    assert state.owner_id in {"worker-a", "worker-b"}
+    assert state.attempt == 1
 
 
 @pytest.mark.asyncio
 async def test_expired_lease_can_be_reclaimed_but_live_lease_cannot(db):
     run_id = await _unowned_run(db)
-    assert await run_execution_store.claim_run(
-        db,
-        run_id=run_id,
-        owner_id="worker-a",
+    control = SqliteRunControlStore(db)
+    assert await control.claim(
+        run_id,
+        "worker-a",
         lease_duration_ms=100,
         timestamp_ms=1_000,
     )
-    assert not await run_execution_store.claim_run(
-        db,
-        run_id=run_id,
-        owner_id="worker-b",
+    assert not await control.claim(
+        run_id,
+        "worker-b",
         lease_duration_ms=100,
         timestamp_ms=1_099,
     )
-    assert await run_execution_store.claim_run(
-        db,
-        run_id=run_id,
-        owner_id="worker-b",
+    assert await control.claim(
+        run_id,
+        "worker-b",
         lease_duration_ms=100,
         timestamp_ms=1_100,
     )
 
-    state = await run_execution_store.get_execution_state(db, run_id)
+    state = await control.get(run_id)
     assert state is not None
-    assert state["execution_owner_id"] == "worker-b"
-    assert state["execution_attempt"] == 2
-    assert not await run_execution_store.renew_lease(
-        db,
-        run_id=run_id,
-        owner_id="worker-a",
+    assert state.owner_id == "worker-b"
+    assert state.attempt == 2
+    assert not await control.renew(
+        run_id,
+        "worker-a",
         lease_duration_ms=100,
         timestamp_ms=1_101,
     )
-    assert await run_execution_store.renew_lease(
-        db,
-        run_id=run_id,
-        owner_id="worker-b",
+    assert await control.renew(
+        run_id,
+        "worker-b",
         lease_duration_ms=100,
         timestamp_ms=1_101,
     )
@@ -174,7 +166,7 @@ async def test_cancellation_blocks_future_claim_and_wakes_live_session(db):
     ))
     external = asyncio.Event()
     session = RunExecutionSession(
-        SqliteExecutionLeaseStore(db),
+        control := SqliteRunControlStore(db),
         owner_id=repository.owner_id,
         lease_duration_ms=repository.lease_duration_ms,
         external_signal=external,
@@ -182,22 +174,60 @@ async def test_cancellation_blocks_future_claim_and_wakes_live_session(db):
     )
     await session.bind(run_id)
 
-    assert await run_execution_store.request_cancellation(db, run_id)
-    assert not await run_execution_store.request_cancellation(db, run_id)
+    assert await control.request_cancellation(run_id)
+    assert not await control.request_cancellation(run_id)
     await asyncio.wait_for(session.signal.wait(), timeout=0.5)
     assert session.signal.is_set()
     await session.close()
 
-    assert not await run_execution_store.claim_run(
-        db,
-        run_id=run_id,
-        owner_id="worker-next",
+    assert not await control.claim(
+        run_id,
+        "worker-next",
         lease_duration_ms=1_000,
     )
-    state = await run_execution_store.get_execution_state(db, run_id)
+    state = await control.get(run_id)
     assert state is not None
-    assert state["execution_owner_id"] is None
-    assert state["cancel_requested_at_ms"] is not None
+    assert state.owner_id is None
+    assert state.cancellation_requested_at_ms is not None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_receipt_preserves_competing_done_status(db):
+    run_id = await _unowned_run(db)
+    control = SqliteRunControlStore(db)
+
+    await control.fence_cancellation(run_id)
+    await db.execute(
+        "UPDATE ai_agent_runs SET status = 'done' WHERE id = ?",
+        [run_id],
+    )
+    completed = await control.complete_cancellation(
+        run_id,
+        terminalized=False,
+    )
+    replayed = await control.load_cancellation_receipt(run_id)
+
+    assert completed.status.value == "done"
+    assert replayed is not None and replayed.status.value == "done"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_service_completes_after_competing_done_status(db):
+    run_id = await _unowned_run(db)
+    composition = create_agent_composition(db)
+    try:
+        await composition.run_control_store.fence_cancellation(run_id)
+        await db.execute(
+            "UPDATE ai_agent_runs SET status = 'done' WHERE id = ?",
+            [run_id],
+        )
+        result = await AgentCancellationService(db, composition).cancel(run_id)
+    finally:
+        await composition.shutdown()
+
+    assert result is not None
+    assert result["status"] == "done"
+    assert result["cancellationStatus"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -205,6 +235,7 @@ async def test_expired_run_is_terminalized_atomically_and_idempotently(
     db,
     orphan_recovery,
 ):
+    control = SqliteRunControlStore(db)
     run_id = await run_store.create_run(
         db,
         session_id=7,
@@ -221,43 +252,15 @@ async def test_expired_run_is_terminalized_atomically_and_idempotently(
         "executor": "tool",
         "type": "read",
     }])
-    await db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, created_by_run_id) "
-        "VALUES ('orphan-item', 'test', 'draft', 'owner', ?)",
-        [run_id],
-    )
-    await db.execute(
-        "INSERT INTO ai_agent_work_item_runs "
-        "(work_item_id, run_id, relation, work_item_revision) "
-        "VALUES ('orphan-item', ?, 'created', 1)",
-        [run_id],
-    )
-    await db.execute(
-        "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, run_id, artifact_scope, "
-        "work_item_id, created_by_run_id) VALUES "
-        "('orphan-artifact', 'test', 'draft', 'owner', ?, 'work_item', "
-        "'orphan-item', ?)",
-        [run_id, run_id],
-    )
-    await db.execute(
-        "INSERT INTO ai_agent_artifact_claims "
-        "(artifact_id, work_item_id, run_id, claim_token, "
-        "acquired_revision, expires_at_ms) VALUES "
-        "('orphan-artifact', 'orphan-item', ?, 'claim-orphan', 1, 999999)",
-        [run_id],
-    )
+    await _seed_orphan_artifact_claim(db, run_id, "orphan")
 
-    assert await run_execution_store.list_orphaned_run_candidates(
-        db,
+    assert await control.list_orphans(
         timestamp_ms=1_099,
     ) == ()
-    candidates = await run_execution_store.list_orphaned_run_candidates(
-        db,
+    candidates = await control.list_orphans(
         timestamp_ms=1_100,
     )
-    assert [candidate["id"] for candidate in candidates] == [run_id]
+    assert [candidate.run_id for candidate in candidates] == [run_id]
     assert await orphan_recovery.recover() == (run_id,)
     assert await orphan_recovery.recover() == ()
 
@@ -271,8 +274,99 @@ async def test_expired_run_is_terminalized_atomically_and_idempotently(
     assert events[0]["payload"]["reason"] == "execution_lease_expired"
     assert await db.fetch_one(
         "SELECT artifact_id FROM ai_agent_artifact_claims "
-        "WHERE artifact_id = 'orphan-artifact'"
+        "WHERE artifact_id = 'orphan-artifact-orphan'"
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_orphan_waits_for_live_task_then_checkpoints_recoverable_task(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="durable orphan",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    tasks = SqliteLongTaskRepository(db)
+    task = await tasks.create(
+        "orphan-durable-task",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="write",
+            owner_id="owner",
+            created_by_run_id=run_id,
+            units=(LongTaskUnitSpec(id="unit-1", position=0),),
+        ),
+    )
+    task = await tasks.start(task.id, expected_revision=task.revision)
+    unit = await tasks.claim_ready_unit(
+        task.id,
+        worker_id="task-worker",
+        lease_duration_ms=1_000,
+    )
+    assert unit is not None
+    await db.execute(
+        "UPDATE ai_agent_long_task_units SET lease_expires_at_ms = 9999999999999 "
+        "WHERE task_id = ? AND unit_id = ?",
+        [task.id, unit.id],
+    )
+    composition = create_agent_composition(db)
+    recovery = AgentOrphanRecoveryService(db, composition)
+    try:
+        assert await recovery.recover() == ()
+        await db.execute(
+            "UPDATE ai_agent_long_task_units SET lease_expires_at_ms = 1 "
+            "WHERE task_id = ? AND unit_id = ?",
+            [task.id, unit.id],
+        )
+        assert await recovery.recover() == (run_id,)
+    finally:
+        await composition.shutdown()
+
+    run = await run_store.get_run(db, run_id)
+    task = await tasks.load(task.id)
+    units = await tasks.list_units(task.id)
+    assert run is not None and run["status"] == "canceled"
+    assert task is not None and task.status.value == "paused"
+    assert units[0].status.value == "pending"
+    assert units[0].error_code == "durable_task_interrupted"
+
+
+@pytest.mark.asyncio
+async def test_orphan_preserves_a_pending_durable_task(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="pending durable orphan",
+        mode="agent",
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    tasks = SqliteLongTaskRepository(db)
+    task = await tasks.create(
+        "pending-orphan-task",
+        LongTaskCreateCommand(
+            namespace="test",
+            kind="write",
+            owner_id="owner",
+            created_by_run_id=run_id,
+            units=(LongTaskUnitSpec(id="unit-1", position=0),),
+        ),
+    )
+    composition = create_agent_composition(db)
+    try:
+        recovered = await AgentOrphanRecoveryService(db, composition).recover()
+    finally:
+        await composition.shutdown()
+
+    run = await run_store.get_run(db, run_id)
+    task = await tasks.load(task.id)
+    assert recovered == (run_id,)
+    assert run is not None and run["status"] == "canceled"
+    assert task is not None and task.status.value == "paused"
 
 
 @pytest.mark.asyncio
@@ -289,6 +383,14 @@ async def test_orphan_recovery_uses_canonical_failed_commit_and_clears_claim(db)
     await _seed_orphan_artifact_claim(db, run_id, "canonical")
     composition = create_agent_composition(db)
     try:
+        await composition.output_repository.open_stream(OutputStreamSpec(
+            output_stream_id=f"orphan-stream-{run_id}",
+            run_id=run_id,
+            turn_id="orphan-turn",
+            invocation_id=f"orphan-invocation-{run_id}",
+            intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+            commit_mode=OutputCommitMode.PRIVATE,
+        ))
         recovered = await AgentOrphanRecoveryService(db, composition).recover()
     finally:
         await composition.shutdown()
@@ -322,6 +424,17 @@ async def test_orphan_recovery_uses_canonical_failed_commit_and_clears_claim(db)
         "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
         [run_id],
     ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT status, error_code FROM ai_agent_output_streams WHERE id = ?",
+        [f"orphan-stream-{run_id}"],
+    ) == {"status": "aborted", "error_code": "run_terminalized"}
+    abort_event = await db.fetch_one(
+        "SELECT payload_json FROM ai_agent_run_events "
+        "WHERE output_stream_id = ? AND kind = 'stream.aborted'",
+        [f"orphan-stream-{run_id}"],
+    )
+    assert abort_event is not None
+    assert '"cause":"run_terminal_commit"' in abort_event["payload_json"]
 
 
 @pytest.mark.asyncio
@@ -434,6 +547,7 @@ async def test_cancel_requested_orphan_recovers_as_canceled(
     db,
     orphan_recovery,
 ):
+    control = SqliteRunControlStore(db)
     run_id = await run_store.create_run(
         db,
         session_id=None,
@@ -443,7 +557,7 @@ async def test_cancel_requested_orphan_recovers_as_canceled(
         heartbeat_at_ms=1,
         lease_expires_at_ms=2,
     )
-    assert await run_execution_store.request_cancellation(db, run_id)
+    assert await control.request_cancellation(run_id)
 
     assert await orphan_recovery.recover() == (run_id,)
 
@@ -457,7 +571,7 @@ async def test_cancel_requested_orphan_recovers_as_canceled(
         "lease_expires_at_ms": None,
     }
     assert await db.fetch_one(
-        "SELECT status FROM ai_agent_run_cancellations WHERE root_run_id = ?",
+        "SELECT status FROM ai_agent_run_cancellations WHERE run_id = ?",
         [run_id],
     ) == {"status": "completed"}
     assert await db.fetch_one(
@@ -499,85 +613,6 @@ async def test_concurrent_orphan_monitors_have_one_recovery_owner(db):
         "AND source_event_key = ?",
         [run_id, f"run:{run_id}:failed"],
     ) == {"count": 1}
-
-
-@pytest.mark.asyncio
-async def test_live_descendant_defers_runtime_root_orphan_recovery(db):
-    root_id = await run_store.create_run(
-        db,
-        session_id=None,
-        prompt="expired root",
-        mode="agent",
-        execution_owner_id="dead-root-worker",
-        heartbeat_at_ms=1,
-        lease_expires_at_ms=2,
-    )
-    child_id = await run_store.create_run(
-        db,
-        session_id=None,
-        prompt="live child",
-        mode="agent",
-        parent_run_id=root_id,
-        root_run_id=root_id,
-        run_depth=1,
-        execution_owner_id="live-child-worker",
-        heartbeat_at_ms=10,
-        lease_expires_at_ms=9999999999999,
-    )
-
-    assert await run_execution_store.list_orphaned_run_candidates(db) == ()
-    restart = await run_execution_store.list_orphaned_run_candidates(
-        db,
-        after_restart=True,
-    )
-    assert {row["id"] for row in restart} == {root_id, child_id}
-
-
-@pytest.mark.asyncio
-async def test_restart_cancel_recovery_drains_root_and_old_child(
-    db,
-    orphan_recovery,
-):
-    root_id = await run_store.create_run(
-        db,
-        session_id=None,
-        prompt="canceled old root",
-        mode="agent",
-        execution_owner_id="old-root-worker",
-        heartbeat_at_ms=1,
-        lease_expires_at_ms=9999999999999,
-    )
-    child_id = await run_store.create_run(
-        db,
-        session_id=None,
-        prompt="canceled old child",
-        mode="agent",
-        parent_run_id=root_id,
-        root_run_id=root_id,
-        run_depth=1,
-        execution_owner_id="old-child-worker",
-        heartbeat_at_ms=1,
-        lease_expires_at_ms=9999999999999,
-    )
-    assert await run_execution_store.request_cancellation(db, root_id)
-
-    recovered = await orphan_recovery.recover(after_restart=True)
-
-    assert set(recovered) == {root_id, child_id}
-    assert await db.fetch_all(
-        "SELECT id, status FROM ai_agent_runs WHERE id IN (?, ?) ORDER BY id",
-        [root_id, child_id],
-    ) == sorted(
-        [
-            {"id": root_id, "status": "canceled"},
-            {"id": child_id, "status": "canceled"},
-        ],
-        key=lambda row: row["id"],
-    )
-    assert await db.fetch_one(
-        "SELECT status FROM ai_agent_run_cancellations WHERE root_run_id = ?",
-        [root_id],
-    ) == {"status": "completed"}
 
 
 @pytest.mark.asyncio

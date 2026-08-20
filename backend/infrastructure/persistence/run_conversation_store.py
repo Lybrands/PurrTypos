@@ -132,7 +132,7 @@ async def materialize_recovered_run_conversations(
         owned_root = await db.fetch_one(
             "SELECT r.id FROM ai_agent_runs AS r "
             "JOIN ai_sessions AS s ON s.id = r.session_id "
-            "WHERE r.id = ? AND r.parent_run_id IS NULL "
+            "WHERE r.id = ? "
             "AND ("
             " (r.binding_namespace = 'writing.chat.request' "
             "  AND r.binding_aggregate_id = CAST(r.session_id AS TEXT)) "
@@ -155,8 +155,7 @@ async def materialize_terminal_writing_run_holes(db) -> tuple[str, ...]:
     rows = await db.fetch_all(
         "SELECT r.id FROM ai_agent_runs AS r "
         "JOIN ai_sessions AS s ON s.id = r.session_id "
-        "WHERE r.parent_run_id IS NULL "
-        "AND ("
+        "WHERE ("
         " (r.binding_namespace = 'writing.chat.request' "
         "  AND r.binding_aggregate_id = CAST(r.session_id AS TEXT)) "
         " OR ((r.binding_namespace IS NULL OR r.binding_namespace = '') "

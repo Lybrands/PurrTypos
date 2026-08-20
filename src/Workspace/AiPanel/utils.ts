@@ -138,6 +138,7 @@ export function parseConversationsFromApi(
         agentRunId: item.agent_run_id || undefined,
         longTaskId: item.long_task_id || undefined,
         model: item.model || undefined,
+        sentAt: item.create_time || undefined,
         durationMs: typeof item.duration_ms === 'number' ? item.duration_ms : undefined,
         commentary: item.commentary || undefined,
         commentaryBlocks,

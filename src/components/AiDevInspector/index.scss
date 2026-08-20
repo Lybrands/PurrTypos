@@ -513,13 +513,13 @@
   }
 }
 
-.ai-dev-inspector__child-runs {
+.ai-dev-inspector__delegation-activities {
   display: flex;
   flex-direction: column;
   gap: 7px;
 }
 
-.ai-dev-inspector__child-run {
+.ai-dev-inspector__delegation-activity {
   overflow: hidden;
   border: 1px solid var(--border-light);
   border-radius: 10px;

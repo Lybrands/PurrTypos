@@ -14,7 +14,7 @@ from purra.contracts import (
     StepExecutor,
     StepStatus,
     StepType,
-    TaskPlan,
+    ExecutionPlan,
     TaskStep,
     ToolBatchOutcome,
     ToolRiskLevel,
@@ -27,11 +27,11 @@ from purra.errors import (
 )
 from purra.events import CoreEventType
 from purra.plan_compiler import (
-    compile_task_plan,
+    compile_work_plan,
     project_completed_steps_for_planning,
 )
 from purra.planner import build_execution_message
-from purra.ports import CancellationSignal, DynamicTaskPlanner, ToolRegistration
+from purra.ports import CancellationSignal, DynamicWorkPlanner, ToolRegistration
 from purra.run_controller import AgentRunController
 from purra.run_state import RunStateMachine
 from purra.timing import duration_ms
@@ -45,7 +45,7 @@ class DynamicPlanningOrchestrator:
     def __init__(
         self,
         *,
-        planner: DynamicTaskPlanner,
+        planner: DynamicWorkPlanner,
         request: AgentRunRequest,
         capabilities: PlanningCapabilities,
         controller: AgentRunController,
@@ -130,14 +130,11 @@ class DynamicPlanningOrchestrator:
                 validate_plan_authority(
                     recovery_plan,
                     self._enabled_names,
-                    available_agent_roles=(
-                        self._capabilities.available_agent_roles
-                    ),
                     constraints=self._capabilities.constraints,
                     max_tool_steps=0,
                 )
                 revised = await self._controller.revise_plan(recovery_plan)
-                remaining_plan = TaskPlan(
+                remaining_plan = ExecutionPlan(
                     title=revised.title,
                     goal=revised.goal,
                     steps=tuple(
@@ -177,7 +174,7 @@ class DynamicPlanningOrchestrator:
                     executor=StepExecutor.MODEL,
                     risk_level=ToolRiskLevel.READ,
                 ),)
-            fallback_plan = TaskPlan(
+            fallback_plan = ExecutionPlan(
                 title=snapshot.title,
                 goal=snapshot.goal,
                 steps=remaining_steps,
@@ -189,9 +186,6 @@ class DynamicPlanningOrchestrator:
             validate_plan_authority(
                 fallback_plan,
                 self._enabled_names,
-                available_agent_roles=(
-                    self._capabilities.available_agent_roles
-                ),
                 constraints=self._capabilities.constraints,
                 max_tool_steps=fallback_tool_count,
             )
@@ -243,18 +237,21 @@ class DynamicPlanningOrchestrator:
             if step.status is StepStatus.DONE
             for name in step.suggested_tools
         ) | self._capabilities.constraints.execution_satisfied_tool_names
-        compiled = compile_task_plan(
-            planning.plan,
+        compiled = compile_work_plan(
+            planning.work_plan,
             self._registrations,
             constraints=self._capabilities.constraints,
             satisfied_tool_names=satisfied_tool_names,
             enabled_tool_names=self._enabled_names,
         )
-        prospective = RunStateMachine.revise_plan(snapshot, compiled.plan)
-        remaining_plan = TaskPlan(
+        prospective = RunStateMachine.revise_plan(
+            snapshot,
+            compiled.execution_plan,
+        )
+        remaining_plan = ExecutionPlan(
             title=prospective.title,
             goal=prospective.goal,
-            task_spec=compiled.plan.task_spec,
+            task_spec=compiled.execution_plan.task_spec,
             steps=tuple(
                 step
                 for step in prospective.steps
@@ -264,11 +261,10 @@ class DynamicPlanningOrchestrator:
         validate_plan_authority(
             remaining_plan,
             self._enabled_names,
-            available_agent_roles=self._capabilities.available_agent_roles,
             constraints=self._capabilities.constraints,
             max_tool_steps=max(0, remaining_model_rounds - 1),
         )
-        revised = await self._controller.revise_plan(compiled.plan)
+        revised = await self._controller.revise_plan(compiled.execution_plan)
         await self._controller.record_trace(TraceRecord(
             stage="planning",
             outcome="replanned",
@@ -296,10 +292,10 @@ def safe_model_only_plan(
     title: str,
     goal: str | None,
     step_id: str,
-) -> TaskPlan:
+) -> ExecutionPlan:
     """Return the only fail-open plan Core may author without model trust."""
 
-    return TaskPlan(
+    return ExecutionPlan(
         title=title,
         goal=goal,
         steps=(TaskStep(

@@ -151,7 +151,7 @@ Phase 1 已把四个历史单文件入口迁为兼容包，并完成第一轮真
 | `contracts/__init__.py` | 2083 行 | 1947 行 | 基础枚举与五个按族导入边界 |
 | `ports/__init__.py` | 775 行 | 53 行 | model、context、planning、tools、persistence、run lifecycle 全部实际迁出 |
 
-这一阶段没有改变公共入口、事件类型、错误码、Run 状态迁移或 Repository 提交顺序。`test_purra_phase_one_structure.py` 现在同时保护三件事：旧单文件不能恢复、已经迁走的定义不能回流、兼容 facade 与 orchestrator 只能继续缩小。
+这一阶段没有改变公共入口、事件类型、错误码、Run 状态迁移或 Repository 提交顺序。现行 `test_purra_structure.py` 同时保护三件事：旧单文件不能恢复、已经迁走的定义不能回流、兼容 facade 与 orchestrator 只能继续缩小。
 
 Contracts 中相互引用密集的数据类仍由兼容 facade 定义，但 `messages`、`planning`、`context`、`tools`、`runs` 的稳定导入边界已经建立；后续只能沿这些边界继续向外迁移，不能再新增到 facade。Phase 1 的目标是建立可回归的拆分接缝，不在同一次提交中重写这些数据类的构造和校验行为。
 
@@ -224,13 +224,13 @@ Phase 5 不再把旧剧本 Agent 数据可读作为约束。测试阶段数据�
 |---|---|---|
 | 产品装配 | 通用 `AgentComposition` 不导入、不识别 screenplay；宿主 factory 注入产品 extension 与 projector | `application/composition_factory.py`、`screenplay_agent_composition.py` |
 | Operation 归属 | 创建 Run 时必须一次性写入绑定；之后不可补写、改绑或从 Session 猜测 | `RunBinding(namespace="screenplay.operation", aggregate_id, command_id)` |
-| 通用持久化 | Run、Work Item、Long Task、Artifact 不再保存 `operation_id` | Core lineage、Work Item links、Artifact lineage |
+| 通用持久化 | Run、Long Task、Artifact 不再保存 `operation_id` | Core lineage、Long Task bindings、Artifact owner lineage |
 | Artifact 投影幂等 | 不再把业务 Operation 字段兼作投影标记 | `ai_agent_artifact_projections` |
 | 产品请求 | 删除迁移期 `ScreenplayAgentStreamRequest`，不保留 alias | `ScreenplayAgentRunRequest` |
 | 旧数据 | 删除旧 Project 所有权闭包、v1 表、对话 Proposal 字段及通用 runtime 业务列 | `init_screenplay_v2_runtime_schema` |
 | 架构债务 | `agent_composition.py` 的 screenplay 上限从 24 清为 0 | `test_agent_refactor_boundaries.py` |
 
-保留的 `purra.contracts`、`purra.engine`、`purra.ports`、`purra.runtime` 包入口是 Core 自身稳定的公开导入面，服务所有 Agent；它们不是旧剧本数据兼容层，因此不在删除范围。Provider 协议兼容、Fountain 文本兼容等也不参与剧本状态归属，不能与旧数据迁移混为一谈。
+保留的 `purra.engine` 与 `purra.runtime` 是 Core 实现包，不是宿主兼容面；完整 Run 统一从 `purra.api` 进入，宿主需要的契约和适配器端口从对应公共模块导入。这些包不是旧剧本数据兼容层，因此不在删除范围。Provider 协议兼容、Fountain 文本兼容等也不参与剧本状态归属，不能与旧数据迁移混为一谈。
 
 Phase 5 完整门禁与故障注入矩阵记录在 [`purra-screenplay-phase5-verification.md`](purra-screenplay-phase5-verification.md)。
 

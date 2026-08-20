@@ -26,14 +26,14 @@ test("partial structured screenplay child output stays hidden", () => {
   );
 });
 
-test("ordinary child conversation text remains visible", () => {
+test("ordinary delegated Agent text remains visible", () => {
   assert.equal(
     presentableStructuredResponse("已检查第五集连续性。"),
     "已检查第五集连续性。",
   );
 });
 
-test("child Run operations stay as direct rows in the parent execution panel", async () => {
+test("delegated operations stay as direct rows in the owning execution panel", async () => {
   const presentation = await import("./presentation.ts");
 
   assert.equal(typeof presentation.buildSubAgentTimelineItems, "function");

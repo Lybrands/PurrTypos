@@ -35,6 +35,10 @@ from purra.output import (
     RunLifecycleOutputDraft,
 )
 from purra.ports import RunCommit
+from purra.testing import assert_host_adapters_conform
+from infrastructure.persistence.agent_output_publisher import (
+    InProcessAgentOutputPublisher,
+)
 
 
 def _repository_types():
@@ -68,30 +72,18 @@ async def output_db(tmp_path: Path):
 
 async def _seed_artifact_claim(db, run_id: str) -> None:
     await db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, created_by_run_id) "
-        "VALUES ('terminal-claim-item', 'test', 'draft', 'owner', ?)",
-        [run_id],
-    )
-    await db.execute(
-        "INSERT INTO ai_agent_work_item_runs "
-        "(work_item_id, run_id, relation, work_item_revision) "
-        "VALUES ('terminal-claim-item', ?, 'created', 1)",
-        [run_id],
-    )
-    await db.execute(
         "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, run_id, artifact_scope, "
-        "work_item_id, created_by_run_id) VALUES "
-        "('terminal-claim-artifact', 'test', 'draft', 'owner', ?, "
-        "'work_item', 'terminal-claim-item', ?)",
+        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+        "created_by_run_id) VALUES "
+        "('terminal-claim-artifact', 'test', 'draft', 'owner', "
+        "'run', ?, ?)",
         [run_id, run_id],
     )
     await db.execute(
         "INSERT INTO ai_agent_artifact_claims "
-        "(artifact_id, work_item_id, run_id, claim_token, "
+        "(artifact_id, run_id, claim_token, "
         "acquired_revision, expires_at_ms) VALUES "
-        "('terminal-claim-artifact', 'terminal-claim-item', ?, "
+        "('terminal-claim-artifact', ?, "
         "'terminal-claim-token', 1, 9999999999999)",
         [run_id],
     )
@@ -118,11 +110,12 @@ def _stream(
     *,
     stream_id: str = "output-1",
     invocation_id: str = "invocation-1",
+    turn_id: str = "turn-1",
 ) -> OutputStreamSpec:
     return OutputStreamSpec(
         output_stream_id=stream_id,
         run_id=run_id,
-        turn_id="turn-1",
+        turn_id=turn_id,
         invocation_id=invocation_id,
         intent=AgentOutputIntent.FINAL_PUBLIC,
         commit_mode=OutputCommitMode.LIVE,
@@ -136,10 +129,11 @@ def _delta(
     text: str,
     stream_id: str = "output-1",
     invocation_id: str = "invocation-1",
+    turn_id: str = "turn-1",
 ) -> AgentOutputEventDraft:
     return AgentOutputEventDraft.public_text(
         run_id=run_id,
-        turn_id="turn-1",
+        turn_id=turn_id,
         output_stream_id=stream_id,
         invocation_id=invocation_id,
         source_event_key=source_event_key,
@@ -216,6 +210,62 @@ def _completed_draft(run_id: str) -> RunLifecycleOutputDraft:
     )
 
 
+def _private_tool_stream(run_id: str) -> OutputStreamSpec:
+    return OutputStreamSpec(
+        output_stream_id="output-tool-1",
+        run_id=run_id,
+        turn_id="turn-1",
+        invocation_id="invocation-tool-1",
+        intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+        commit_mode=OutputCommitMode.PRIVATE,
+    )
+
+
+def _private_tool_content(
+    run_id: str,
+    *,
+    source_event_key: str,
+    text: str,
+) -> AgentOutputEventDraft:
+    return AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id="output-tool-1",
+        invocation_id="invocation-tool-1",
+        source_event_key=source_event_key,
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_CONTENT_DELTA,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={"delta": text},
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+
+def _private_tool_call(run_id: str) -> AgentOutputEventDraft:
+    return AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id="output-tool-1",
+        invocation_id="invocation-tool-1",
+        source_event_key="provider:tool:call",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_TOOL_CALL_DELTA,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={
+            "deltas": [{
+                "index": 0,
+                "id": "call-1",
+                "type": "function",
+                "name": "readSource",
+                "argumentsFragment": "{}",
+            }]
+        },
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+
 @pytest.mark.asyncio
 async def test_repository_implements_the_output_port_and_creates_schema(
     output_db,
@@ -258,6 +308,17 @@ async def test_repository_implements_the_output_port_and_creates_schema(
         "emitted_at",
         "source_event_key",
     }.issubset(event_columns)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_host_adapters_pass_the_shared_conformance_suite(output_db):
+    db, _run_id, runs = output_db
+    await assert_host_adapters_conform(
+        runs=runs,
+        outputs=_repository(db, run_repository=runs),
+        publisher=InProcessAgentOutputPublisher(),
+        session_id=7,
+    )
 
 
 @pytest.mark.asyncio
@@ -325,7 +386,59 @@ async def test_session_cursor_replays_public_events_without_domain_coupling(
 
 
 @pytest.mark.asyncio
-async def test_append_allocates_turn_sequence_and_duplicate_source_is_idempotent(
+async def test_committed_private_tool_stream_publishes_replayable_commentary(
+    output_db,
+):
+    db, run_id, _runs = output_db
+    repository = _repository(db)
+    await repository.open_stream(_private_tool_stream(run_id))
+    await repository.append_event(_private_tool_content(
+        run_id,
+        source_event_key="provider:tool:1",
+        text="我先核对",
+    ))
+    await repository.append_event(_private_tool_content(
+        run_id,
+        source_event_key="provider:tool:2",
+        text="现有资料。",
+    ))
+    await repository.append_event(_private_tool_call(run_id))
+    private_commit = await repository.commit_stream(
+        "output-tool-1",
+        ModelFinishReason.TOOL_CALLS,
+    )
+
+    published = await repository.publish_stream_content_as_commentary(
+        "output-tool-1"
+    )
+    repeated = await repository.publish_stream_content_as_commentary(
+        "output-tool-1"
+    )
+
+    assert repeated == published
+    assert len(published) == 2
+    commentary, committed = published
+    assert commentary.sequence > private_commit.sequence
+    assert commentary.source is OutputSource.PROVIDER
+    assert commentary.kind is OutputEventKind.PROVIDER_CONTENT_DELTA
+    assert commentary.channel is OutputChannel.COMMENTARY
+    assert commentary.visibility is OutputVisibility.PUBLIC
+    assert commentary.payload == {"delta": "我先核对现有资料。"}
+    assert committed.sequence > commentary.sequence
+    assert committed.kind is OutputEventKind.STREAM_COMMITTED
+    assert committed.channel is OutputChannel.COMMENTARY
+    assert committed.visibility is OutputVisibility.PUBLIC
+    assert tuple(
+        event
+        for _cursor, event in await repository.list_session_events(
+            session_id=7,
+            after_cursor=0,
+        )
+    ) == published
+
+
+@pytest.mark.asyncio
+async def test_append_allocates_run_sequence_and_duplicate_source_is_idempotent(
     output_db,
 ):
     db, run_id, _runs = output_db
@@ -382,6 +495,40 @@ async def test_sequence_is_shared_by_parallel_streams_in_the_same_turn(
     )
 
     assert (first.sequence, second.sequence) == (1, 2)
+
+
+@pytest.mark.asyncio
+async def test_sequence_is_shared_by_model_tasks_across_turns_in_the_same_run(
+    output_db,
+):
+    db, run_id, _runs = output_db
+    repository = _repository(db)
+    await repository.open_stream(_stream(run_id))
+    await repository.open_stream(
+        _stream(
+            run_id,
+            stream_id="output-2",
+            invocation_id="invocation-2",
+            turn_id="turn-2",
+        )
+    )
+
+    first = await repository.append_event(
+        _delta(run_id, source_event_key="provider:1", text="甲")
+    )
+    second = await repository.append_event(
+        _delta(
+            run_id,
+            source_event_key="provider:2",
+            text="乙",
+            stream_id="output-2",
+            invocation_id="invocation-2",
+            turn_id="turn-2",
+        )
+    )
+
+    assert (first.sequence, second.sequence) == (1, 2)
+    assert await repository.list_events(run_id, after_sequence=1) == (second,)
 
 
 @pytest.mark.asyncio
@@ -556,13 +703,14 @@ async def test_every_terminal_commit_releases_run_artifact_claim(
     db, run_id, runs = output_db
     await _seed_artifact_claim(db, run_id)
     repository = _repository(db, run_repository=runs)
+    await repository.open_stream(_stream(run_id))
     event = AgentEvent(
         type=event_type,
         run_id=run_id,
         payload={"status": status.value},
     )
 
-    await repository.commit_run_lifecycle(
+    committed = await repository.commit_run_lifecycle(
         run_id,
         RunCommit(
             terminal_status=status,
@@ -581,6 +729,16 @@ async def test_every_terminal_commit_releases_run_artifact_claim(
         "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
         [run_id],
     ) == {"count": 0}
+    assert committed[-2].kind is OutputEventKind.STREAM_ABORTED
+    assert committed[-2].payload == {
+        "errorCode": "run_terminalized",
+        "cause": "run_terminal_commit",
+        "runStatus": status.value,
+    }
+    assert await db.fetch_one(
+        "SELECT status, error_code FROM ai_agent_output_streams WHERE id = ?",
+        ["output-1"],
+    ) == {"status": "aborted", "error_code": "run_terminalized"}
 
 
 @pytest.mark.asyncio
@@ -593,6 +751,7 @@ async def test_terminal_event_failure_rolls_back_artifact_claim_cleanup(output_d
         + ":done' BEGIN SELECT RAISE(ABORT, 'terminal output rejected'); END"
     )
     repository = _repository(db, run_repository=runs)
+    await repository.open_stream(_stream(run_id))
     event = AgentEvent(
         type=CoreEventType.RUN_COMPLETED,
         run_id=run_id,
@@ -619,6 +778,15 @@ async def test_terminal_event_failure_rolls_back_artifact_claim_cleanup(output_d
         "SELECT COUNT(*) AS count FROM ai_agent_artifact_claims WHERE run_id = ?",
         [run_id],
     ) == {"count": 1}
+    assert await db.fetch_one(
+        "SELECT status, error_code FROM ai_agent_output_streams WHERE id = ?",
+        ["output-1"],
+    ) == {"status": "open", "error_code": None}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE output_stream_id = ? AND kind = ?",
+        ["output-1", OutputEventKind.STREAM_ABORTED.value],
+    ) == {"count": 0}
 
 
 @pytest.mark.asyncio
@@ -662,6 +830,7 @@ async def test_validated_result_is_private_and_atomically_readable(output_db):
 async def test_validated_terminal_commit_exact_replay_is_idempotent(output_db):
     db, run_id, runs = output_db
     repository = _repository(db, run_repository=runs)
+    await repository.open_stream(_stream(run_id))
     commit = _validated_commit(run_id)
     draft = _completed_draft(run_id)
 
@@ -669,10 +838,16 @@ async def test_validated_terminal_commit_exact_replay_is_idempotent(output_db):
     replay = await repository.commit_run_lifecycle(run_id, commit, draft)
 
     assert replay == first
+    assert len(first) == 3
     assert await db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_run_events "
         "WHERE run_id = ? AND kind = ?",
         [run_id, OutputEventKind.RUN_VALIDATED_RESULT.value],
+    ) == {"count": 1}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE run_id = ? AND kind = ?",
+        [run_id, OutputEventKind.STREAM_ABORTED.value],
     ) == {"count": 1}
 
 
@@ -702,56 +877,6 @@ async def test_terminal_commit_replay_rejects_validated_identity_change(
 
     with pytest.raises(ContractViolationError, match="validated result"):
         await repository.commit_run_lifecycle(run_id, commits[replay], draft)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("response_mode", "include_validated"),
-    (
-        ("validated_result", False),
-        ("direct_live", True),
-    ),
-)
-async def test_host_child_terminal_commit_rejects_response_policy_mismatch(
-    output_db,
-    response_mode: str,
-    include_validated: bool,
-):
-    db, _run_id, runs = output_db
-    run_id = await runs.create(RunCreateParams(
-        session_id=7,
-        prompt="host child",
-        mode="agent",
-        binding=RunBinding(
-            namespace="test.host-child",
-            aggregate_id="project-1",
-            command_id="task-1:unit-1",
-            attributes={
-                "hostChild": {
-                    "protocol": "purra.host-child/v1",
-                    "responseMode": response_mode,
-                },
-            },
-        ),
-    ))
-    repository = _repository(db, run_repository=runs)
-    commit = (
-        _validated_commit(run_id)
-        if include_validated
-        else _completed_commit(run_id)
-    )
-
-    with pytest.raises(ContractViolationError, match="response policy"):
-        await repository.commit_run_lifecycle(
-            run_id,
-            commit,
-            _completed_draft(run_id),
-        )
-
-    assert await db.fetch_one(
-        "SELECT status FROM ai_agent_runs WHERE id = ?",
-        [run_id],
-    ) == {"status": RunStatus.RUNNING.value}
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,9 @@
-"""Atomic exclusive writer claims for Work Item-scoped Artifacts."""
+"""Atomic exclusive writer claims for durable Artifacts."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from time import time
-from typing import Any
 from uuid import uuid4
 
 from purra.artifacts.continuity import (
@@ -24,7 +23,12 @@ def _now_ms() -> int:
 
 
 class SqliteArtifactClaimRepository:
-    """One durable, expiring writer lease per Work Item Artifact."""
+    """One durable, expiring writer lease per Artifact.
+
+    Cross-Run authorization belongs to the host authorizer used by PurrA's
+    access controller. This repository only linearizes lease ownership and
+    optimistic revision checks.
+    """
 
     def __init__(
         self,
@@ -44,30 +48,23 @@ class SqliteArtifactClaimRepository:
         command: ArtifactWriteClaimCommand,
     ) -> ArtifactWriteClaim:
         async with self._db.transaction(cancellation_linearizable=True):
-            # Read time only after this transaction owns SQLite's write slot.
-            # A caller may have waited behind another writer long enough for
-            # the previously active claim to expire.
             now = int(self._clock())
-            expires_at = now + command.lease_duration_ms
-            artifact = await self._require_writable_artifact(
-                artifact_id=command.artifact_id,
-                work_item_id=command.work_item_id,
-                run_id=command.run_id,
-            )
-            actual_revision = int(artifact.get("revision") or 0)
-            if actual_revision != command.expected_revision:
+            artifact = await self._require_open_artifact(command.artifact_id)
+            revision = int(artifact.get("revision") or 0)
+            if revision != command.expected_revision:
                 raise ArtifactConflictError(
                     "artifact revision does not match",
                     code="artifact_revision_conflict",
                     details={
                         "expectedRevision": command.expected_revision,
-                        "actualRevision": actual_revision,
+                        "actualRevision": revision,
                     },
                 )
             current = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
                 [command.artifact_id],
             )
+            expires_at = now + command.lease_duration_ms
             if current is not None and int(current["expires_at_ms"]) > now:
                 if str(current["run_id"]) != command.run_id:
                     raise ArtifactConflictError(
@@ -75,63 +72,40 @@ class SqliteArtifactClaimRepository:
                         code="artifact_claim_conflict",
                         details={
                             "artifactId": command.artifact_id,
-                            "workItemId": command.work_item_id,
                             "holderRunId": str(current["run_id"]),
                             "expiresAtMs": int(current["expires_at_ms"]),
                         },
                     )
-                expires_at = max(expires_at, int(current["expires_at_ms"]))
-                await self._db.execute(
-                    "UPDATE ai_agent_artifact_claims SET acquired_revision = ?, "
-                    "expires_at_ms = ?, update_time = CURRENT_TIMESTAMP "
-                    "WHERE artifact_id = ? AND run_id = ? AND claim_token = ?",
-                    [
-                        actual_revision,
-                        expires_at,
-                        command.artifact_id,
-                        command.run_id,
-                        str(current["claim_token"]),
-                    ],
-                )
-                refreshed = await self._db.fetch_one(
-                    "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
-                    [command.artifact_id],
-                )
-                return _require_claim(refreshed, command.artifact_id)
+                if int(current["acquired_revision"]) != revision:
+                    raise ArtifactConflictError(
+                        "artifact claim revision is stale",
+                        code="artifact_claim_revision_conflict",
+                        details={"artifactId": command.artifact_id},
+                    )
+                return _claim(current)
 
             token = str(self._token_factory() or "").strip()
             if not token:
                 raise RuntimeError("artifact claim token factory returned empty token")
             await self._db.execute(
                 "INSERT INTO ai_agent_artifact_claims "
-                "(artifact_id, work_item_id, run_id, claim_token, "
-                "acquired_revision, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(artifact_id) DO UPDATE SET "
-                "work_item_id = excluded.work_item_id, "
+                "(artifact_id, run_id, claim_token, acquired_revision, expires_at_ms) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(artifact_id) DO UPDATE SET "
                 "run_id = excluded.run_id, claim_token = excluded.claim_token, "
                 "acquired_revision = excluded.acquired_revision, "
                 "expires_at_ms = excluded.expires_at_ms, "
-                "create_time = CURRENT_TIMESTAMP, "
-                "update_time = CURRENT_TIMESTAMP",
-                [
-                    command.artifact_id,
-                    command.work_item_id,
-                    command.run_id,
-                    token,
-                    actual_revision,
-                    expires_at,
-                ],
+                "create_time = CURRENT_TIMESTAMP, update_time = CURRENT_TIMESTAMP",
+                [command.artifact_id, command.run_id, token, revision, expires_at],
             )
-            persisted = await self._db.fetch_one(
-                "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
-                [command.artifact_id],
+            return _require_claim(
+                await self._db.fetch_one(
+                    "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
+                    [command.artifact_id],
+                ),
+                command.artifact_id,
             )
-            return _require_claim(persisted, command.artifact_id)
 
-    async def load_active(
-        self,
-        artifact_id: str,
-    ) -> ArtifactWriteClaim | None:
+    async def load_active(self, artifact_id: str) -> ArtifactWriteClaim | None:
         normalized_id = _required_text(artifact_id, "artifact id")
         row = await self._db.fetch_one(
             "SELECT * FROM ai_agent_artifact_claims "
@@ -153,13 +127,8 @@ class SqliteArtifactClaimRepository:
                 [command.artifact_id],
             )
             self._require_live_owner(current, command, now=now)
+            artifact = await self._require_open_artifact(command.artifact_id)
             assert current is not None
-            artifact = await self._require_writable_artifact(
-                artifact_id=command.artifact_id,
-                work_item_id=str(current["work_item_id"]),
-                run_id=command.run_id,
-            )
-            revision = int(artifact.get("revision") or 0)
             expires_at = max(
                 now + command.lease_duration_ms,
                 int(current["expires_at_ms"]),
@@ -170,7 +139,7 @@ class SqliteArtifactClaimRepository:
                 "WHERE artifact_id = ? AND run_id = ? AND claim_token = ? "
                 "AND expires_at_ms > ?",
                 [
-                    revision,
+                    int(artifact.get("revision") or 0),
                     expires_at,
                     command.artifact_id,
                     command.run_id,
@@ -185,11 +154,13 @@ class SqliteArtifactClaimRepository:
                     code="artifact_claim_conflict",
                     details={"artifactId": command.artifact_id},
                 )
-            renewed = await self._db.fetch_one(
-                "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
-                [command.artifact_id],
+            return _require_claim(
+                await self._db.fetch_one(
+                    "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
+                    [command.artifact_id],
+                ),
+                command.artifact_id,
             )
-            return _require_claim(renewed, command.artifact_id)
 
     async def release(self, command: ArtifactClaimLeaseCommand) -> bool:
         if command.lease_duration_ms is not None:
@@ -213,13 +184,7 @@ class SqliteArtifactClaimRepository:
             changed = await self._db.fetch_one("SELECT changes() AS count")
             return int((changed or {}).get("count") or 0)
 
-    async def _require_writable_artifact(
-        self,
-        *,
-        artifact_id: str,
-        work_item_id: str,
-        run_id: str,
-    ) -> dict[str, Any]:
+    async def _require_open_artifact(self, artifact_id: str) -> dict:
         artifact = await self._db.fetch_one(
             "SELECT * FROM ai_agent_artifacts WHERE id = ?",
             [artifact_id],
@@ -230,71 +195,17 @@ class SqliteArtifactClaimRepository:
                 code="artifact_not_found",
                 details={"artifactId": artifact_id},
             )
-        if (
-            str(artifact.get("artifact_scope") or "run") != "work_item"
-            or str(artifact.get("work_item_id") or "") != work_item_id
-        ):
-            raise ArtifactStateError(
-                "artifact is not owned by this Work Item",
-                code="artifact_work_item_scope_mismatch",
-                details={
-                    "artifactId": artifact_id,
-                    "workItemId": work_item_id,
-                },
-            )
         if str(artifact.get("status") or "") != "open":
             raise ArtifactStateError(
                 "artifact is not open",
                 code="artifact_not_open",
                 details={"status": str(artifact.get("status") or "")},
             )
-        work_item = await self._db.fetch_one(
-            "SELECT namespace, owner_id, status FROM ai_agent_work_items "
-            "WHERE id = ?",
-            [work_item_id],
-        )
-        if work_item is None:
-            raise ArtifactStateError(
-                "artifact Work Item does not exist",
-                code="artifact_work_item_not_found",
-                details={"workItemId": work_item_id},
-            )
-        if (
-            str(work_item.get("namespace") or "")
-            != str(artifact.get("namespace") or "")
-            or str(work_item.get("owner_id") or "")
-            != str(artifact.get("owner_id") or "")
-        ):
-            raise ArtifactStateError(
-                "artifact and Work Item ownership do not match",
-                code="artifact_work_item_owner_mismatch",
-                details={"workItemId": work_item_id},
-            )
-        if str(work_item.get("status") or "") != "open":
-            raise ArtifactStateError(
-                "artifact Work Item is not open",
-                code="artifact_work_item_not_open",
-                details={"status": str(work_item.get("status") or "")},
-            )
-        link = await self._db.fetch_one(
-            "SELECT relation FROM ai_agent_work_item_runs "
-            "WHERE work_item_id = ? AND run_id = ?",
-            [work_item_id, run_id],
-        )
-        if str((link or {}).get("relation") or "") not in {
-            "created",
-            "continuation",
-        }:
-            raise ArtifactStateError(
-                "Run cannot write this Work Item",
-                code="artifact_claim_run_not_linked",
-                details={"workItemId": work_item_id, "runId": run_id},
-            )
         return artifact
 
     @staticmethod
     def _require_live_owner(
-        row: dict[str, Any] | None,
+        row: dict | None,
         command: ArtifactClaimLeaseCommand,
         *,
         now: int,
@@ -322,10 +233,9 @@ class SqliteArtifactClaimRepository:
             )
 
 
-def _claim(row: dict[str, Any]) -> ArtifactWriteClaim:
+def _claim(row: dict) -> ArtifactWriteClaim:
     return ArtifactWriteClaim(
         artifact_id=str(row["artifact_id"]),
-        work_item_id=str(row["work_item_id"]),
         run_id=str(row["run_id"]),
         claim_token=str(row["claim_token"]),
         acquired_revision=int(row["acquired_revision"]),
@@ -333,10 +243,7 @@ def _claim(row: dict[str, Any]) -> ArtifactWriteClaim:
     )
 
 
-def _require_claim(
-    row: dict[str, Any] | None,
-    artifact_id: str,
-) -> ArtifactWriteClaim:
+def _require_claim(row: dict | None, artifact_id: str) -> ArtifactWriteClaim:
     if row is None:
         raise RuntimeError(f"artifact claim {artifact_id} was not persisted")
     return _claim(row)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import json
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from hashlib import sha256
+from typing import Any, Sequence
 
 from purra.contracts import (
     AgentMessage,
@@ -11,10 +14,22 @@ from purra.contracts import (
     ModelInvocation,
     ModelTokenUsage,
     ToolCall,
+    ToolChoiceMode,
+    TraceRecord,
 )
+from purra.cancellation import OperationCanceled
+from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.json_values import thaw_json_mapping
 from purra.model_invocation.contracts import AgentModelCall
 from purra.output import AgentOutputIntent, OutputCommitMode
-from purra.recovery import RecoveryCause, RecoveryPolicy
+from purra.recovery import (
+    RecoveryAction,
+    RecoveryCause,
+    RecoveryDecision,
+    RecoveryLedger,
+    RecoveryPolicy,
+    RecoveryRequest,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +44,187 @@ class PendingProviderAttempt:
     buffer_model_content: bool
     logical_round: int
     attempt: int
+
+
+class ProviderFailurePhase(StrEnum):
+    OPENING = "opening"
+    STREAMING = "streaming"
+
+
+class ProviderFailureDisposition(StrEnum):
+    RETRY = "retry"
+    FALLBACK = "fallback"
+    CANCEL = "cancel"
+    FAIL = "fail"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailureResolution:
+    disposition: ProviderFailureDisposition
+    traces: tuple[TraceRecord, ...]
+    error_code: str
+    next_attempt: PendingProviderAttempt | None = None
+    disable_required_tool_choice: bool = False
+
+
+def resolve_provider_failure(
+    error: Exception,
+    *,
+    phase: ProviderFailurePhase,
+    attempt: PendingProviderAttempt,
+    recovery_ledger: RecoveryLedger,
+    remaining_model_rounds: int,
+    round_number: int,
+    cancellation_requested: bool,
+    received_chunk_count: int,
+    emitted_delta_count: int,
+    visible_output_emitted: bool = False,
+    provider_finish_observed: bool = False,
+    duration_ms: int | None = None,
+) -> ProviderFailureResolution:
+    """Settle one failed physical Provider attempt without leaking its text."""
+
+    phase = ProviderFailurePhase(phase)
+    base_details = {
+        "round": round_number,
+        "attempt": attempt.attempt,
+        "logicalRound": attempt.logical_round,
+        "receivedChunkCount": received_chunk_count,
+        "emittedDeltaCount": emitted_delta_count,
+        "providerAttemptTerminal": True,
+        "batchExecuted": False,
+    }
+    if isinstance(error, OperationCanceled) or cancellation_requested:
+        return ProviderFailureResolution(
+            disposition=ProviderFailureDisposition.CANCEL,
+            traces=(TraceRecord(
+                stage=(
+                    "model_round"
+                    if phase is ProviderFailurePhase.OPENING
+                    else "stream"
+                ),
+                outcome="canceled",
+                details={**base_details, "retryScheduled": False},
+                duration_ms=duration_ms,
+            ),),
+            error_code="request_canceled",
+        )
+
+    if isinstance(error, UnsupportedModelFeatureError):
+        decision: RecoveryDecision | None = None
+        required = attempt.invocation.tool_choice is ToolChoiceMode.REQUIRED
+        if required:
+            decision = recovery_ledger.decide(RecoveryRequest(
+                cause=RecoveryCause.PROVIDER_REQUIRED_TOOL_CHOICE_UNSUPPORTED,
+                action=RecoveryAction.FALLBACK_PROVIDER_MODE,
+                remaining_model_rounds=remaining_model_rounds,
+                cancellation_requested=cancellation_requested,
+            ))
+        can_fallback = bool(decision is not None and decision.allowed)
+        traces = [] if decision is None else [
+            _recovery_trace(decision, round_number=round_number)
+        ]
+        traces.append(TraceRecord(
+            stage="model_round",
+            outcome="unsupported_model_feature",
+            details={
+                **base_details,
+                "retryScheduled": can_fallback,
+                "errorType": root_error_type(error),
+                "errorChainTypes": error_chain_types(error),
+            },
+            duration_ms=duration_ms,
+        ))
+        next_attempt = None
+        if can_fallback:
+            next_attempt = replace(
+                attempt,
+                invocation=replace(
+                    attempt.invocation,
+                    tool_choice=ToolChoiceMode.AUTO,
+                ),
+                attempt=attempt.attempt + 1,
+            )
+            traces.append(TraceRecord(
+                stage="tool_choice",
+                outcome="provider_fallback_auto",
+                details={
+                    "round": round_number,
+                    "attempt": attempt.attempt,
+                    "logicalRound": attempt.logical_round,
+                    "retryScheduled": True,
+                    "batchExecuted": False,
+                },
+            ))
+        return ProviderFailureResolution(
+            disposition=(
+                ProviderFailureDisposition.FALLBACK
+                if can_fallback
+                else ProviderFailureDisposition.FAIL
+            ),
+            traces=tuple(traces),
+            error_code=error.code,
+            next_attempt=next_attempt,
+            disable_required_tool_choice=required,
+        )
+
+    error_code = (
+        error.code
+        if isinstance(error, ModelGatewayError)
+        else (
+            "model_gateway_error"
+            if phase is ProviderFailurePhase.OPENING
+            else "model_stream_error"
+        )
+    )
+    decision = None
+    if is_retryable_stream_interruption(error):
+        decision = recovery_ledger.decide(RecoveryRequest(
+            cause=RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
+            action=RecoveryAction.RETRY_MODEL,
+            remaining_model_rounds=remaining_model_rounds,
+            retryable=not provider_finish_observed,
+            cancellation_requested=cancellation_requested,
+            visible_output_emitted=visible_output_emitted,
+        ))
+    retry_scheduled = bool(decision is not None and decision.allowed)
+    interrupted = error_code == "upstream_stream_interrupted"
+    traces = [] if decision is None else [
+        _recovery_trace(decision, round_number=round_number)
+    ]
+    traces.append(TraceRecord(
+        stage="stream" if interrupted else "model_round",
+        outcome=(
+            ("interrupted_retry" if retry_scheduled else "interrupted")
+            if interrupted
+            else (
+                "exception"
+                if phase is ProviderFailurePhase.OPENING
+                else "stream_exception"
+            )
+        ),
+        details={
+            **base_details,
+            "retryScheduled": retry_scheduled,
+            "errorType": root_error_type(error),
+            "errorChainTypes": error_chain_types(error),
+        },
+        duration_ms=duration_ms,
+    ))
+    return ProviderFailureResolution(
+        disposition=(
+            ProviderFailureDisposition.RETRY
+            if retry_scheduled
+            else ProviderFailureDisposition.FAIL
+        ),
+        traces=tuple(traces),
+        error_code=error_code,
+        next_attempt=(
+            replace(attempt, attempt=attempt.attempt + 1)
+            if retry_scheduled
+            else None
+        ),
+    )
 
 
 def provider_retry_round_capacity(policy: RecoveryPolicy) -> int:
@@ -105,6 +301,82 @@ def truncation_trace_details(
             output_limit.to_mapping() if output_limit is not None else None
         ),
     }
+
+
+def model_request_fingerprint(
+    messages: Sequence[AgentMessage],
+    invocation: ModelInvocation,
+) -> str:
+    payload = {
+        "messages": [message.to_mapping() for message in messages],
+        "provider": invocation.request.provider,
+        "model": invocation.request.model,
+        "profileDigest": invocation.request.capability_snapshot.digest(),
+        "options": thaw_json_mapping(invocation.request.options),
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": thaw_json_mapping(tool.parameters),
+            }
+            for tool in invocation.tools
+        ],
+        "toolChoice": invocation.tool_choice.value,
+        "reasoningMode": invocation.reasoning_mode.value,
+        "outputLimit": (
+            invocation.output_limit.to_mapping()
+            if invocation.output_limit is not None
+            else None
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return f"sha256:{sha256(encoded).hexdigest()}"
+
+
+def is_retryable_stream_interruption(error: Exception) -> bool:
+    return bool(
+        isinstance(error, ModelGatewayError)
+        and error.code == "upstream_stream_interrupted"
+        and error.retryable
+    )
+
+
+def root_error_type(error: Exception) -> str:
+    cause = error.__cause__
+    return type(cause if isinstance(cause, Exception) else error).__name__
+
+
+def error_chain_types(error: BaseException, *, limit: int = 8) -> list[str]:
+    types: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and len(types) < max(1, int(limit)):
+        identity = id(current)
+        if identity in seen:
+            break
+        seen.add(identity)
+        types.append(type(current).__name__)
+        cause = current.__cause__
+        current = cause if cause is not None else current.__context__
+    return types
+
+
+def _recovery_trace(
+    decision: RecoveryDecision,
+    *,
+    round_number: int,
+) -> TraceRecord:
+    return TraceRecord(
+        stage="recovery_decision",
+        outcome="allowed" if decision.allowed else "denied",
+        details={"round": round_number, **decision.to_trace_details()},
+    )
 
 
 @dataclass(slots=True)

@@ -475,6 +475,7 @@ async def test_writing_staged_recall_uses_resolved_task_spec_query():
     planning = await provider.build_planning_context(request, budget)
     assert [block.name for block in planning.blocks] == [
         WRITING_AGENT_POLICY_CONTEXT,
+        "writing_planning_facts",
     ]
     assert planning.diagnostics["planningContextMode"] == "lightweight_manifest"
     assert source.queries == []

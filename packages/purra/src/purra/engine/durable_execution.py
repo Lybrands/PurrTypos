@@ -12,9 +12,8 @@ from purra.cancellation import await_with_cancellation
 from purra.contracts import (
     AgentRunRequest,
     RunId,
-    StepExecutor,
     StepStatus,
-    TaskPlan,
+    ExecutionPlan,
 )
 from purra.errors import ContractViolationError
 from purra.events import AgentEvent, CoreEventType
@@ -46,22 +45,26 @@ async def complete_durable_continuation(
 ) -> AsyncIterator[AgentEvent]:
     """Resume an admitted durable receipt without re-planning or dispatching."""
 
-    validate_task_admission_coverage(continuation.plan, continuation.admission)
+    plan = continuation.source.execution_plan
+    if plan is None:
+        raise ContractViolationError("durable continuation source has no plan")
+    admission = continuation.receipt.admission
+    validate_task_admission_coverage(plan, admission)
     await controller.record_event(
         CoreEventType.TASK_ADMISSION_DECIDED,
         {
-            **continuation.admission.to_event_payload(),
+            **admission.to_event_payload(),
             "continuation": True,
-            "sourceRootRunId": continuation.source_root_run_id,
+            "sourceRootRunId": continuation.source.run_id,
             "continuationCommand": continuation.continuation_command,
         },
     )
-    await controller.install_plan(continuation.plan)
+    await controller.install_plan(plan)
     async for event in complete_admitted_task(
         controller=controller,
         request=request,
-        plan=continuation.plan,
-        admission=continuation.admission,
+        plan=plan,
+        admission=admission,
         dispatcher=dispatcher,
         sink=sink,
         signal=signal,
@@ -74,7 +77,7 @@ async def complete_admitted_task(
     *,
     controller: AgentRunController,
     request: AgentRunRequest,
-    plan: TaskPlan,
+    plan: ExecutionPlan,
     admission: TaskAdmissionDecision,
     dispatcher: LongTaskDispatcher | None,
     sink: BufferedEventSink,
@@ -107,7 +110,7 @@ async def complete_admitted_task(
                     request,
                     plan,
                     admission,
-                    parent_run_id=controller.run_id,
+                    run_id=controller.run_id,
                     signal=signal,
                 ),
                 signal,
@@ -122,6 +125,10 @@ async def complete_admitted_task(
             )
             for event in sink.drain():
                 yield event
+        if receipt.admission != admission:
+            raise ContractViolationError(
+                "durable dispatcher changed the admitted execution contract"
+            )
 
         durable_step_aliases = _durable_step_aliases(receipt, admission)
         updates: asyncio.Queue[
@@ -140,7 +147,7 @@ async def complete_admitted_task(
 
         execution = asyncio.create_task(dispatcher.execute(
             receipt.task_id,
-            parent_run_id=str(controller.run_id or ""),
+            run_id=str(controller.run_id or ""),
             observer=observe,
             signal=signal,
         ))
@@ -297,19 +304,11 @@ async def _cleanup_durable_execution(
 
 
 def validate_task_admission_coverage(
-    plan: TaskPlan,
+    plan: ExecutionPlan,
     admission: TaskAdmissionDecision,
 ) -> None:
     """Require a durable executor to own every step it bypasses."""
 
-    has_agent_steps = any(
-        step.executor is StepExecutor.AGENT
-        for step in plan.steps
-    )
-    if has_agent_steps and admission.mode is ExecutionMode.INLINE:
-        raise ContractViolationError(
-            "Agent plan steps require durable task admission"
-        )
     if admission.mode is not ExecutionMode.DURABLE:
         return
     planned_step_ids = {step.id for step in plan.steps}
@@ -330,10 +329,10 @@ def validate_task_admission_coverage(
 
 def _validate_durable_plan_revision(
     controller: AgentRunController,
-    revision: TaskPlan,
+    revision: ExecutionPlan,
     covered_step_ids: Sequence[str],
     *,
-    original_plan: TaskPlan | None = None,
+    original_plan: ExecutionPlan | None = None,
 ) -> None:
     revised_by_id = {step.id: step for step in revision.steps}
     if set(revised_by_id) != set(covered_step_ids):
@@ -345,11 +344,11 @@ def _validate_durable_plan_revision(
         raise ContractViolationError(
             "durable plan revision requires an active root run"
         )
-    baseline = original_plan or TaskPlan(
-        title=snapshot.title,
-        goal=snapshot.goal,
-        steps=snapshot.steps,
-    )
+    baseline = original_plan or snapshot.execution_plan
+    if baseline is None:
+        raise ContractViolationError(
+            "durable plan revision requires a persisted ExecutionPlan"
+        )
     if (
         revision.title,
         revision.goal,
@@ -361,6 +360,10 @@ def _validate_durable_plan_revision(
     ):
         raise ContractViolationError(
             "durable plan revision cannot change plan title, goal, or task spec"
+        )
+    if revision.work_step_ids != baseline.work_step_ids:
+        raise ContractViolationError(
+            "durable plan revision cannot change WorkStep lineage"
         )
     for current in snapshot.steps:
         revised = revised_by_id[current.id]

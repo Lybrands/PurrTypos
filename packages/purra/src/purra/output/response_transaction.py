@@ -13,7 +13,6 @@ from purra.contracts import (
     MessageRole,
     ModelRequest,
     ModelStreamChunk,
-    ResponseValidationResult,
     RunStatus,
     ToolChoiceMode,
 )
@@ -23,12 +22,7 @@ from purra.model_invocation import (
     ManagedInvocationStream,
     ModelInvocationContext,
 )
-from purra.operations import (
-    AgentOperationController,
-    OperationDisplay,
-    OperationKind,
-    OperationScope,
-)
+from purra.operations import AgentOperationController
 from purra.output.contracts import (
     AgentOutputIntent,
     OutputCommitMode,
@@ -41,6 +35,7 @@ from purra.output.ports import (
     CommittedResultFactsProvider,
     ValidatedResultCommitter,
 )
+from purra.output.response_validation import ResponseValidationCoordinator
 from purra.ports import CancellationSignal, ResponseJudge, ResponseValidator
 
 
@@ -101,7 +96,7 @@ class AgentResponseTransaction:
         self._facts = facts_provider
         self._validators = tuple(validators)
         self._judges = tuple(judges)
-        self._operations = operation_controller
+        self._validation = ResponseValidationCoordinator(operation_controller)
         self._max_candidate_attempts = int(max_candidate_attempts)
         if self._max_candidate_attempts <= 0:
             raise ValueError("candidate attempts must be positive")
@@ -251,48 +246,35 @@ class AgentResponseTransaction:
         context: ModelInvocationContext,
         signal: CancellationSignal | None,
     ) -> None:
-        violations: list[str] = []
-        repair_guidance: list[str] = []
-        for index, validator in enumerate(self._validators):
-            operation_id = await self._start_validation(
-                context,
-                source="validator",
-                index=index,
-            )
-            try:
-                result = validator.validate(
-                    content=candidate,
-                    messages=tuple(messages),
-                )
-                self._require_validation_result(result)
-                if not result.accepted:
-                    violations.append(str(result.violation_code))
-                    repair_guidance.append(str(result.repair_guidance))
-                await self._succeed_validation(operation_id)
-            except BaseException:
-                await self._fail_validation(operation_id)
-                raise
+        deterministic = await self._validation.validate_registered(
+            content=candidate,
+            messages=messages,
+            validators=self._validators,
+            run_id=context.run_id,
+            round_number=0,
+        )
+        if deterministic.error is not None:
+            raise deterministic.error
+        violations = list(deterministic.violation_codes)
+        repair_guidance = list(deterministic.repair_guidance)
         if not violations:
             for index, judge in enumerate(self._judges):
-                operation_id = await self._start_validation(
-                    context,
-                    source="judge",
+                attempt = await self._validation.begin_judge(
+                    run_id=context.run_id,
                     index=index,
                 )
-                try:
-                    result = await judge.judge(
-                        content=candidate,
-                        messages=tuple(messages),
-                        signal=signal,
-                    )
-                    self._require_validation_result(result)
-                    if not result.accepted:
-                        violations.append(str(result.violation_code))
-                        repair_guidance.append(str(result.repair_guidance))
-                    await self._succeed_validation(operation_id)
-                except BaseException:
-                    await self._fail_validation(operation_id)
-                    raise
+                semantic = await self._validation.judge(
+                    attempt,
+                    judge,
+                    content=candidate,
+                    messages=messages,
+                    signal=signal,
+                    round_number=0,
+                )
+                if semantic.error is not None:
+                    raise semantic.error
+                violations.extend(semantic.violation_codes)
+                repair_guidance.extend(semantic.repair_guidance)
         if violations:
             raise ResponseTransactionValidationError(
                 violations,
@@ -345,47 +327,6 @@ class AgentResponseTransaction:
             raise ContractViolationError(
                 f"response transaction requires {expected.value} mode"
             )
-
-    @staticmethod
-    def _require_validation_result(result: object) -> ResponseValidationResult:
-        if not isinstance(result, ResponseValidationResult):
-            raise ContractViolationError(
-                "response validator returned an invalid result"
-            )
-        return result
-
-    async def _start_validation(
-        self,
-        context: ModelInvocationContext,
-        *,
-        source: str,
-        index: int,
-    ) -> str | None:
-        if self._operations is None:
-            return None
-        receipt = await self._operations.start(
-            OperationKind.VALIDATION,
-            OperationScope(
-                run_id=context.run_id,
-                display=OperationDisplay(
-                    label_key="agent.operation.validation",
-                    label_params={"source": source, "index": index},
-                ),
-            ),
-        )
-        return receipt.operation_id
-
-    async def _succeed_validation(self, operation_id: str | None) -> None:
-        if operation_id is not None:
-            await self._operations.succeed(operation_id)  # type: ignore[union-attr]
-
-    async def _fail_validation(self, operation_id: str | None) -> None:
-        if operation_id is not None:
-            await self._operations.fail(  # type: ignore[union-attr]
-                operation_id,
-                "response_validation_failed",
-            )
-
 
 def _candidate_repair_instruction(
     error: ResponseTransactionValidationError,

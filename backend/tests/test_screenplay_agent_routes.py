@@ -92,7 +92,7 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayToolCallingService",
+        "ScreenplayCandidateModelService",
         lambda *_args, **_kwargs: object(),
     )
     monkeypatch.setattr(
@@ -108,7 +108,7 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     assert "planner" not in captured_service
     assert "resolver" not in captured_service
     assert captured_executor["composition"] is composition
-    assert captured_executor["tool_calling_service"] is not None
+    assert captured_executor["candidate_model_service"] is not None
 
 
 async def _post(app, body):

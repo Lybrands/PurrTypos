@@ -6,17 +6,19 @@ The host owns durable task identity and the executors for each recipe step.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from purra.contracts import AgentRunRequest, ExecutionRecipe, TaskPlan
+from purra.contracts import AgentRunRequest, ExecutionRecipe, ExecutionPlan
 from purra.events import AgentEvent, CoreEventType
 from purra.json_values import freeze_json_mapping, thaw_json_mapping
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskRunRelation,
     LongTaskSplitResult,
     LongTaskStatus,
     LongTaskUnitRecord,
@@ -36,16 +38,10 @@ from purra.task_admission.contracts import (
     LongTaskExecutionUpdate,
     TaskAdmissionDecision,
 )
-from purra.work_items import WorkItemLifecycle
-from purra.work_items.contracts import (
-    WorkItemCreateCommand,
-    WorkItemRunLinkCommand,
-    WorkItemRunRelation,
-    WorkItemStatus,
-    WorkItemTransitionCommand,
-)
-from purra.work_items.ports import WorkItemRepository
-from purra.work_items.errors import WorkItemConflictError, WorkItemStateError
+
+
+async def _unbound_unit_run(_run_id: str) -> None:
+    raise RuntimeError("durable unit Run binding is unavailable")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +79,7 @@ class DurableTaskDescriptorResolver(Protocol):
     async def resolve(
         self,
         request: AgentRunRequest,
-        plan: TaskPlan,
+        plan: ExecutionPlan,
         decision: TaskAdmissionDecision,
     ) -> DurableTaskDescriptor: ...
 
@@ -93,6 +89,7 @@ class DurableUnitExecutionContext:
     task: LongTaskRecord
     unit: LongTaskUnitRecord
     dependency_outputs: Mapping[str, str]
+    bind_run: Callable[[str], Awaitable[None]] = _unbound_unit_run
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, LongTaskRecord):
@@ -111,6 +108,8 @@ class DurableUnitExecutionContext:
             "dependency_outputs",
             freeze_json_mapping(outputs),
         )
+        if not callable(self.bind_run):
+            raise TypeError("durable unit Run binder must be callable")
 
 
 @runtime_checkable
@@ -153,7 +152,6 @@ class RecipeLongTaskDispatcher:
     def __init__(
         self,
         *,
-        work_item_repository: WorkItemRepository,
         long_task_repository: LongTaskRepository,
         descriptor_resolver: DurableTaskDescriptorResolver,
         executor_registry: DurableExecutorRegistry,
@@ -163,8 +161,6 @@ class RecipeLongTaskDispatcher:
         retry_backoff_ms: tuple[int, ...] = (),
         idle_poll_ms: int = 100,
     ) -> None:
-        self._work_item_repository = work_item_repository
-        self._work_items = WorkItemLifecycle(work_item_repository)
         self._long_tasks = long_task_repository
         self._descriptors = descriptor_resolver
         self._executors = executor_registry
@@ -181,10 +177,10 @@ class RecipeLongTaskDispatcher:
     async def dispatch(
         self,
         request: AgentRunRequest,
-        plan: TaskPlan,
+        plan: ExecutionPlan,
         decision: TaskAdmissionDecision,
         *,
-        parent_run_id: str,
+        run_id: str,
         signal: CancellationSignal | None = None,
     ) -> LongTaskDispatchReceipt:
         del signal
@@ -192,7 +188,7 @@ class RecipeLongTaskDispatcher:
         if recipe is None:
             raise ValueError("durable dispatch requires an execution recipe")
         units = _compile_recipe_units(recipe, decision.covered_step_ids)
-        parent_run_id = required_text(parent_run_id, "durable parent Run id")
+        run_id = required_text(run_id, "durable Run id")
         descriptor = await self._descriptors.resolve(request, plan, decision)
         if descriptor.namespace != request.domain_context.namespace:
             raise ValueError("durable task namespace does not match the request")
@@ -220,12 +216,12 @@ class RecipeLongTaskDispatcher:
                 recipe=recipe,
                 units=units,
                 metadata=metadata,
-                parent_run_id=parent_run_id,
+                run_id=run_id,
             )
         else:
             task = await self._link_and_resume(
                 reusable,
-                parent_run_id,
+                run_id,
                 additional_attempts=descriptor.failed_resume_attempts,
             )
         return LongTaskDispatchReceipt(
@@ -234,6 +230,7 @@ class RecipeLongTaskDispatcher:
                 descriptor.message
                 or _dispatch_message(task)
             ),
+            admission=decision,
             metadata={
                 "namespace": task.namespace,
                 "kind": task.kind,
@@ -254,16 +251,17 @@ class RecipeLongTaskDispatcher:
         self,
         task_id: str,
         *,
-        parent_run_id: str,
+        run_id: str,
         observer: Callable[[LongTaskExecutionUpdate], Awaitable[None]],
         signal: CancellationSignal | None = None,
     ) -> LongTaskExecutionResult:
-        parent_run_id = required_text(parent_run_id, "durable parent Run id")
+        run_id = required_text(run_id, "durable Run id")
         runner = _RecipeUnitRunner(
             repository=self._long_tasks,
             executors=self._executors,
             observer=observer,
-            parent_run_id=parent_run_id,
+            run_id=run_id,
+            worker_id=self._worker_id,
         )
         await runner.emit_progress(task_id)
         task = await LongTaskCoordinator(
@@ -275,9 +273,7 @@ class RecipeLongTaskDispatcher:
         ).run(task_id, runner, signal)
         await runner.emit_progress(task.id)
         units = await self._long_tasks.list_units(task.id)
-        work_item = await self._work_items.get(task.work_item_id)
         if task.status is LongTaskStatus.COMPLETED:
-            await self._settle_work_item(work_item.id, WorkItemStatus.COMPLETED)
             return LongTaskExecutionResult(
                 task_id=task.id,
                 status=LongTaskExecutionStatus.COMPLETED,
@@ -285,7 +281,6 @@ class RecipeLongTaskDispatcher:
                 metadata={"completedUnits": task.completed_units},
             )
         if task.status is LongTaskStatus.CANCELED:
-            await self._settle_work_item(work_item.id, WorkItemStatus.CANCELED)
             status = LongTaskExecutionStatus.CANCELED
         elif task.status is LongTaskStatus.PAUSED:
             status = LongTaskExecutionStatus.PAUSED
@@ -305,29 +300,6 @@ class RecipeLongTaskDispatcher:
             ),
             metadata={"completedUnits": task.completed_units},
         )
-
-    async def _settle_work_item(
-        self,
-        work_item_id: str,
-        target: WorkItemStatus,
-    ) -> None:
-        item = await self._work_items.get(work_item_id)
-        if item.status is target:
-            return
-        if item.status is not WorkItemStatus.OPEN:
-            raise RuntimeError("durable task and Work Item terminal states conflict")
-        command = WorkItemTransitionCommand(
-            work_item_id=item.id,
-            expected_revision=item.revision,
-        )
-        try:
-            if target is WorkItemStatus.COMPLETED:
-                await self._work_items.complete(command)
-            else:
-                await self._work_items.cancel(command)
-        except (WorkItemConflictError, WorkItemStateError):
-            if (await self._work_items.get(item.id)).status is not target:
-                raise
 
     async def _find_reusable(
         self,
@@ -368,20 +340,24 @@ class RecipeLongTaskDispatcher:
     async def _link_and_resume(
         self,
         task: LongTaskRecord,
-        parent_run_id: str,
+        run_id: str,
         *,
         additional_attempts: int,
     ) -> LongTaskRecord:
-        work_item = await self._work_items.get(task.work_item_id)
-        if parent_run_id != task.created_by_run_id:
-            links = await self._work_item_repository.list_run_links(work_item.id)
-            if not any(link.run_id == parent_run_id for link in links):
-                await self._work_items.link_run(WorkItemRunLinkCommand(
-                    work_item_id=work_item.id,
-                    run_id=parent_run_id,
-                    relation=WorkItemRunRelation.REFERENCE,
-                    expected_revision=work_item.revision,
-                ))
+        bindings = await self._long_tasks.list_run_bindings(task.id)
+        if not any(binding.run_id == run_id for binding in bindings):
+            continues = task.status is LongTaskStatus.PAUSED or (
+                task.status is LongTaskStatus.FAILED and additional_attempts > 0
+            )
+            await self._long_tasks.bind_run(
+                task.id,
+                run_id,
+                relation=(
+                    LongTaskRunRelation.CONTINUATION
+                    if continues
+                    else LongTaskRunRelation.REFERENCE
+                ),
+            )
         if task.status is LongTaskStatus.PAUSED:
             return await self._long_tasks.resume(task.id)
         if task.status is LongTaskStatus.FAILED and additional_attempts:
@@ -398,49 +374,28 @@ class RecipeLongTaskDispatcher:
         recipe: ExecutionRecipe,
         units: tuple[LongTaskUnitSpec, ...],
         metadata: Mapping[str, Any],
-        parent_run_id: str,
+        run_id: str,
     ) -> LongTaskRecord:
-        work_item = await self._work_items.begin(WorkItemCreateCommand(
-            namespace=descriptor.namespace,
-            kind=recipe.kind,
-            owner_id=descriptor.owner_id,
-            created_by_run_id=parent_run_id,
-            metadata={
-                "idempotencyKey": descriptor.idempotency_key,
-                **thaw_json_mapping(descriptor.metadata),
-            },
-        ))
-        try:
-            task = await self._long_tasks.create(
-                f"longtask_{self._id_factory()}",
-                LongTaskCreateCommand(
-                    namespace=descriptor.namespace,
-                    kind=recipe.kind,
-                    owner_id=descriptor.owner_id,
-                    work_item_id=work_item.id,
-                    created_by_run_id=parent_run_id,
-                    units=units,
-                    max_parallelism=recipe.max_parallelism,
-                    metadata=metadata,
-                ),
-            )
-        except BaseException:
-            await self._work_items.cancel(WorkItemTransitionCommand(
-                work_item_id=work_item.id,
-                expected_revision=work_item.revision,
-            ))
-            raise
-        if task.work_item_id != work_item.id:
-            await self._work_items.cancel(WorkItemTransitionCommand(
-                work_item_id=work_item.id,
-                expected_revision=work_item.revision,
-            ))
+        task_id = f"longtask_{self._id_factory()}"
+        task = await self._long_tasks.create(
+            task_id,
+            LongTaskCreateCommand(
+                namespace=descriptor.namespace,
+                kind=recipe.kind,
+                owner_id=descriptor.owner_id,
+                created_by_run_id=run_id,
+                units=units,
+                max_parallelism=recipe.max_parallelism,
+                metadata=metadata,
+            ),
+        )
+        if task.id != task_id:
             if task.metadata.get("idempotencyKey") != descriptor.idempotency_key:
                 raise RuntimeError("durable_task_scope_conflict")
             _require_same_recipe(task, recipe)
             return await self._link_and_resume(
                 task,
-                parent_run_id,
+                run_id,
                 additional_attempts=descriptor.failed_resume_attempts,
             )
         return task
@@ -453,19 +408,37 @@ class _RecipeUnitRunner:
         repository: LongTaskRepository,
         executors: DurableExecutorRegistry,
         observer: Callable[[LongTaskExecutionUpdate], Awaitable[None]],
-        parent_run_id: str,
+        run_id: str,
+        worker_id: str,
     ) -> None:
         self._repository = repository
         self._executors = executors
         self._observer = observer
-        self._parent_run_id = parent_run_id
+        self._run_id = run_id
+        self._worker_id = worker_id
 
     async def run_unit(self, task, unit, signal=None) -> LongTaskUnitResult:
         await self.emit_progress(task.id)
+
+        async def bind_run(run_id: str) -> None:
+            bound = await self._repository.bind_unit_run(
+                task.id,
+                unit.id,
+                worker_id=self._worker_id,
+                run_id=run_id,
+            )
+            if (
+                bound.status is not LongTaskUnitStatus.RUNNING
+                or bound.run_id != str(run_id or "").strip()
+            ):
+                raise asyncio.CancelledError
+            await self.emit_progress(task.id)
+
         context = DurableUnitExecutionContext(
             task=task,
             unit=unit,
             dependency_outputs=await self._dependency_outputs(unit),
+            bind_run=bind_run,
         )
         executor = self._executors.require(str(unit.metadata.get("executor") or ""))
         result = await executor.execute(context, signal)
@@ -516,7 +489,7 @@ class _RecipeUnitRunner:
         units = await self._repository.list_units(task.id)
         await self._observer(LongTaskExecutionUpdate(AgentEvent(
             type=CoreEventType.LONG_TASK_PROGRESS,
-            run_id=self._parent_run_id,
+            run_id=self._run_id,
             payload={
                 "taskId": task.id,
                 "status": task.status.value,
@@ -526,25 +499,7 @@ class _RecipeUnitRunner:
                 "failedUnits": task.failed_units,
                 "updateTime": task.update_time,
                 "units": [
-                    {
-                        "id": unit.id,
-                        "position": unit.position,
-                        "plannerStepId": str(
-                            unit.metadata.get("plannerStepId") or unit.id
-                        ),
-                        "kind": str(unit.metadata.get("unitKind") or ""),
-                        "status": unit.status.value,
-                        "attempt": unit.attempt,
-                        "maxAttempts": unit.max_attempts,
-                        **({"runId": unit.run_id} if unit.run_id else {}),
-                        **(
-                            {"outputRef": unit.output_ref}
-                            if unit.output_ref
-                            else {}
-                        ),
-                        **({"errorCode": unit.error_code} if unit.error_code else {}),
-                        "updateTime": unit.update_time,
-                    }
+                    _progress_unit_payload(unit)
                     for unit in units
                 ],
             },
@@ -567,6 +522,24 @@ class _RecipeUnitRunner:
                 raise RuntimeError("durable_dependency_output_missing")
             outputs[dependency_id] = dependency.output_ref
         return outputs
+
+
+def _progress_unit_payload(unit: LongTaskUnitRecord) -> dict[str, object]:
+    title = str(unit.metadata.get("displayTitle") or "").strip()
+    return {
+        "id": unit.id,
+        "position": unit.position,
+        "plannerStepId": str(unit.metadata.get("plannerStepId") or unit.id),
+        "kind": str(unit.metadata.get("unitKind") or ""),
+        **({"title": title} if title else {}),
+        "status": unit.status.value,
+        "attempt": unit.attempt,
+        "maxAttempts": unit.max_attempts,
+        **({"runId": unit.run_id} if unit.run_id else {}),
+        **({"outputRef": unit.output_ref} if unit.output_ref else {}),
+        **({"errorCode": unit.error_code} if unit.error_code else {}),
+        "updateTime": unit.update_time,
+    }
 
 
 def _compile_recipe_units(

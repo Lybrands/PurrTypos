@@ -267,7 +267,6 @@ function normalizeStep(value: unknown): AiTaskStep | null {
       value.planningCapability ?? value.planning_capability,
     ) || undefined,
     protocolPrivate: false,
-    agentRole: stringValue(value.agentRole ?? value.agent_role) || undefined,
     assignment: isRecord(value.assignment) ? value.assignment : undefined,
     dependsOn: Array.isArray(value.dependsOn ?? value.depends_on)
       ? stringArray(value.dependsOn ?? value.depends_on) ?? []
@@ -336,9 +335,8 @@ function delegationView(
   value: {
     delegationId: string
     firstSequence: number
-    parentRunId: string
-    childRunId: string | null
-    agentRole: string
+    runId: string
+    agentName: string
     agentTitle: string | null
     objective: string
     status: string
@@ -347,10 +345,8 @@ function delegationView(
 ): AiAgentDelegation {
   return {
     delegationId: value.delegationId,
-    parentRunId: value.parentRunId,
-    rootRunId: value.parentRunId,
-    childRunId: value.childRunId,
-    agentRole: value.agentRole,
+    runId: value.runId,
+    agentName: value.agentName,
     agentTitle: value.agentTitle,
     objective: value.objective,
     unitId: null,
@@ -371,10 +367,8 @@ function delegationActivity(
   const committed = value.output.finalStreamStatus === 'committed'
   return {
     delegationId: value.delegationId,
-    parentRunId: value.parentRunId,
-    rootRunId: value.parentRunId,
-    childRunId: value.childRunId,
-    agentRole: value.agentRole,
+    runId: value.runId,
+    agentName: value.agentName,
     agentTitle: value.agentTitle,
     objective: value.objective,
     status: value.status as AiAgentDelegation['status'],
@@ -384,7 +378,7 @@ function delegationActivity(
       streamingContent: !committed && value.output.finalText
         ? value.output.finalText
         : undefined,
-      agentRunId: value.childRunId ?? undefined,
+      agentRunId: value.runId,
       canonicalOutput: value.output,
       toolApprovals: value.output.approvalOrder.map(
         (approvalId) => value.output.approvals[approvalId],

@@ -45,7 +45,13 @@ class AgentOutputRepository(Protocol):
         commit: RunCommit,
         draft: RunLifecycleOutputDraft,
         related_drafts: tuple[AgentOutputEventDraft, ...] = (),
-    ) -> tuple[AgentOutputEvent, ...]: ...
+    ) -> tuple[AgentOutputEvent, ...]:
+        """Commit Run state and output events as one terminal fence.
+
+        A terminal commit must abort every still-open stream for the Run in the
+        same transaction and must replay the same canonical events exactly.
+        """
+        ...
 
     async def commit_stream(
         self,
@@ -58,6 +64,11 @@ class AgentOutputRepository(Protocol):
         output_stream_id: str,
         error_code: str,
     ) -> AgentOutputEvent: ...
+
+    async def publish_stream_content_as_commentary(
+        self,
+        output_stream_id: str,
+    ) -> tuple[AgentOutputEvent, ...]: ...
 
     async def list_events(
         self,

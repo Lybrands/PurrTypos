@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from purra.agent_presets import AgentPresetSnapshot
 from purra.contracts import (
     ContextBudgetClaim,
     ReasoningMode,
     ResponseConstraints,
     RunBinding,
-    RunLineage,
     RunProvenance,
-    TaskPlan,
 )
 from purra.normalization import (
     optional_non_negative_int,
@@ -25,36 +24,27 @@ from purra.output.contracts import (
 )
 from purra.output.ports import CommittedResultFactsProvider
 from purra.ports import ResponseJudge, ResponseJudgePolicy, ResponseValidator
-from purra.task_admission import (
-    ExecutionMode,
-    LongTaskDispatchReceipt,
-    TaskAdmissionDecision,
-)
+from purra.run_recovery import RunRecoverySnapshot
+from purra.task_admission import LongTaskDispatchReceipt
 
 
 @dataclass(frozen=True, slots=True)
 class DurableTaskContinuation:
-    """Trusted host receipt for resuming one existing durable task in a new Run."""
+    """Resume one durable task from a typed, persisted Run snapshot."""
 
-    source_root_run_id: str
+    source: RunRecoverySnapshot
     continuation_command: str
-    plan: TaskPlan
-    admission: TaskAdmissionDecision
     receipt: LongTaskDispatchReceipt
 
     def __post_init__(self) -> None:
-        for name in ("source_root_run_id", "continuation_command"):
-            value = str(getattr(self, name) or "").strip()
-            if not value:
-                raise ValueError(f"durable continuation {name} is required")
-            object.__setattr__(self, name, value)
-        if not isinstance(self.plan, TaskPlan):
-            raise TypeError("durable continuation plan must be TaskPlan")
-        if (
-            not isinstance(self.admission, TaskAdmissionDecision)
-            or self.admission.mode is not ExecutionMode.DURABLE
-        ):
-            raise ValueError("durable continuation requires durable admission")
+        if not isinstance(self.source, RunRecoverySnapshot):
+            raise TypeError("durable continuation source must be RunRecoverySnapshot")
+        if self.source.execution_plan is None:
+            raise ValueError("durable continuation source has no ExecutionPlan")
+        command = str(self.continuation_command or "").strip()
+        if not command:
+            raise ValueError("durable continuation command is required")
+        object.__setattr__(self, "continuation_command", command)
         if not isinstance(self.receipt, LongTaskDispatchReceipt):
             raise TypeError("durable continuation receipt is invalid")
 
@@ -75,7 +65,6 @@ class AgentCoreRunOptions:
     require_tool_call: bool | None = None
     reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT
     provenance: RunProvenance | None = None
-    lineage: RunLineage | None = None
     binding: RunBinding | None = None
     response_constraints: ResponseConstraints = ResponseConstraints()
     response_validators: tuple[ResponseValidator, ...] = ()
@@ -84,6 +73,7 @@ class AgentCoreRunOptions:
     response_transaction_policy: ResponseTransactionPolicy | None = None
     committed_result_facts_provider: CommittedResultFactsProvider | None = None
     durable_continuation: DurableTaskContinuation | None = None
+    agent_preset_snapshot: AgentPresetSnapshot | None = None
 
     def __post_init__(self) -> None:
         claims = tuple(self.context_claims)
@@ -132,8 +122,6 @@ class AgentCoreRunOptions:
             RunProvenance,
         ):
             raise TypeError("run provenance must be a RunProvenance value")
-        if self.lineage is not None and not isinstance(self.lineage, RunLineage):
-            raise TypeError("run lineage must be a RunLineage value")
         if self.binding is not None and not isinstance(self.binding, RunBinding):
             raise TypeError("run binding must be a RunBinding value")
         if not isinstance(self.response_constraints, ResponseConstraints):
@@ -176,6 +164,26 @@ class AgentCoreRunOptions:
             DurableTaskContinuation,
         ):
             raise TypeError("durable continuation must be DurableTaskContinuation")
+        if self.agent_preset_snapshot is not None and not isinstance(
+            self.agent_preset_snapshot,
+            AgentPresetSnapshot,
+        ):
+            raise TypeError(
+                "agent preset snapshot must be an AgentPresetSnapshot"
+            )
+        if self.durable_continuation is not None:
+            selected_preset = (
+                self.agent_preset_snapshot.to_mapping()
+                if self.agent_preset_snapshot is not None
+                else {}
+            )
+            if (
+                self.durable_continuation.source.agent_preset_snapshot
+                != selected_preset
+            ):
+                raise ValueError(
+                    "durable continuation must reuse the source AgentPreset snapshot"
+                )
         requires_full_text = bool(
             self.response_constraints.exact_top_level_item_count is not None
             or validators

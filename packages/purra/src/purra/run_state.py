@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from purra.contracts import (
+    ExecutionTransition,
     RunId,
     RunStatus,
     StepExecutor,
     StepStatus,
     StepType,
-    TaskPlan,
+    ExecutionPlan,
     TaskSpec,
     TaskStep,
     TaskStepUpdate,
@@ -46,6 +47,7 @@ class RunSnapshot:
     status: RunStatus
     task_spec: TaskSpec | None = None
     steps: tuple[TaskStep, ...] = ()
+    work_step_ids: tuple[str, ...] | None = None
     final_response: str = ""
     error: str | None = None
 
@@ -57,14 +59,8 @@ class RunSnapshot:
         if len({step.id for step in steps}) != len(steps):
             raise ValueError("run snapshot step ids must be unique")
         running_count = sum(step.status is StepStatus.RUNNING for step in steps)
-        if running_count > 1 and any(
-            step.status is StepStatus.RUNNING
-            and step.executor is not StepExecutor.AGENT
-            for step in steps
-        ):
-            raise ValueError(
-                "only dependency-independent Agent steps may run in parallel"
-            )
+        if running_count > 1:
+            raise ValueError("a Run may execute only one plan transition at a time")
         status_by_id = {step.id: step.status for step in steps}
         for step in steps:
             if step.status is not StepStatus.RUNNING or not step.depends_on:
@@ -85,12 +81,34 @@ class RunSnapshot:
         if self.task_spec is not None and not isinstance(self.task_spec, TaskSpec):
             raise TypeError("run snapshot task_spec must be a TaskSpec")
         object.__setattr__(self, "steps", steps)
+        work_step_ids = (
+            tuple(step.id for step in steps if not step.protocol_private)
+            if self.work_step_ids is None
+            else tuple(self.work_step_ids)
+        )
+        if set(work_step_ids) - {step.id for step in steps}:
+            raise ValueError("run snapshot work_step_ids must name known steps")
+        object.__setattr__(self, "work_step_ids", work_step_ids)
         object.__setattr__(self, "final_response", str(self.final_response or ""))
         object.__setattr__(self, "error", _optional_text(self.error))
 
     @property
     def terminal(self) -> bool:
         return self.status in _TERMINAL_STATUSES
+
+    @property
+    def execution_plan(self) -> ExecutionPlan | None:
+        """Return the complete persisted plan authority for this snapshot."""
+
+        if not self.steps:
+            return None
+        return ExecutionPlan(
+            title=self.title,
+            goal=self.goal,
+            task_spec=self.task_spec,
+            steps=self.steps,
+            work_step_ids=self.work_step_ids,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +136,7 @@ class RunStateMachine:
     @staticmethod
     def initialize(
         run_id: RunId,
-        plan: TaskPlan | None = None,
+        plan: ExecutionPlan | None = None,
         *,
         default_title: str = "To-dos",
     ) -> RunSnapshot:
@@ -129,17 +147,12 @@ class RunStateMachine:
                 goal=None,
                 status=RunStatus.RUNNING,
             )
+        if not isinstance(plan, ExecutionPlan):
+            raise TypeError("run initialization requires an ExecutionPlan")
 
         steps = tuple(_initial_step(step) for step in plan.steps)
         for step in steps:
             _validate_step_execution_contract(step)
-        root_agent_indexes = tuple(
-            index
-            for index, step in enumerate(steps)
-            if step.executor is StepExecutor.AGENT
-            and not step.depends_on
-            and step.status is not StepStatus.DONE
-        )
         first_runnable = next(
             (
                 index
@@ -149,14 +162,7 @@ class RunStateMachine:
             ),
             -1,
         )
-        if root_agent_indexes:
-            for index in root_agent_indexes:
-                steps = _replace_at(
-                    steps,
-                    index,
-                    replace(steps[index], status=StepStatus.RUNNING),
-                )
-        elif first_runnable >= 0:
+        if first_runnable >= 0:
             steps = _replace_at(
                 steps,
                 first_runnable,
@@ -169,12 +175,15 @@ class RunStateMachine:
             status=RunStatus.RUNNING,
             task_spec=plan.task_spec,
             steps=steps,
+            work_step_ids=plan.work_step_ids,
         )
 
     @staticmethod
-    def revise_plan(state: RunSnapshot, plan: TaskPlan) -> RunSnapshot:
+    def revise_plan(state: RunSnapshot, plan: ExecutionPlan) -> RunSnapshot:
         """Replace tentative work while preserving immutable execution history."""
 
+        if not isinstance(plan, ExecutionPlan):
+            raise TypeError("run revision requires an ExecutionPlan")
         if state.terminal:
             raise ContractViolationError("cannot revise a terminal run plan")
         history = tuple(
@@ -206,7 +215,7 @@ class RunStateMachine:
         )
         revised_future = RunStateMachine.initialize(
             state.run_id,
-            TaskPlan(
+            ExecutionPlan(
                 title=plan.title,
                 goal=plan.goal,
                 task_spec=plan.task_spec,
@@ -253,6 +262,14 @@ class RunStateMachine:
             goal=plan.goal,
             task_spec=plan.task_spec,
             steps=history + revised_future_steps,
+            work_step_ids=tuple(dict.fromkeys((
+                *(
+                    step_id
+                    for step_id in state.work_step_ids
+                    if step_id in history_ids
+                ),
+                *plan.work_step_ids,
+            ))),
         )
 
     @staticmethod
@@ -607,6 +624,33 @@ class RunStateMachine:
             for step in state.steps
             if _is_tool_step(step)
             for tool in step.suggested_tools
+        )
+
+    @staticmethod
+    def execution_transition(
+        state: RunSnapshot,
+    ) -> ExecutionTransition | None:
+        """Compile the live Run snapshot into one bounded runtime grant."""
+
+        if state.terminal:
+            return None
+        running = next(
+            (
+                step
+                for step in state.steps
+                if step.status is StepStatus.RUNNING
+            ),
+            None,
+        )
+        if running is None:
+            return None
+        return ExecutionTransition(
+            step_id=running.id,
+            executor=running.executor,
+            allowed_tool_names=(
+                RunStateMachine.allowed_tool_names_for_current_transition(state)
+            ),
+            future_tool_names=RunStateMachine.future_allowed_tool_names(state),
         )
 
     @staticmethod

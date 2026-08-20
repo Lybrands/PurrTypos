@@ -6,7 +6,6 @@ from purra.output.contracts import (
     AgentOutputIntent,
     DomainEffectOutput,
     DelegationOutputEvent,
-    FederatedOutputEvent,
     OutputChannel,
     OutputCommitMode,
     OutputEventKind,
@@ -20,6 +19,8 @@ from purra.output.contracts import (
     ResponseTransactionPolicy,
     RunLifecycleOutputDraft,
     RuntimeOutputEvent,
+    TERMINAL_STREAM_ABORT_CAUSE,
+    TERMINAL_STREAM_ABORT_ERROR_CODE,
     ToolOutputEvent,
 )
 from purra.output.ports import (

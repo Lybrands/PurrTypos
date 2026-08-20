@@ -93,12 +93,11 @@ async def test_delete_rejects_session_with_active_long_task(
     await seed_session(temp_db)
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units, metadata_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             "task-paused",
-            "work-1",
             "writing.book",
             "draft",
             "book-1",
@@ -127,9 +126,9 @@ async def test_delete_rejects_metadata_less_active_task_owned_by_session_run(
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units, metadata_json) "
-        "VALUES ('task-without-session-meta', 'work-owned', 'writing.book', "
+        "VALUES ('task-without-session-meta', 'writing.book', "
         "'draft', 'book-1', 'run-task-owner', 'running', 1, '{}')"
     )
 
@@ -157,9 +156,9 @@ async def test_delete_unlinks_durable_audit_rows_and_removes_product_rows(
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units, metadata_json) "
-        "VALUES ('task-done', 'work-2', 'writing.book', 'draft', 'book-1', "
+        "VALUES ('task-done', 'writing.book', 'draft', 'book-1', "
         "'run-done', 'completed', 1, '{\"sessionId\":41,\"kept\":true}')"
     )
     await temp_db.execute(

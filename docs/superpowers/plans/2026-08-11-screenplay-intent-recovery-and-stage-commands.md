@@ -906,16 +906,15 @@ git commit -m "feat(screenplay): submit typed stage commands"
 
 - Modify: `backend/tests/test_screenplay_agent_rewrite.py`
 - Modify: `backend/tests/test_screenplay_agent_durable_service.py`
-- Modify: `backend/tests/test_screenplay_multi_model_e2e.py`
 - Modify: `docs/design/screenplay-agent-api-v2.md:175-216`
-- Modify: `docs/design/2026-08-10-screenplay-agent-refactor-handoff.md:173-178`
+- Modify: `docs/design/Pure Agent Handoff.md:173-178`
 - Modify: `docs/superpowers/specs/2026-08-11-remove-canned-stage-prompts-design.md`
 - Modify: `docs/superpowers/specs/2026-08-11-screenplay-intent-recovery-and-stage-command-design.md`
 
 **Interfaces:**
 
 - Consumes: all previous tasks.
-- Produces: one deterministic regression reproducing the exact `review JSON in reasoning -> empty content -> wrong answer repair` incident, one credential-gated DeepSeek structured-output exercise, and updated public API/design contracts.
+- Produces: one deterministic regression reproducing the exact `review JSON in reasoning -> empty content -> wrong answer repair` incident and updated public API/design contracts.
 
 - [ ] **Step 1: Add the complete deterministic incident replay**
 
@@ -961,11 +960,9 @@ assert "未收到需要修复的候选 JSON" not in turn["assistant_content"]
 
 Add the negative replay where every physical attempt is reasoning-only. It must fail with `empty_model_response`, with zero Operation/Task/Revision rows.
 
-- [ ] **Step 2: Add the credential-gated live structured call**
+- [ ] **Step 2: Keep Provider verification outside repository automation**
 
-Extend the DeepSeek reasoning-on case in `test_screenplay_multi_model_e2e.py` to use `ManagedModelExecutor.stream_text()` with `response_format={"type":"json_object"}` and a small JSON-only prompt. Assert returned `content` parses as an object and `attempts` is between 1 and the standard bounded maximum.
-
-Do not assert that the provider must produce reasoning-only; both a first-attempt content response and a recovered second-attempt response are valid. Keep the existing missing-key release-blocker skip text.
+真实 Provider 的结构化输出、reasoning 和恢复行为由项目所有者手工验收；仓库只保留 scripted gateway 的确定性合同测试。
 
 - [ ] **Step 3: Update the authoritative API and design documents**
 
@@ -1021,15 +1018,9 @@ npm run check:agent-refactor
 
 Expected: boundary, model-contract, screenplay-acceptance, TypeScript, frontend-unit, and complete backend suites pass.
 
-- [ ] **Step 7: Run the paid real-provider gate when credentials are available**
+- [ ] **Step 7: Record owner-operated Provider acceptance separately**
 
-Run:
-
-```bash
-npm run test:screenplay-real-e2e
-```
-
-Expected: configured providers pass. Missing keys may skip only with the existing explicit `RELEASE BLOCKER` message; report those skips as unexecuted live coverage, not as a pass.
+真实 Provider 验收不进入仓库测试命令或自动发布门禁，由项目所有者单独执行并保留结果。
 
 - [ ] **Step 8: Commit incident coverage and contract documentation**
 
@@ -1037,9 +1028,8 @@ Expected: configured providers pass. Missing keys may skip only with the existin
 git add \
   backend/tests/test_screenplay_agent_rewrite.py \
   backend/tests/test_screenplay_agent_durable_service.py \
-  backend/tests/test_screenplay_multi_model_e2e.py \
   docs/design/screenplay-agent-api-v2.md \
-  docs/design/2026-08-10-screenplay-agent-refactor-handoff.md \
+  'docs/design/Pure Agent Handoff.md' \
   docs/superpowers/specs/2026-08-11-remove-canned-stage-prompts-design.md \
   docs/superpowers/specs/2026-08-11-screenplay-intent-recovery-and-stage-command-design.md
 git commit -m "test(screenplay): replay reasoning-only intent incident"

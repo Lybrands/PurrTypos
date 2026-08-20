@@ -1,4 +1,4 @@
-"""Contracts and policy for Artifact access across Run boundaries."""
+"""Content-free contracts and policy for Artifact access."""
 
 from __future__ import annotations
 
@@ -6,16 +6,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from purra.artifacts.contracts import ArtifactStatus
-from purra.artifacts.scope import ArtifactScope
+from purra.artifacts.ownership import ArtifactOwnerRef
 from purra.normalization import (
     non_negative_int,
     optional_non_negative_int,
     optional_positive_int,
-    optional_text,
     positive_int,
     required_text,
 )
-from purra.work_items.contracts import WorkItemRunRelation, WorkItemStatus
 
 
 class ArtifactAccessMode(StrEnum):
@@ -29,71 +27,37 @@ class ArtifactAccessReason(StrEnum):
     ARTIFACT_ABORTED = "artifact_aborted"
     ARTIFACT_FINALIZED = "artifact_finalized"
     ARTIFACT_REVISION_CONFLICT = "artifact_revision_conflict"
-    RUN_SCOPE_MISMATCH = "run_scope_mismatch"
-    WORK_ITEM_SCOPE_MISMATCH = "work_item_scope_mismatch"
-    WORK_ITEM_RUN_NOT_LINKED = "work_item_run_not_linked"
-    WORK_ITEM_RUN_READ_ONLY = "work_item_run_read_only"
-    WORK_ITEM_NOT_OPEN = "work_item_not_open"
-
-
-@dataclass(frozen=True, slots=True)
-class ArtifactScopeBinding:
-    """Stable owner of an Artifact's execution lifetime.
-
-    ``scope_id`` is a Run ID for Run scope and a Work Item ID for Work Item
-    scope. ``created_by_run_id`` remains immutable provenance; it is not the
-    current writer of a Work Item-scoped Artifact.
-    """
-
-    scope: ArtifactScope
-    scope_id: str
-    created_by_run_id: str
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "scope", ArtifactScope(self.scope))
-        for name in ("scope_id", "created_by_run_id"):
-            object.__setattr__(self, name, required_text(
-                getattr(self, name), f"artifact scope binding {name}"
-            ))
-        if (
-            self.scope is ArtifactScope.RUN
-            and self.scope_id != self.created_by_run_id
-        ):
-            raise ValueError(
-                "Run-scoped artifact must be owned by its creating Run"
-            )
-
-    @property
-    def run_id(self) -> str | None:
-        return self.scope_id if self.scope is ArtifactScope.RUN else None
-
-    @property
-    def work_item_id(self) -> str | None:
-        return self.scope_id if self.scope is ArtifactScope.WORK_ITEM else None
+    CROSS_RUN_NOT_AUTHORIZED = "cross_run_not_authorized"
 
 
 @dataclass(frozen=True, slots=True)
 class ArtifactResumeCandidate:
-    """Content-free Core view used to authorize a possible continuation."""
+    """Content-free view used to authorize a possible continuation."""
 
     artifact_id: str
     namespace: str
     kind: str
     owner_id: str
-    binding: ArtifactScopeBinding
+    owner_ref: ArtifactOwnerRef
+    created_by_run_id: str
     status: ArtifactStatus
     revision: int
     committed_item_count: int = 0
     expected_item_count: int | None = None
-    work_item_status: WorkItemStatus | None = None
 
     def __post_init__(self) -> None:
-        for name in ("artifact_id", "namespace", "kind", "owner_id"):
+        for name in (
+            "artifact_id",
+            "namespace",
+            "kind",
+            "owner_id",
+            "created_by_run_id",
+        ):
             object.__setattr__(self, name, required_text(
                 getattr(self, name), f"artifact candidate {name}"
             ))
-        if not isinstance(self.binding, ArtifactScopeBinding):
-            raise TypeError("artifact candidate binding is invalid")
+        if not isinstance(self.owner_ref, ArtifactOwnerRef):
+            raise TypeError("artifact candidate owner_ref is invalid")
         object.__setattr__(self, "status", ArtifactStatus(self.status))
         object.__setattr__(self, "revision", positive_int(
             self.revision, "artifact candidate revision"
@@ -104,24 +68,12 @@ class ArtifactResumeCandidate:
         object.__setattr__(self, "expected_item_count", optional_non_negative_int(
             self.expected_item_count, "expected_item_count"
         ))
-        if self.expected_item_count is not None:
-            if self.committed_item_count > self.expected_item_count:
-                raise ValueError(
-                    "committed_item_count cannot exceed expected_item_count"
-                )
-        if self.binding.scope is ArtifactScope.WORK_ITEM:
-            if self.work_item_status is None:
-                raise ValueError(
-                    "Work Item-scoped candidate requires work_item_status"
-                )
-            object.__setattr__(
-                self,
-                "work_item_status",
-                WorkItemStatus(self.work_item_status),
-            )
-        elif self.work_item_status is not None:
+        if (
+            self.expected_item_count is not None
+            and self.committed_item_count > self.expected_item_count
+        ):
             raise ValueError(
-                "Run-scoped candidate cannot carry work_item_status"
+                "committed_item_count cannot exceed expected_item_count"
             )
 
 
@@ -131,8 +83,6 @@ class ArtifactAccessRequest:
     run_id: str
     mode: ArtifactAccessMode
     expected_revision: int
-    work_item_id: str | None = None
-    work_item_run_relation: WorkItemRunRelation | None = None
 
     def __post_init__(self) -> None:
         for name in ("artifact_id", "run_id"):
@@ -143,13 +93,6 @@ class ArtifactAccessRequest:
         object.__setattr__(self, "expected_revision", positive_int(
             self.expected_revision, "expected_revision"
         ))
-        object.__setattr__(self, "work_item_id", optional_text(self.work_item_id))
-        if self.work_item_run_relation is not None:
-            object.__setattr__(
-                self,
-                "work_item_run_relation",
-                WorkItemRunRelation(self.work_item_run_relation),
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,13 +133,12 @@ class ArtifactAccessDecision:
 @dataclass(frozen=True, slots=True)
 class ArtifactWriteClaimCommand:
     artifact_id: str
-    work_item_id: str
     run_id: str
     expected_revision: int
     lease_duration_ms: int
 
     def __post_init__(self) -> None:
-        for name in ("artifact_id", "work_item_id", "run_id"):
+        for name in ("artifact_id", "run_id"):
             object.__setattr__(self, name, required_text(
                 getattr(self, name), f"artifact claim {name}"
             ))
@@ -211,19 +153,13 @@ class ArtifactWriteClaimCommand:
 @dataclass(frozen=True, slots=True)
 class ArtifactWriteClaim:
     artifact_id: str
-    work_item_id: str
     run_id: str
     claim_token: str
     acquired_revision: int
     expires_at_ms: int
 
     def __post_init__(self) -> None:
-        for name in (
-            "artifact_id",
-            "work_item_id",
-            "run_id",
-            "claim_token",
-        ):
+        for name in ("artifact_id", "run_id", "claim_token"):
             object.__setattr__(self, name, required_text(
                 getattr(self, name), f"artifact write claim {name}"
             ))
@@ -262,10 +198,8 @@ class ArtifactAccessGrant:
             raise TypeError("artifact access grant decision is invalid")
         if not self.decision.allowed:
             raise ValueError("denied artifact access cannot become a grant")
-        if self.decision.requires_write_claim and self.write_claim is None:
-            raise ValueError("artifact access grant requires a write claim")
-        if not self.decision.requires_write_claim and self.write_claim is not None:
-            raise ValueError("artifact access grant has an unexpected write claim")
+        if self.decision.requires_write_claim != (self.write_claim is not None):
+            raise ValueError("artifact access grant write claim does not match")
         if self.write_claim is not None and (
             self.write_claim.artifact_id != self.decision.artifact_id
             or self.write_claim.run_id != self.decision.run_id
@@ -276,20 +210,21 @@ class ArtifactAccessGrant:
 
 
 class ArtifactAccessPolicy:
-    """Fail-closed generic access rules; domains add compatibility checks."""
+    """Generic lifecycle and optimistic-concurrency checks."""
 
     def decide(
         self,
         candidate: ArtifactResumeCandidate,
         request: ArtifactAccessRequest,
+        *,
+        cross_run_authorized: bool = False,
     ) -> ArtifactAccessDecision:
-        reason = self._denial_reason(candidate, request)
-        allowed = reason is None
-        requires_claim = bool(
-            allowed
-            and request.mode is ArtifactAccessMode.WRITE
-            and candidate.binding.scope is ArtifactScope.WORK_ITEM
+        reason = self._denial_reason(
+            candidate,
+            request,
+            cross_run_authorized=bool(cross_run_authorized),
         )
+        allowed = reason is None
         return ArtifactAccessDecision(
             artifact_id=request.artifact_id,
             run_id=request.run_id,
@@ -297,16 +232,25 @@ class ArtifactAccessPolicy:
             allowed=allowed,
             reason=reason or ArtifactAccessReason.ALLOWED,
             artifact_revision=candidate.revision,
-            requires_write_claim=requires_claim,
+            requires_write_claim=(
+                allowed and request.mode is ArtifactAccessMode.WRITE
+            ),
         )
 
     @staticmethod
     def _denial_reason(
         candidate: ArtifactResumeCandidate,
         request: ArtifactAccessRequest,
+        *,
+        cross_run_authorized: bool,
     ) -> ArtifactAccessReason | None:
         if candidate.artifact_id != request.artifact_id:
             return ArtifactAccessReason.ARTIFACT_ID_MISMATCH
+        if (
+            candidate.created_by_run_id != request.run_id
+            and not cross_run_authorized
+        ):
+            return ArtifactAccessReason.CROSS_RUN_NOT_AUTHORIZED
         if candidate.status is ArtifactStatus.ABORTED:
             return ArtifactAccessReason.ARTIFACT_ABORTED
         if candidate.revision != request.expected_revision:
@@ -316,24 +260,6 @@ class ArtifactAccessPolicy:
             and candidate.status is ArtifactStatus.FINALIZED
         ):
             return ArtifactAccessReason.ARTIFACT_FINALIZED
-        if candidate.binding.scope is ArtifactScope.RUN:
-            if candidate.binding.scope_id != request.run_id:
-                return ArtifactAccessReason.RUN_SCOPE_MISMATCH
-            return None
-        if candidate.binding.scope_id != request.work_item_id:
-            return ArtifactAccessReason.WORK_ITEM_SCOPE_MISMATCH
-        if request.work_item_run_relation is None:
-            return ArtifactAccessReason.WORK_ITEM_RUN_NOT_LINKED
-        if (
-            request.mode is ArtifactAccessMode.WRITE
-            and not request.work_item_run_relation.writes_work_item
-        ):
-            return ArtifactAccessReason.WORK_ITEM_RUN_READ_ONLY
-        if (
-            request.mode is ArtifactAccessMode.WRITE
-            and candidate.work_item_status is not WorkItemStatus.OPEN
-        ):
-            return ArtifactAccessReason.WORK_ITEM_NOT_OPEN
         return None
 
 
@@ -346,8 +272,6 @@ __all__ = [
     "ArtifactAccessRequest",
     "ArtifactClaimLeaseCommand",
     "ArtifactResumeCandidate",
-    "ArtifactScope",
-    "ArtifactScopeBinding",
     "ArtifactWriteClaim",
     "ArtifactWriteClaimCommand",
 ]

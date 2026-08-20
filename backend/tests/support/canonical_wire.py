@@ -126,22 +126,6 @@ def _project_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
                 else "agentDelegationUpdated"
             )
             return {name: {"runId": event.get("runId"), **dict(payload)}}
-        if event_type == "child_output":
-            child = payload.get("event")
-            child_view = _project_event(child) if isinstance(child, Mapping) else None
-            if child_view is None:
-                return None
-            return {"agentSubRunEvent": {
-                "runId": event.get("runId"),
-                "parentRunId": payload.get("parentRunId") or event.get("runId"),
-                "rootRunId": payload.get("parentRunId") or event.get("runId"),
-                "delegationId": payload.get("delegationId"),
-                "childRunId": payload.get("sourceRunId"),
-                "agentRole": payload.get("agentRole"),
-                "agentTitle": payload.get("agentTitle"),
-                "objective": payload.get("objective"),
-                "chunk": child_view,
-            }}
     return None
 
 

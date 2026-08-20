@@ -154,12 +154,13 @@ export function getExecutionPanelPresentation(
   const progress = getOperationGroupProgress(parts.filter(isTimelineOperationPart));
   const active = input.isStreaming;
   const stepCount = progress.total;
+  const visible = active
+    || parts.length > 0
+    || (input.durationMs != null && input.durationMs > 0);
   return {
-    visible: active
-      || parts.length > 0
-      || (input.durationMs != null && input.durationMs > 0),
+    visible,
     active,
-    autoOpen: false,
+    autoOpen: visible,
     stepCount,
     title: active
       ? "正在进行"
@@ -265,6 +266,7 @@ export function buildAssistantTimeline(
       if (
         !operation
         || operation.kind === "model"
+        || operation.kind === "validation"
         || (operation.kind === "context_compaction" && message.contextCompaction)
         || (operation.kind === "delegation" && message.delegations?.length)
       ) return;
