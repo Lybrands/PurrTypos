@@ -1,5 +1,14 @@
 import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
+import {
+  Navigate,
+  Route,
+  Routes,
+  matchPath,
+  parsePath,
+  useLocation,
+  useNavigate,
+} from 'react-router-dom'
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId } from './types'
@@ -16,6 +25,8 @@ const AiDevInspector = import.meta.env.DEV
   : null
 
 type Page = 'home' | 'screenplay' | 'bookshelf' | 'workspace'
+type BooksStatus = 'idle' | 'loading' | 'loaded'
+type SettingsLocationState = { returnTo?: string }
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
 
 function getStoredLastOpenedBookId(): EntityId | null {
@@ -40,15 +51,31 @@ function storeLastOpenedBookId(bookId: EntityId | null) {
 
 export default function App() {
   const appMessage = usePurrToast()
-  const [page, setPage] = React.useState<Page>('home')
+  const location = useLocation()
+  const navigate = useNavigate()
+  const settingsState = location.state as SettingsLocationState | null
+  const showSettings = location.pathname === '/settings'
+  const contentLocation = showSettings ? settingsState?.returnTo || '/' : location
+  const contentPath = typeof contentLocation === 'string'
+    ? parsePath(contentLocation).pathname || '/'
+    : contentLocation.pathname
+  const workspaceMatch = matchPath('/books/:bookId', contentPath)
+  const page: Page = workspaceMatch
+    ? 'workspace'
+    : contentPath === '/screenplay' || contentPath.startsWith('/screenplay/')
+      ? 'screenplay'
+      : contentPath === '/bookshelf'
+        ? 'bookshelf'
+        : 'home'
   const [books, setBooks] = React.useState<Book[]>([])
-  const [activeBook, setActiveBook] = React.useState<Book | null>(null)
+  const [booksStatus, setBooksStatus] = React.useState<BooksStatus>('idle')
+  const activeBook = workspaceMatch
+    ? books.find((book) => book.id === workspaceMatch.params.bookId) ?? null
+    : null
   const [workspaceReady, setWorkspaceReady] = React.useState(false)
   const [lastOpenedBookId, setLastOpenedBookId] = React.useState<EntityId | null>(
     getStoredLastOpenedBookId,
   )
-
-  const [showSettings, setShowSettings] = React.useState(false)
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
   const configuredModelConfigs = React.useMemo(
     () => modelConfigs.filter((config) => config.apiKey?.trim()),
@@ -96,9 +123,11 @@ export default function App() {
   }, [])
 
   const loadBooks = React.useCallback(async () => {
+    setBooksStatus('loading')
     const res = await services.books.getBooks()
     if (res.success && res.data) {
       setBooks(res.data)
+      setBooksStatus('loaded')
       setLastOpenedBookId((storedBookId) => {
         if (storedBookId == null || res.data.some((book) => book.id === storedBookId)) {
           return storedBookId
@@ -106,28 +135,46 @@ export default function App() {
         storeLastOpenedBookId(null)
         return null
       })
+    } else {
+      setBooksStatus('loaded')
     }
   }, [])
 
   React.useEffect(() => {
-    if (page === 'bookshelf' || page === 'screenplay') loadBooks()
+    if (page === 'bookshelf' || page === 'screenplay' || page === 'workspace') loadBooks()
   }, [page, loadBooks])
 
   const handleEnterBookshelf = React.useCallback(() => {
-    setPage('bookshelf')
-  }, [])
+    navigate('/bookshelf')
+  }, [navigate])
 
   const handleEnterScreenplayAgent = React.useCallback(() => {
-    setPage('screenplay')
-  }, [])
+    navigate('/screenplay')
+  }, [navigate])
+
+  const handleOpenSettings = React.useCallback(() => {
+    navigate('/settings', {
+      state: {
+        returnTo: `${location.pathname}${location.search}${location.hash}`,
+      } satisfies SettingsLocationState,
+    })
+  }, [location.hash, location.pathname, location.search, navigate])
+
+  const handleCloseSettings = React.useCallback(() => {
+    navigate(
+      settingsState?.returnTo && settingsState.returnTo !== '/settings'
+        ? settingsState.returnTo
+        : '/',
+      { replace: true },
+    )
+  }, [navigate, settingsState])
 
   const handleOpenBook = React.useCallback((book: Book) => {
     storeLastOpenedBookId(book.id)
     setLastOpenedBookId(book.id)
     setWorkspaceReady(false)
-    setActiveBook(book)
-    setPage('workspace')
-  }, [])
+    navigate(`/books/${encodeURIComponent(book.id)}`)
+  }, [navigate])
 
   const handleCreateBook = React.useCallback(async (title: string, enableVolume?: boolean) => {
     const res = await services.books.createBook({ title, enableVolume })
@@ -159,14 +206,13 @@ export default function App() {
 
   const handleBackToBookshelf = React.useCallback(() => {
     setWorkspaceReady(false)
-    setActiveBook(null)
-    setPage('bookshelf')
-  }, [])
+    navigate('/bookshelf')
+  }, [navigate])
 
   const handleBackToHome = React.useCallback(() => {
     setWorkspaceReady(false)
-    setPage('home')
-  }, [])
+    navigate('/')
+  }, [navigate])
 
   const handleWorkspaceReady = React.useCallback(() => {
     setWorkspaceReady(true)
@@ -174,6 +220,16 @@ export default function App() {
 
   const ambientPage: Page =
     page === 'workspace' && !workspaceReady ? 'bookshelf' : page
+
+  React.useEffect(() => {
+    if (page === 'workspace' && booksStatus === 'loaded' && !activeBook) {
+      navigate('/bookshelf', { replace: true })
+    }
+  }, [activeBook, booksStatus, navigate, page])
+
+  React.useEffect(() => {
+    setWorkspaceReady(false)
+  }, [workspaceMatch?.params.bookId])
 
   return (
     <div className={`app-root app-root--${page} app-root--ambient-${ambientPage}`}>
@@ -185,48 +241,52 @@ export default function App() {
       )}
       <main className="app-main">
         <Suspense fallback={<div className="app-page-loading"><PurrSpin size="large" /></div>}>
-          {page === 'home' && (
-            <HomePage
-              onEnterScreenplayAgent={handleEnterScreenplayAgent}
-              onEnterBookshelf={handleEnterBookshelf}
-              onOpenSettings={() => setShowSettings(true)}
-            />
-          )}
-          {page === 'screenplay' && (
-            <ScreenplayAgentPage
-              books={books}
-              modelConfigs={configuredModelConfigs}
-              onUpdateModelConfig={updateModelConfig}
-              onOpenBookshelf={handleEnterBookshelf}
-              onOpenSettings={() => setShowSettings(true)}
-              onBack={handleBackToHome}
-            />
-          )}
-          {page === 'bookshelf' && (
-            <BookshelfPage
-              books={books}
-              lastOpenedBookId={lastOpenedBookId}
-              onOpenBook={handleOpenBook}
-              onCreateBook={handleCreateBook}
-              onDeleteBook={handleDeleteBook}
-              onRenameBook={handleRenameBook}
-              onBack={handleBackToHome}
-            />
-          )}
-          {page === 'workspace' && activeBook && (
-            <Workspace
-              bookId={activeBook.id}
-              bookTitle={activeBook.title}
-              enableVolume={!!activeBook.enable_volume}
-              onBack={handleBackToBookshelf}
-              onGoHome={handleBackToHome}
-              onOpenSettings={() => setShowSettings(true)}
-              modelConfigs={configuredModelConfigs}
-              onUpdateModelConfig={updateModelConfig}
-              syncOutlineChapter={syncOutlineChapter}
-              onReady={handleWorkspaceReady}
-            />
-          )}
+          <Routes location={contentLocation}>
+            <Route path="/" element={(
+              <HomePage
+                onEnterScreenplayAgent={handleEnterScreenplayAgent}
+                onEnterBookshelf={handleEnterBookshelf}
+                onOpenSettings={handleOpenSettings}
+              />
+            )} />
+            <Route path="/screenplay/*" element={(
+              <ScreenplayAgentPage
+                books={books}
+                modelConfigs={configuredModelConfigs}
+                onUpdateModelConfig={updateModelConfig}
+                onOpenBookshelf={handleEnterBookshelf}
+                onOpenSettings={handleOpenSettings}
+                onBack={handleBackToHome}
+              />
+            )} />
+            <Route path="/bookshelf" element={(
+              <BookshelfPage
+                books={books}
+                lastOpenedBookId={lastOpenedBookId}
+                onOpenBook={handleOpenBook}
+                onCreateBook={handleCreateBook}
+                onDeleteBook={handleDeleteBook}
+                onRenameBook={handleRenameBook}
+                onBack={handleBackToHome}
+              />
+            )} />
+            <Route path="/books/:bookId" element={activeBook ? (
+              <Workspace
+                bookId={activeBook.id}
+                bookTitle={activeBook.title}
+                enableVolume={!!activeBook.enable_volume}
+                onBack={handleBackToBookshelf}
+                onGoHome={handleBackToHome}
+                onOpenSettings={handleOpenSettings}
+                modelConfigs={configuredModelConfigs}
+                onUpdateModelConfig={updateModelConfig}
+                syncOutlineChapter={syncOutlineChapter}
+                onReady={handleWorkspaceReady}
+              />
+            ) : <div className="app-page-loading"><PurrSpin size="large" /></div>} />
+            <Route path="/settings" element={null} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
         </Suspense>
       </main>
       <footer className="app-footer">
@@ -237,12 +297,12 @@ export default function App() {
         <div className="app-settings-overlay">
           <Suspense fallback={<PurrSpin size="large" />}>
             <SettingsPage
-            modelConfigs={modelConfigs}
-            onSaveModelConfigs={saveModelConfigs}
-            onClose={() => setShowSettings(false)}
-            syncOutlineChapter={syncOutlineChapter}
-            onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
-          />
+              modelConfigs={modelConfigs}
+              onSaveModelConfigs={saveModelConfigs}
+              onClose={handleCloseSettings}
+              syncOutlineChapter={syncOutlineChapter}
+              onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
+            />
           </Suspense>
         </div>
       )}

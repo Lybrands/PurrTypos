@@ -957,7 +957,7 @@ async def test_checkpoint_planner_heartbeat_prevents_duplicate_model_call(
 ):
     repository = SqliteScreenplayCheckpointRepository(
         temp_db,
-        lease_ms=30,
+        lease_ms=300,
         poll_interval_seconds=0.002,
     )
     observer = _ScreenplayCheckpointObserver(
@@ -988,7 +988,7 @@ async def test_checkpoint_planner_heartbeat_prevents_duplicate_model_call(
         if not receipt.get("_acquired"):
             return receipt
         model_calls += 1
-        await observer._with_heartbeat(receipt, "reserved", asyncio.sleep(0.1))
+        await observer._with_heartbeat(receipt, "reserved", asyncio.sleep(0.6))
         return await repository.ready(
             operation_id="operation-heartbeat",
             checkpoint_key="episode:4",
