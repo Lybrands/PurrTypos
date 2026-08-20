@@ -53,6 +53,7 @@ from purra.run_control import (
     RunCancellationReceipt,
     decide_orphan_run,
 )
+from purra.run_state import canonicalize_execution_plan
 
 __all__ = [
     "AgentCore",
@@ -94,4 +95,5 @@ __all__ = [
     "WorkPlanner",
     "WorkStep",
     "decide_orphan_run",
+    "canonicalize_execution_plan",
 ]

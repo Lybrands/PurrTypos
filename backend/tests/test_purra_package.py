@@ -25,6 +25,35 @@ PACKAGE_READMES = (
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
 }
+PUBLIC_PURRA_HOST_MODULES = frozenset({
+    "purra.api",
+    "purra.artifacts",
+    "purra.cancellation",
+    "purra.context_budget",
+    "purra.context_orchestration",
+    "purra.context_strategies",
+    "purra.contracts",
+    "purra.errors",
+    "purra.evaluation",
+    "purra.events",
+    "purra.evidence",
+    "purra.json_values",
+    "purra.long_tasks",
+    "purra.model_call_parameters",
+    "purra.model_invocation",
+    "purra.model_protocol",
+    "purra.normalization",
+    "purra.observability",
+    "purra.orphan_recovery",
+    "purra.output",
+    "purra.ports",
+    "purra.recovery",
+    "purra.run_control",
+    "purra.stream_ownership",
+    "purra.structured_output",
+    "purra.task_admission",
+    "purra.tools",
+})
 
 
 def _imports(path: Path) -> tuple[str, ...]:
@@ -42,6 +71,16 @@ def _application_python_files() -> tuple[Path, ...]:
     roots = (
         BACKEND_DIR / "application",
         BACKEND_DIR / "domains",
+        BACKEND_DIR / "routers",
+    )
+    return tuple(path for root in roots for path in sorted(root.rglob("*.py")))
+
+
+def _production_python_files() -> tuple[Path, ...]:
+    roots = (
+        BACKEND_DIR / "application",
+        BACKEND_DIR / "domains",
+        BACKEND_DIR / "infrastructure",
         BACKEND_DIR / "routers",
     )
     return tuple(path for root in roots for path in sorted(root.rglob("*.py")))
@@ -72,6 +111,21 @@ def test_public_purra_readmes_do_not_bind_the_framework_to_a_product():
         if term in path.read_text(encoding="utf-8").casefold()
     ]
     assert not violations, "PurrA public docs contain product semantics:\n" + "\n".join(
+        violations
+    )
+
+
+def test_product_code_imports_only_supported_purra_module_roots():
+    violations = [
+        f"{_relative(path)} imports unsupported {module}"
+        for path in _production_python_files()
+        for module in _imports(path)
+        if module == "purra" or (
+            module.startswith("purra.")
+            and module not in PUBLIC_PURRA_HOST_MODULES
+        )
+    ]
+    assert not violations, "Private PurrA imports from product code:\n" + "\n".join(
         violations
     )
 

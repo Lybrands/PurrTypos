@@ -17,10 +17,10 @@ from purra.contracts import (
 )
 from purra.context_budget import resolve_context_budget_claims
 from purra.json_values import thaw_json_mapping
-from purra.context_orchestration.compaction import (
+from purra.context_orchestration import (
     ContextCompressionCoordinator,
+    ContextCompressionSettings,
 )
-from purra.context_orchestration.contracts import ContextCompressionSettings
 from purra.api import (
     AgentCore,
     AgentCoreRunOptions,
@@ -48,8 +48,11 @@ from purra.ports import (
     ToolCatalog,
     ToolRegistration,
 )
-from purra.output.processor import AgentOutputProcessor
-from purra.output.ports import AgentOutputJournalQuery, AgentOutputRepository
+from purra.output import (
+    AgentOutputJournalQuery,
+    AgentOutputProcessor,
+    AgentOutputRepository,
+)
 from purra.tools import InMemoryToolCatalog
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator

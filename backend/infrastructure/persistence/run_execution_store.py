@@ -14,7 +14,7 @@ from purra.run_control import (
     RunActivitySnapshot,
     RunCancellationReceipt,
 )
-from purra.ports.projection import RunCancellationProjector
+from purra.ports import RunCancellationProjector
 from purra.normalization import unique_text_tuple
 
 

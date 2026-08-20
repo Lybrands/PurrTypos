@@ -20,8 +20,8 @@ from purra.contracts import (
     ToolRiskLevel,
 )
 from purra.cancellation import await_with_cancellation
+from purra.api import canonicalize_execution_plan
 from purra.json_values import thaw_json_mapping
-from purra.run_state import RunStateMachine
 from infrastructure.persistence.run_store import get_run_todos
 
 
@@ -1274,13 +1274,7 @@ def plan_digest(plan: ExecutionPlan) -> str:
 
 
 def _canonical_root_plan(plan: ExecutionPlan) -> ExecutionPlan:
-    snapshot = RunStateMachine.initialize("checkpoint-plan", plan)
-    return ExecutionPlan(
-        title=snapshot.title,
-        goal=snapshot.goal,
-        task_spec=snapshot.task_spec,
-        steps=snapshot.steps,
-    )
+    return canonicalize_execution_plan(plan)
 
 
 __all__ = [

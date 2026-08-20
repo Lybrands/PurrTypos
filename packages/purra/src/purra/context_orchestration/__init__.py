@@ -10,10 +10,21 @@ from purra.context_orchestration.ledger import (
     ContextCompactionPhase,
 )
 
+
+def __getattr__(name: str):
+    if name == "ContextCompressionCoordinator":
+        from purra.context_orchestration.compaction import (
+            ContextCompressionCoordinator,
+        )
+
+        return ContextCompressionCoordinator
+    raise AttributeError(name)
+
 __all__ = [
     "ContextCompressionRequest",
     "ContextCompressionSettings",
     "ConversationCompactionResult",
     "ContextCompactionBudget",
     "ContextCompactionPhase",
+    "ContextCompressionCoordinator",
 ]
