@@ -4,15 +4,13 @@
  * - Otherwise: copy backend source (excluding venv, PyInstaller output, caches) for Python-at-runtime.
  */
 const fs = require('fs')
-const os = require('os')
 const path = require('path')
 const { spawnSync } = require('child_process')
 
 const root = path.join(__dirname, '..')
 const outDir = path.join(root, 'build-resources', 'backend')
 const backendSrc = path.join(root, 'backend')
-const purraPackage = path.join(root, 'packages', 'purra')
-const purraBuildDir = path.join(purraPackage, 'build')
+const purraRequirements = path.join(backendSrc, 'requirements-purra.txt')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
 
@@ -60,50 +58,29 @@ function findPackagingPython() {
       [
         ...candidate.prefix,
         '-c',
-        'import importlib.util, pip; assert importlib.util.find_spec("setuptools")',
+        'import pip',
       ],
       { cwd: root, stdio: 'ignore' },
     ).status === 0
   })
 }
 
-function vendorPurraWheel(dest) {
+function vendorPurra(dest) {
   const python = findPackagingPython()
   if (!python) {
-    throw new Error('Python with pip and setuptools is required to package PurrA')
+    throw new Error('Python with pip is required to install PurrA')
   }
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'purrtypos-purra-wheel-'))
-  try {
-    fs.rmSync(purraBuildDir, { recursive: true, force: true })
-    const wheelResult = spawnSync(
-      python.command,
-      [
-        ...python.prefix,
-        '-m', 'pip', 'wheel', '--no-deps', '--no-build-isolation',
-        '--wheel-dir', tempDir, purraPackage,
-      ],
-      { cwd: root, stdio: 'inherit' },
-    )
-    if (wheelResult.status !== 0) {
-      throw new Error('Failed to build the PurrA wheel')
-    }
-    const wheel = fs.readdirSync(tempDir).find((name) => name.endsWith('.whl'))
-    if (!wheel) throw new Error('PurrA wheel build produced no wheel')
-    const installResult = spawnSync(
-      python.command,
-      [
-        ...python.prefix,
-        '-m', 'pip', 'install', '--no-deps', '--target', dest,
-        path.join(tempDir, wheel),
-      ],
-      { cwd: root, stdio: 'inherit' },
-    )
-    if (installResult.status !== 0) {
-      throw new Error('Failed to vendor the PurrA wheel')
-    }
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true })
-    fs.rmSync(purraBuildDir, { recursive: true, force: true })
+  const result = spawnSync(
+    python.command,
+    [
+      ...python.prefix,
+      '-m', 'pip', 'install', '--no-deps', '--target', dest,
+      '-r', purraRequirements,
+    ],
+    { cwd: root, stdio: 'inherit' },
+  )
+  if (result.status !== 0) {
+    throw new Error('Failed to install the pinned PurrA dependency')
   }
 }
 
@@ -121,6 +98,6 @@ if (process.platform === 'win32' && fs.existsSync(frozenExe)) {
     )
   }
   copyDirFiltered(backendSrc, outDir)
-  vendorPurraWheel(outDir)
-  console.log('[prepare-backend-resources] Copied backend and installed PurrA wheel →', outDir)
+  vendorPurra(outDir)
+  console.log('[prepare-backend-resources] Copied backend and installed pinned PurrA →', outDir)
 }
