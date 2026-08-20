@@ -1,12 +1,17 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import {
+  BrowserRouter,
+  HashRouter,
+} from 'react-router-dom'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { FontSizeProvider } from './contexts/FontSizeContext'
 import App from './App'
+import { runtimeCapabilities } from './platform'
 import { PurrConfirmProvider, PurrToastProvider, PurrTooltipProvider } from '@/purr-components'
 import './index.scss'
 
-function ThemedApp() {
+function AppProviders() {
   return (
     <PurrTooltipProvider>
       <PurrToastProvider>
@@ -15,6 +20,15 @@ function ThemedApp() {
         </PurrConfirmProvider>
       </PurrToastProvider>
     </PurrTooltipProvider>
+  )
+}
+
+function ThemedApp() {
+  const Router = runtimeCapabilities.runtime === 'electron' ? HashRouter : BrowserRouter
+  return (
+    <Router>
+      <AppProviders />
+    </Router>
   )
 }
 

@@ -10,6 +10,38 @@ import {
   screenplaySourceToV2,
 } from './screenplayProjectModel.ts'
 import type { ScreenplayProject, ScreenplayV2Workspace } from '../types.ts'
+import {
+  parseScreenplayRoute,
+  screenplayNewPath,
+  screenplayProjectPath,
+} from './screenplayRoutes.ts'
+
+test('screenplay routes distinguish project-level pages and reject child pages', () => {
+  assert.deepEqual(parseScreenplayRoute('/screenplay'), { kind: 'projects' })
+  assert.deepEqual(parseScreenplayRoute('/screenplay/new'), {
+    kind: 'new',
+    bookId: null,
+  })
+  assert.deepEqual(parseScreenplayRoute('/screenplay/new', '?bookId=book%201'), {
+    kind: 'new',
+    bookId: 'book 1',
+  })
+  assert.deepEqual(parseScreenplayRoute('/screenplay/projects/project%201'), {
+    kind: 'project',
+    projectId: 'project 1',
+  })
+  assert.deepEqual(parseScreenplayRoute('/screenplay/projects/project-1/documents'), {
+    kind: 'invalid',
+  })
+  assert.equal(
+    screenplayNewPath('book 1'),
+    '/screenplay/new?bookId=book+1',
+  )
+  assert.equal(
+    screenplayProjectPath('project 1'),
+    '/screenplay/projects/project%201',
+  )
+})
 
 test('projects native lifecycle and CAS revision from the workspace', () => {
   const project = {

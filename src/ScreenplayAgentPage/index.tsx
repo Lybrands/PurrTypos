@@ -1,5 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import AppHeader from '../components/AppHeader'
 import { AgentConversationPanel } from '../components/AgentConversation'
 import {
@@ -122,6 +123,11 @@ import {
   reviewWorkspaceEntry,
 } from './reviewAdjudicationModel'
 import { stageAgentAction } from './stageAgentAction'
+import {
+  parseScreenplayRoute,
+  screenplayNewPath,
+  screenplayProjectPath,
+} from './screenplayRoutes'
 import { structuredContentToMarkdown } from './revisionDocumentView'
 import {
   documentEpisodesFromRevision,
@@ -590,6 +596,14 @@ export default function ScreenplayAgentPage({
 }: ScreenplayAgentPageProps) {
   const { message } = useAppFeedback()
   const confirm = usePurrConfirm()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const screenplayRoute = React.useMemo(
+    () => parseScreenplayRoute(location.pathname, location.search),
+    [location.pathname, location.search],
+  )
+  const syncedScreenplayPathRef = React.useRef<string | null>(null)
+  const initializedNewRouteRef = React.useRef<string | null>(null)
   const [stage, setStage] = React.useState<EntryStage>('source')
   const [entrySourceView, setEntrySourceView] = React.useState<EntrySourceView>('choices')
   const [briefStepIndex, setBriefStepIndex] = React.useState(0)
@@ -1135,6 +1149,7 @@ export default function ScreenplayAgentPage({
         ))
         setAgentPrompt('')
         setStage('source')
+        navigate('/screenplay', { replace: true })
       }
       setDeleteProjectTarget(null)
       message.success('剧本项目已删除')
@@ -1145,6 +1160,7 @@ export default function ScreenplayAgentPage({
     deleteProjectTarget,
     lastOpenedProjectId,
     message,
+    navigate,
     openedProject?.id,
     projectMutationId,
   ])
@@ -1382,6 +1398,9 @@ export default function ScreenplayAgentPage({
   }, [sourceScopeUnit])
 
   const startFromBook = React.useCallback((book: Book) => {
+    const newRoute = screenplayNewPath(book.id)
+    initializedNewRouteRef.current = newRoute
+    navigate(newRoute)
     setBriefStepIndex(0)
     setFurthestBriefStepIndex(0)
     setSourceKind('book')
@@ -1397,9 +1416,12 @@ export default function ScreenplayAgentPage({
     setSelectedSourceChapterIds([])
     setSelectedSourceVolumeIds([])
     setStage('brief')
-  }, [])
+  }, [navigate])
 
   const startOriginal = React.useCallback(() => {
+    const newRoute = screenplayNewPath()
+    initializedNewRouteRef.current = newRoute
+    navigate(newRoute)
     setBriefStepIndex(0)
     setFurthestBriefStepIndex(0)
     setSourceKind('original')
@@ -1414,7 +1436,7 @@ export default function ScreenplayAgentPage({
     setSelectedSourceChapterIds([])
     setSelectedSourceVolumeIds([])
     setStage('brief')
-  }, [])
+  }, [navigate])
 
   const buildHandoff = React.useCallback(() => {
     if (!format || !approach) {
@@ -1560,7 +1582,8 @@ export default function ScreenplayAgentPage({
 
   const handleHeaderBack = React.useCallback(() => {
     if (stage === 'source') {
-      onBack()
+      if (screenplayRoute.kind === 'new') navigate('/screenplay')
+      else onBack()
       return
     }
     if (stage === 'handoff') {
@@ -1568,10 +1591,17 @@ export default function ScreenplayAgentPage({
       return
     }
     resetToSource()
-  }, [onBack, resetToSource, stage])
+    navigate('/screenplay')
+  }, [
+    navigate,
+    onBack,
+    resetToSource,
+    screenplayRoute.kind,
+    stage,
+  ])
 
   const headerBackLabel = stage === 'source'
-    ? '返回首页'
+    ? screenplayRoute.kind === 'new' ? '返回剧本项目列表' : '返回首页'
     : stage === 'brief'
       ? '重新选择起点'
       : stage === 'handoff'
@@ -1701,6 +1731,8 @@ export default function ScreenplayAgentPage({
   }, [conversationClient, message])
 
   const openProject = React.useCallback(async (project: ScreenplayProject) => {
+    const projectPath = screenplayProjectPath(project.id)
+    if (location.pathname !== projectPath) navigate(projectPath)
     agentSessionLifecycleRef.current.invalidate()
     activeAgentLoadTokenRef.current = undefined
     setAgentLoadInitializing(true)
@@ -1775,10 +1807,68 @@ export default function ScreenplayAgentPage({
     loadProjectDocuments,
     loadProjectSourceRefs,
     loadProjectWorkspace,
+    location.pathname,
     message,
+    navigate,
   ])
 
   const openedProjectId = openedProject?.id ?? null
+
+  React.useEffect(() => {
+    const routeKey = `${location.pathname}${location.search}`
+    const routeChanged = syncedScreenplayPathRef.current !== routeKey
+    syncedScreenplayPathRef.current = routeKey
+    if (screenplayRoute.kind === 'invalid') {
+      initializedNewRouteRef.current = null
+      navigate('/screenplay', { replace: true })
+      return
+    }
+    if (screenplayRoute.kind === 'projects') {
+      initializedNewRouteRef.current = null
+      if (routeChanged && (openedProject || stage !== 'source')) resetToSource()
+      return
+    }
+    if (screenplayRoute.kind === 'new') {
+      if (initializedNewRouteRef.current === routeKey) return
+      if (openedProject || stage !== 'source') {
+        resetToSource()
+        return
+      }
+      if (screenplayRoute.bookId) {
+        const book = books.find((item) => item.id === screenplayRoute.bookId)
+        if (book) startFromBook(book)
+      } else {
+        startOriginal()
+      }
+      return
+    }
+    initializedNewRouteRef.current = null
+    if (projectsLoading) return
+    if (openedProject?.id === screenplayRoute.projectId) {
+      if (stage !== 'project') setStage('project')
+      return
+    }
+    const project = projects.find((item) => item.id === screenplayRoute.projectId)
+    if (!project) {
+      navigate('/screenplay', { replace: true })
+      return
+    }
+    void openProject(project)
+  }, [
+    books,
+    location.pathname,
+    location.search,
+    navigate,
+    openProject,
+    openedProject,
+    projects,
+    projectsLoading,
+    resetToSource,
+    screenplayRoute,
+    startFromBook,
+    startOriginal,
+    stage,
+  ])
 
   React.useEffect(() => {
     if (openedProjectId == null || agentSessionId == null) return undefined
@@ -2768,7 +2858,7 @@ export default function ScreenplayAgentPage({
   ])
 
   const stageLabel = stage === 'source'
-    ? '选择起点'
+    ? screenplayRoute.kind === 'new' ? '新建剧本' : '剧本项目'
     : stage === 'brief'
       ? '创作简报'
       : stage === 'handoff'
@@ -3172,7 +3262,7 @@ export default function ScreenplayAgentPage({
         )}
         left={(
           <>
-            {stage === 'source' ? (
+            {stage === 'source' && screenplayRoute.kind !== 'new' ? (
               <PurrTooltip title="返回首页">
                 <PurrButton
                   type="text"
@@ -3218,8 +3308,10 @@ export default function ScreenplayAgentPage({
         {stage === 'source' && (
           <div className="screenplay-entry">
             <header className="screenplay-entry-header">
-              <h1>开始创作</h1>
-              <p>选择一个起点，或继续已有项目。</p>
+              <h1>{screenplayRoute.kind === 'new' ? '新建剧本' : '开始创作'}</h1>
+              <p>{screenplayRoute.kind === 'new'
+                ? '选择原创故事，或从书架作品开始改编。'
+                : '选择一个起点，或继续已有项目。'}</p>
             </header>
 
             <section className="screenplay-entry-section" aria-labelledby="screenplay-create-title">
@@ -3320,7 +3412,7 @@ export default function ScreenplayAgentPage({
               </div>
             </section>
 
-            {(projectsLoading || projects.length > 0) && (
+            {screenplayRoute.kind !== 'new' && (projectsLoading || projects.length > 0) && (
               <section className="screenplay-recent-projects" aria-labelledby="screenplay-recent-title">
                 <div className="screenplay-recent-projects__header">
                   <h2 id="screenplay-recent-title">我的项目</h2>

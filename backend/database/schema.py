@@ -21,6 +21,327 @@ async def _try_exec(db: DatabaseConnection, sql: str) -> None:
         pass
 
 
+async def _table_columns(
+    db: DatabaseConnection,
+    table: str,
+) -> set[str]:
+    return {
+        str(row["name"])
+        for row in await db.fetch_all(f"PRAGMA table_info({table})")
+    }
+
+
+async def _table_exists(db: DatabaseConnection, table: str) -> bool:
+    row = await db.fetch_one(
+        "SELECT 1 AS present FROM sqlite_master "
+        "WHERE type = 'table' AND name = ?",
+        [table],
+    )
+    return row is not None
+
+
+async def _migrate_legacy_agent_artifacts(db: DatabaseConnection) -> None:
+    columns = await _table_columns(db, "ai_agent_artifacts")
+    if not columns or "owner_ref_kind" in columns:
+        return
+    required = {
+        "run_id",
+        "artifact_scope",
+        "work_item_id",
+        "created_by_run_id",
+    }
+    if not required.issubset(columns):
+        missing = ", ".join(sorted(required - columns))
+        raise RuntimeError(
+            f"legacy Agent artifact schema is missing columns: {missing}"
+        )
+
+    long_task_columns = await _table_columns(db, "ai_agent_long_tasks")
+    has_legacy_task_mapping = "work_item_id" in long_task_columns
+    if not has_legacy_task_mapping:
+        work_item_artifacts = await db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_artifacts "
+            "WHERE artifact_scope = 'work_item'"
+        )
+        if int((work_item_artifacts or {}).get("count") or 0):
+            raise RuntimeError(
+                "legacy Work Item artifacts cannot be mapped to durable tasks"
+            )
+    task_id_lookup = (
+        "(SELECT NULLIF(t.id, '') FROM ai_agent_long_tasks AS t "
+        " WHERE t.work_item_id = a.work_item_id LIMIT 1)"
+        if has_legacy_task_mapping
+        else "NULL"
+    )
+    task_creator_lookup = (
+        "(SELECT NULLIF(t.created_by_run_id, '') "
+        " FROM ai_agent_long_tasks AS t "
+        " WHERE t.work_item_id = a.work_item_id LIMIT 1)"
+        if has_legacy_task_mapping
+        else "NULL"
+    )
+
+    unresolved = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifacts AS a WHERE "
+        "CASE WHEN a.artifact_scope = 'work_item' THEN "
+        f"  {task_id_lookup} "
+        "ELSE COALESCE(NULLIF(a.run_id, ''), NULLIF(a.created_by_run_id, '')) "
+        "END IS NULL OR "
+        "COALESCE(NULLIF(a.created_by_run_id, ''), NULLIF(a.run_id, ''), "
+        f"  {task_creator_lookup}) IS NULL"
+    )
+    if int((unresolved or {}).get("count") or 0):
+        raise RuntimeError(
+            "legacy Agent artifacts contain unresolved owner or creator identities"
+        )
+
+    async with db.transaction():
+        await db.execute("DROP TABLE IF EXISTS ai_agent_artifacts_migrating")
+        await db.execute("""CREATE TABLE ai_agent_artifacts_migrating (
+            id TEXT PRIMARY KEY NOT NULL,
+            namespace TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            owner_ref_kind TEXT NOT NULL,
+            owner_ref_id TEXT NOT NULL,
+            created_by_run_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'open',
+            revision INTEGER NOT NULL DEFAULT 1,
+            next_sequence INTEGER NOT NULL DEFAULT 1,
+            committed_item_count INTEGER NOT NULL DEFAULT 0,
+            expected_item_count INTEGER DEFAULT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            resource_ref TEXT DEFAULT NULL,
+            coverage_digest TEXT DEFAULT NULL,
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute(f"""INSERT INTO ai_agent_artifacts_migrating (
+            id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id,
+            created_by_run_id, schema_version, status, revision, next_sequence,
+            committed_item_count, expected_item_count, metadata_json,
+            resource_ref, coverage_digest, create_time, update_time
+        )
+        SELECT
+            a.id, a.namespace, a.kind, a.owner_id,
+            CASE WHEN a.artifact_scope = 'work_item'
+                 THEN 'durable_task' ELSE 'agent_run' END,
+            CASE WHEN a.artifact_scope = 'work_item' THEN
+                {task_id_lookup}
+            ELSE COALESCE(NULLIF(a.run_id, ''), NULLIF(a.created_by_run_id, ''))
+            END,
+            COALESCE(
+                NULLIF(a.created_by_run_id, ''),
+                NULLIF(a.run_id, ''),
+                {task_creator_lookup}
+            ),
+            a.schema_version, a.status, a.revision, a.next_sequence,
+            a.committed_item_count, a.expected_item_count, a.metadata_json,
+            a.resource_ref, a.coverage_digest, a.create_time, a.update_time
+        FROM ai_agent_artifacts AS a""")
+        await db.execute("DROP TABLE ai_agent_artifacts")
+        await db.execute(
+            "ALTER TABLE ai_agent_artifacts_migrating "
+            "RENAME TO ai_agent_artifacts"
+        )
+
+
+async def _migrate_legacy_long_tasks(db: DatabaseConnection) -> None:
+    columns = await _table_columns(db, "ai_agent_long_tasks")
+    if "work_item_id" not in columns:
+        return
+    has_work_items = await _table_exists(db, "ai_agent_work_items")
+    has_work_item_runs = await _table_exists(db, "ai_agent_work_item_runs")
+    if has_work_items:
+        unmapped = await db.fetch_one(
+            "SELECT COUNT(*) AS count FROM ai_agent_work_items AS w "
+            "LEFT JOIN ai_agent_long_tasks AS t ON t.work_item_id = w.id "
+            "WHERE t.id IS NULL"
+        )
+        if int((unmapped or {}).get("count") or 0):
+            raise RuntimeError(
+                "legacy Agent Work Items contain rows without a durable task"
+            )
+
+    async with db.transaction():
+        if has_work_item_runs:
+            await db.execute("""INSERT OR IGNORE INTO ai_agent_long_task_runs (
+                task_id, run_id, relation, create_time
+            )
+            SELECT t.id, r.run_id, r.relation, r.create_time
+            FROM ai_agent_work_item_runs AS r
+            JOIN ai_agent_long_tasks AS t ON t.work_item_id = r.work_item_id""")
+        await db.execute("""INSERT OR IGNORE INTO ai_agent_long_task_runs (
+            task_id, run_id, relation, create_time
+        )
+        SELECT id, created_by_run_id, 'created', create_time
+        FROM ai_agent_long_tasks""")
+
+        await db.execute("DROP TABLE IF EXISTS ai_agent_long_tasks_migrating")
+        await db.execute("""CREATE TABLE ai_agent_long_tasks_migrating (
+            id TEXT PRIMARY KEY NOT NULL,
+            namespace TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            created_by_run_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            revision INTEGER NOT NULL DEFAULT 1,
+            total_units INTEGER NOT NULL,
+            completed_units INTEGER NOT NULL DEFAULT 0,
+            failed_units INTEGER NOT NULL DEFAULT 0,
+            max_parallelism INTEGER NOT NULL DEFAULT 1,
+            cancel_requested_at_ms INTEGER DEFAULT NULL,
+            usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute("""INSERT INTO ai_agent_long_tasks_migrating (
+            id, namespace, kind, owner_id, created_by_run_id, status, revision,
+            total_units, completed_units, failed_units, max_parallelism,
+            cancel_requested_at_ms, usage_json, metadata_json,
+            create_time, update_time
+        )
+        SELECT id, namespace, kind, owner_id, created_by_run_id, status, revision,
+            total_units, completed_units, failed_units, max_parallelism,
+            cancel_requested_at_ms, usage_json, metadata_json,
+            create_time, update_time
+        FROM ai_agent_long_tasks""")
+        await db.execute("DROP TABLE ai_agent_long_tasks")
+        await db.execute(
+            "ALTER TABLE ai_agent_long_tasks_migrating "
+            "RENAME TO ai_agent_long_tasks"
+        )
+        if has_work_item_runs:
+            await db.execute("DROP TABLE ai_agent_work_item_runs")
+        if has_work_items:
+            await db.execute("DROP TABLE ai_agent_work_items")
+
+
+async def _migrate_legacy_artifact_claims(db: DatabaseConnection) -> None:
+    columns = await _table_columns(db, "ai_agent_artifact_claims")
+    if "work_item_id" not in columns:
+        return
+    async with db.transaction():
+        await db.execute("DROP TABLE IF EXISTS ai_agent_artifact_claims_migrating")
+        await db.execute("""CREATE TABLE ai_agent_artifact_claims_migrating (
+            artifact_id TEXT PRIMARY KEY NOT NULL,
+            run_id TEXT NOT NULL,
+            claim_token TEXT NOT NULL,
+            acquired_revision INTEGER NOT NULL,
+            expires_at_ms INTEGER NOT NULL,
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute("""INSERT INTO ai_agent_artifact_claims_migrating (
+            artifact_id, run_id, claim_token, acquired_revision, expires_at_ms,
+            create_time, update_time
+        )
+        SELECT artifact_id, run_id, claim_token, acquired_revision, expires_at_ms,
+            create_time, update_time
+        FROM ai_agent_artifact_claims""")
+        await db.execute("DROP TABLE ai_agent_artifact_claims")
+        await db.execute(
+            "ALTER TABLE ai_agent_artifact_claims_migrating "
+            "RENAME TO ai_agent_artifact_claims"
+        )
+
+
+async def _migrate_legacy_delegations(db: DatabaseConnection) -> None:
+    columns = await _table_columns(db, "ai_agent_delegations")
+    if not columns:
+        return
+    if "run_id" in columns:
+        if "agent_role" not in columns:
+            return
+        async with db.transaction():
+            await db.execute(
+                "UPDATE ai_agent_delegations SET agent_name = agent_role "
+                "WHERE TRIM(agent_name) = '' AND TRIM(agent_role) <> ''"
+            )
+            await db.execute(
+                "UPDATE ai_agent_delegations SET agent_title = agent_name "
+                "WHERE TRIM(agent_title) = ''"
+            )
+            await db.execute(
+                "UPDATE ai_agent_delegations SET agent_instruction = "
+                "'Execute the delegated objective.' "
+                "WHERE TRIM(agent_instruction) = ''"
+            )
+            await db.execute(
+                "ALTER TABLE ai_agent_delegations DROP COLUMN agent_role"
+            )
+        return
+    required = {"parent_run_id", "root_run_id", "child_run_id", "agent_role"}
+    if not required.issubset(columns):
+        missing = ", ".join(sorted(required - columns))
+        raise RuntimeError(
+            f"legacy Agent delegation schema is missing columns: {missing}"
+        )
+    unresolved = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_delegations "
+        "WHERE TRIM(parent_run_id) = '' OR TRIM(agent_role) = ''"
+    )
+    if int((unresolved or {}).get("count") or 0):
+        raise RuntimeError(
+            "legacy Agent delegations contain unresolved Run or Agent identities"
+        )
+
+    async with db.transaction():
+        await db.execute("DROP TABLE IF EXISTS ai_agent_delegations_migrating")
+        await db.execute("""CREATE TABLE ai_agent_delegations_migrating (
+            id TEXT PRIMARY KEY NOT NULL,
+            run_id TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            agent_title TEXT NOT NULL,
+            agent_instruction TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            input_json TEXT NOT NULL DEFAULT '{}',
+            context_mode TEXT NOT NULL DEFAULT 'isolated',
+            status TEXT NOT NULL DEFAULT 'queued',
+            required INTEGER NOT NULL DEFAULT 1,
+            priority INTEGER NOT NULL DEFAULT 0,
+            result_summary TEXT DEFAULT NULL,
+            error TEXT DEFAULT NULL,
+            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
+        await db.execute("""INSERT INTO ai_agent_delegations_migrating (
+            id, run_id, batch_id, agent_name, agent_title, agent_instruction,
+            objective, input_json, context_mode, status, required, priority,
+            result_summary, error, create_time, update_time
+        )
+        SELECT
+            id,
+            parent_run_id,
+            'legacy-delegation:' || id,
+            agent_role,
+            agent_role,
+            'Execute the delegated objective.',
+            objective,
+            json_set(
+                CASE WHEN json_valid(input_json) THEN input_json ELSE '{}' END,
+                '$._legacyChildRunId', child_run_id,
+                '$._legacyRootRunId', root_run_id
+            ),
+            'isolated',
+            status,
+            required,
+            priority,
+            result_summary,
+            error,
+            create_time,
+            update_time
+        FROM ai_agent_delegations""")
+        await db.execute("DROP TABLE ai_agent_delegations")
+        await db.execute(
+            "ALTER TABLE ai_agent_delegations_migrating "
+            "RENAME TO ai_agent_delegations"
+        )
+
+
 async def _drop_agent_run_lineage_columns(db: DatabaseConnection) -> None:
     columns = {
         str(row["name"])
@@ -833,6 +1154,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (task_id, run_id)
     )""")
+    # Preserve ownership while the legacy Work Item mapping still exists.
+    await _migrate_legacy_agent_artifacts(db)
+    await _migrate_legacy_long_tasks(db)
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_long_task_runs_run
         ON ai_agent_long_task_runs(run_id, create_time DESC)
@@ -1035,6 +1359,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await _migrate_legacy_artifact_claims(db)
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_artifact_claims_run
         ON ai_agent_artifact_claims(run_id, expires_at_ms)
@@ -1073,47 +1398,11 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await _migrate_legacy_delegations(db)
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_delegations_run_batch_status
         ON ai_agent_delegations(run_id, batch_id, status, priority DESC, create_time)
     """)
-    await _try_exec(
-        db,
-        "ALTER TABLE ai_agent_delegations ADD COLUMN agent_name TEXT NOT NULL "
-        "DEFAULT ''",
-    )
-    await _try_exec(
-        db,
-        "ALTER TABLE ai_agent_delegations ADD COLUMN agent_title TEXT NOT NULL "
-        "DEFAULT ''",
-    )
-    await _try_exec(
-        db,
-        "ALTER TABLE ai_agent_delegations ADD COLUMN agent_instruction TEXT "
-        "NOT NULL DEFAULT ''",
-    )
-    delegation_columns = {
-        str(row["name"])
-        for row in await db.fetch_all("PRAGMA table_info(ai_agent_delegations)")
-    }
-    if "agent_role" in delegation_columns:
-        await db.execute(
-            "UPDATE ai_agent_delegations SET agent_name = agent_role "
-            "WHERE agent_name = ''"
-        )
-    await db.execute(
-        "UPDATE ai_agent_delegations SET agent_title = agent_name "
-        "WHERE agent_title = ''"
-    )
-    await db.execute(
-        "UPDATE ai_agent_delegations SET agent_instruction = "
-        "'Execute the delegated objective.' WHERE agent_instruction = ''"
-    )
-    if "agent_role" in delegation_columns:
-        await _try_exec(
-            db,
-            "ALTER TABLE ai_agent_delegations DROP COLUMN agent_role",
-        )
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
