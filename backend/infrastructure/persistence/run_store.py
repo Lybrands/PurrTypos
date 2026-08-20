@@ -35,51 +35,8 @@ async def create_run(
     execution_owner_id: str | None = None,
     lease_expires_at_ms: int | None = None,
     heartbeat_at_ms: int | None = None,
-    parent_run_id: str | None = None,
-    root_run_id: str | None = None,
-    delegation_id: str | None = None,
-    agent_role: str | None = None,
-    run_depth: int = 0,
 ) -> str:
-    if (
-        str(parent_run_id or "").strip()
-        and not db.current_task_owns_transaction()
-    ):
-        async with db.transaction(cancellation_linearizable=True):
-            return await create_run(
-                db,
-                session_id=session_id,
-                prompt=prompt,
-                mode=mode,
-                provenance=provenance,
-                binding=binding,
-                execution_owner_id=execution_owner_id,
-                lease_expires_at_ms=lease_expires_at_ms,
-                heartbeat_at_ms=heartbeat_at_ms,
-                parent_run_id=parent_run_id,
-                root_run_id=root_run_id,
-                delegation_id=delegation_id,
-                agent_role=agent_role,
-                run_depth=run_depth,
-            )
     run_id = new_run_id()
-    normalized_root_run_id = str(root_run_id or "").strip() or run_id
-    normalized_parent_run_id = str(parent_run_id or "").strip()
-    if normalized_parent_run_id:
-        root = await db.fetch_one(
-            "SELECT status, cancellation_epoch FROM ai_agent_runs WHERE id = ?",
-            [normalized_root_run_id],
-        )
-        if (
-            root is None
-            or str(root.get("status") or "") != "running"
-            or int(root.get("cancellation_epoch") or 0) > 0
-        ):
-            from purra.errors import ContractViolationError
-
-            raise ContractViolationError(
-                "child Run cannot attach after Root cancellation"
-            )
     execution_intent = (
         provenance.execution_intent if provenance is not None else None
     )
@@ -139,11 +96,10 @@ async def create_run(
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
         "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
-        "binding_command_id, binding_attributes_json, parent_run_id, "
-        "root_run_id, delegation_id, "
-        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "binding_command_id, binding_attributes_json, "
+        "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt) "
-        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 run_id,
                 session_id,
@@ -151,11 +107,6 @@ async def create_run(
                 prompt,
                 *provenance_values,
                 *binding_values,
-                normalized_parent_run_id or None,
-                normalized_root_run_id,
-                delegation_id,
-                agent_role,
-                int(run_depth),
                 execution_owner_id,
                 lease_expires_at_ms,
                 heartbeat_at_ms,
@@ -188,10 +139,10 @@ async def upsert_todos(
             await db.execute(
                 "INSERT INTO ai_agent_run_todos "
                 "(run_id, step_id, title, status, executor, step_type, "
-                "risk_level, description, expected_tools, agent_role, "
+                "risk_level, description, expected_tools, "
                 "assignment_json, depends_on_json, result_summary, "
                 "error, protocol_private, planning_capability, sort) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     run_id,
                     str(step.get("id") or f"step-{idx + 1}"),
@@ -202,7 +153,6 @@ async def upsert_todos(
                     step.get("riskLevel"),
                     step.get("description"),
                     json.dumps(step.get("suggestedTools") or [], ensure_ascii=False),
-                    step.get("agentRole"),
                     json.dumps(step.get("assignment") or {}, ensure_ascii=False),
                     json.dumps(step.get("dependsOn") or [], ensure_ascii=False),
                     step.get("resultSummary"),
@@ -269,9 +219,8 @@ async def get_run(
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
         "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
-        "binding_command_id, binding_attributes_json, parent_run_id, "
-        "root_run_id, delegation_id, "
-        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "binding_command_id, binding_attributes_json, "
+        "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "cancellation_epoch, "
         "final_response, create_time, update_time "
@@ -291,9 +240,8 @@ async def get_latest_run_for_session(
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
         "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
-        "binding_command_id, binding_attributes_json, parent_run_id, "
-        "root_run_id, delegation_id, "
-        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "binding_command_id, binding_attributes_json, "
+        "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE session_id = ? "
@@ -314,9 +262,8 @@ async def get_run_for_session_request(
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
         "capability_snapshot_json, "
         "binding_namespace, binding_aggregate_id, "
-        "binding_command_id, binding_attributes_json, parent_run_id, "
-        "root_run_id, delegation_id, "
-        "agent_role, run_depth, execution_owner_id, lease_expires_at_ms, "
+        "binding_command_id, binding_attributes_json, "
+        "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE session_id = ? "
@@ -488,7 +435,6 @@ def _todo_row_to_step(row: dict[str, Any]) -> dict[str, Any]:
         "riskLevel": row.get("risk_level"),
         "description": row.get("description"),
         "suggestedTools": expected_tools,
-        "agentRole": row.get("agent_role"),
         "assignment": assignment,
         "dependsOn": depends_on,
         "resultSummary": row.get("result_summary"),

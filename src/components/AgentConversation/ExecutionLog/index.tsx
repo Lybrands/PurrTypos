@@ -122,7 +122,6 @@ export default function ExecutionLog({
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
           ) : null}
-          {active ? <span className="a-blink-dots">...</span> : null}
         </button>
       ) : (
         <div className="work-log__toggle work-log__toggle--static">
@@ -130,7 +129,6 @@ export default function ExecutionLog({
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
           ) : null}
-          {active ? <span className="a-blink-dots">...</span> : null}
         </div>
       )}
       {hasDetails ? (

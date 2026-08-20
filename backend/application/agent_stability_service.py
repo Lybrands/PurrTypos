@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Protocol
 
-from purra.evaluation import (
+from purra.observability import (
     DEFAULT_STABILITY_TREND_POLICY,
     StabilityRegressionGatePolicy,
     StabilityTrendPolicy,

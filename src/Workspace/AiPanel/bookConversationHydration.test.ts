@@ -65,7 +65,6 @@ function snapshot(
       sessionId: 7,
       conversationId: Number(runId.split('-').at(-1)) || null,
       status,
-      lineage: { rootRunId: runId, depth: 0 },
       finalResponse,
       createdAt: '2026-08-12T08:00:00+00:00',
       updatedAt: '2026-08-12T08:00:06+00:00',

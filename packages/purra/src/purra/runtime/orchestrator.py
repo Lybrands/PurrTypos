@@ -9,9 +9,7 @@ domain concepts and concrete tool handlers stay behind ports.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import replace
-from hashlib import sha256
 from time import perf_counter
 from typing import Any, AsyncIterator, Mapping, Sequence
 from uuid import uuid4
@@ -22,6 +20,7 @@ from purra.cancellation import (
     is_canceled as _is_canceled,
 )
 from purra.context_budget import (
+    context_budget_contract_error as _context_budget_contract_error,
     estimate_agent_messages_tokens,
     estimate_tool_schema_tokens,
     trim_agent_messages_by_turn,
@@ -43,7 +42,6 @@ from purra.contracts import (
     ModelTokenUsage,
     ReasoningMode,
     ResponseConstraints,
-    ResponseValidationResult,
     RuntimeLimits,
     RuntimeOutcome,
     RunId,
@@ -54,14 +52,11 @@ from purra.contracts import (
     ToolCallResult,
     ToolChoiceMode,
     ToolContextContract,
-    ToolPlanningDisposition,
     ToolSchema,
     TraceRecord,
 )
 from purra.errors import (
     ModelGatewayError,
-    ResponseJudgeContractError,
-    UnsupportedModelFeatureError,
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.evidence import RunEvidenceStore
@@ -77,29 +72,45 @@ from purra.model_protocol import InvocationOutputLimit, classify_model_terminati
 from purra.output.contracts import ResponseTransactionMode
 from purra.operations import (
     AgentOperationController,
-    OperationDisplay,
-    OperationKind,
     OperationScope,
 )
-from purra.json_values import thaw_json_mapping
-from purra.recovery import EMPTY_RESPONSE_RETRY_GUIDANCE
+from purra.output.response_validation import ResponseValidationCoordinator
+from purra.recovery.guidance import (
+    DECLINED_TOOL_GUIDANCE as _DECLINED_TOOL_GUIDANCE,
+)
 from purra.runtime_context import project_intermediate_tool_context
 from purra.runtime.model_round import (
     ModelRoundAccumulator as _ModelRoundAccumulator,
     PendingProviderAttempt as _PendingProviderAttempt,
+    ProviderFailureDisposition,
+    ProviderFailurePhase,
     build_agent_model_call as _agent_model_call,
+    model_request_fingerprint as _model_request_fingerprint,
     provider_retry_round_capacity,
+    resolve_provider_failure,
+    root_error_type as _root_error_type,
     truncation_trace_details,
 )
 from purra.runtime.response_finalization import (
+    ResponseFinalizationDisposition,
     exact_item_count_repair_guidance as _exact_item_count_repair_guidance,
-    is_textual_tool_call as _is_textual_tool_call,
-    is_unstructured_tool_output as _is_unstructured_tool_output,
-    response_constraint_repair_guidance as _response_constraint_repair_guidance,
+    public_presentation_messages,
+    resolve_response_constraint_recovery,
+    resolve_response_recovery,
     top_level_numbered_items as _top_level_numbered_items,
+)
+from purra.runtime.tool_authorization import (
+    ToolAuthorizationDisposition,
+    resolve_tool_authorization,
+    resolve_tool_protocol,
+)
+from purra.runtime.tool_recovery import (
+    ToolRecoveryDisposition,
+    resolve_tool_recovery,
 )
 from purra.runtime.tool_round import (
     close_async_iterator as _close_async_iterator,
+    continuation_messages as _continuation_messages,
     extend_progress_round_budget as _extend_progress_round_budget,
     results_match_calls as _results_match_calls,
     stream_tool_batch as _stream_tool_batch,
@@ -109,14 +120,8 @@ from purra.runtime.tool_round import (
 )
 from purra.timing import duration_ms as _duration_ms
 from purra.recovery import (
-    RecoveryAction,
-    RecoveryCause,
-    RecoveryDecision,
-    RecoveryEffectState,
     RecoveryLedger,
     RecoveryPolicy,
-    RecoveryReason,
-    RecoveryRequest,
 )
 from purra.ports import (
     CancellationSignal,
@@ -132,82 +137,6 @@ from purra.ports import (
 
 
 RuntimeUpdate = AgentEvent | AgentRuntimeResult
-
-
-_DECLINED_TOOL_GUIDANCE = (
-    "The preceding tool result is authoritative: the user rejected the "
-    "approval, so the operation was not executed and must not be retried in "
-    "this run. Respond in the user's language with a plain-language summary "
-    "of that outcome. Do not call or imitate a tool, and do not emit tool-call "
-    "markup as text."
-)
-_TEXTUAL_TOOL_CALL_RETRY_GUIDANCE = (
-    "Your preceding response imitated a tool call using plain-text markup. "
-    "That text was not executable and was not shown to the user. The rejected "
-    "approval remains authoritative and the operation was not executed. Give "
-    "one concise plain-language response in the user's language. Do not call, "
-    "retry, or imitate any tool."
-)
-_FAILED_TOOL_OUTPUT_RETRY_GUIDANCE = (
-    "The preceding recovery response imitated a tool call or dumped tool "
-    "arguments as plain text. It was withheld because plain text cannot "
-    "execute the failed tool. Give one concise plain-language summary in the "
-    "user's language. State that the tool did not complete and do not emit, "
-    "retry, or imitate a tool call or its JSON arguments."
-)
-_MISSING_REQUIRED_TOOL_CALL_RETRY_GUIDANCE = (
-    "The preceding model round did not return the structured tool call required "
-    "by the current approved plan step. That text was discarded and no tool was "
-    "executed. Retry this step now by returning exactly one valid structured call "
-    "to one of the tools currently exposed by the host. Do not describe, imitate, "
-    "or wrap the call in ordinary text."
-)
-_MISSING_REQUIRED_TOOL_CALL_REPLAN_GUIDANCE = (
-    "The model still omitted the required structured tool call after one retry. "
-    "Treat the current tool step as failed and revise the remaining plan from "
-    "the evidence already collected. Do not claim that the omitted tool ran, "
-    "invent its result, or repeat an equivalent completed read step."
-)
-_UNAUTHORIZED_TOOL_REPLAN_GUIDANCE = (
-    "The current plan step could not be completed because the model repeatedly "
-    "selected a tool outside the host-authorized set. Replan this unexecuted "
-    "step without weakening tool authorization."
-)
-_TOOL_INPUT_RETRY_GUIDANCE = (
-    "The preceding tool call was rejected because its input did not satisfy "
-    "the tool contract. The tool did not complete and produced no successful "
-    "evidence. Correct the arguments from the structured error result and retry "
-    "the same currently exposed tool exactly once. Return a real structured "
-    "tool call, not a textual imitation, and do not invent a successful result."
-)
-_MALFORMED_TOOL_CALL_RETRY_GUIDANCE = (
-    "The preceding structured tool-call envelope was malformed and was rejected "
-    "before any tool handler ran. Retry the current step exactly once using the "
-    "provider's native structured tool-call protocol. Include one stable call id, "
-    "one currently exposed tool name, and one complete JSON object for arguments. "
-    "Do not emit XML-like tool markup or an argument dump as ordinary text."
-)
-_FINAL_PUBLIC_PRESENTATION_GUIDANCE = (
-    "The preceding assistant content came from a private tool-capable model "
-    "round and was not shown to the user. Return the final user-facing answer "
-    "now in this tool-free response. Preserve supported facts, do not mention "
-    "this handoff, and do not imitate or request a tool call."
-)
-_RECOVERABLE_TOOL_INPUT_ERROR_CODES = frozenset({
-    "duplicate_tool_call_id",
-    "invalid_tool_arguments_json",
-    "invalid_tool_arguments_schema",
-    "invalid_tool_arguments_shape",
-    "invalid_tool_arguments_type",
-    "invalid_tool_arguments_value",
-    "invalid_tool_call_id",
-    "invalid_tool_name",
-    "too_many_tool_calls",
-    "tool_arguments_too_large",
-    # Compatibility for gateways that already normalize preflight failures.
-    # They must explicitly report NOT_STARTED before policy permits recovery.
-    "tool_input_invalid",
-})
 class AgentRuntime:
     def __init__(
         self,
@@ -232,7 +161,9 @@ class AgentRuntime:
         self._context_compressor = context_compressor
         self._limits = limits
         self._recovery_policy = recovery_policy
-        self._operations = operation_controller
+        self._response_validation = ResponseValidationCoordinator(
+            operation_controller
+        )
 
     async def run(
         self,
@@ -310,14 +241,6 @@ class AgentRuntime:
                 "recorded",
                 details={
                     "receiptCount": len(context_receipts),
-                    "storyReceiptCount": sum(
-                        receipt.source == "story_state"
-                        for receipt in context_receipts
-                    ),
-                    "semanticReceiptCount": sum(
-                        receipt.source == "semantic"
-                        for receipt in context_receipts
-                    ),
                 },
             )
         context_contracts = dict(tool_context_contracts or {})
@@ -781,229 +704,47 @@ class AgentRuntime:
                         "parameters": invocation_parameters,
                     },
                 )
-            except OperationCanceled:
-                await self._trace(
-                    "model_round",
-                    "canceled",
-                    details={
-                        "round": round_number,
-                        "attempt": provider_attempt.attempt,
-                        "logicalRound": provider_attempt.logical_round,
-                        "receivedChunkCount": 0,
-                        "emittedDeltaCount": 0,
-                        "retryScheduled": False,
-                        "providerAttemptTerminal": True,
-                        "batchExecuted": False,
-                    },
-                    duration_ms=_duration_ms(model_started),
-                )
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.CANCELED,
-                    used_model,
-                    round_number,
-                    error_code="request_canceled",
-                )
-                return
-            except UnsupportedModelFeatureError as error:
-                if _is_canceled(signal):
-                    await self._trace(
-                        "model_round",
-                        "canceled",
-                        details={
-                            "round": round_number,
-                            "attempt": provider_attempt.attempt,
-                            "logicalRound": provider_attempt.logical_round,
-                            "receivedChunkCount": 0,
-                            "emittedDeltaCount": 0,
-                            "retryScheduled": False,
-                            "providerAttemptTerminal": True,
-                            "batchExecuted": False,
-                        },
-                        duration_ms=_duration_ms(model_started),
-                    )
-                    yield _runtime_result(
-                        run_id,
-                        RuntimeOutcome.CANCELED,
-                        used_model,
-                        round_number,
-                        error_code="request_canceled",
-                    )
-                    return
-                fallback_decision: RecoveryDecision | None = None
-                if invocation.tool_choice is ToolChoiceMode.REQUIRED:
-                    fallback_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=(
-                                RecoveryCause.PROVIDER_REQUIRED_TOOL_CHOICE_UNSUPPORTED
-                            ),
-                            action=RecoveryAction.FALLBACK_PROVIDER_MODE,
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            cancellation_requested=_is_canceled(signal),
-                        ),
-                        round_number=round_number,
-                    )
-                can_fallback = bool(
-                    fallback_decision is not None
-                    and fallback_decision.allowed
-                )
-                if invocation.tool_choice is ToolChoiceMode.REQUIRED:
-                    provider_required_tool_choice_enabled = False
-                await self._trace(
-                    "model_round",
-                    "unsupported_model_feature",
-                    details={
-                        "round": round_number,
-                        "attempt": provider_attempt.attempt,
-                        "logicalRound": provider_attempt.logical_round,
-                        "receivedChunkCount": 0,
-                        "emittedDeltaCount": 0,
-                        "retryScheduled": can_fallback,
-                        "providerAttemptTerminal": True,
-                        "batchExecuted": False,
-                        "errorType": _root_error_type(error),
-                        "errorChainTypes": _error_chain_types(error),
-                    },
-                    duration_ms=_duration_ms(model_started),
-                )
-                if can_fallback:
-                    round_limit += 1
-                    fallback_invocation = ModelInvocation(
-                        request=invocation.request,
-                        tools=invocation.tools,
-                        tool_choice=ToolChoiceMode.AUTO,
-                        output_limit=invocation.output_limit,
-                        reasoning_mode=invocation.reasoning_mode,
-                    )
-                    pending_provider_attempt = _PendingProviderAttempt(
-                        messages=round_messages,
-                        invocation=fallback_invocation,
-                        allowed_names=allowed_names,
-                        future_names=future_names,
-                        require_tool=require_tool,
-                        buffer_model_content=buffer_model_content,
-                        logical_round=provider_attempt.logical_round,
-                        attempt=provider_attempt.attempt + 1,
-                    )
-                    await self._trace(
-                        "tool_choice",
-                        "provider_fallback_auto",
-                        details={
-                            "round": round_number,
-                            "attempt": provider_attempt.attempt,
-                            "logicalRound": provider_attempt.logical_round,
-                            "retryScheduled": True,
-                            "batchExecuted": False,
-                        },
-                    )
-                    continue
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code=error.code,
-                )
-                return
             except Exception as error:
-                if _is_canceled(signal):
-                    await self._trace(
-                        "model_round",
-                        "canceled",
-                        details={
-                            "round": round_number,
-                            "attempt": provider_attempt.attempt,
-                            "logicalRound": provider_attempt.logical_round,
-                            "receivedChunkCount": 0,
-                            "emittedDeltaCount": 0,
-                            "retryScheduled": False,
-                            "providerAttemptTerminal": True,
-                            "batchExecuted": False,
-                        },
-                        duration_ms=_duration_ms(model_started),
-                    )
-                    yield _runtime_result(
-                        run_id,
-                        RuntimeOutcome.CANCELED,
-                        used_model,
-                        round_number,
-                        error_code="request_canceled",
-                    )
-                    return
-                error_code = (
-                    error.code
-                    if isinstance(error, ModelGatewayError)
-                    else "model_gateway_error"
-                )
-                retry_scheduled = False
-                if _is_retryable_stream_interruption(error):
-                    retry_scheduled = (
-                        await self._decide_recovery(
-                            recovery_ledger,
-                            RecoveryRequest(
-                                cause=RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
-                                action=RecoveryAction.RETRY_MODEL,
-                                remaining_model_rounds=remaining_model_rounds(
-                                    round_number
-                                ),
-                                cancellation_requested=_is_canceled(signal),
-                            ),
-                            round_number=round_number,
-                        )
-                    ).allowed
-                interrupted = error_code == "upstream_stream_interrupted"
-                await self._trace(
-                    "stream" if interrupted else "model_round",
-                    (
-                        (
-                            "interrupted_retry"
-                            if retry_scheduled
-                            else "interrupted"
-                        )
-                        if interrupted
-                        else "exception"
-                    ),
-                    details={
-                        "round": round_number,
-                        "attempt": provider_attempt.attempt,
-                        "logicalRound": provider_attempt.logical_round,
-                        "receivedChunkCount": 0,
-                        "emittedDeltaCount": 0,
-                        "retryScheduled": retry_scheduled,
-                        "providerAttemptTerminal": True,
-                        "batchExecuted": False,
-                        "errorType": _root_error_type(error),
-                        "errorChainTypes": _error_chain_types(error),
-                    },
+                provider_failure = resolve_provider_failure(
+                    error,
+                    phase=ProviderFailurePhase.OPENING,
+                    attempt=provider_attempt,
+                    recovery_ledger=recovery_ledger,
+                    remaining_model_rounds=remaining_model_rounds(round_number),
+                    round_number=round_number,
+                    cancellation_requested=_is_canceled(signal),
+                    received_chunk_count=0,
+                    emitted_delta_count=0,
                     duration_ms=_duration_ms(model_started),
                 )
-                if retry_scheduled:
-                    round_limit += 1
-                    pending_provider_attempt = _PendingProviderAttempt(
-                        messages=round_messages,
-                        invocation=invocation,
-                        allowed_names=allowed_names,
-                        future_names=future_names,
-                        require_tool=require_tool,
-                        buffer_model_content=buffer_model_content,
-                        logical_round=provider_attempt.logical_round,
-                        attempt=provider_attempt.attempt + 1,
+                for trace in provider_failure.traces:
+                    await self._trace(
+                        trace.stage,
+                        trace.outcome,
+                        details=dict(trace.details),
+                        duration_ms=trace.duration_ms,
                     )
+                if provider_failure.disable_required_tool_choice:
+                    provider_required_tool_choice_enabled = False
+                if provider_failure.next_attempt is not None:
+                    round_limit += 1
+                    pending_provider_attempt = provider_failure.next_attempt
                     continue
                 yield _runtime_result(
                     run_id,
-                    RuntimeOutcome.FAILED,
+                    (
+                        RuntimeOutcome.CANCELED
+                        if provider_failure.disposition
+                        is ProviderFailureDisposition.CANCEL
+                        else RuntimeOutcome.FAILED
+                    ),
                     used_model,
                     round_number,
-                    error_code=error_code,
+                    error_code=provider_failure.error_code,
                 )
                 return
 
             used_model = stream.receipt.model or used_model
-            stream_canceled = False
             stream_error: Exception | None = None
             chunks = stream.chunks
             try:
@@ -1028,116 +769,60 @@ class AgentRuntime:
                         emitted_delta_count += 1
                     if chunk.finish_reason is not None:
                         break
-            except OperationCanceled:
-                stream_canceled = True
             except Exception as error:
                 stream_error = error
             finally:
                 await _close_async_iterator(chunks)
 
-            if stream_canceled or (
-                accumulator.finish_reason is None and _is_canceled(signal)
-            ):
-                await self._trace(
-                    "stream",
-                    "canceled",
-                    details={
-                        "round": round_number,
-                        "attempt": provider_attempt.attempt,
-                        "logicalRound": provider_attempt.logical_round,
-                        "receivedChunkCount": received_chunk_count,
-                        "emittedDeltaCount": emitted_delta_count,
-                        "retryScheduled": False,
-                        "providerAttemptTerminal": True,
-                        "batchExecuted": False,
-                    },
-                    duration_ms=_duration_ms(model_started),
-                )
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.CANCELED,
-                    used_model,
-                    round_number,
-                    error_code="request_canceled",
-                )
-                return
             if stream_error is None and accumulator.finish_reason is None:
-                stream_error = ModelGatewayError(
-                    "model stream ended without a finish reason",
-                    code="upstream_stream_interrupted",
-                    retryable=True,
+                stream_error = (
+                    OperationCanceled("agent run was canceled")
+                    if _is_canceled(signal)
+                    else ModelGatewayError(
+                        "model stream ended without a finish reason",
+                        code="upstream_stream_interrupted",
+                        retryable=True,
+                    )
                 )
             if stream_error is not None:
-                error_code = (
-                    stream_error.code
-                    if isinstance(stream_error, ModelGatewayError)
-                    else "model_stream_error"
-                )
-                retry_scheduled = False
-                if _is_retryable_stream_interruption(stream_error):
-                    retry_scheduled = (
-                        await self._decide_recovery(
-                            recovery_ledger,
-                            RecoveryRequest(
-                                cause=RecoveryCause.PROVIDER_STREAM_INTERRUPTED,
-                                action=RecoveryAction.RETRY_MODEL,
-                                remaining_model_rounds=remaining_model_rounds(
-                                    round_number
-                                ),
-                                retryable=(
-                                    accumulator.finish_reason is None
-                                ),
-                                cancellation_requested=_is_canceled(signal),
-                                visible_output_emitted=direct_content_released,
-                            ),
-                            round_number=round_number,
-                        )
-                    ).allowed
-                interrupted = error_code == "upstream_stream_interrupted"
-                await self._trace(
-                    "stream" if interrupted else "model_round",
-                    (
-                        (
-                            "interrupted_retry"
-                            if retry_scheduled
-                            else "interrupted"
-                        )
-                        if interrupted
-                        else "stream_exception"
+                provider_failure = resolve_provider_failure(
+                    stream_error,
+                    phase=ProviderFailurePhase.STREAMING,
+                    attempt=provider_attempt,
+                    recovery_ledger=recovery_ledger,
+                    remaining_model_rounds=remaining_model_rounds(round_number),
+                    round_number=round_number,
+                    cancellation_requested=_is_canceled(signal),
+                    received_chunk_count=received_chunk_count,
+                    emitted_delta_count=emitted_delta_count,
+                    visible_output_emitted=direct_content_released,
+                    provider_finish_observed=(
+                        accumulator.finish_reason is not None
                     ),
-                    details={
-                        "round": round_number,
-                        "attempt": provider_attempt.attempt,
-                        "logicalRound": provider_attempt.logical_round,
-                        "receivedChunkCount": received_chunk_count,
-                        "emittedDeltaCount": emitted_delta_count,
-                        "retryScheduled": retry_scheduled,
-                        "providerAttemptTerminal": True,
-                        "batchExecuted": False,
-                        "errorType": _root_error_type(stream_error),
-                        "errorChainTypes": _error_chain_types(stream_error),
-                    },
                     duration_ms=_duration_ms(model_started),
                 )
-                if retry_scheduled:
-                    round_limit += 1
-                    pending_provider_attempt = _PendingProviderAttempt(
-                        messages=round_messages,
-                        invocation=invocation,
-                        allowed_names=allowed_names,
-                        future_names=future_names,
-                        require_tool=require_tool,
-                        buffer_model_content=buffer_model_content,
-                        logical_round=provider_attempt.logical_round,
-                        attempt=provider_attempt.attempt + 1,
+                for trace in provider_failure.traces:
+                    await self._trace(
+                        trace.stage,
+                        trace.outcome,
+                        details=dict(trace.details),
+                        duration_ms=trace.duration_ms,
                     )
+                if provider_failure.next_attempt is not None:
+                    round_limit += 1
+                    pending_provider_attempt = provider_failure.next_attempt
                     continue
                 yield _runtime_result(
                     run_id,
-                    RuntimeOutcome.FAILED,
+                    (
+                        RuntimeOutcome.CANCELED
+                        if provider_failure.disposition
+                        is ProviderFailureDisposition.CANCEL
+                        else RuntimeOutcome.FAILED
+                    ),
                     used_model,
                     round_number,
-                    error_code=error_code,
+                    error_code=provider_failure.error_code,
                 )
                 return
 
@@ -1285,372 +970,86 @@ class AgentRuntime:
                 )
                 return
 
-            if malformed_call_error is not None:
-                malformed_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.MALFORMED_TOOL_CALL_BATCH,
-                        action=RecoveryAction.RETRY_MODEL,
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        cancellation_requested=_is_canceled(signal),
-                        visible_output_emitted=direct_content_released,
-                    ),
-                    round_number=round_number,
-                    details={"protocolReason": malformed_call_error},
-                )
-                await self._trace(
-                    "tool_authorization",
-                    (
-                        "malformed_batch_retry"
-                        if malformed_decision.allowed
-                        else "malformed_batch"
-                    ),
-                    details={
-                        "round": round_number,
-                        "callCount": accumulator.tool_call_count,
-                        "reason": malformed_call_error,
-                        "retryScheduled": malformed_decision.allowed,
-                    },
-                )
-                if malformed_decision.allowed:
-                    messages.append(AgentMessage(
-                        role=MessageRole.DEVELOPER,
-                        content=_MALFORMED_TOOL_CALL_RETRY_GUIDANCE,
-                    ))
-                    continue
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code="malformed_tool_call_batch",
-                )
-                return
-
             tool_finish = termination.authorizes_tool_calls
-            if require_tool and not calls:
-                retry_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.MISSING_REQUIRED_TOOL_CALL,
-                        action=RecoveryAction.RETRY_MODEL,
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        minimum_remaining_rounds=2,
-                        cancellation_requested=_is_canceled(signal),
-                        visible_output_emitted=direct_content_released,
-                    ),
-                    round_number=round_number,
-                )
-                can_retry = retry_decision.allowed
-                replan_decision: RecoveryDecision | None = None
-                if not can_retry and planning_hook is not None:
-                    replan_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=(
-                                RecoveryCause.MISSING_REQUIRED_TOOL_CALL_REPLAN
-                            ),
-                            action=RecoveryAction.REPLAN,
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            cancellation_requested=_is_canceled(signal),
-                            visible_output_emitted=direct_content_released,
-                        ),
-                        round_number=round_number,
+            protocol = resolve_tool_protocol(
+                calls,
+                tool_call_count=accumulator.tool_call_count,
+                malformed_call_error=malformed_call_error,
+                tool_finish=tool_finish,
+                require_tool=require_tool,
+                planning_available=planning_hook is not None,
+                declined_response_pending=declined_response_pending,
+                response_repair_pending=response_repair_pending,
+                public_presentation_pending=public_presentation_pending,
+                recovery_ledger=recovery_ledger,
+                remaining_model_rounds=remaining_model_rounds(round_number),
+                round_number=round_number,
+                cancellation_requested=_is_canceled(signal),
+                visible_output_emitted=direct_content_released,
+            )
+            if protocol is not None:
+                for trace in protocol.traces:
+                    await self._trace(
+                        trace.stage,
+                        trace.outcome,
+                        details=dict(trace.details),
                     )
-                can_replan = bool(
-                    replan_decision is not None and replan_decision.allowed
-                )
-                await self._trace(
-                    "tool_round",
-                    (
-                        "missing_required_call_retry"
-                        if can_retry
-                        else (
-                            "missing_required_call_replan"
-                            if can_replan
-                            else "missing_required_call"
-                        )
-                    ),
-                    details={
-                        "round": round_number,
-                        "retryUsed": (
-                            retry_decision.attempt > 1
-                            or (
-                                not retry_decision.allowed
-                                and retry_decision.attempt > 0
-                            )
-                        ),
-                        "retryAttempt": (
-                            retry_decision.attempt if can_retry else 0
-                        ),
-                        "replanUsed": bool(
-                            replan_decision is not None
-                            and (
-                                replan_decision.attempt > 1
-                                or (
-                                    not replan_decision.allowed
-                                    and replan_decision.attempt > 0
-                                )
-                            )
-                        ),
-                        "replanScheduled": can_replan,
-                        "roundsRemaining": remaining_model_rounds(
-                            round_number
-                        ),
-                        "batchExecuted": False,
-                    },
-                )
-                if can_retry:
-                    messages.append(AgentMessage(
-                        role=MessageRole.DEVELOPER,
-                        content=_MISSING_REQUIRED_TOOL_CALL_RETRY_GUIDANCE,
-                    ))
+                if (
+                    protocol.disposition
+                    is ToolAuthorizationDisposition.RETRY_MODEL
+                ):
+                    messages.extend(protocol.messages)
                     continue
-                if can_replan:
+                if protocol.disposition is ToolAuthorizationDisposition.REPLAN:
                     last_tool_outcome = ToolBatchOutcome.FAILED
-                    pending_recovery_error_code = "missing_required_tool_call"
-                    failed_tool_recovery_error_code = (
-                        "missing_required_tool_call"
-                    )
+                    pending_recovery_error_code = protocol.error_code
+                    failed_tool_recovery_error_code = protocol.error_code
                     dynamic_replan_pending = True
-                    messages.append(AgentMessage(
-                        role=MessageRole.DEVELOPER,
-                        content=_MISSING_REQUIRED_TOOL_CALL_REPLAN_GUIDANCE,
-                    ))
+                    messages.extend(protocol.messages)
                     continue
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code="missing_required_tool_call",
-                )
-                return
-
-            if calls and not tool_finish:
-                await self._trace(
-                    "tool_authorization",
-                    "malformed_batch",
-                    details={
-                        "round": round_number,
-                        "callCount": len(calls),
-                        "reason": "tool_calls_without_supported_finish_reason",
-                    },
-                )
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code="malformed_tool_call_batch",
-                )
-                return
-
-            if declined_response_pending and calls:
-                await self._trace(
-                    "tool_authorization",
-                    "rejected_after_approval_decline",
-                    details={
-                        "round": round_number,
-                        "requestedTools": sorted(call.name for call in calls),
-                        "callCount": len(calls),
-                    },
-                )
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code="tool_call_after_approval_rejection",
-                )
-                return
-
-            if response_repair_pending and calls:
-                await self._trace(
-                    "tool_authorization",
-                    "rejected_during_response_repair",
-                    details={
-                        "round": round_number,
-                        "requestedTools": sorted(call.name for call in calls),
-                        "callCount": len(calls),
-                    },
-                )
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code="tool_call_during_response_repair",
-                )
-                return
+                if protocol.disposition is ToolAuthorizationDisposition.REJECT:
+                    yield _runtime_result(
+                        run_id,
+                        RuntimeOutcome.FAILED,
+                        used_model,
+                        round_number,
+                        error_code=protocol.error_code,
+                    )
+                    return
 
             if not tool_finish or not calls:
-                if (
-                    declined_response_pending
-                    and _is_textual_tool_call(accumulator.content)
-                ):
-                    textual_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=RecoveryCause.UNSTRUCTURED_TOOL_PROTOCOL,
-                            action=RecoveryAction.RETRY_MODEL,
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            cancellation_requested=_is_canceled(signal),
-                            visible_output_emitted=direct_content_released,
-                        ),
-                        round_number=round_number,
-                    )
-                    can_retry = textual_decision.allowed
-                    await self._trace(
-                        "model_output",
-                        (
-                            "textual_tool_call_retry"
-                            if can_retry
-                            else "textual_tool_call_rejected"
-                        ),
-                        details={
-                            "round": round_number,
-                            "retryUsed": (
-                                textual_decision.attempt > 1
-                                or textual_decision.reason_code
-                                is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
-                            ),
-                        },
-                    )
-                    if can_retry:
-                        messages.append(AgentMessage(
-                            role=MessageRole.DEVELOPER,
-                            content=_TEXTUAL_TOOL_CALL_RETRY_GUIDANCE,
-                        ))
+                response_recovery = resolve_response_recovery(
+                    content=accumulator.content,
+                    reasoning=accumulator.reasoning,
+                    declined_response_pending=declined_response_pending,
+                    failed_tool_recovery_error_code=(
+                        failed_tool_recovery_error_code
+                    ),
+                    recovery_ledger=recovery_ledger,
+                    remaining_model_rounds=remaining_model_rounds(round_number),
+                    round_number=round_number,
+                    cancellation_requested=_is_canceled(signal),
+                    visible_output_emitted=direct_content_released,
+                )
+                if response_recovery is not None:
+                    for trace in response_recovery.traces:
+                        await self._trace(
+                            trace.stage,
+                            trace.outcome,
+                            details=dict(trace.details),
+                        )
+                    if (
+                        response_recovery.disposition
+                        is ResponseFinalizationDisposition.RETRY_MODEL
+                    ):
+                        messages.extend(response_recovery.messages)
                         continue
                     yield _runtime_result(
                         run_id,
                         RuntimeOutcome.FAILED,
                         used_model,
                         round_number,
-                        error_code="unstructured_tool_call_after_rejection",
-                    )
-                    return
-
-                if (
-                    failed_tool_recovery_error_code is not None
-                    and _is_unstructured_tool_output(accumulator.content)
-                ):
-                    textual_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=RecoveryCause.UNSTRUCTURED_TOOL_PROTOCOL,
-                            action=RecoveryAction.RETRY_MODEL,
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            cancellation_requested=_is_canceled(signal),
-                            visible_output_emitted=direct_content_released,
-                        ),
-                        round_number=round_number,
-                    )
-                    can_retry = textual_decision.allowed
-                    await self._trace(
-                        "model_output",
-                        (
-                            "unstructured_tool_output_retry"
-                            if can_retry
-                            else "unstructured_tool_output_replaced"
-                        ),
-                        details={
-                            "round": round_number,
-                            "retryUsed": (
-                                textual_decision.attempt > 1
-                                or textual_decision.reason_code
-                                is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
-                            ),
-                            "primaryErrorCode": (
-                                failed_tool_recovery_error_code
-                            ),
-                        },
-                    )
-                    if can_retry:
-                        messages.append(AgentMessage(
-                            role=MessageRole.DEVELOPER,
-                            content=_FAILED_TOOL_OUTPUT_RETRY_GUIDANCE,
-                        ))
-                        continue
-                    yield _runtime_result(
-                        run_id,
-                        RuntimeOutcome.FAILED,
-                        used_model,
-                        round_number,
-                        error_code=(
-                            failed_tool_recovery_error_code
-                            or "tool_execution_failed"
-                        ),
-                    )
-                    return
-
-                if (
-                    not declined_response_pending
-                    and not accumulator.content.strip()
-                ):
-                    empty_retry_count = recovery_ledger.attempts(
-                        RecoveryCause.EMPTY_MODEL_RESPONSE
-                    )
-                    empty_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=RecoveryCause.EMPTY_MODEL_RESPONSE,
-                            action=RecoveryAction.RETRY_MODEL,
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            cancellation_requested=_is_canceled(signal),
-                            visible_output_emitted=direct_content_released,
-                        ),
-                        round_number=round_number,
-                    )
-                    can_retry = empty_decision.allowed
-                    await self._trace(
-                        "model_output",
-                        (
-                            "empty_response_retry"
-                            if can_retry
-                            else "empty_response_rejected"
-                        ),
-                        details={
-                            "round": round_number,
-                            "retryCount": empty_retry_count,
-                            "retryScheduled": can_retry,
-                            "reasoningCharacters": len(
-                                accumulator.reasoning or ""
-                            ),
-                        },
-                    )
-                    if can_retry:
-                        messages.extend((
-                            AgentMessage(
-                                role=MessageRole.ASSISTANT,
-                                content="",
-                                reasoning=accumulator.reasoning or None,
-                            ),
-                            AgentMessage(
-                                role=MessageRole.DEVELOPER,
-                                content=EMPTY_RESPONSE_RETRY_GUIDANCE,
-                            ),
-                        ))
-                        continue
-                    yield _runtime_result(
-                        run_id,
-                        RuntimeOutcome.FAILED,
-                        used_model,
-                        round_number,
-                        error_code="empty_model_response",
+                        error_code=response_recovery.error_code,
                     )
                     return
 
@@ -1674,72 +1073,40 @@ class AgentRuntime:
                                 _exact_item_count_repair_guidance(exact_item_count)
                             )
 
-                    for validator_index, validator in enumerate(validators):
-                        validation_operation_id = (
-                            await self._start_validation_operation(
-                                invocation_context.run_id,
-                                source="validator",
-                                index=validator_index,
-                            )
+                    registered_validation = (
+                        await self._response_validation.validate_registered(
+                            content=accumulator.content,
+                            messages=messages,
+                            validators=validators,
+                            run_id=invocation_context.run_id,
+                            round_number=round_number,
                         )
-                        try:
-                            result = validator.validate(
-                                content=accumulator.content,
-                                messages=tuple(messages),
-                            )
-                        except Exception as error:
-                            await self._fail_validation_operation(
-                                validation_operation_id,
-                                "response_validator_error",
-                            )
-                            await self._trace(
-                                "model_output",
-                                "response_validator_exception",
-                                details={
-                                    "round": round_number,
-                                    "errorType": _root_error_type(error),
-                                },
-                            )
-                            yield _runtime_result(
-                                run_id,
-                                RuntimeOutcome.FAILED,
-                                used_model,
-                                round_number,
-                                error_code="response_validator_error",
-                            )
-                            return
-                        if not isinstance(result, ResponseValidationResult):
-                            await self._fail_validation_operation(
-                                validation_operation_id,
-                                "response_validator_contract_violation",
-                            )
-                            await self._trace(
-                                "model_output",
-                                "response_validator_contract_violation",
-                                details={"round": round_number},
-                            )
-                            yield _runtime_result(
-                                run_id,
-                                RuntimeOutcome.FAILED,
-                                used_model,
-                                round_number,
-                                error_code=(
-                                    "response_validator_contract_violation"
-                                ),
-                            )
-                            return
-                        await self._succeed_validation_operation(
-                            validation_operation_id
+                    )
+                    for trace in registered_validation.traces:
+                        await self._trace(
+                            trace.stage,
+                            trace.outcome,
+                            details=dict(trace.details),
+                            duration_ms=trace.duration_ms,
                         )
-                        if result.accepted:
-                            continue
-                        violation_codes.append(str(result.violation_code))
-                        repair_guidance.append(str(result.repair_guidance))
-                        validation_details.append({
-                            "source": "validator",
-                            "code": result.violation_code,
-                            "details": dict(result.details),
-                        })
+                    if registered_validation.error_code is not None:
+                        yield _runtime_result(
+                            run_id,
+                            RuntimeOutcome.FAILED,
+                            used_model,
+                            round_number,
+                            error_code=registered_validation.error_code,
+                        )
+                        return
+                    violation_codes.extend(
+                        registered_validation.violation_codes
+                    )
+                    repair_guidance.extend(
+                        registered_validation.repair_guidance
+                    )
+                    validation_details.extend(
+                        registered_validation.validation_details
+                    )
 
                     # Semantic judges are potentially expensive and receive a
                     # structurally valid candidate only. Their domain logic
@@ -1749,11 +1116,9 @@ class AgentRuntime:
                     # repair, with two repairs total across the response.
                     if not violation_codes:
                         for judge_index, judge in enumerate(judges):
-                            judge_started = perf_counter()
-                            validation_operation_id = (
-                                await self._start_validation_operation(
-                                    invocation_context.run_id,
-                                    source="judge",
+                            judge_attempt = (
+                                await self._response_validation.begin_judge(
+                                    run_id=invocation_context.run_id,
                                     index=judge_index,
                                 )
                             )
@@ -1769,256 +1134,100 @@ class AgentRuntime:
                                     "judgeIndex": judge_index,
                                 },
                             )
-                            try:
-                                result = await await_with_cancellation(
-                                    judge.judge(
-                                        content=accumulator.content,
-                                        messages=tuple(messages),
-                                        signal=signal,
-                                    ),
-                                    signal,
-                                )
-                            except OperationCanceled:
-                                await self._cancel_validation_operation(
-                                    validation_operation_id,
-                                )
-                                await self._trace(
-                                    "model_output",
-                                    "response_judge_canceled",
-                                    details={
-                                        "round": round_number,
-                                        "judgeIndex": judge_index,
-                                    },
-                                    duration_ms=_duration_ms(judge_started),
-                                )
-                                yield _runtime_result(
-                                    run_id,
-                                    RuntimeOutcome.CANCELED,
-                                    used_model,
-                                    round_number,
-                                    error_code="request_canceled",
-                                )
-                                return
-                            except ResponseJudgeContractError as error:
-                                await self._fail_validation_operation(
-                                    validation_operation_id,
-                                    "response_judge_contract_violation",
-                                )
-                                await self._trace(
-                                    "model_output",
-                                    "response_judge_contract_violation",
-                                    details={
-                                        "round": round_number,
-                                        "judgeIndex": judge_index,
-                                        "errorType": _root_error_type(error),
-                                    },
-                                    duration_ms=_duration_ms(judge_started),
-                                )
-                                yield _runtime_result(
-                                    run_id,
-                                    RuntimeOutcome.FAILED,
-                                    used_model,
-                                    round_number,
-                                    error_code=(
-                                        "response_judge_contract_violation"
-                                    ),
-                                )
-                                return
-                            except Exception as error:
-                                await self._fail_validation_operation(
-                                    validation_operation_id,
-                                    "response_judge_error",
-                                )
-                                await self._trace(
-                                    "model_output",
-                                    "response_judge_exception",
-                                    details={
-                                        "round": round_number,
-                                        "judgeIndex": judge_index,
-                                        "errorType": _root_error_type(error),
-                                    },
-                                    duration_ms=_duration_ms(judge_started),
-                                )
-                                yield _runtime_result(
-                                    run_id,
-                                    RuntimeOutcome.FAILED,
-                                    used_model,
-                                    round_number,
-                                    error_code="response_judge_error",
-                                )
-                                return
-                            if not isinstance(result, ResponseValidationResult):
-                                await self._fail_validation_operation(
-                                    validation_operation_id,
-                                    "response_judge_contract_violation",
-                                )
-                                await self._trace(
-                                    "model_output",
-                                    "response_judge_contract_violation",
-                                    details={
-                                        "round": round_number,
-                                        "judgeIndex": judge_index,
-                                    },
-                                    duration_ms=_duration_ms(judge_started),
-                                )
-                                yield _runtime_result(
-                                    run_id,
-                                    RuntimeOutcome.FAILED,
-                                    used_model,
-                                    round_number,
-                                    error_code=(
-                                        "response_judge_contract_violation"
-                                    ),
-                                )
-                                return
-                            await self._succeed_validation_operation(
-                                validation_operation_id
-                            )
-                            await self._trace(
-                                "model_output",
-                                (
-                                    "response_judge_passed"
-                                    if result.accepted
-                                    else "response_judge_rejected"
-                                ),
-                                details={
-                                    "round": round_number,
-                                    "judgeIndex": judge_index,
-                                    **(
-                                        {}
-                                        if result.accepted
-                                        else {
-                                            "violationCode": result.violation_code
-                                        }
-                                    ),
-                                },
-                                duration_ms=_duration_ms(judge_started),
-                            )
-                            if result.accepted:
-                                continue
-                            violation_codes.append(str(result.violation_code))
-                            repair_guidance.append(str(result.repair_guidance))
-                            validation_details.append({
-                                "source": "judge",
-                                "code": result.violation_code,
-                                "details": dict(result.details),
-                            })
-
-                    if violation_codes:
-                        repair_phase = (
-                            "semantic"
-                            if validation_details
-                            and all(
-                                item.get("source") == "judge"
-                                for item in validation_details
-                            )
-                            else "deterministic"
-                        )
-                        repair_cause = (
-                            RecoveryCause.RESPONSE_CONSTRAINT_SEMANTIC
-                            if repair_phase == "semantic"
-                            else RecoveryCause.RESPONSE_CONSTRAINT_DETERMINISTIC
-                        )
-                        repair_phases_used = tuple(
-                            phase
-                            for phase, cause in (
-                                (
-                                    "deterministic",
-                                    RecoveryCause.RESPONSE_CONSTRAINT_DETERMINISTIC,
-                                ),
-                                (
-                                    "semantic",
-                                    RecoveryCause.RESPONSE_CONSTRAINT_SEMANTIC,
-                                ),
-                            )
-                            if recovery_ledger.attempts(cause) > 0
-                        )
-                        phase_retry_used = (
-                            recovery_ledger.attempts(repair_cause) > 0
-                        )
-                        repair_decision = await self._decide_recovery(
-                            recovery_ledger,
-                            RecoveryRequest(
-                                cause=repair_cause,
-                                action=RecoveryAction.RETRY_MODEL,
-                                remaining_model_rounds=remaining_model_rounds(
-                                    round_number
-                                ),
-                                retryable=len(repair_phases_used) < 2,
-                                cancellation_requested=_is_canceled(signal),
-                                visible_output_emitted=direct_content_released,
-                            ),
-                            round_number=round_number,
-                        )
-                        can_retry = repair_decision.allowed
-                        trace_details: dict[str, Any] = {
-                            "round": round_number,
-                            "violationCodes": violation_codes,
-                            "retryUsed": phase_retry_used,
-                            "repairPhase": repair_phase,
-                            "repairAttempts": len(repair_phases_used),
-                            "repairPhasesUsed": sorted(repair_phases_used),
-                        }
-                        if exact_item_count is not None:
-                            trace_details.update({
-                                "expectedItemCount": exact_item_count,
-                                "observedItems": list(observed_items),
-                            })
-                        if validation_details:
-                            trace_details["validatorResults"] = validation_details
-                        await self._trace(
-                            "model_output",
-                            (
-                                "response_constraint_retry"
-                                if can_retry
-                                else "response_constraint_rejected"
-                            ),
-                            details=trace_details,
-                        )
-                        if can_retry:
-                            response_repair_pending = True
-                            messages.extend((
-                                AgentMessage(
-                                    role=MessageRole.ASSISTANT,
+                            semantic_validation = (
+                                await self._response_validation.judge(
+                                    judge_attempt,
+                                    judge,
                                     content=accumulator.content,
-                                    reasoning=accumulator.reasoning or None,
-                                ),
-                                AgentMessage(
-                                    role=MessageRole.DEVELOPER,
-                                    content=_response_constraint_repair_guidance(
-                                        repair_guidance
+                                    messages=messages,
+                                    signal=signal,
+                                    round_number=round_number,
+                                )
+                            )
+                            for trace in semantic_validation.traces:
+                                await self._trace(
+                                    trace.stage,
+                                    trace.outcome,
+                                    details=dict(trace.details),
+                                    duration_ms=trace.duration_ms,
+                                )
+                            if semantic_validation.error_code is not None:
+                                yield _runtime_result(
+                                    run_id,
+                                    (
+                                        RuntimeOutcome.CANCELED
+                                        if semantic_validation.canceled
+                                        else RuntimeOutcome.FAILED
                                     ),
-                                ),
-                            ))
+                                    used_model,
+                                    round_number,
+                                    error_code=semantic_validation.error_code,
+                                )
+                                return
+                            violation_codes.extend(
+                                semantic_validation.violation_codes
+                            )
+                            repair_guidance.extend(
+                                semantic_validation.repair_guidance
+                            )
+                            validation_details.extend(
+                                semantic_validation.validation_details
+                            )
+
+                    constraint_recovery = resolve_response_constraint_recovery(
+                        content=accumulator.content,
+                        reasoning=accumulator.reasoning,
+                        violation_codes=violation_codes,
+                        repair_guidance=repair_guidance,
+                        validation_details=validation_details,
+                        exact_item_count=exact_item_count,
+                        observed_items=observed_items,
+                        recovery_ledger=recovery_ledger,
+                        remaining_model_rounds=remaining_model_rounds(
+                            round_number
+                        ),
+                        round_number=round_number,
+                        cancellation_requested=_is_canceled(signal),
+                        visible_output_emitted=direct_content_released,
+                    )
+                    if constraint_recovery is not None:
+                        for trace in constraint_recovery.traces:
+                            await self._trace(
+                                trace.stage,
+                                trace.outcome,
+                                details=dict(trace.details),
+                            )
+                        if (
+                            constraint_recovery.disposition
+                            is ResponseFinalizationDisposition.RETRY_MODEL
+                        ):
+                            response_repair_pending = (
+                                constraint_recovery.response_repair_pending
+                            )
+                            messages.extend(constraint_recovery.messages)
                             continue
                         yield _runtime_result(
                             run_id,
                             RuntimeOutcome.FAILED,
                             used_model,
                             round_number,
-                            error_code="response_constraint_violation",
+                            error_code=constraint_recovery.error_code,
                         )
                         return
 
                 final_response = accumulator.content
-                if (
-                    (invocation.tools or buffer_model_content)
-                    and transaction_mode is ResponseTransactionMode.DIRECT_LIVE
-                    and not public_presentation_pending
-                ):
+                presentation_messages = public_presentation_messages(
+                    content=final_response,
+                    reasoning=accumulator.reasoning,
+                    invocation_had_tools=bool(invocation.tools),
+                    buffered_model_content=buffer_model_content,
+                    transaction_mode=transaction_mode,
+                    already_pending=public_presentation_pending,
+                )
+                if presentation_messages:
                     public_presentation_pending = True
                     round_limit += 1
-                    messages.extend((
-                        AgentMessage(
-                            role=MessageRole.ASSISTANT,
-                            content=final_response,
-                            reasoning=accumulator.reasoning or None,
-                        ),
-                        AgentMessage(
-                            role=MessageRole.DEVELOPER,
-                            content=_FINAL_PUBLIC_PRESENTATION_GUIDANCE,
-                        ),
-                    ))
+                    messages.extend(presentation_messages)
                     continue
                 if buffer_model_content:
                     if self._observer is not None:
@@ -2035,203 +1244,47 @@ class AgentRuntime:
                 )
                 return
 
-            requested_names = frozenset(call.name for call in calls)
-            current_authorized = requested_names.issubset(allowed_names)
-            includes_future = bool(requested_names - allowed_names) and bool(
-                requested_names & future_names
+            authorization = resolve_tool_authorization(
+                calls,
+                allowed_names=allowed_names,
+                future_names=future_names,
+                require_tool=require_tool,
+                planning_available=planning_hook is not None,
+                content=accumulator.content,
+                reasoning=accumulator.reasoning,
+                recovery_ledger=recovery_ledger,
+                remaining_model_rounds=remaining_model_rounds(round_number),
+                round_number=round_number,
+                cancellation_requested=_is_canceled(signal),
+                visible_output_emitted=direct_content_released,
             )
-            future_batch = (
-                includes_future
-                and requested_names.issubset(allowed_names | future_names)
-            )
-
-            if future_batch:
-                future_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.FUTURE_TOOL_STEP,
-                        action=RecoveryAction.RETRY_MODEL,
-                        # A later plan step gets its own correction budget.
-                        # Repeating the same out-of-order jump while the same
-                        # current tool set is authorized still fails closed.
-                        scope=_tool_authorization_recovery_scope(allowed_names),
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        minimum_remaining_rounds=2,
-                        retryable=bool(allowed_names),
-                        cancellation_requested=_is_canceled(signal),
-                        visible_output_emitted=direct_content_released,
-                    ),
-                    round_number=round_number,
-                )
-                can_retry = future_decision.allowed
-                if can_retry:
-                    await self._trace(
-                        "tool_authorization",
-                        "future_step_retry",
-                        details={
-                            "round": round_number,
-                            "requestedTools": sorted(requested_names),
-                            "currentTools": sorted(allowed_names),
-                            "futureTools": sorted(future_names),
-                            "callCount": len(calls),
-                            "batchExecuted": False,
-                            "executed": False,
-                        },
-                    )
-                    messages.extend(_future_step_retry_messages(
-                        calls,
-                        current_allowed=allowed_names,
-                        content=accumulator.content,
-                        reasoning=accumulator.reasoning,
-                    ))
-                    continue
-
+            for trace in authorization.traces:
                 await self._trace(
-                    "tool_authorization",
-                    "future_step_rejected",
-                    details={
-                        "round": round_number,
-                        "requestedTools": sorted(requested_names),
-                        "currentTools": sorted(allowed_names),
-                        "futureTools": sorted(future_names),
-                        "retryAlreadyUsed": (
-                            future_decision.attempt > 0
-                            and not future_decision.allowed
-                        ),
-                        "roundsAvailable": (
-                            future_decision.remaining_model_rounds >= 2
-                        ),
-                    },
+                    trace.stage,
+                    trace.outcome,
+                    details=dict(trace.details),
                 )
+            requested_names = authorization.requested_names
+            if (
+                authorization.disposition
+                is ToolAuthorizationDisposition.RETRY_MODEL
+            ):
+                messages.extend(authorization.messages)
+                continue
+            if authorization.disposition is ToolAuthorizationDisposition.REPLAN:
+                last_tool_outcome = ToolBatchOutcome.FAILED
+                pending_recovery_error_code = authorization.error_code
+                failed_tool_recovery_error_code = authorization.error_code
+                dynamic_replan_pending = True
+                messages.extend(authorization.messages)
+                continue
+            if authorization.disposition is ToolAuthorizationDisposition.REJECT:
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.FAILED,
                     used_model,
                     round_number,
-                    error_code="tool_step_out_of_order",
-                )
-                return
-
-            if not current_authorized:
-                unauthorized_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.UNAUTHORIZED_TOOL,
-                        action=RecoveryAction.RETRY_MODEL,
-                        # One model correction is allowed for each distinct
-                        # host-authorized tool step. A correction consumed by
-                        # an earlier step must not make a later, still
-                        # side-effect-free step unrecoverable. Repeating an
-                        # invalid name against the same authorization set
-                        # remains fail-closed.
-                        scope=_tool_authorization_recovery_scope(allowed_names),
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        minimum_remaining_rounds=2,
-                        retryable=(require_tool and bool(allowed_names)),
-                        cancellation_requested=_is_canceled(signal),
-                        visible_output_emitted=direct_content_released,
-                    ),
-                    round_number=round_number,
-                )
-                can_retry = unauthorized_decision.allowed
-                if can_retry:
-                    await self._trace(
-                        "tool_authorization",
-                        "unauthorized_tool_retry",
-                        details={
-                            "round": round_number,
-                            "requestedTools": sorted(requested_names),
-                            "currentTools": sorted(allowed_names),
-                            "futureTools": sorted(future_names),
-                            "callCount": len(calls),
-                            "batchExecuted": False,
-                            "executed": False,
-                        },
-                    )
-                    messages.extend(_unauthorized_tool_retry_messages(
-                        current_allowed=allowed_names,
-                    ))
-                    continue
-
-                # An unauthorized batch has zero side effects. If a focused
-                # correction still leaves the model stuck on a stale tool,
-                # give the dynamic planner one bounded chance to replace the
-                # failed step instead of terminating the whole run. The host
-                # authorization set remains authoritative throughout.
-                unauthorized_replan_decision: RecoveryDecision | None = None
-                if (
-                    planning_hook is not None
-                    and unauthorized_decision.reason_code
-                    is RecoveryReason.ATTEMPT_BUDGET_EXHAUSTED
-                ):
-                    unauthorized_replan_decision = await self._decide_recovery(
-                        recovery_ledger,
-                        RecoveryRequest(
-                            cause=RecoveryCause.UNAUTHORIZED_TOOL_REPLAN,
-                            action=RecoveryAction.REPLAN,
-                            scope=_tool_authorization_recovery_scope(
-                                allowed_names
-                            ),
-                            remaining_model_rounds=remaining_model_rounds(
-                                round_number
-                            ),
-                            minimum_remaining_rounds=2,
-                            retryable=(require_tool and bool(allowed_names)),
-                            cancellation_requested=_is_canceled(signal),
-                            visible_output_emitted=direct_content_released,
-                        ),
-                        round_number=round_number,
-                    )
-                if (
-                    unauthorized_replan_decision is not None
-                    and unauthorized_replan_decision.allowed
-                ):
-                    await self._trace(
-                        "tool_authorization",
-                        "unauthorized_tool_replan",
-                        details={
-                            "round": round_number,
-                            "requestedTools": sorted(requested_names),
-                            "currentTools": sorted(allowed_names),
-                            "futureTools": sorted(future_names),
-                            "batchExecuted": False,
-                            "executed": False,
-                        },
-                    )
-                    last_tool_outcome = ToolBatchOutcome.FAILED
-                    pending_recovery_error_code = "tool_not_authorized"
-                    failed_tool_recovery_error_code = "tool_not_authorized"
-                    dynamic_replan_pending = True
-                    messages.append(AgentMessage(
-                        role=MessageRole.DEVELOPER,
-                        content=_UNAUTHORIZED_TOOL_REPLAN_GUIDANCE,
-                    ))
-                    continue
-
-                await self._trace(
-                    "tool_authorization",
-                    "rejected",
-                    details={
-                        "round": round_number,
-                        "requestedTools": sorted(requested_names),
-                        "currentTools": sorted(allowed_names),
-                        "futureTools": sorted(future_names),
-                        "retryAlreadyUsed": (
-                            unauthorized_decision.attempt > 0
-                            and not unauthorized_decision.allowed
-                        ),
-                    },
-                )
-                yield _runtime_result(
-                    run_id,
-                    RuntimeOutcome.FAILED,
-                    used_model,
-                    round_number,
-                    error_code="tool_not_authorized",
+                    error_code=authorization.error_code,
                 )
                 return
 
@@ -2245,6 +1298,7 @@ class AgentRuntime:
                 )
                 return
 
+            await self._model_manager.publish_model_stream_commentary(stream.receipt.output_stream_id)
             if scope_tools_to_observer and self._observer is not None:
                 await self._observer.on_tool_calls_started(tuple(sorted(requested_names)))
             yield AgentEvent(
@@ -2418,8 +1472,6 @@ class AgentRuntime:
                 # model to consume its result and answer. Planned runs keep
                 # the logical requirement active and advance via the observer.
                 logical_required_tool_call_enabled = False
-            if outcome is not ToolBatchOutcome.FAILED:
-                tool_input_recovery_epoch += 1
             yield AgentEvent(
                 type=CoreEventType.TOOL_ROUND_COMPLETED,
                 run_id=run_id,
@@ -2431,133 +1483,53 @@ class AgentRuntime:
                 content="" if require_tool else accumulator.content,
                 reasoning=accumulator.reasoning,
             ))
-            tool_input_decision: RecoveryDecision | None = None
-            if (
-                outcome is ToolBatchOutcome.FAILED
-                and _is_recoverable_tool_input_error(batch_result.error)
-            ):
-                tool_input_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.TOOL_INPUT_INVALID,
-                        action=RecoveryAction.RETRY_MODEL,
-                        scope=(
-                            "tool-input-sequence:"
-                            f"{tool_input_recovery_epoch}"
-                        ),
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        cancellation_requested=_is_canceled(signal),
-                        effect_state=RecoveryEffectState(
-                            batch_result.effect_state.value
-                        ),
-                        may_repeat_side_effect=True,
-                    ),
-                    round_number=round_number,
-                    details={"sourceErrorCode": batch_result.error},
-                )
-            retry_tool_input = bool(
-                tool_input_decision is not None
-                and tool_input_decision.allowed
+            tool_recovery = resolve_tool_recovery(
+                batch_result,
+                requested_names=requested_names,
+                planning_available=planning_hook is not None,
+                recovery_ledger=recovery_ledger,
+                input_recovery_epoch=tool_input_recovery_epoch,
+                remaining_model_rounds=remaining_model_rounds(round_number),
+                round_number=round_number,
+                cancellation_requested=_is_canceled(signal),
             )
-            if retry_tool_input:
-                messages.append(AgentMessage(
-                    role=MessageRole.DEVELOPER,
-                    content=_TOOL_INPUT_RETRY_GUIDANCE,
-                ))
+            tool_input_recovery_epoch = (
+                tool_recovery.next_input_recovery_epoch
+            )
+            for trace in tool_recovery.traces:
                 await self._trace(
-                    "tool_recovery",
-                    "input_retry_scheduled",
-                    details={
-                        "round": round_number,
-                        "errorCode": batch_result.error,
-                        "retryAttempt": tool_input_decision.attempt,
-                        "requestedTools": sorted(requested_names),
-                        "effectState": batch_result.effect_state.value,
-                    },
+                    trace.stage,
+                    trace.outcome,
+                    details=dict(trace.details),
                 )
+            if tool_recovery.disposition is ToolRecoveryDisposition.RETRY_MODEL:
+                messages.extend(tool_recovery.messages)
                 continue
-            if outcome is ToolBatchOutcome.FAILED and planning_hook is None:
+            if tool_recovery.disposition is ToolRecoveryDisposition.REJECT:
                 yield _runtime_result(
                     run_id,
                     RuntimeOutcome.FAILED,
                     used_model,
                     round_number,
-                    error_code=batch_result.error or "tool_execution_failed",
+                    error_code=tool_recovery.error_code,
                 )
                 return
-            if outcome is ToolBatchOutcome.FAILED and planning_hook is not None:
-                failed_replan_decision = await self._decide_recovery(
-                    recovery_ledger,
-                    RecoveryRequest(
-                        cause=RecoveryCause.TOOL_EXECUTION_FAILED_REPLAN,
-                        action=RecoveryAction.REPLAN,
-                        scope=f"tool-round:{round_number}",
-                        remaining_model_rounds=remaining_model_rounds(
-                            round_number
-                        ),
-                        cancellation_requested=_is_canceled(signal),
-                        effect_state=RecoveryEffectState(
-                            batch_result.effect_state.value
-                        ),
-                        may_repeat_side_effect=True,
-                    ),
-                    round_number=round_number,
-                    details={"sourceErrorCode": batch_result.error},
-                )
-                if not failed_replan_decision.allowed:
-                    yield _runtime_result(
-                        run_id,
-                        RuntimeOutcome.FAILED,
-                        used_model,
-                        round_number,
-                        error_code=(
-                            batch_result.error or "tool_execution_failed"
-                        ),
-                    )
-                    return
-            successful_replan_requested = bool(
-                outcome in {
-                    ToolBatchOutcome.PROGRESSED,
-                    ToolBatchOutcome.COMPLETED,
-                }
-                and batch_result.replan_requested
-            )
             if (
-                planning_hook is not None
-                and (
-                    outcome is ToolBatchOutcome.FAILED
-                    or successful_replan_requested
-                )
+                tool_recovery.disposition
+                is ToolRecoveryDisposition.REPLAN
             ):
                 last_tool_outcome = outcome
                 pending_recovery_error_code = (
-                    batch_result.error
+                    tool_recovery.error_code
                     if outcome is ToolBatchOutcome.FAILED
                     else None
                 )
                 failed_tool_recovery_error_code = (
-                    batch_result.error or "tool_execution_failed"
+                    tool_recovery.error_code
                     if outcome is ToolBatchOutcome.FAILED
                     else None
                 )
                 dynamic_replan_pending = True
-                if successful_replan_requested:
-                    await self._trace(
-                        "planning",
-                        "replan_requested",
-                        details={
-                            "round": round_number,
-                            "outcome": outcome.value,
-                            "requestedByTools": sorted({
-                                result.tool_name
-                                for result in batch_result.results
-                                if result.planning_disposition
-                                is ToolPlanningDisposition.REPLAN
-                            }),
-                        },
-                    )
             if outcome is ToolBatchOutcome.DECLINED:
                 declined_response_pending = True
                 messages.append(AgentMessage(
@@ -2584,7 +1556,7 @@ class AgentRuntime:
             return all_names
         if self._observer is None:
             return frozenset()
-        return self._observer.current_allowed_tool_names() & all_names
+        return transition.allowed_tool_names & all_names if (transition := self._observer.current_execution_transition()) is not None else frozenset()
 
     def _future_allowed_names(
         self,
@@ -2595,75 +1567,7 @@ class AgentRuntime:
         if not scope_tools_to_observer or self._observer is None:
             return frozenset()
         all_names = frozenset(schema.name for schema in tools)
-        return self._observer.future_allowed_tool_names() & all_names
-
-    async def _start_validation_operation(
-        self,
-        run_id: RunId,
-        *,
-        source: str,
-        index: int,
-    ) -> str | None:
-        if self._operations is None:
-            return None
-        receipt = await self._operations.start(
-            OperationKind.VALIDATION,
-            OperationScope(
-                run_id=run_id,
-                display=OperationDisplay(
-                    label_key="agent.operation.validation",
-                    label_params={"source": source, "index": index},
-                ),
-            ),
-        )
-        return receipt.operation_id
-
-    async def _succeed_validation_operation(
-        self,
-        operation_id: str | None,
-    ) -> None:
-        if self._operations is not None and operation_id is not None:
-            await self._operations.succeed(operation_id)
-
-    async def _fail_validation_operation(
-        self,
-        operation_id: str | None,
-        error_code: str,
-    ) -> None:
-        if self._operations is not None and operation_id is not None:
-            await self._operations.fail(operation_id, error_code)
-
-    async def _cancel_validation_operation(
-        self,
-        operation_id: str | None,
-    ) -> None:
-        if self._operations is not None and operation_id is not None:
-            await self._operations.cancel(
-                operation_id,
-                "response_validation_canceled",
-            )
-
-    async def _decide_recovery(
-        self,
-        ledger: RecoveryLedger,
-        request: RecoveryRequest,
-        *,
-        round_number: int,
-        details: Mapping[str, object] | None = None,
-    ) -> RecoveryDecision:
-        decision = ledger.decide(request)
-        trace_details = {
-            "round": int(round_number),
-            **decision.to_trace_details(),
-        }
-        if details:
-            trace_details.update(details)
-        await self._trace(
-            "recovery_decision",
-            "allowed" if decision.allowed else "denied",
-            details=trace_details,
-        )
-        return decision
+        return transition.future_tool_names & all_names if (transition := self._observer.current_execution_transition()) is not None else frozenset()
 
     async def _trace(
         self,
@@ -2683,134 +1587,6 @@ class AgentRuntime:
         ))
 
 
-def _continuation_messages(
-    calls: Sequence[ToolCall],
-    results: Sequence[ToolCallResult],
-    *,
-    content: str,
-    reasoning: str,
-) -> list[AgentMessage]:
-    messages = [AgentMessage(
-        role=MessageRole.ASSISTANT,
-        content=content,
-        reasoning=reasoning or None,
-        tool_calls=tuple(calls),
-        origin=MessageOrigin.MODEL,
-    )]
-    messages.extend(
-        AgentMessage(
-            role=MessageRole.TOOL,
-            content=result.content,
-            tool_call_id=result.tool_call_id,
-            origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"purra_tool_name": result.tool_name},
-        )
-        for result in results
-    )
-    return messages
-
-
-def _future_step_retry_messages(
-    calls: Sequence[ToolCall],
-    *,
-    current_allowed: frozenset[str],
-    content: str,
-    reasoning: str,
-) -> list[AgentMessage]:
-    error_code = "tool_step_out_of_order"
-    error_content = json.dumps(
-        {
-            "success": False,
-            "errorCode": error_code,
-            "batchExecuted": False,
-            "retryable": True,
-            "currentAllowed": sorted(current_allowed),
-            "error": (
-                "The whole batch was not executed because it included a tool "
-                "from a future plan step."
-            ),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    messages = _continuation_messages(
-        calls,
-        tuple(
-            ToolCallResult(
-                tool_call_id=call.id,
-                tool_name=call.name,
-                content=error_content,
-                error=error_code,
-            )
-            for call in calls
-        ),
-        content=content,
-        reasoning=reasoning,
-    )
-    messages.append(AgentMessage(
-        role=MessageRole.DEVELOPER,
-        content=(
-            "The preceding tool-call batch had zero execution. In the next "
-            "round, the tool schemas supplied with the invocation are the "
-            "complete authorized set. Do not call a tool whose schema is "
-            "absent."
-        ),
-    ))
-    return messages
-
-
-def _unauthorized_tool_retry_messages(
-    *,
-    current_allowed: frozenset[str],
-) -> list[AgentMessage]:
-    # Do not echo a rejected tool call into the next model round. Although a
-    # synthetic tool error keeps the transcript protocol-shaped, it also puts
-    # the stale method name immediately before the retry and can cause some
-    # providers to repeat it. Nothing executed, so a clean developer repair is
-    # both truthful and less likely to anchor the model on the invalid call.
-    authorized = ", ".join(sorted(current_allowed))
-    selection = (
-        f"this host-authorized tool: {authorized}"
-        if len(current_allowed) == 1
-        else f"one of these host-authorized tools: {authorized}"
-    )
-    return [AgentMessage(
-        role=MessageRole.DEVELOPER,
-        content=(
-            "The preceding tool-call batch was rejected with zero execution "
-            "and has been removed from the retry context. Retry the current "
-            f"plan step by calling {selection}. Do not call or imitate "
-            "any other tool, including tools remembered from prior rounds or "
-            "conversations."
-        ),
-    )]
-
-
-def _tool_authorization_recovery_scope(
-    current_allowed: frozenset[str],
-) -> str:
-    return "tool-authorization:" + ",".join(sorted(current_allowed))
-
-
-def _context_budget_contract_error(
-    request: AgentRunRequest,
-    budget: ContextBudget | None,
-    configured_tools: Sequence[ToolSchema],
-) -> str | None:
-    if budget is None:
-        return None
-    if (
-        request.context_window is None
-        or int(request.context_window) != budget.window_tokens
-    ):
-        return "context_budget_window_mismatch"
-    if estimate_tool_schema_tokens(configured_tools) != budget.tool_schema_tokens:
-        return "context_budget_tool_schema_mismatch"
-    if budget.output_reserve_tokens <= 0:
-        return "context_budget_output_reserve_invalid"
-    return None
-
-
 def _runtime_result(
     run_id: RunId | None,
     outcome: RuntimeOutcome,
@@ -2828,71 +1604,3 @@ def _runtime_result(
         round_count=round_count,
         error_code=error_code,
     )
-
-
-def _model_request_fingerprint(
-    messages: Sequence[AgentMessage],
-    invocation: ModelInvocation,
-) -> str:
-    payload = {
-        "messages": [message.to_mapping() for message in messages],
-        "provider": invocation.request.provider,
-        "model": invocation.request.model,
-        "profileDigest": invocation.request.capability_snapshot.digest(),
-        "options": thaw_json_mapping(invocation.request.options),
-        "tools": [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": thaw_json_mapping(tool.parameters),
-            }
-            for tool in invocation.tools
-        ],
-        "toolChoice": invocation.tool_choice.value,
-        "reasoningMode": invocation.reasoning_mode.value,
-        "outputLimit": (
-            invocation.output_limit.to_mapping()
-            if invocation.output_limit is not None
-            else None
-        ),
-    }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return f"sha256:{sha256(encoded).hexdigest()}"
-
-
-def _is_retryable_stream_interruption(error: Exception) -> bool:
-    return bool(
-        isinstance(error, ModelGatewayError)
-        and error.code == "upstream_stream_interrupted"
-        and error.retryable
-    )
-
-
-def _is_recoverable_tool_input_error(error_code: str | None) -> bool:
-    return str(error_code or "").strip() in _RECOVERABLE_TOOL_INPUT_ERROR_CODES
-
-
-def _root_error_type(error: Exception) -> str:
-    cause = error.__cause__
-    return type(cause if isinstance(cause, Exception) else error).__name__
-
-
-def _error_chain_types(error: BaseException, *, limit: int = 8) -> list[str]:
-    types: list[str] = []
-    seen: set[int] = set()
-    current: BaseException | None = error
-    while current is not None and len(types) < max(1, int(limit)):
-        identity = id(current)
-        if identity in seen:
-            break
-        seen.add(identity)
-        types.append(type(current).__name__)
-        cause = current.__cause__
-        current = cause if cause is not None else current.__context__
-    return types

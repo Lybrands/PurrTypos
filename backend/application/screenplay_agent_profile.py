@@ -11,7 +11,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import uuid4
 
-from application.agent_profile_registry import AgentProfileRegistration
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_manifest_compiler import compile_screenplay_manifest
 from application.screenplay_task_resolver import (
@@ -51,7 +50,7 @@ from infrastructure.persistence.sqlite_screenplay_operation_repository import (
 from infrastructure.screenplay import (
     build_screenplay_tool_catalog,
 )
-from purra.contracts import AgentRunRequest, TaskPlan
+from purra.contracts import AgentRunRequest, ExecutionPlan
 from purra.contracts import StepStatus
 from purra.events import AgentEvent, CoreEventType
 from purra.long_tasks import (
@@ -64,7 +63,10 @@ from purra.task_admission import LongTaskExecutionStatus
 from purra.json_values import thaw_json_mapping
 
 
-class ScreenplayAgentProfileExtension:
+class ScreenplayAgentProfile:
+    id = "screenplay"
+    domain_namespace = SCREENPLAY_AGENT_DOMAIN_NAMESPACE
+
     def __init__(
         self,
         db,
@@ -100,12 +102,9 @@ class ScreenplayAgentProfileExtension:
             ),
         )
 
-    def profile_registration(self) -> AgentProfileRegistration:
-        return AgentProfileRegistration(
-            id="screenplay",
-            domain_namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-            adapter=self._adapter,
-        )
+    @property
+    def adapter(self) -> ScreenplayDomainAdapter:
+        return self._adapter
 
     async def prepare_request(self, request: AgentRunRequest) -> AgentRunRequest:
         context = ScreenplayAgentDomainContext.from_core_context(
@@ -150,7 +149,7 @@ class ScreenplayAgentProfileExtension:
 
     async def evaluate(self, request, plan, signal=None):
         del signal
-        if not isinstance(plan, TaskPlan) or plan.task_spec is None:
+        if not isinstance(plan, ExecutionPlan) or plan.task_spec is None:
             raise ValueError("screenplay admission requires a planned TaskSpec")
         context = ScreenplayAgentDomainContext.from_core_context(
             request.domain_context
@@ -247,19 +246,17 @@ class ScreenplayAgentProfileExtension:
     def create_long_task_dispatcher(
         self,
         *,
-        work_item_repository=None,
         long_task_repository=None,
         executor=None,
     ):
         if executor is None:
             return None
-        if work_item_repository is None or long_task_repository is None:
-            raise ValueError("screenplay durable repositories are required")
+        if long_task_repository is None:
+            raise ValueError("screenplay durable task repository is required")
         return _ScreenplayRecipeLongTaskDispatcher(
             db=self._db,
             operations=self._operations,
             turns=self._turns,
-            work_item_repository=work_item_repository,
             long_task_repository=long_task_repository,
             descriptor_resolver=_ScreenplayTaskDescriptorResolver(),
             executor_registry=DurableExecutorRegistry({"screenplay": executor}),
@@ -331,18 +328,18 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
                 operation_id=operation_id,
                 task_id=receipt.task_id,
                 target_role=str(decision.metadata.get("targetRole") or ""),
-                root_run_id=str(kwargs.get("parent_run_id") or ""),
+                root_run_id=str(kwargs.get("run_id") or ""),
             )
         return receipt
 
-    async def execute(self, task_id, *, parent_run_id, observer, signal=None):
+    async def execute(self, task_id, *, run_id, observer, signal=None):
         checkpoint_observer = (
             _ScreenplayCheckpointObserver(
                 dispatcher=self,
                 planner=self._checkpoint_planner,
                 downstream=observer,
                 task_id=task_id,
-                root_run_id=parent_run_id,
+                root_run_id=run_id,
                 signal=signal,
             )
             if self._checkpoint_planner is not None
@@ -351,7 +348,7 @@ class _ScreenplayRecipeLongTaskDispatcher(RecipeLongTaskDispatcher):
         try:
             result = await super().execute(
                 task_id,
-                parent_run_id=parent_run_id,
+                run_id=run_id,
                 observer=checkpoint_observer,
                 signal=signal,
             )
@@ -927,19 +924,19 @@ async def _settle_screenplay_exception(dispatcher, task_id, error) -> None:
     return None
 
 
-def build_screenplay_profile_extension(
+def build_screenplay_agent_profile(
     *,
     db,
     candidate_normalizer=None,
     **_dependencies,
-) -> ScreenplayAgentProfileExtension:
-    return ScreenplayAgentProfileExtension(
+) -> ScreenplayAgentProfile:
+    return ScreenplayAgentProfile(
         db,
         candidate_normalizer=candidate_normalizer,
     )
 
 
 __all__ = [
-    "ScreenplayAgentProfileExtension",
-    "build_screenplay_profile_extension",
+    "ScreenplayAgentProfile",
+    "build_screenplay_agent_profile",
 ]

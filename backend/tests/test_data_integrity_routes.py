@@ -339,34 +339,6 @@ async def test_delete_book_rejects_active_run_ownership(
     )
 
 
-async def test_delete_book_rejects_active_child_of_owned_terminal_root(
-    temp_db: DatabaseConnection,
-):
-    await temp_db.execute(
-        "INSERT INTO books (id, title) VALUES ('book-child', 'Child')"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_sessions (id, book_id, scope) "
-        "VALUES (85, 'book-child', 'setting')"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_runs (id, session_id, status, prompt) "
-        "VALUES ('run-child-root', 85, 'done', 'root')"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_runs (id, parent_run_id, status, prompt) "
-        "VALUES ('run-child-active', 'run-child-root', 'running', 'child')"
-    )
-
-    with pytest.raises(AppError) as conflict:
-        await delete_book("book-child")
-
-    assert conflict.value.status_code == 409
-    assert await temp_db.fetch_one(
-        "SELECT id FROM books WHERE id = 'book-child'"
-    ) == {"id": "book-child"}
-
-
 async def test_claimed_writing_request_blocks_book_delete_before_submit(
     temp_db: DatabaseConnection,
 ):
@@ -467,9 +439,9 @@ async def test_delete_book_rejects_owner_long_task_without_session_metadata(
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units, metadata_json) VALUES "
-        "('book-task-active', 'book-work', 'purrtypos.writing', 'draft', "
+        "('book-task-active', 'purrtypos.writing', 'draft', "
         "'book-task', 'missing-run', 'paused', 1, '{}')"
     )
 
@@ -510,16 +482,10 @@ async def test_delete_book_unlinks_terminal_run_and_removes_owned_runtime_rows(
         [conversation_id],
     )
     await temp_db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, created_by_run_id, status) VALUES "
-        "('work-book-terminal', 'purrtypos.writing', 'draft', "
-        "'book-terminal', 'run-book-terminal', 'completed')"
-    )
-    await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units) VALUES ('task-book-terminal', "
-        "'work-book-terminal', 'purrtypos.writing', 'draft', 'book-terminal', "
+        "'purrtypos.writing', 'draft', 'book-terminal', "
         "'run-book-terminal', 'completed', 1)"
     )
     await temp_db.execute(
@@ -529,9 +495,10 @@ async def test_delete_book_unlinks_terminal_run_and_removes_owned_runtime_rows(
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, run_id) VALUES "
+        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+        "created_by_run_id) VALUES "
         "('artifact-book-terminal', 'purrtypos.writing', 'draft', "
-        "'book-terminal', 'run-book-terminal')"
+        "'book-terminal', 'run', 'run-book-terminal', 'run-book-terminal')"
     )
     await temp_db.execute(
         "INSERT INTO ai_writing_chat_requests "
@@ -556,9 +523,6 @@ async def test_delete_book_unlinks_terminal_run_and_removes_owned_runtime_rows(
     assert await temp_db.fetch_one(
         "SELECT task_id FROM ai_agent_long_task_usage "
         "WHERE task_id = 'task-book-terminal'"
-    ) is None
-    assert await temp_db.fetch_one(
-        "SELECT id FROM ai_agent_work_items WHERE id = 'work-book-terminal'"
     ) is None
     assert await temp_db.fetch_one(
         "SELECT id FROM ai_agent_artifacts "

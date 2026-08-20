@@ -11,7 +11,6 @@ RUN_SERVICE = BACKEND_DIR / "application" / "agent_run_service.py"
 AI_ROUTER = BACKEND_DIR / "routers" / "ai.py"
 AGENT_COMPOSITION = BACKEND_DIR / "application" / "agent_composition.py"
 PORT_ONLY_SERVICES = (
-    BACKEND_DIR / "application" / "agent_delegation_service.py",
     BACKEND_DIR / "application" / "agent_run_queries.py",
     BACKEND_DIR / "application" / "run_execution_control.py",
     BACKEND_DIR / "application" / "agent_stability_service.py",
@@ -58,6 +57,29 @@ def test_agent_run_service_has_no_http_or_sse_dependency():
             if name.split(".", 1)[0] in forbidden_roots:
                 violations.append(f"line {node.lineno} imports {name}")
     assert not violations, "RunService transport leaks:\n" + "\n".join(violations)
+
+
+def test_agent_run_service_accepts_only_core_run_contracts():
+    source = RUN_SERVICE.read_text(encoding="utf-8")
+    forbidden_modules = {
+        "application.agent_run_input",
+        "application.request_mapping",
+        "application.run_provenance",
+        "domains.writing",
+        "schemas.ai",
+    }
+    tree = ast.parse(source, filename=str(RUN_SERVICE))
+    imports = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+
+    assert not imports.intersection(forbidden_modules)
+    assert "request: AgentRunRequest" in source
+    assert "options: AgentCoreRunOptions" in source
+    assert "enable_delegation" not in source
+    assert "mapped_request" not in source
 
 
 def test_ai_router_does_not_assemble_purra():

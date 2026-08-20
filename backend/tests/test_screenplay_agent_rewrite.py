@@ -20,7 +20,6 @@ from purra.contracts import (
     ContextBudget,
     DomainContext,
     RunCreateParams,
-    RunLineage,
     RunStatus,
     ModelCompletion,
     ModelFinishReason,
@@ -32,7 +31,7 @@ from purra.contracts import (
     StepExecutor,
     StepStatus,
     StepType,
-    TaskPlan,
+    ExecutionPlan,
     TaskSpec,
     TaskStep,
 )
@@ -56,7 +55,7 @@ from application.screenplay_agent_service import (
 )
 from application.screenplay_task_resolver import ResolvedScreenplayTask
 from application.screenplay_agent_profile import (
-    ScreenplayAgentProfileExtension,
+    ScreenplayAgentProfile,
     _ScreenplayCheckpointObserver,
     _checkpoint_input,
     _ready_checkpoint_keys,
@@ -68,7 +67,7 @@ from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
-    _requires_child_run,
+    _requires_run,
     _unit_result,
     normalize_screenplay_candidate,
 )
@@ -106,7 +105,7 @@ from application.screenplay_structured_call import (
     PublicModelResult,
     StructuredModelResult,
 )
-from application.screenplay_tool_calling import ScreenplayCandidateRunResult
+from application.screenplay_candidate_model import ScreenplayCandidateRunResult
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from database.screenplay_agent_schema import init_screenplay_agent_schema
@@ -138,20 +137,14 @@ from infrastructure.persistence.sqlite_screenplay_operation_repository import (
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
-from infrastructure.persistence.sqlite_work_item_repository import (
-    SqliteWorkItemRepository,
-)
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
-from infrastructure.persistence.sqlite_host_child_run_registry import (
-    SqliteHostChildRunRegistry,
-)
 from infrastructure.persistence.agent_output_publisher import (
     InProcessAgentOutputPublisher,
 )
-from infrastructure.persistence.run_execution_store import SqliteExecutionLeaseStore
+from infrastructure.persistence.run_execution_store import SqliteRunControlStore
 from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from domains.screenplay_agent.adapter import (
     ScreenplayExecutionStateFactory,
@@ -165,39 +158,10 @@ from purra.task_admission import (
     LongTaskExecutionResult,
     LongTaskExecutionStatus,
 )
+from purra.testing import assert_task_orchestration_conforms
 
 
 pytestmark = pytest.mark.asyncio
-
-
-def _part_lineage(root_run_id: str = "root-screenplay-part") -> RunLineage:
-    return RunLineage(
-        parent_run_id=root_run_id,
-        root_run_id=root_run_id,
-        delegation_id=None,
-        agent_role="screenplay-part",
-        depth=1,
-    )
-
-
-async def _persisted_part_lineage(
-    db: DatabaseConnection,
-    session_id: int,
-) -> RunLineage:
-    existing = await db.fetch_one(
-        "SELECT id FROM ai_agent_runs "
-        "WHERE session_id = ? AND mode = 'screenplay_part_test_root' "
-        "ORDER BY create_time, id LIMIT 1",
-        [session_id],
-    )
-    root_run_id = str(existing["id"]) if existing is not None else (
-        await SqliteRunRepository(db).create(RunCreateParams(
-            session_id=session_id,
-            prompt="Screenplay Part test Root",
-            mode="screenplay_part_test_root",
-        ))
-    )
-    return _part_lineage(root_run_id)
 
 
 def _checkpoint_unit(
@@ -221,7 +185,7 @@ def _checkpoint_unit(
 
 
 def _root_revision_payload(
-    plan: TaskPlan,
+    plan: ExecutionPlan,
     *,
     identity: str,
     digest: str | None = None,
@@ -239,8 +203,6 @@ def _root_revision_payload(
             "status": step.status.value,
             "risk_level": step.risk_level.value if step.risk_level else None,
             "suggested_tools": list(step.suggested_tools),
-            "agent_role": step.agent_role,
-            "assignment": thaw_json_mapping(step.assignment),
             "depends_on": list(step.depends_on),
             "description": step.description,
             "result_summary": step.result_summary,
@@ -290,7 +252,7 @@ async def test_checkpoint_boundaries_are_business_milestones_not_every_part():
 
 
 async def test_checkpoint_planner_receipts_expose_only_public_artifact_facts():
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -350,12 +312,12 @@ async def test_checkpoint_planner_receipts_expose_only_public_artifact_facts():
     ("generate_review_dimension", True),
     ("compose_final_response", True),
 ))
-async def test_screenplay_part_child_run_classification(kind, expected):
-    assert _requires_child_run(kind) is expected
+async def test_screenplay_part_run_requirement_classification(kind, expected):
+    assert _requires_run(kind) is expected
 
 
 async def test_checkpoint_planner_accepts_only_future_copy_and_dependencies():
-    original = TaskPlan(
+    original = ExecutionPlan(
         title="创作两集",
         goal="完成两集候选稿",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
@@ -413,7 +375,7 @@ async def test_checkpoint_planner_accepts_only_future_copy_and_dependencies():
 async def test_checkpoint_loads_current_plan_from_authoritative_root_state(
     temp_db: DatabaseConnection,
 ):
-    original = TaskPlan(
+    original = ExecutionPlan(
         title="创作两集",
         goal="完成两集候选稿",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
@@ -427,9 +389,9 @@ async def test_checkpoint_loads_current_plan_from_authoritative_root_state(
         await temp_db.execute(
             "INSERT INTO ai_agent_run_todos "
             "(run_id, step_id, title, status, executor, step_type, "
-            "risk_level, description, expected_tools, agent_role, "
+            "risk_level, description, expected_tools, "
             "assignment_json, depends_on_json, result_summary, error, sort) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 "root-checkpoint-plan",
                 step.id,
@@ -440,8 +402,7 @@ async def test_checkpoint_loads_current_plan_from_authoritative_root_state(
                 step.risk_level.value if step.risk_level else None,
                 step.description,
                 json.dumps(list(step.suggested_tools)),
-                step.agent_role,
-                json.dumps(thaw_json_mapping(step.assignment)),
+                "{}",
                 json.dumps(list(step.depends_on)),
                 "已读取权威材料" if position == 0 else None,
                 None,
@@ -496,7 +457,7 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -568,7 +529,7 @@ async def test_ready_checkpoint_rebinds_to_continuation_root_after_crash(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -607,7 +568,7 @@ async def test_applied_checkpoint_on_source_root_remains_immutable_audit(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -724,7 +685,7 @@ async def test_expired_checkpoint_owner_is_fenced_during_continuation_rebind(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -837,7 +798,7 @@ async def test_continuation_ready_rebase_only_synchronizes_root_step_status(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    baseline = TaskPlan(
+    baseline = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -921,7 +882,7 @@ async def test_checkpoint_non_owner_waits_at_barrier_until_owner_is_ready(
     await asyncio.sleep(0.02)
     assert waiter.done() is False
 
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -967,7 +928,7 @@ async def test_checkpoint_expiry_takeover_fences_stale_planner_write(
     assert recovered["_acquired"] is True
     assert int(recovered["reservation_epoch"]) > int(stale["reservation_epoch"])
 
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1007,7 +968,7 @@ async def test_checkpoint_planner_heartbeat_prevents_duplicate_model_call(
         root_run_id="root-heartbeat",
         signal=None,
     )
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1122,7 +1083,7 @@ async def test_ready_checkpoint_reconciles_root_event_without_replanning(
     event_already_persisted: bool,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1215,7 +1176,7 @@ async def test_checkpoint_root_reconcile_requires_complete_matching_plan(
     mutation: str,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1271,7 +1232,7 @@ async def test_duplicate_root_revision_event_pauses_ready_receipt(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1341,7 +1302,7 @@ async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event
         lease_ms=20,
         poll_interval_seconds=0.002,
     )
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1426,7 +1387,7 @@ async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event
 
 @pytest.mark.parametrize("mutation", ("completed", "scope", "step_id"))
 async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutation):
-    original = TaskPlan(
+    original = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1446,7 +1407,7 @@ async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutati
             current.steps[0],
             replace(current.steps[1], id="replacement"),
             replace(current.steps[2], depends_on=("replacement",)),
-        ))
+        ), work_step_ids=("evidence", "replacement", "deliver"))
     else:
         changed_spec = replace(
             original.task_spec,
@@ -1495,7 +1456,7 @@ async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutati
 
 
 async def test_checkpoint_planner_typed_model_failure_pauses_without_plan():
-    original = TaskPlan(
+    original = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
         steps=_bound_steps("evidence", "create", "deliver"),
@@ -1919,18 +1880,13 @@ class _CoreComposition:
             db,
             run_repository=self._runs,
         )
-        self._host_children = SqliteHostChildRunRegistry(db)
         self._publisher = InProcessAgentOutputPublisher()
-        self._leases = SqliteExecutionLeaseStore(db)
+        self._leases = SqliteRunControlStore(db)
         self.last_request = None
 
     @property
     def output_repository(self):
         return self._outputs
-
-    @property
-    def host_child_run_registry(self):
-        return self._host_children
 
     def create_core_for_request(self, request, api_key, **kwargs):
         self.last_request = request
@@ -1958,10 +1914,6 @@ class _CoreComposition:
     def create_response_judge_policies(self, request):
         del request
         return ()
-
-    def agent_role_registry_for_request(self, request):
-        del request
-        return None
 
     def bind_run_profile(self, request, options):
         del request
@@ -2052,7 +2004,7 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         "preserve": [],
         "baseRevisionId": None,
     }
-    assert compiled.recipe.metadata["recipeVersion"] == 4
+    assert compiled.recipe.metadata["recipeVersion"] == 5
     assert compiled.manifest.digest == repeated.manifest.digest
     assert [part.id for part in compiled.manifest.parts] == [
         part.id for part in repeated.manifest.parts
@@ -2141,6 +2093,34 @@ async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order(
     assert steps.index(by_id["compose-final-response"]) > max(
         steps.index(by_id[unit_id]) for unit_id in validation_ids
     )
+
+
+async def test_source_analysis_recipe_exposes_semantic_progress_titles():
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="分析原作范围",
+            requested_deliverable="sourceAnalysis",
+        ),
+        target_role="sourceAnalysis",
+        plan_bindings=(
+            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
+            ScreenplayPlanBinding("analyze", ScreenplayPlanPhase.CREATION),
+            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
+        ),
+        plan_steps=_bound_steps("understand", "analyze", "deliver"),
+    )
+
+    assert [step.metadata["displayTitle"] for step in compiled.recipe.steps] == [
+        "读取原作内容",
+        "分析人物",
+        "梳理故事",
+        "分析世界观",
+        "提炼主题",
+        "评估改编风险",
+        "检查分析结果",
+        "生成回复",
+    ]
 
 
 async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode():
@@ -2315,13 +2295,13 @@ async def _project_and_session(db):
     return projects, workspace, session
 
 
-async def test_deterministic_evidence_part_creates_no_child_run(
+async def test_deterministic_evidence_part_requires_no_dedicated_run(
     temp_db: DatabaseConnection,
 ):
     _, workspace, session = await _project_and_session(temp_db)
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        tool_calling_service=object(),  # unused by deterministic evidence
+        candidate_model_service=object(),  # unused by deterministic evidence
     )
     before = await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
@@ -2357,7 +2337,7 @@ def _admission_plan(
     operation: str,
     deliverable: str | None,
     phases: tuple[str, ...],
-) -> TaskPlan:
+) -> ExecutionPlan:
     steps = tuple(
         TaskStep(
             id=f"semantic-{index}",
@@ -2368,7 +2348,7 @@ def _admission_plan(
         )
         for index, phase in enumerate(phases, start=1)
     )
-    return TaskPlan(
+    return ExecutionPlan(
         title="完成本轮剧本任务",
         task_spec=TaskSpec(
             goal="根据本轮要求完成剧本任务",
@@ -2439,7 +2419,7 @@ async def test_screenplay_profile_admits_answer_inline_without_operation(
         stage_command=None,
         runtime_profile={},
     )
-    profile = ScreenplayAgentProfileExtension(
+    profile = ScreenplayAgentProfile(
         temp_db,
         owner_id="screenplay-admission-test",
         resolver=_AdmissionResolver(),
@@ -2451,9 +2431,10 @@ async def test_screenplay_profile_admits_answer_inline_without_operation(
         content="当前项目进行到哪一步？",
     ))
 
-    decision = await profile.task_admission().evaluate(
-        request,
-        _admission_plan(
+    decision = await assert_task_orchestration_conforms(
+        evaluator=profile.task_admission(),
+        request=request,
+        plan=_admission_plan(
             operation="answer",
             deliverable=None,
             phases=("evidence", "delivery"),
@@ -2467,14 +2448,14 @@ async def test_screenplay_profile_admits_answer_inline_without_operation(
     ) == {"count": 0}
 
 
-async def test_product_composition_installs_the_screenplay_profile_extension(
+async def test_product_composition_installs_the_screenplay_profile(
     temp_db: DatabaseConnection,
 ):
     composition = create_agent_composition(temp_db)
     try:
         assert isinstance(
-            composition.profile_extension("screenplay"),
-            ScreenplayAgentProfileExtension,
+            composition.profile("screenplay"),
+            ScreenplayAgentProfile,
         )
     finally:
         await composition.shutdown()
@@ -2496,7 +2477,7 @@ async def test_screenplay_profile_rejects_a_root_request_outside_its_persisted_t
         stage_command=None,
         runtime_profile={},
     )
-    profile = ScreenplayAgentProfileExtension(
+    profile = ScreenplayAgentProfile(
         temp_db,
         owner_id="screenplay-trusted-turn-test",
     )
@@ -2544,7 +2525,7 @@ async def test_screenplay_profile_admits_formal_plan_as_one_operation_and_privat
         stage_command=stage_command,
         runtime_profile={},
     )
-    profile = ScreenplayAgentProfileExtension(
+    profile = ScreenplayAgentProfile(
         temp_db,
         owner_id="screenplay-admission-test",
         resolver=_AdmissionResolver(),
@@ -2564,7 +2545,11 @@ async def test_screenplay_profile_admits_formal_plan_as_one_operation_and_privat
         phases=phases,
     )
 
-    first = await profile.task_admission().evaluate(request, plan)
+    first = await assert_task_orchestration_conforms(
+        evaluator=profile.task_admission(),
+        request=request,
+        plan=plan,
+    )
     replay = await profile.task_admission().evaluate(request, plan)
 
     assert hydrated.stage_command == ScreenplayStageCommand.from_mapping(
@@ -2618,7 +2603,7 @@ async def _durable_screenplay_admission(
         },
         runtime_profile={},
     )
-    profile = ScreenplayAgentProfileExtension(
+    profile = ScreenplayAgentProfile(
         db,
         owner_id=owner_id,
         resolver=_AdmissionResolver(),
@@ -2663,9 +2648,9 @@ async def test_admitted_operation_settles_when_root_fails_before_dispatch(
     assert turn is not None
     await temp_db.execute(
         "INSERT INTO ai_agent_runs "
-        "(id, session_id, status, mode, prompt, binding_namespace, "
-        "binding_aggregate_id, binding_command_id, binding_attributes_json, "
-        "root_run_id) VALUES (?, ?, 'running', 'agent', '', ?, ?, ?, ?, ?)",
+            "(id, session_id, status, mode, prompt, binding_namespace, "
+            "binding_aggregate_id, binding_command_id, binding_attributes_json) "
+            "VALUES (?, ?, 'running', 'agent', '', ?, ?, ?, ?)",
         [
             root_run_id,
             turn["sessionId"],
@@ -2675,8 +2660,7 @@ async def test_admitted_operation_settles_when_root_fails_before_dispatch(
             json.dumps({
                 "agentProfile": "screenplay",
                 "domainNamespace": "purrtypos.screenplay",
-            }),
-            root_run_id,
+                }),
         ],
     )
     await temp_db.execute(
@@ -2728,7 +2712,6 @@ async def test_admitted_operation_settles_when_root_fails_before_dispatch(
 
 def _admission_dispatcher(db, profile):
     return profile.create_long_task_dispatcher(
-        work_item_repository=SqliteWorkItemRepository(db),
         long_task_repository=SqliteLongTaskRepository(db),
         executor=_AdmissionUnitExecutor(),
     )
@@ -2755,18 +2738,16 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
             request,
             plan,
             decision,
-            parent_run_id="run-atomic-dispatch",
+            run_id="run-atomic-dispatch",
         )
 
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
     ) == {"count": 0}
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_items"
-    ) == {"count": 0}
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs"
-    ) == {"count": 0}
+    assert await temp_db.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+        "('ai_agent_work_items', 'ai_agent_work_item_runs')"
+    ) == []
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_long_task_units"
     ) == {"count": 0}
@@ -2780,24 +2761,22 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
         request,
         plan,
         decision,
-        parent_run_id="run-atomic-dispatch",
+        run_id="run-atomic-dispatch",
     )
     replay = await dispatcher.dispatch(
         request,
         plan,
         decision,
-        parent_run_id="run-atomic-dispatch",
+        run_id="run-atomic-dispatch",
     )
     assert replay.task_id == first.task_id
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
     ) == {"count": 1}
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_items"
-    ) == {"count": 1}
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_item_runs"
-    ) == {"count": 1}
+    assert await temp_db.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+        "('ai_agent_work_items', 'ai_agent_work_item_runs')"
+    ) == []
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM screenplay_agent_operation_commands "
         "WHERE command_type = 'attachLongTask'"
@@ -2808,7 +2787,7 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
     assert operation.long_task_id == first.task_id
 
 
-async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_work_item(
+async def test_screenplay_dispatch_preserves_primary_task_create_error(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -2824,7 +2803,6 @@ async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_w
 
     monkeypatch.setattr(long_tasks, "create", fail_create)
     dispatcher = profile.create_long_task_dispatcher(
-        work_item_repository=SqliteWorkItemRepository(temp_db),
         long_task_repository=long_tasks,
         executor=_AdmissionUnitExecutor(),
     )
@@ -2837,12 +2815,13 @@ async def test_screenplay_dispatch_preserves_create_error_when_cleanup_cancels_w
             request,
             plan,
             decision,
-            parent_run_id="run-create-cleanup",
+            run_id="run-create-cleanup",
         )
 
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_work_items"
-    ) == {"count": 0}
+    assert await temp_db.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'ai_agent_work_items'"
+    ) == []
 
 
 @pytest.mark.parametrize(
@@ -2863,7 +2842,7 @@ async def test_screenplay_dispatcher_leaves_business_terminal_settlement_to_root
         request,
         plan,
         decision,
-        parent_run_id=f"run-{status.value}-root-settlement",
+        run_id=f"run-{status.value}-root-settlement",
     )
     result = LongTaskExecutionResult(
         task_id=receipt.task_id,
@@ -2891,7 +2870,7 @@ async def test_screenplay_dispatcher_exception_does_not_settle_business_state(
         request,
         plan,
         decision,
-        parent_run_id="run-exception-atomic",
+        run_id="run-exception-atomic",
     )
     await dispatcher._settle_exception(
         receipt.task_id,
@@ -2974,6 +2953,18 @@ async def test_final_response_unit_metadata_exposes_the_generic_durable_contract
 async def test_host_part_output_is_a_finalized_artifact_without_shadow_json(
     temp_db: DatabaseConnection,
 ):
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, total_units) "
+        "VALUES ('task-artifact-only', 'purrtypos.screenplay', 'screenplay', "
+        "'project-artifact-only', 'run-artifact-only', 1)"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, run_id) VALUES "
+        "('task-artifact-only', 'evidence:4', 'evidence:4', 0, "
+        "'run-artifact-only')"
+    )
     parts = ScreenplayPartArtifactQuery(temp_db)
     ref = await parts.write_host_part(
         project_id="project-artifact-only",
@@ -3732,877 +3723,6 @@ class _ScriptedModelGateway(_ModelGateway):
         return ModelStream(chunks=chunks(), model=invocation.request.model)
 
 
-async def test_structured_model_repair_is_persisted_as_one_diagnostic_run(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
-        session_id=session["id"],
-        prompt="测试结构化输出 Root",
-        mode="agent",
-    ))
-    malformed = '{"contentText":"角色说"少亲自来"。"}'
-    runtime = _request(session["id"], "测试结构化输出").runtime
-    runtime.options.update({
-        "model": "deepseek-v4-flash",
-        "model_profile": "deepseek:deepseek-v4-flash",
-        "thinking": {"type": "enabled"},
-    })
-    gateway = _ScriptedModelGateway("secret", [
-        [
-            ModelStreamChunk(content_delta=malformed),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-        [
-            ModelStreamChunk(content_delta='```json\n{"answer":"ok"}\n```'),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-    ])
-    composition = _core_composition(temp_db, gateway)
-    result = await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=composition,
-    ).run_json(
-        runtime=runtime,
-        session_id=session["id"],
-        prompt="测试结构化输出",
-        system_instruction="只输出 JSON",
-        user_payload={"question": "test"},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="repair-test",
-        task_id="task-repair",
-        unit_id="unit-repair",
-        expected_part_key="answer",
-        lineage=_part_lineage(root_run_id),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-
-    assert result.value == {"answer": "ok"}
-    child_context = ScreenplayAgentDomainContext.from_core_context(
-        composition.last_request.domain_context
-    )
-    assert (
-        child_context.task_id,
-        child_context.unit_id,
-        child_context.expected_part_key,
-    ) == ("task-repair", "unit-repair", "answer")
-    assert ScreenplayToolLoopPolicy().should_plan(
-        composition.last_request,
-        PlanningCapabilities(),
-    ) is False
-    assert [invocation.reasoning_mode for invocation in gateway.invocations] == [
-        ReasoningMode.DEFAULT,
-        ReasoningMode.DEFAULT,
-    ]
-    assert [[message.role.value for message in messages] for messages, _ in gateway.calls] == [
-        ["system", "user"],
-        ["system", "user", "assistant", "developer"],
-    ]
-    assert gateway.calls[1][0][-2].content == malformed
-    assert "question" not in str(gateway.calls[1][0][-2].content)
-    assert await temp_db.fetch_one(
-        "SELECT status, binding_namespace, final_response, parent_run_id, "
-        "root_run_id, delegation_id, agent_role, run_depth "
-        "FROM ai_agent_runs WHERE id = ?",
-        [result.run_id],
-    ) == {
-        "status": "done",
-        "binding_namespace": "screenplay.agent.test",
-        "final_response": "",
-        "parent_run_id": root_run_id,
-        "root_run_id": root_run_id,
-        "delegation_id": None,
-        "agent_role": "screenplay-part",
-        "run_depth": 1,
-    }
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
-        "WHERE run_id = ? AND event_type = 'model.call_recorded'",
-        [result.run_id],
-    ) == {"count": 2}
-    assert await temp_db.fetch_all(
-        "SELECT json_extract(payload_json, '$.parameters.messageCount') AS count "
-        "FROM ai_agent_run_events WHERE run_id = ? "
-        "AND event_type = 'model.call_recorded' ORDER BY id",
-        [result.run_id],
-    ) == [{"count": 2}, {"count": 4}]
-
-
-async def test_structured_child_returns_persisted_result_not_validator_memory(
-    temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _, _, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta='{"answer":"persisted"}'),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
-        session_id=session["id"],
-        prompt="持久结果优先 Root",
-        mode="agent",
-    ))
-    composition = _core_composition(temp_db, gateway)
-    original_validate = (
-        screenplay_structured_call._StructuredResultValidator.validate
-    )
-
-    def divergent_memory(self, **kwargs):
-        verdict = original_validate(self, **kwargs)
-        self.value = {"answer": "memory-only"}
-        return verdict
-
-    monkeypatch.setattr(
-        screenplay_structured_call._StructuredResultValidator,
-        "validate",
-        divergent_memory,
-    )
-    result = await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=composition,
-    ).run_json(
-        runtime=_request(session["id"], "持久结果优先").runtime,
-        session_id=session["id"],
-        prompt="持久结果优先",
-        system_instruction="只输出 JSON",
-        user_payload={"question": "test"},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="persisted-result-test",
-        lineage=_part_lineage(root_run_id),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-
-    assert result.value == {"answer": "persisted"}
-    invocation_count = len(gateway.invocations)
-    assert await AgentRunService(composition).read_validated_result(
-        result.run_id
-    ) == '{"answer":"persisted"}'
-    assert len(gateway.invocations) == invocation_count
-
-
-async def test_structured_child_retry_after_host_crash_reuses_persisted_run(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta='{"answer":"persisted"}'),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
-        session_id=session["id"],
-        prompt="崩溃恢复 Root",
-        mode="agent",
-    ))
-    composition = _core_composition(temp_db, gateway)
-
-    async def invoke(active_composition=composition):
-        return await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=active_composition,
-        ).run_json(
-            runtime=_request(session["id"], "崩溃恢复").runtime,
-            session_id=session["id"],
-            prompt="崩溃恢复",
-            system_instruction="只输出 JSON",
-            user_payload={"question": "same"},
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id="project-crash",
-            binding_command_id="task-crash:unit-crash",
-            task_id="task-crash",
-            unit_id="unit-crash",
-            expected_part_key="answer",
-            lineage=_part_lineage(root_run_id),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-        )
-
-    first = await invoke()
-    event_count = await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
-        [first.run_id],
-    )
-    class ReplayMustNotInvokeProvider(_ModelGateway):
-        async def stream(self, *_args, **_kwargs):
-            raise AssertionError("durable Child replay invoked its provider")
-
-    replay_gateway = ReplayMustNotInvokeProvider("secret")
-    second = await invoke(_core_composition(temp_db, replay_gateway))
-
-    assert second == first
-    assert len(gateway.invocations) == 1
-    assert replay_gateway.invocations == []
-    receipt = await temp_db.fetch_one(
-        "SELECT host_child_key FROM ai_agent_host_child_runs WHERE run_id = ?",
-        [first.run_id],
-    )
-    assert receipt is not None
-    assert receipt["host_child_key"].startswith("host-child:")
-    assert "project-crash" not in receipt["host_child_key"]
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ?",
-        [first.run_id],
-    ) == event_count
-
-
-async def test_structured_child_same_key_request_conflict_fails_closed(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta='{"answer":"persisted"}'),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    composition = _core_composition(temp_db, gateway)
-    service = screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=composition,
-    )
-    common = dict(
-        runtime=_request(session["id"], "身份冲突").runtime,
-        session_id=session["id"],
-        prompt="身份冲突",
-        user_payload={"question": "same"},
-        binding_namespace="screenplay.agent.task",
-        binding_aggregate_id="project-conflict",
-        binding_command_id="task-conflict:unit-conflict",
-        task_id="task-conflict",
-        unit_id="unit-conflict",
-        expected_part_key="answer",
-        lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-    await service.run_json(system_instruction="只输出 JSON", **common)
-
-    with pytest.raises(ContractViolationError, match="identity"):
-        await service.run_json(system_instruction="输出另一份 JSON", **common)
-    assert len(gateway.invocations) == 1
-
-
-async def test_concurrent_structured_child_same_key_invokes_provider_once(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    class BlockingSuccessGateway(_ModelGateway):
-        def __init__(self, api_key: str) -> None:
-            super().__init__(api_key)
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-
-        async def stream(self, messages, invocation, signal=None):
-            del messages, signal
-            self.invocations.append(invocation)
-            self.started.set()
-            await self.release.wait()
-
-            async def chunks():
-                yield ModelStreamChunk(content_delta='{"answer":"one"}')
-                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
-
-            return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-    gateway = BlockingSuccessGateway("secret")
-    composition = _core_composition(temp_db, gateway)
-
-    async def invoke(signal=None):
-        return await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=composition,
-        ).run_json(
-            runtime=_request(session["id"], "并发恢复").runtime,
-            session_id=session["id"],
-            prompt="并发恢复",
-            system_instruction="只输出 JSON",
-            user_payload={"question": "same"},
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id="project-concurrent",
-            binding_command_id="task-concurrent:unit-concurrent",
-            task_id="task-concurrent",
-            unit_id="unit-concurrent",
-            expected_part_key="answer",
-            lineage=await _persisted_part_lineage(temp_db, session["id"]),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-            signal=signal,
-        )
-
-    first = asyncio.create_task(invoke())
-    await gateway.started.wait()
-    second = asyncio.create_task(invoke())
-    await asyncio.sleep(0.1)
-    assert len(gateway.invocations) == 1
-
-    gateway.release.set()
-    first_result, second_result = await asyncio.gather(first, second)
-    assert second_result == first_result
-    assert len(gateway.invocations) == 1
-
-
-async def test_canceling_existing_host_child_waiter_does_not_cancel_owner(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    class BlockingSuccessGateway(_ModelGateway):
-        def __init__(self, api_key: str) -> None:
-            super().__init__(api_key)
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-
-        async def stream(self, messages, invocation, signal=None):
-            del messages, signal
-            self.invocations.append(invocation)
-            self.started.set()
-            await self.release.wait()
-
-            async def chunks():
-                yield ModelStreamChunk(content_delta='{"answer":"owner"}')
-                yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
-
-            return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-    gateway = BlockingSuccessGateway("secret")
-    composition = _core_composition(temp_db, gateway)
-
-    async def invoke(signal=None):
-        return await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=composition,
-        ).run_json(
-            runtime=_request(session["id"], "等待取消").runtime,
-            session_id=session["id"],
-            prompt="等待取消",
-            system_instruction="只输出 JSON",
-            user_payload={"question": "same"},
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id="project-wait-cancel",
-            binding_command_id="task-wait-cancel:unit-wait-cancel",
-            task_id="task-wait-cancel",
-            unit_id="unit-wait-cancel",
-            expected_part_key="answer",
-            lineage=await _persisted_part_lineage(temp_db, session["id"]),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-            signal=signal,
-        )
-
-    owner = asyncio.create_task(invoke())
-    await gateway.started.wait()
-    waiter_signal = asyncio.Event()
-    waiter = asyncio.create_task(invoke(waiter_signal))
-    await asyncio.sleep(0.1)
-    waiter_signal.set()
-    with pytest.raises(asyncio.CancelledError):
-        await waiter
-
-    gateway.release.set()
-    owner_result = await owner
-    assert owner_result.value == {"answer": "owner"}
-    assert len(gateway.invocations) == 1
-
-
-async def test_truncated_structured_output_is_never_repaired_or_replayed(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    class TruncatedGateway(_ModelGateway):
-        async def stream(self, messages, invocation, signal=None):
-            del messages, signal
-            self.invocations.append(invocation)
-
-            async def chunks():
-                yield ModelStreamChunk(content_delta='{"answer":"unfinished')
-                yield ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH)
-
-            return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-    gateway = TruncatedGateway("secret")
-    with pytest.raises(ModelGatewayError) as captured:
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=_core_composition(temp_db, gateway),
-        ).run_json(
-            runtime=_request(session["id"], "测试截断输出").runtime,
-            session_id=session["id"],
-            prompt="测试截断输出",
-            system_instruction="只输出 JSON",
-            user_payload={"question": "test"},
-            binding_namespace="screenplay.agent.test",
-            binding_aggregate_id="project-test",
-            binding_command_id="truncated-output-test",
-            lineage=await _persisted_part_lineage(temp_db, session["id"]),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-        )
-
-    assert captured.value.code == "model_output_truncated"
-    assert len(gateway.invocations) == 1
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
-        "WHERE event_type = 'model.call_recorded'"
-    ) == {"count": 1}
-
-
-async def test_structured_model_renews_its_core_run_lease_during_slow_generation(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    class SlowGateway(_ScriptedModelGateway):
-        async def stream(self, messages, invocation, signal=None):
-            await asyncio.sleep(0.65)
-            return await super().stream(messages, invocation, signal)
-
-    gateway = SlowGateway("secret", [[
-        ModelStreamChunk(content_delta='{"answer":"ok"}'),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    runtime = _request(session["id"], "测试慢速结构化输出").runtime
-    result = await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    ).run_json(
-        runtime=runtime,
-        session_id=session["id"],
-        prompt="测试慢速结构化输出",
-        system_instruction="只输出 JSON",
-        user_payload={"question": "test"},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="slow-lease-test",
-        lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-
-    assert result.value == {"answer": "ok"}
-    assert await temp_db.fetch_one(
-        "SELECT status, execution_owner_id, lease_expires_at_ms "
-        "FROM ai_agent_runs WHERE id = ?",
-        [result.run_id],
-    ) == {
-        "status": "done",
-        "execution_owner_id": None,
-        "lease_expires_at_ms": None,
-    }
-
-
-async def test_screenplay_ai_part_signal_persists_child_cancellation(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    root_run_id = await SqliteRunRepository(temp_db).create(RunCreateParams(
-        session_id=session["id"],
-        prompt="取消 Child Root",
-        mode="agent",
-    ))
-
-    class BlockingGateway(_ModelGateway):
-        def __init__(self, api_key: str) -> None:
-            super().__init__(api_key)
-            self.started = asyncio.Event()
-            self.never = asyncio.Event()
-
-        async def stream(self, messages, invocation, signal=None):
-            del messages, invocation, signal
-            self.started.set()
-            await self.never.wait()
-            raise AssertionError("canceled child model call resumed")
-
-    gateway = BlockingGateway("secret")
-    composition = _core_composition(temp_db, gateway)
-    signal = asyncio.Event()
-    common = dict(
-        runtime=_request(session["id"], "取消当前 Part").runtime,
-        session_id=session["id"],
-        prompt="取消当前 Part",
-        system_instruction="只输出 JSON",
-        user_payload={},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="cancel-child-test",
-        lineage=_part_lineage(root_run_id),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-    call = asyncio.create_task(
-        screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=composition,
-        ).run_json(
-            **common,
-            signal=signal,
-        )
-    )
-    await gateway.started.wait()
-    signal.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await call
-
-    child = await temp_db.fetch_one(
-        "SELECT status, parent_run_id, root_run_id, delegation_id, agent_role, "
-        "run_depth, execution_owner_id, lease_expires_at_ms "
-        "FROM ai_agent_runs WHERE parent_run_id = ?",
-        [root_run_id],
-    )
-    assert child == {
-        "status": "canceled",
-        "parent_run_id": root_run_id,
-        "root_run_id": root_run_id,
-        "delegation_id": None,
-        "agent_role": "screenplay-part",
-        "run_depth": 1,
-        "execution_owner_id": None,
-        "lease_expires_at_ms": None,
-    }
-    with pytest.raises(
-        ContractViolationError,
-        match="terminal status 'canceled' is not reusable",
-    ):
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=composition,
-        ).run_json(**common)
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE parent_run_id = ?",
-        [root_run_id],
-    ) == {"count": 1}
-
-
-async def test_structured_model_preserves_the_frontend_thinking_option(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    reasoning_modes = []
-
-    gateway = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta='{"answer":"ok"}'),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    runtime = _request(session["id"], "测试思考配置").runtime
-    runtime.options.update({
-        "model": "deepseek-v4-flash",
-        "model_profile": "deepseek:deepseek-v4-flash",
-        "thinking": {"type": "enabled"},
-    })
-
-    await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    ).run_json(
-        runtime=runtime,
-        session_id=session["id"],
-        prompt="测试思考配置",
-        system_instruction="只输出 JSON",
-        user_payload={"question": "test"},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="thinking-option-test",
-        lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-
-    reasoning_modes.extend(item.reasoning_mode for item in gateway.invocations)
-    assert reasoning_modes == [ReasoningMode.DEFAULT]
-
-
-async def test_screenplay_uses_the_exact_profile_or_user_output_limit():
-    from purra.model_protocol import resolve_invocation_output_limit
-    from infrastructure.models.profiles.registry import resolve_model_profile
-
-    snapshot = resolve_model_profile(
-        "deepseek:deepseek-v4-flash",
-        "deepseek-v4-flash",
-        "https://api.deepseek.com",
-    ).capability_snapshot(context_window_tokens=1_000_000)
-
-    assert resolve_invocation_output_limit(
-        snapshot,
-        explicit_user_override=None,
-    ).max_tokens == 393_216
-    assert resolve_invocation_output_limit(
-        snapshot,
-        explicit_user_override=256_000,
-    ).max_tokens == 256_000
-
-
-async def test_model_failure_keeps_its_run_id_in_the_shared_diagnostic_stream(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    class FailingGateway(_ModelGateway):
-        async def stream(self, *_args, **_kwargs):
-            raise RuntimeError("provider disconnected")
-
-    gateway = FailingGateway("secret")
-    runtime = _request(session["id"], "测试模型失败诊断").runtime
-
-    with pytest.raises(ModelGatewayError) as captured:
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=_core_composition(temp_db, gateway),
-        ).run_json(
-            runtime=runtime,
-            session_id=session["id"],
-            prompt="测试模型失败诊断",
-            system_instruction="只输出 JSON",
-            user_payload={"question": "test"},
-            binding_namespace="screenplay.agent.test",
-            binding_aggregate_id="project-test",
-            binding_command_id="failure-diagnostic-test",
-            lineage=await _persisted_part_lineage(temp_db, session["id"]),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-        )
-
-    assert captured.value.code == "model_gateway_error"
-    assert await _public_text_events(temp_db) == []
-    assert await temp_db.fetch_one(
-        "SELECT status FROM ai_agent_runs "
-        "WHERE parent_run_id IS NOT NULL ORDER BY create_time DESC LIMIT 1"
-    ) == {"status": "failed"}
-
-
-async def test_failed_host_child_retry_uses_one_new_generation(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    class FailingGateway(_ModelGateway):
-        async def stream(self, *_args, **_kwargs):
-            raise RuntimeError("provider disconnected")
-
-    composition = _core_composition(temp_db, FailingGateway("secret"))
-    common = dict(
-        runtime=_request(session["id"], "失败后重试").runtime,
-        session_id=session["id"],
-        prompt="失败后重试",
-        system_instruction="只输出 JSON",
-        user_payload={"question": "same"},
-        binding_namespace="screenplay.agent.task",
-        binding_aggregate_id="project-failed-retry",
-        binding_command_id="task-failed-retry:unit-failed-retry",
-        task_id="task-failed-retry",
-        unit_id="unit-failed-retry",
-        expected_part_key="answer",
-        lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_test",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-    with pytest.raises(ModelGatewayError):
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=composition,
-        ).run_json(**common)
-
-    success = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta='{"answer":"retried"}'),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    composition._gateway = success
-    result = await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=composition,
-    ).run_json(**common)
-
-    assert result.value == {"answer": "retried"}
-    assert len(success.invocations) == 1
-    rows = await temp_db.fetch_all(
-        "SELECT status FROM ai_agent_runs WHERE parent_run_id = ? "
-        "ORDER BY CAST(json_extract(binding_attributes_json, "
-        "'$.hostChild.generation') AS INTEGER)",
-        [(await _persisted_part_lineage(temp_db, session["id"])).root_run_id],
-    )
-    assert [row["status"] for row in rows] == ["failed", "done"]
-    assert await temp_db.fetch_one(
-        "SELECT generation, run_id, terminal_status "
-        "FROM ai_agent_host_child_runs",
-    ) == {
-        "generation": 2,
-        "run_id": result.run_id,
-        "terminal_status": "done",
-    }
-
-
-async def test_reasoning_only_structured_output_retries_original_not_repair(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    expected = '{"action":"review"}'
-    gateway = _ScriptedModelGateway("secret", [
-        [
-            ModelStreamChunk(reasoning_delta=expected),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-        [
-            ModelStreamChunk(content_delta=expected),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-    ])
-
-    result = await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    ).run_json(
-        runtime=_request(session["id"], "测试 reasoning JSON").runtime,
-        session_id=session["id"],
-        prompt="测试 reasoning JSON",
-        system_instruction="只输出 JSON",
-        user_payload={},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="reasoning-json-test",
-        lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_structured_generation",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-    )
-
-    assert result.value == {"action": "review"}
-    assert await temp_db.fetch_all(
-        "SELECT json_extract(payload_json, '$.phase') AS phase "
-        "FROM ai_agent_run_events WHERE run_id = ? "
-        "AND event_type = 'model.call_recorded' ORDER BY id",
-        [result.run_id],
-    ) == [
-        {"phase": "generation"},
-        {"phase": "generation"},
-    ]
-    assert await _public_text_events(temp_db) == []
-
-
-async def test_empty_structured_output_never_sends_an_empty_repair_candidate(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    empty = [ModelStreamChunk(finish_reason=ModelFinishReason.STOP)]
-    gateway = _ScriptedModelGateway("secret", [empty, empty, empty])
-
-    with pytest.raises(ModelGatewayError) as captured:
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=_core_composition(temp_db, gateway),
-        ).run_json(
-            runtime=_request(session["id"], "测试空 JSON").runtime,
-            session_id=session["id"],
-            prompt="测试空 JSON",
-            system_instruction="只输出 JSON",
-            user_payload={},
-            binding_namespace="screenplay.agent.test",
-            binding_aggregate_id="project-test",
-            binding_command_id="empty-json-test",
-            lineage=await _persisted_part_lineage(temp_db, session["id"]),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-        )
-
-    assert captured.value.code == "empty_model_response"
-    assert len(gateway.invocations) == 3
-    assert await temp_db.fetch_all(
-        "SELECT json_extract(payload_json, '$.phase') AS phase "
-        "FROM ai_agent_run_events WHERE event_type = 'model.call_recorded' "
-        "ORDER BY id"
-    ) == [
-        {"phase": "generation"},
-        {"phase": "generation"},
-        {"phase": "generation"},
-    ]
-    assert await _public_text_events(temp_db) == []
-
-
-async def test_repair_that_is_still_invalid_fails_as_structured_output_invalid(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-    gateway = _ScriptedModelGateway("secret", [
-        [
-            ModelStreamChunk(content_delta="{invalid"),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-        [
-            ModelStreamChunk(content_delta="still invalid"),
-            ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-        ],
-    ])
-
-    with pytest.raises(ModelGatewayError) as captured:
-        await screenplay_structured_call.ScreenplayStructuredCallService(
-            temp_db,
-            composition=_core_composition(temp_db, gateway),
-        ).run_json(
-            runtime=_request(session["id"], "测试无效 JSON").runtime,
-            session_id=session["id"],
-            prompt="测试无效 JSON",
-            system_instruction="只输出 JSON",
-            user_payload={},
-            binding_namespace="screenplay.agent.test",
-            binding_aggregate_id="project-test",
-            binding_command_id="invalid-json-test",
-            lineage=await _persisted_part_lineage(temp_db, session["id"]),
-            phase="screenplay_test",
-            repair_instruction="修复 JSON",
-            validate=lambda value: value,
-        )
-
-    assert captured.value.code == "structured_output_invalid"
-    assert len(gateway.invocations) == 2
-
-
-async def test_generated_screenplay_body_never_becomes_a_chat_delta(
-    temp_db: DatabaseConnection,
-):
-    _, _, session = await _project_and_session(temp_db)
-
-    gateway = _ScriptedModelGateway("secret", [[
-        ModelStreamChunk(content_delta=(
-            '{"sceneText":"这里是完整剧本正文"}'
-        )),
-        ModelStreamChunk(finish_reason=ModelFinishReason.STOP),
-    ]])
-    result = await screenplay_structured_call.ScreenplayStructuredCallService(
-        temp_db,
-        composition=_core_composition(temp_db, gateway),
-    ).run_json(
-        runtime=_request(session["id"], "测试正文隔离").runtime,
-        session_id=session["id"],
-        prompt="测试正文隔离",
-        system_instruction="只输出 JSON",
-        user_payload={},
-        binding_namespace="screenplay.agent.test",
-        binding_aggregate_id="project-test",
-        binding_command_id="body-isolation-test",
-        lineage=await _persisted_part_lineage(temp_db, session["id"]),
-        phase="screenplay_episode_generation",
-        repair_instruction="修复 JSON",
-        validate=lambda value: value,
-        project_execution=lambda value: (f"sceneText: {value['sceneText']}",),
-    )
-
-    assert result.value == {"sceneText": "这里是完整剧本正文"}
-    assert await _public_text_events(temp_db, result.run_id) == []
-
 
 async def test_screenplay_stream_replays_canonical_output_journal(
     temp_db: DatabaseConnection,
@@ -5135,7 +4255,7 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
     tool_calls = _CheckpointingToolCalls()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+        candidate_model_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     evidence = {
@@ -5250,7 +4370,7 @@ async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
     tool_calls = _CheckpointingToolCalls(fail_once_key="scene-2")
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+        candidate_model_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     evidence = {
@@ -5357,7 +4477,7 @@ async def test_review_dimension_parts_aggregate_host_side(
     tool_calls = _CheckpointingToolCalls()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+        candidate_model_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     review_input = {
@@ -5405,6 +4525,7 @@ async def test_review_dimension_parts_aggregate_host_side(
             unit=unit,
             runtime=object(),
         )
+        output["artifactDigest"] = f"sha256:{dimension}"
         unit.update({"status": "completed", "output": output})
     validation = {
         "id": "review:1:validation",
@@ -5414,6 +4535,7 @@ async def test_review_dimension_parts_aggregate_host_side(
         "input": {
             "validationKind": "review_episode",
             "episodeNumber": 1,
+            "sceneIds": ["scene-1"],
         },
     }
     task["units"].append(validation)
@@ -5460,7 +4582,7 @@ async def test_review_dimension_failure_stays_a_failed_part_not_a_finding(
     tool_calls = _CheckpointingToolCalls(fail_once_key="1:dialogue")
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+        candidate_model_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     task = {
@@ -5518,7 +4640,7 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
     tool_calls = _CheckpointingToolCalls()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+        candidate_model_service=tool_calls,  # type: ignore[arg-type]
     )
     task = {
         "id": "task-scene-list-sections",

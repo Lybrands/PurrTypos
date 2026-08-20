@@ -1,15 +1,21 @@
-"""Generic parent/child Agent Run coordination."""
+"""Generic one-Run Agent delegation coordination."""
 
 from purra.delegation.coordinator import (
-    AgentDelegationCoordinator,
-    AgentCoreSubmitter,
-    ChildRunRequestFactory,
+    DelegatedAgentExecutor,
+    DelegatedAgentRequest,
+    DelegatedAgentResult,
+    DelegationContextMode,
+    DelegationCoordinator,
 )
 from purra.delegation.tool import build_delegation_tool_registration
+from purra.delegation.policy import DelegationPolicy
 
 __all__ = [
-    "AgentCoreSubmitter",
-    "AgentDelegationCoordinator",
-    "ChildRunRequestFactory",
+    "DelegatedAgentExecutor",
+    "DelegatedAgentRequest",
+    "DelegatedAgentResult",
+    "DelegationContextMode",
+    "DelegationCoordinator",
+    "DelegationPolicy",
     "build_delegation_tool_registration",
 ]

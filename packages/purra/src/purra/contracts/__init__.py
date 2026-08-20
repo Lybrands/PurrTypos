@@ -22,6 +22,7 @@ from purra.model_protocol.output_limits import InvocationOutputLimit
 from purra.contracts.enums import (
     ApprovalDecision,
     ApprovalStatus,
+    DelegationContextMode,
     DelegationStatus,
     MessageOrigin,
     MessageRole,
@@ -178,12 +179,6 @@ class ModelRequest:
     @property
     def profile_id(self) -> str:
         return self.capability_snapshot.profile_id
-
-    @property
-    def output_capabilities(self) -> ModelOutputCapabilities:
-        """Compatibility view until the output-budget migration completes."""
-
-        return self.capability_snapshot.output
 
     @property
     def protocol_capabilities(self) -> ModelProtocolCapabilities:
@@ -370,58 +365,8 @@ class AgentRunRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentAssignmentCoverage:
-    """Require one Agent role to partition an authenticated value sequence.
-
-    The contract is deliberately domain-neutral: Core never interprets the
-    values or the assignment field.  A domain adapter may declare that Agent
-    steps of one role must cover an opaque sequence exactly once, in order.
-    The Planner still authors the steps, grouping and dependency graph.
-    """
-
-    agent_role: str
-    assignment_field: str
-    required_values: tuple[str, ...]
-    root_only: bool = False
-
-    def __post_init__(self) -> None:
-        role = required_text(
-            self.agent_role, "Agent assignment coverage role"
-        )
-        field_name = required_text(
-            self.assignment_field, "Agent assignment coverage field"
-        )
-        values = tuple(
-            str(value or "").strip()
-            for value in self.required_values
-        )
-        if not values or any(not value for value in values):
-            raise ValueError(
-                "Agent assignment coverage values must be non-empty"
-            )
-        if len(values) != len(set(values)):
-            raise ValueError(
-                "Agent assignment coverage values must be unique"
-            )
-        if not isinstance(self.root_only, bool):
-            raise TypeError("Agent assignment coverage root_only must be boolean")
-        object.__setattr__(self, "agent_role", role)
-        object.__setattr__(self, "assignment_field", field_name)
-        object.__setattr__(self, "required_values", values)
-
-    def to_planning_payload(self) -> dict[str, object]:
-        return {
-            "agentRole": self.agent_role,
-            "assignmentField": self.assignment_field,
-            "requiredValues": list(self.required_values),
-            "rootOnly": self.root_only,
-            "coverage": "exactly_once_in_order",
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class PlanningConstraints:
-    """Request-scoped limits on tools and Agent roles a planner may select.
+    """Request-scoped limits on tools a planner may select.
 
     ``context_satisfied_tool_names`` is node-wide: the named tool's result is
     already present in trusted context, so the planner must not call it.
@@ -436,11 +381,9 @@ class PlanningConstraints:
     ``execution_satisfied_tool_names`` is host-only lowering state.  It names
     private runtime tools whose durable work is already present, without
     advertising those protocol details to the Planner.
-    Agent-role exclusions and requirements provide the equivalent generic
-    boundary for Planner-authored Agent steps; they never prescribe a domain
-    execution topology. ``minimum_root_agent_count`` can require a
-    bounded amount of genuinely independent work without naming or creating
-    any of those Agent steps. ``planning_excluded_executors`` removes an
+    Delegated Agents are exposed through an ordinary host-authorized tool, so
+    this contract does not define a separate Agent execution topology.
+    ``planning_excluded_executors`` removes an
     execution mechanism that the request's admitted runtime cannot support.
     ``allow_model_only_fallback`` controls whether invalid Planner output may
     degrade to a side-effect-free response for this request.
@@ -451,10 +394,6 @@ class PlanningConstraints:
     satisfied_tool_dependency_edges: frozenset[tuple[str, str]] = frozenset()
     required_any_tool_names: frozenset[str] = frozenset()
     execution_satisfied_tool_names: frozenset[str] = frozenset()
-    planning_excluded_agent_roles: frozenset[str] = frozenset()
-    required_any_agent_roles: frozenset[str] = frozenset()
-    minimum_root_agent_count: int = 0
-    agent_assignment_coverages: tuple[AgentAssignmentCoverage, ...] = ()
     planning_excluded_executors: frozenset[StepExecutor] = frozenset()
     allow_model_only_fallback: bool = True
 
@@ -464,52 +403,12 @@ class PlanningConstraints:
             "planning_excluded_tool_names",
             "required_any_tool_names",
             "execution_satisfied_tool_names",
-            "planning_excluded_agent_roles",
-            "required_any_agent_roles",
         ):
             object.__setattr__(
                 self,
                 field_name,
                 text_frozenset(getattr(self, field_name)),
             )
-        minimum_frontier = self.minimum_root_agent_count
-        if isinstance(minimum_frontier, bool) or not isinstance(
-            minimum_frontier,
-            int,
-        ):
-            raise TypeError(
-                "minimum_root_agent_count must be an integer"
-            )
-        if minimum_frontier < 0:
-            raise ValueError(
-                "minimum_root_agent_count must be non-negative"
-            )
-        object.__setattr__(
-            self,
-            "minimum_root_agent_count",
-            minimum_frontier,
-        )
-        coverages = tuple(self.agent_assignment_coverages)
-        if any(
-            not isinstance(coverage, AgentAssignmentCoverage)
-            for coverage in coverages
-        ):
-            raise TypeError(
-                "agent assignment coverages must be AgentAssignmentCoverage"
-            )
-        coverage_keys = [
-            (coverage.agent_role, coverage.assignment_field)
-            for coverage in coverages
-        ]
-        if len(coverage_keys) != len(set(coverage_keys)):
-            raise ValueError(
-                "agent assignment coverages must be unique per role and field"
-            )
-        object.__setattr__(
-            self,
-            "agent_assignment_coverages",
-            coverages,
-        )
         try:
             excluded_executors = frozenset(
                 StepExecutor(value)
@@ -595,12 +494,9 @@ class ResponseValidationResult:
 @dataclass(frozen=True, slots=True)
 class PlanningCapabilities:
     available_tool_names: frozenset[str] = frozenset()
-    available_agent_roles: frozenset[str] = frozenset()
     model_supports_tools: bool = True
-    host_planning_facts: Mapping[str, Any] = field(default_factory=dict)
+    planning_context_blocks: tuple[ContextBlock, ...] = ()
     tool_guidance: Mapping[str, Any] = field(default_factory=dict)
-    agent_role_guidance: Mapping[str, Any] = field(default_factory=dict)
-    max_parallel_agents: int = 1
     constraints: PlanningConstraints = field(default_factory=PlanningConstraints)
 
     def __post_init__(self) -> None:
@@ -609,196 +505,40 @@ class PlanningCapabilities:
             "available_tool_names",
             text_frozenset(self.available_tool_names),
         )
-        object.__setattr__(
-            self,
-            "available_agent_roles",
-            text_frozenset(self.available_agent_roles),
-        )
         object.__setattr__(self, "model_supports_tools", bool(self.model_supports_tools))
+        planning_context = tuple(self.planning_context_blocks)
+        if any(
+            not isinstance(block, ContextBlock)
+            for block in planning_context
+        ):
+            raise TypeError(
+                "planning context blocks must contain ContextBlock values"
+            )
+        names = tuple(block.name for block in planning_context)
+        if len(names) != len(set(names)):
+            raise ValueError("planning context block names must be unique")
         object.__setattr__(
             self,
-            "host_planning_facts",
-            freeze_json_mapping(self.host_planning_facts),
+            "planning_context_blocks",
+            planning_context,
         )
         object.__setattr__(
             self,
             "tool_guidance",
             freeze_json_mapping(self.tool_guidance),
         )
-        object.__setattr__(
-            self,
-            "agent_role_guidance",
-            freeze_json_mapping(self.agent_role_guidance),
-        )
-        object.__setattr__(
-            self,
-            "max_parallel_agents",
-            positive_int(self.max_parallel_agents, "max_parallel_agents"),
-        )
         if not isinstance(self.constraints, PlanningConstraints):
             raise TypeError("planning constraints must be PlanningConstraints")
 
 
-@dataclass(frozen=True, slots=True)
-class TaskSpec:
-    """Normalized user intent carried across every phase of one Agent Run.
-
-    The planner may propose this semantic summary, but it never grants tools,
-    authorizes data access, or declares low-level evidence dependencies.  Those
-    remain host-owned contracts.
-    """
-
-    goal: str
-    target: Mapping[str, Any] = field(default_factory=dict)
-    operation: str | None = None
-    instruction: str | None = None
-    constraints: tuple[str, ...] = ()
-    preserve: tuple[str, ...] = ()
-    deliverable: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "goal",
-            required_text(self.goal, "task spec goal"),
-        )
-        object.__setattr__(self, "target", freeze_json_mapping(self.target))
-        object.__setattr__(self, "operation", _optional_text(self.operation))
-        object.__setattr__(self, "instruction", _optional_text(self.instruction))
-        object.__setattr__(
-            self,
-            "constraints",
-            unique_text_tuple(self.constraints),
-        )
-        object.__setattr__(
-            self,
-            "preserve",
-            unique_text_tuple(self.preserve),
-        )
-        object.__setattr__(self, "deliverable", _optional_text(self.deliverable))
-
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in {
-                "goal": self.goal,
-                "target": thaw_json_mapping(self.target),
-                "operation": self.operation,
-                "instruction": self.instruction,
-                "constraints": list(self.constraints),
-                "preserve": list(self.preserve),
-                "deliverable": self.deliverable,
-            }.items()
-            if value not in (None, "", [], {})
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class TaskStep:
-    id: str
-    title: str
-    type: StepType
-    executor: StepExecutor
-    status: StepStatus = StepStatus.PENDING
-    risk_level: ToolRiskLevel | None = None
-    suggested_tools: tuple[str, ...] = ()
-    agent_role: str | None = None
-    assignment: Mapping[str, Any] = field(default_factory=dict)
-    depends_on: tuple[str, ...] = ()
-    description: str | None = None
-    result_summary: str | None = None
-    error: str | None = None
-    protocol_private: bool = False
-    planning_capability: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "id", required_text(self.id, "task step id"))
-        object.__setattr__(
-            self,
-            "title",
-            required_text(self.title, "task step title"),
-        )
-        object.__setattr__(self, "type", StepType(self.type))
-        object.__setattr__(self, "executor", StepExecutor(self.executor))
-        object.__setattr__(self, "status", StepStatus(self.status))
-        object.__setattr__(
-            self,
-            "risk_level",
-            ToolRiskLevel(self.risk_level) if self.risk_level is not None else None,
-        )
-        object.__setattr__(
-            self,
-            "suggested_tools",
-            unique_text_tuple(self.suggested_tools),
-        )
-        object.__setattr__(self, "agent_role", _optional_text(self.agent_role))
-        object.__setattr__(self, "assignment", freeze_json_mapping(self.assignment))
-        object.__setattr__(
-            self,
-            "depends_on",
-            unique_text_tuple(self.depends_on),
-        )
-        if self.executor is StepExecutor.AGENT:
-            if self.agent_role is None:
-                raise ValueError("agent task step requires agent_role")
-            if self.suggested_tools:
-                raise ValueError("agent task step cannot grant tools")
-        elif self.agent_role is not None or self.assignment:
-            raise ValueError(
-                "only agent task steps may declare agent_role or assignment"
-            )
-        object.__setattr__(self, "description", _optional_text(self.description))
-        object.__setattr__(self, "result_summary", _optional_text(self.result_summary))
-        object.__setattr__(self, "error", _optional_text(self.error))
-        if not isinstance(self.protocol_private, bool):
-            raise TypeError("task step protocol_private must be a boolean")
-        if self.protocol_private and self.executor is not StepExecutor.TOOL:
-            raise ValueError("only tool steps may be protocol-private")
-        object.__setattr__(
-            self,
-            "planning_capability",
-            _optional_text(self.planning_capability),
-        )
-        if (
-            self.planning_capability is not None
-            and self.executor is not StepExecutor.TOOL
-        ):
-            raise ValueError(
-                "only tool steps may reference a planning capability"
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class TaskPlan:
-    title: str
-    steps: tuple[TaskStep, ...]
-    goal: str | None = None
-    task_spec: TaskSpec | None = None
-
-    def __post_init__(self) -> None:
-        title = required_text(self.title, "task plan title")
-        steps = tuple(self.steps)
-        if not steps:
-            raise ValueError("task plan requires at least one step")
-        step_ids = [step.id for step in steps]
-        if len(step_ids) != len(set(step_ids)):
-            raise ValueError("task plan step ids must be unique")
-        known_ids: set[str] = set()
-        for step in steps:
-            unknown = set(step.depends_on) - known_ids
-            if unknown:
-                raise ValueError(
-                    "task plan dependencies must reference earlier steps: "
-                    + ", ".join(sorted(unknown))
-                )
-            if step.id in step.depends_on:
-                raise ValueError("task plan step cannot depend on itself")
-            known_ids.add(step.id)
-        object.__setattr__(self, "title", title)
-        object.__setattr__(self, "steps", steps)
-        object.__setattr__(self, "goal", _optional_text(self.goal))
-        if self.task_spec is not None and not isinstance(self.task_spec, TaskSpec):
-            raise TypeError("task plan task_spec must be TaskSpec")
+from purra.contracts.plans import (
+    ExecutionPlan,
+    ExecutionTransition,
+    TaskSpec,
+    TaskStep,
+    WorkPlan,
+    WorkStep,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -839,7 +579,7 @@ class PlannerLimits:
 @dataclass(frozen=True, slots=True)
 class PlanningResult:
     kind: PlanningKind
-    plan: TaskPlan
+    work_plan: WorkPlan
     reason: str | None = None
     model: str | None = None
     model_call_count: int = 0
@@ -847,6 +587,8 @@ class PlanningResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", PlanningKind(self.kind))
+        if not isinstance(self.work_plan, WorkPlan):
+            raise TypeError("planning result work_plan must be WorkPlan")
         object.__setattr__(self, "reason", _optional_text(self.reason))
         object.__setattr__(self, "model", _optional_text(self.model))
         call_count = non_negative_int(
@@ -1174,9 +916,8 @@ class ToolDataContract:
     Schema. Host-bound and host-derived paths must be absent from it; adapters
     bind or calculate those values after model input validation.
 
-    An empty contract preserves compatibility for tools that have not yet been
-    audited. Domains can adopt the contract incrementally while Core startup
-    validation prevents audited tools from regressing their authority boundary.
+    An empty path declaration means every model-visible Schema field is
+    model-owned, with no host-bound or host-derived payload fields.
     """
 
     model_owned_paths: tuple[str, ...] = ()
@@ -1583,39 +1324,6 @@ class RunProvenance:
 
 
 @dataclass(frozen=True, slots=True)
-class RunLineage:
-    """Immutable parent identity for one child Agent Run.
-
-    ``delegation_id`` is present only when a model-created delegation claim
-    owns the child. Host-orchestrated children, such as durable task units,
-    retain parent/root lineage without pretending that a delegation lease
-    exists.
-    """
-
-    parent_run_id: RunId
-    root_run_id: RunId
-    delegation_id: str | None
-    agent_role: str
-    depth: int
-
-    def __post_init__(self) -> None:
-        for name in (
-            "parent_run_id",
-            "root_run_id",
-            "agent_role",
-        ):
-            object.__setattr__(self, name, required_text(
-                getattr(self, name), f"run lineage {name}"
-            ))
-        object.__setattr__(self, "delegation_id", _optional_text(
-            self.delegation_id
-        ))
-        object.__setattr__(self, "depth", positive_int(
-            self.depth, "child run depth"
-        ))
-
-
-@dataclass(frozen=True, slots=True)
 class RunExecutionLease:
     run_id: RunId
     status: RunStatus
@@ -1637,48 +1345,50 @@ class RunExecutionLease:
 @dataclass(frozen=True, slots=True)
 class AgentDelegation:
     id: str
-    parent_run_id: RunId
-    root_run_id: RunId
-    agent_role: str
+    batch_id: str
+    run_id: RunId
+    agent_name: str
+    agent_title: str
+    agent_instruction: str
     objective: str
     input_payload: Mapping[str, Any] = field(default_factory=dict)
+    context_mode: DelegationContextMode = DelegationContextMode.ISOLATED
     status: DelegationStatus = DelegationStatus.QUEUED
-    child_run_id: RunId | None = None
     required: bool = True
     priority: int = 0
     result_summary: str | None = None
     error: str | None = None
-    claim_attempt: int = 0
     created_at: str | None = None
     updated_at: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("id", "parent_run_id", "root_run_id", "agent_role", "objective"):
+        for name in (
+            "id",
+            "batch_id",
+            "run_id",
+            "agent_name",
+            "agent_title",
+            "agent_instruction",
+            "objective",
+        ):
             object.__setattr__(self, name, required_text(
                 getattr(self, name), f"delegation {name}"
             ))
         object.__setattr__(self, "status", DelegationStatus(self.status))
         object.__setattr__(
             self,
+            "context_mode",
+            DelegationContextMode(self.context_mode),
+        )
+        object.__setattr__(
+            self,
             "input_payload",
             freeze_json_mapping(self.input_payload),
         )
-        object.__setattr__(self, "child_run_id", _optional_text(self.child_run_id))
         object.__setattr__(self, "required", bool(self.required))
         object.__setattr__(self, "priority", int(self.priority))
-        object.__setattr__(self, "claim_attempt", max(0, int(self.claim_attempt)))
         object.__setattr__(self, "result_summary", _optional_text(self.result_summary))
         object.__setattr__(self, "error", _optional_text(self.error))
-
-
-@dataclass(frozen=True, slots=True)
-class DelegationClaim:
-    delegation: AgentDelegation
-    lineage: RunLineage
-
-    def __post_init__(self) -> None:
-        if self.delegation.id != self.lineage.delegation_id:
-            raise ValueError("delegation claim lineage does not match")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1701,42 +1411,14 @@ class DelegationAggregation:
 
 
 @dataclass(frozen=True, slots=True)
-class RunCheckpoint:
-    """Storage-neutral durable read checkpoint for one Run."""
-
-    run: Mapping[str, Any]
-    steps: tuple[Mapping[str, Any], ...]
-    events: tuple[Mapping[str, Any], ...]
-    delegations: tuple[AgentDelegation, ...] = ()
-    next_cursor: int = 0
-    has_more: bool = False
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "run", freeze_json_mapping(self.run))
-        object.__setattr__(
-            self,
-            "steps",
-            tuple(freeze_json_mapping(item) for item in self.steps),
-        )
-        object.__setattr__(
-            self,
-            "events",
-            tuple(freeze_json_mapping(item) for item in self.events),
-        )
-        object.__setattr__(self, "delegations", tuple(self.delegations))
-        object.__setattr__(self, "next_cursor", max(0, int(self.next_cursor)))
-        object.__setattr__(self, "has_more", bool(self.has_more))
-
-
-@dataclass(frozen=True, slots=True)
 class RunCreateParams:
     session_id: SessionId | None
     prompt: str
     mode: str | None
     provenance: RunProvenance | None = None
-    lineage: RunLineage | None = None
     binding: RunBinding | None = None
     turn_id: str | None = None
+    agent_preset_snapshot: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "prompt", str(self.prompt or ""))
@@ -1747,10 +1429,13 @@ class RunCreateParams:
             RunProvenance,
         ):
             raise TypeError("run provenance must be a RunProvenance value")
-        if self.lineage is not None and not isinstance(self.lineage, RunLineage):
-            raise TypeError("run lineage must be a RunLineage value")
         if self.binding is not None and not isinstance(self.binding, RunBinding):
             raise TypeError("run binding must be a RunBinding value")
+        object.__setattr__(
+            self,
+            "agent_preset_snapshot",
+            freeze_json_mapping(self.agent_preset_snapshot),
+        )
 
 
 @dataclass(frozen=True, slots=True)

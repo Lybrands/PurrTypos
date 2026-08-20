@@ -6,13 +6,16 @@ import pytest
 import pytest_asyncio
 
 from purra.contracts import RunCreateParams
+from purra.ports import RunControlStore
+from purra.testing import (
+    assert_delegation_repository_conforms,
+    assert_execution_lease_store_conforms,
+    assert_tool_idempotency_gateway_conforms,
+)
 from database.connection import DatabaseConnection
 from infrastructure.persistence import run_store
 from infrastructure.persistence.run_execution_store import (
-    SqliteExecutionLeaseStore,
-)
-from infrastructure.persistence.sqlite_checkpoint_store import (
-    SqliteCheckpointStore,
+    SqliteRunControlStore,
 )
 from infrastructure.persistence.sqlite_delegation_repository import (
     SqliteDelegationRepository,
@@ -20,12 +23,6 @@ from infrastructure.persistence.sqlite_delegation_repository import (
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_tool_idempotency_gateway import (
     SqliteToolIdempotencyGateway,
-)
-from tests.support.agent_adapter_contracts import (
-    assert_checkpoint_store_contract,
-    assert_delegation_repository_contract,
-    assert_execution_lease_store_contract,
-    assert_tool_idempotency_gateway_contract,
 )
 
 
@@ -40,7 +37,7 @@ async def db(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_sqlite_execution_lease_store_conforms(db):
+async def test_sqlite_run_control_store_conforms(db):
     async def create_run() -> str:
         return await run_store.create_run(
             db,
@@ -49,8 +46,10 @@ async def test_sqlite_execution_lease_store_conforms(db):
             mode="agent",
         )
 
-    await assert_execution_lease_store_contract(
-        SqliteExecutionLeaseStore(db),
+    store = SqliteRunControlStore(db)
+    assert isinstance(store, RunControlStore)
+    await assert_execution_lease_store_conforms(
+        store,
         create_run,
     )
 
@@ -65,26 +64,56 @@ async def test_sqlite_delegation_repository_conforms(db):
             mode="agent",
         )
 
-    await assert_delegation_repository_contract(
+    await assert_delegation_repository_conforms(
         SqliteDelegationRepository(db),
         create_parent,
     )
 
 
 @pytest.mark.asyncio
-async def test_sqlite_checkpoint_store_conforms(db):
-    async def seed_run() -> str:
-        run_id = await run_store.create_run(
-            db,
-            session_id=None,
-            prompt="checkpoint contract",
-            mode="agent",
+async def test_delegation_schema_migrates_agent_role_to_agent_name(tmp_path: Path):
+    legacy = DatabaseConnection(tmp_path)
+    await legacy.init()
+    try:
+        await legacy.execute(
+            "ALTER TABLE ai_agent_delegations ADD COLUMN agent_role TEXT"
         )
-        await run_store.append_event(db, run_id, "contract.first", {"index": 1})
-        await run_store.append_event(db, run_id, "contract.second", {"index": 2})
-        return run_id
+        await legacy.execute(
+            "INSERT INTO ai_agent_delegations "
+            "(id, run_id, batch_id, agent_name, agent_role, agent_title, "
+            "agent_instruction, objective) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                "delegation-legacy",
+                "run-legacy",
+                "batch-legacy",
+                "",
+                "legacy-reviewer",
+                "",
+                "",
+                "review",
+            ],
+        )
+    finally:
+        await legacy.close()
 
-    await assert_checkpoint_store_contract(SqliteCheckpointStore(db), seed_run)
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    try:
+        columns = {
+            str(row["name"])
+            for row in await migrated.fetch_all(
+                "PRAGMA table_info(ai_agent_delegations)"
+            )
+        }
+        rows = await SqliteDelegationRepository(migrated).list_for_run(
+            "run-legacy"
+        )
+    finally:
+        await migrated.close()
+
+    assert "agent_role" not in columns
+    assert rows[0].agent_name == "legacy-reviewer"
+    assert rows[0].agent_title == "legacy-reviewer"
 
 
 @pytest.mark.asyncio
@@ -95,7 +124,7 @@ async def test_sqlite_tool_idempotency_gateway_conforms(db):
         prompt="idempotency contract",
         mode="agent",
     ))
-    await assert_tool_idempotency_gateway_contract(
+    await assert_tool_idempotency_gateway_conforms(
         SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id),
         run_id,
     )

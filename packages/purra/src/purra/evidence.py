@@ -16,6 +16,9 @@ from purra.contracts import (
 )
 
 
+CONTEXT_EVIDENCE_RECEIPTS_KEY = "context_evidence_receipts"
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceRecord:
     evidence_id: str
@@ -87,6 +90,16 @@ class ContextEvidenceReceipt:
         }
 
 
+def context_evidence_receipts(
+    messages: Sequence[AgentMessage],
+) -> tuple[ContextEvidenceReceipt, ...]:
+    """Extract host-declared context provenance from model-visible messages."""
+
+    return tuple(receipt for _block, _content, receipt in _context_receipt_rows(
+        messages
+    ))
+
+
 @dataclass(slots=True)
 class RunEvidenceStore:
     """Keep full tool evidence outside the ever-growing protocol transcript."""
@@ -109,40 +122,17 @@ class RunEvidenceStore:
         recorded: list[ContextEvidenceReceipt] = []
         for message in messages:
             block_name = str(message.attributes.get("context_name") or "").strip()
-            raw_receipts = message.host_metadata.get("memory_context_receipts")
-            if not block_name or not (
-                isinstance(raw_receipts, Sequence)
-                and not isinstance(raw_receipts, (str, bytes, bytearray))
+            raw_receipts = message.host_metadata.get(
+                CONTEXT_EVIDENCE_RECEIPTS_KEY
+            )
+            if block_name and isinstance(raw_receipts, Sequence) and not isinstance(
+                raw_receipts,
+                (str, bytes, bytearray),
             ):
-                continue
-            self._context_blocks[block_name] = str(message.content or "")
-            for raw in raw_receipts:
-                if not isinstance(raw, Mapping):
-                    continue
-                evidence_id = str(raw.get("evidenceId") or "").strip()
-                source = str(raw.get("source") or "").strip()
-                item_id = str(raw.get("itemId") or "").strip()
-                if not evidence_id or not source or not item_id:
-                    continue
-                receipt = ContextEvidenceReceipt(
-                    evidence_id=evidence_id,
-                    context_block=block_name,
-                    source=source,
-                    item_id=item_id,
-                    version=_optional_int(raw.get("version")),
-                    metadata={
-                        str(key): value
-                        for key, value in raw.items()
-                        if str(key) not in {
-                            "evidenceId",
-                            "source",
-                            "itemId",
-                            "version",
-                        }
-                    },
-                )
-                self._context_receipts[evidence_id] = receipt
-                recorded.append(receipt)
+                self._context_blocks[block_name] = str(message.content or "")
+        for _block_name, _content, receipt in _context_receipt_rows(messages):
+            self._context_receipts[receipt.evidence_id] = receipt
+            recorded.append(receipt)
         return tuple(recorded)
 
     def record_batch(
@@ -280,6 +270,50 @@ def _record_and_receipt(
     return record, receipt
 
 
+def _context_receipt_rows(
+    messages: Sequence[AgentMessage],
+) -> tuple[tuple[str, str, ContextEvidenceReceipt], ...]:
+    rows: list[tuple[str, str, ContextEvidenceReceipt]] = []
+    for message in messages:
+        block_name = str(message.attributes.get("context_name") or "").strip()
+        raw_receipts = message.host_metadata.get(CONTEXT_EVIDENCE_RECEIPTS_KEY)
+        if not block_name or not (
+            isinstance(raw_receipts, Sequence)
+            and not isinstance(raw_receipts, (str, bytes, bytearray))
+        ):
+            continue
+        for raw in raw_receipts:
+            if not isinstance(raw, Mapping):
+                continue
+            evidence_id = str(raw.get("evidenceId") or "").strip()
+            source = str(raw.get("source") or "").strip()
+            item_id = str(raw.get("itemId") or "").strip()
+            if not evidence_id or not source or not item_id:
+                continue
+            rows.append((
+                block_name,
+                str(message.content or ""),
+                ContextEvidenceReceipt(
+                    evidence_id=evidence_id,
+                    context_block=block_name,
+                    source=source,
+                    item_id=item_id,
+                    version=_optional_int(raw.get("version")),
+                    metadata={
+                        str(key): value
+                        for key, value in raw.items()
+                        if str(key) not in {
+                            "evidenceId",
+                            "source",
+                            "itemId",
+                            "version",
+                        }
+                    },
+                ),
+            ))
+    return tuple(rows)
+
+
 def _optional_int(value: object) -> int | None:
     if value in (None, ""):
         return None
@@ -290,8 +324,10 @@ def _optional_int(value: object) -> int | None:
 
 
 __all__ = [
+    "CONTEXT_EVIDENCE_RECEIPTS_KEY",
     "ContextEvidenceReceipt",
     "EvidenceRecord",
     "RunEvidenceStore",
     "ToolResultReceipt",
+    "context_evidence_receipts",
 ]

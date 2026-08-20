@@ -6,6 +6,7 @@ from purra.artifacts.continuity import (
     ArtifactAccessGrant,
     ArtifactAccessMode,
     ArtifactAccessPolicy,
+    ArtifactAccessReason,
     ArtifactAccessRequest,
     ArtifactClaimLeaseCommand,
     ArtifactResumeCandidate,
@@ -13,19 +14,21 @@ from purra.artifacts.continuity import (
     ArtifactWriteClaimCommand,
 )
 from purra.artifacts.errors import ArtifactAccessDeniedError
-from purra.artifacts.ports import ArtifactClaimRepository
+from purra.artifacts.ports import ArtifactAccessAuthorizer, ArtifactClaimRepository
 
 
 class ArtifactAccessController:
-    """Authorize access and atomically claim Work Item-scoped writers."""
+    """Authorize access and atomically claim every writer."""
 
     def __init__(
         self,
         claim_repository: ArtifactClaimRepository,
         *,
+        authorizer: ArtifactAccessAuthorizer | None = None,
         policy: ArtifactAccessPolicy | None = None,
     ) -> None:
         self._claim_repository = claim_repository
+        self._authorizer = authorizer
         self._policy = policy or ArtifactAccessPolicy()
 
     async def authorize(
@@ -35,39 +38,32 @@ class ArtifactAccessController:
         *,
         lease_duration_ms: int | None = None,
     ) -> ArtifactAccessGrant:
-        decision = self._policy.decide(candidate, request)
+        cross_run_authorized = bool(
+            request.run_id != candidate.created_by_run_id
+            and self._authorizer is not None
+            and await self._authorizer.authorize(candidate, request)
+        )
+        decision = self._policy.decide(
+            candidate,
+            request,
+            cross_run_authorized=cross_run_authorized,
+        )
         if not decision.allowed:
-            raise ArtifactAccessDeniedError(
-                "artifact access was denied",
-                code=decision.reason.value,
-                details={
-                    "artifactId": decision.artifact_id,
-                    "runId": decision.run_id,
-                    "mode": decision.mode.value,
-                    "artifactRevision": decision.artifact_revision,
-                },
-            )
+            self._raise_denied(candidate, request, decision.reason)
         claim: ArtifactWriteClaim | None = None
         if decision.requires_write_claim:
             if lease_duration_ms is None:
                 raise ValueError(
-                    "Work Item-scoped write access requires lease_duration_ms"
-                )
-            work_item_id = candidate.binding.work_item_id
-            if work_item_id is None:
-                raise RuntimeError(
-                    "Work Item-scoped candidate lost its Work Item identity"
+                    "artifact write access requires lease_duration_ms"
                 )
             claim = await self._claim_repository.acquire(ArtifactWriteClaimCommand(
                 artifact_id=candidate.artifact_id,
-                work_item_id=work_item_id,
                 run_id=request.run_id,
                 expected_revision=request.expected_revision,
                 lease_duration_ms=lease_duration_ms,
             ))
             if (
                 claim.artifact_id != candidate.artifact_id
-                or claim.work_item_id != work_item_id
                 or claim.run_id != request.run_id
                 or claim.acquired_revision != request.expected_revision
             ):
@@ -77,6 +73,23 @@ class ArtifactAccessController:
         elif lease_duration_ms is not None:
             raise ValueError("this artifact access does not require a write lease")
         return ArtifactAccessGrant(decision=decision, write_claim=claim)
+
+    @staticmethod
+    def _raise_denied(
+        candidate: ArtifactResumeCandidate,
+        request: ArtifactAccessRequest,
+        reason: ArtifactAccessReason,
+    ) -> None:
+        raise ArtifactAccessDeniedError(
+            "artifact access was denied",
+            code=reason.value,
+            details={
+                "artifactId": request.artifact_id,
+                "runId": request.run_id,
+                "mode": request.mode.value,
+                "artifactRevision": candidate.revision,
+            },
+        )
 
     async def renew(
         self,

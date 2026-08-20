@@ -251,7 +251,7 @@ class ScreenplayIntent:
             raise TypeError("screenplay intent requires a TaskSpec")
         steps = tuple(plan_steps)
         if not steps or any(not isinstance(step, TaskStep) for step in steps):
-            raise TypeError("screenplay intent requires TaskPlan steps")
+            raise TypeError("screenplay intent requires WorkPlan steps")
         step_ids = tuple(step.id for step in steps)
         if len(step_ids) != len(set(step_ids)):
             raise ValueError("screenplay plan step ids must be unique")

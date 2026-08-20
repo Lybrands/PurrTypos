@@ -16,8 +16,11 @@
 
 ```bash
 .venv/bin/python -m pytest \
+  packages/purra/tests/test_standalone_agent_conformance.py \
+  packages/purra/tests/test_model_tool_gateway_conformance.py \
+  packages/purra/tests/test_durable_execution.py -q
+.venv/bin/python -m pytest \
   backend/tests/test_purra_runtime.py \
-  backend/tests/test_purra_engine.py \
   backend/tests/test_purra_tool_executor.py \
   backend/tests/test_writing_domain_adapter.py \
   backend/tests/test_writing_response_validation.py \

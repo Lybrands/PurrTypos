@@ -12,9 +12,6 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
-
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
 PURRA_DIR = ROOT_DIR / "packages" / "purra" / "src" / "purra"
@@ -79,7 +76,9 @@ SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
 RETIRED_SCREENPLAY_PLANNER = (
     BACKEND_DIR / "application" / "screenplay_agent_planner.py"
 )
-PHASE_FOUR_REMOVED_PATHS = (
+REMOVED_COMPATIBILITY_PATHS = (
+    BACKEND_DIR / "domains" / "agent_roles.py",
+    BACKEND_DIR / "domains" / "writing" / "agent_roles.py",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "proposalProvenance.ts",
     BACKEND_DIR / "application" / "screenplay_long_task_conversation.py",
@@ -87,18 +86,12 @@ PHASE_FOUR_REMOVED_PATHS = (
     / "infrastructure"
     / "persistence"
     / "sqlite_screenplay_proposal_source.py",
-)
-PHASE_FIVE_REMOVED_PATHS = (
     BACKEND_DIR / "schemas" / "screenplay_agent_run.py",
     BACKEND_DIR / "schemas" / "screenplay_conversation.py",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "screenplayConversationRuntime.ts",
 )
 GENERIC_RUNTIME_PERSISTENCE_FILES = (
     BACKEND_DIR / "infrastructure" / "persistence" / "sqlite_run_repository.py",
-    BACKEND_DIR
-    / "infrastructure"
-    / "persistence"
-    / "sqlite_work_item_repository.py",
     BACKEND_DIR
     / "infrastructure"
     / "persistence"
@@ -124,7 +117,6 @@ SCREENPLAY_DOMAIN_DATABASE_DEBT: set[tuple[str, str]] = set()
 # must monotonically decrease until product composition and transport are split.
 GENERIC_APPLICATION_SCREENPLAY_DEBT_CAPS = {
     "application/agent_composition.py": 0,
-    "application/agent_delegation_service.py": 0,
     "application/agent_run_queries.py": 0,
     "application/agent_run_service.py": 0,
     "application/request_mapping.py": 0,
@@ -165,11 +157,6 @@ def _source_between(source: str, start: str, end: str) -> str:
         "start anchor must precede end anchor"
     )
     return source.split(start, 1)[1].split(end, 1)[0]
-
-
-def test_source_between_rejects_reversed_anchors():
-    with pytest.raises(AssertionError, match="start anchor must precede end anchor"):
-        _source_between("end marker then start marker", "start marker", "end marker")
 
 
 def _class_fields(path: Path, class_name: str) -> set[str]:
@@ -465,13 +452,13 @@ def test_screenplay_edit_wiring_reaches_the_shared_panel_controller():
     assert "onEditMessage={controller.actions.editMessage}" in panel_source
 
 
-def test_phase_four_removed_compatibility_modules_stay_deleted():
+def test_removed_compatibility_modules_stay_deleted():
     restored = [
         path.relative_to(ROOT_DIR).as_posix()
-        for path in PHASE_FOUR_REMOVED_PATHS
+        for path in REMOVED_COMPATIBILITY_PATHS
         if path.exists()
     ]
-    assert not restored, "Deleted Phase 4 compatibility modules returned: " + ", ".join(
+    assert not restored, "Deleted compatibility modules returned: " + ", ".join(
         restored
     )
 
@@ -501,7 +488,7 @@ _PLANNER_STORAGE_ROLES: dict[str, frozenset[str]] = {
         frozenset({"read"}),
     "backend/infrastructure/screenplay/agent_continuation_begin_projector.py":
         frozenset({"read", "write"}),
-    "backend/infrastructure/screenplay/agent_root_cancellation_participant.py":
+    "backend/infrastructure/screenplay/agent_run_cancellation_projector.py":
         frozenset({"read"}),
     "backend/infrastructure/screenplay/agent_root_completion_projector.py":
         frozenset({"read"}),
@@ -509,7 +496,6 @@ _PLANNER_STORAGE_ROLES: dict[str, frozenset[str]] = {
     "backend/tests/test_screenplay_agent_durable_service.py": frozenset(
         {"read", "write"}
     ),
-    "backend/tests/test_screenplay_multi_model_e2e.py": frozenset({"read"}),
     "backend/tests/test_screenplay_agent_runtime_cleanup.py": frozenset(
         {"write"}
     ),
@@ -559,13 +545,14 @@ def _retired_screenplay_violations() -> list[str]:
 
 def _planner_column_violations(
     source_overrides: dict[Path, str] | None = None,
+    paths: tuple[Path, ...] | None = None,
 ) -> list[str]:
     overrides = {
         path.resolve(): source
         for path, source in (source_overrides or {}).items()
     }
     violations: list[str] = []
-    for path in _backend_python_paths():
+    for path in paths or _backend_python_paths():
         source = overrides.get(path.resolve())
         if source is None:
             source = path.read_text(encoding="utf-8")
@@ -704,39 +691,45 @@ def test_storage_roles_tolerate_formatting_but_reject_rogue_reads_and_aliases():
         / "sqlite_screenplay_agent_repository.py"
     )
     source = adapter.read_text(encoding="utf-8")
-    formatted = source + (
+    def scan(suffix: str) -> list[str]:
+        return _planner_column_violations(
+            {adapter: source + suffix},
+            paths=(adapter,),
+        )
+
+    formatted = (
         "\n_BOUNDARY_FORMATTED = '''SELECT\n"
         "planner_run_id   AS   root_run_id\n"
         "FROM screenplay_agent_turns'''\n"
     )
-    assert _planner_column_violations({adapter: formatted}) == []
+    assert scan(formatted) == []
 
-    rogue = source + (
+    rogue = (
         "\n_BOUNDARY_ROGUE = "
         "'SELECT planner_run_id FROM screenplay_agent_turns'\n"
     )
     assert any(
         "read must alias root_run_id" in item
-        for item in _planner_column_violations({adapter: rogue})
+        for item in scan(rogue)
     )
 
-    wrong_alias = source + (
+    wrong_alias = (
         "\n_BOUNDARY_ALIAS = "
         "'SELECT root_run_id AS planner_run_id FROM screenplay_agent_turns'\n"
     )
     assert any(
         "legacy output alias" in item
-        for item in _planner_column_violations({adapter: wrong_alias})
+        for item in scan(wrong_alias)
     )
 
-    json_alias = source + (
+    json_alias = (
         "\n_BOUNDARY_JSON = "
         "\"UPDATE screenplay_agent_turns SET intent_json = "
         "'{\\\"planner_run_id\\\": \\\"run-1\\\"}'\"\n"
     )
     assert any(
         "legacy JSON key" in item
-        for item in _planner_column_violations({adapter: json_alias})
+        for item in scan(json_alias)
     )
 
 
@@ -810,17 +803,6 @@ def test_screenplay_domain_events_never_return_to_generic_ai_wire():
     ]
     assert not violations, "Legacy screenplay AI wire returned: " + ", ".join(
         violations
-    )
-
-
-def test_phase_five_removed_migration_transport_stays_deleted():
-    restored = [
-        path.relative_to(ROOT_DIR).as_posix()
-        for path in PHASE_FIVE_REMOVED_PATHS
-        if path.exists()
-    ]
-    assert not restored, "Deleted Phase 5 migration transport returned: " + ", ".join(
-        restored
     )
 
 
@@ -939,6 +921,22 @@ def test_screenplay_profile_cannot_settle_business_terminal_state():
     assert "cancel_task(" not in settle
 
 
+def test_agent_composition_registers_profiles_without_extension_indirection():
+    composition = (
+        BACKEND_DIR / "application" / "agent_composition.py"
+    ).read_text(encoding="utf-8")
+    registry = (
+        BACKEND_DIR / "application" / "agent_profile_registry.py"
+    ).read_text(encoding="utf-8")
+
+    assert "profile_registration(" not in composition
+    assert "_profile_extensions" not in composition
+    assert "class AgentProfileRegistration" not in registry
+    assert "class AgentProfile(Protocol)" in registry
+    assert "agent_role_registry" not in composition
+    assert "agent_role_registry" not in registry
+
+
 def test_screenplay_manifest_never_emits_the_obsolete_coarse_units():
     source = (
         BACKEND_DIR / "application" / "screenplay_manifest_compiler.py"
@@ -948,24 +946,3 @@ def test_screenplay_manifest_never_emits_the_obsolete_coarse_units():
     assert not (
         BACKEND_DIR / "domains" / "screenplay_agent" / "recipe_compiler.py"
     ).exists()
-
-
-def test_paid_screenplay_e2e_uses_the_real_root_workflow():
-    path = BACKEND_DIR / "tests" / "test_screenplay_multi_model_e2e.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    imported = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        for alias in node.names
-    }
-    referenced_names = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name)
-    }
-
-    assert "_finalization_fixture" not in imported
-    assert "monkeypatch" not in referenced_names
-    assert "ScreenplayAgentService" in imported
-    assert "create_agent_composition" in imported

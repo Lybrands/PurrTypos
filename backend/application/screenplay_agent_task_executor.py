@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from purra.contracts import ReasoningMode, RunLineage
+from purra.contracts import ReasoningMode
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
@@ -19,7 +19,7 @@ from domains.screenplay_agent.contracts import (
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_checkpoint_planning import ScreenplayCheckpointPlanner
-from application.screenplay_tool_calling import ScreenplayToolCallingService
+from application.screenplay_candidate_model import ScreenplayCandidateModelService
 from domains.screenplay.source_scope import parse_source_scope
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.candidate_projection import (
@@ -61,7 +61,7 @@ class ScreenplayTaskModelCalls:
         *,
         composition=None,
         structured_call_service: ScreenplayStructuredCallService | None = None,
-        tool_calling_service: ScreenplayToolCallingService | None = None,
+        candidate_model_service: ScreenplayCandidateModelService | None = None,
     ) -> None:
         self._db = db
         self._context = ScreenplayAgentContextQuery(db)
@@ -73,8 +73,8 @@ class ScreenplayTaskModelCalls:
             if composition is not None
             else None
         )
-        self._tool_calls = tool_calling_service
-        if self._models is None and self._tool_calls is None:
+        self._candidate_model = candidate_model_service
+        if self._models is None and self._candidate_model is None:
             raise ValueError("screenplay task requires a model execution service")
 
     async def execute(
@@ -86,22 +86,30 @@ class ScreenplayTaskModelCalls:
         signal=None,
     ) -> Mapping[str, Any]:
         kind = str(unit.get("kind") or "")
-        if _requires_child_run(kind) and not str(
+        if _requires_run(kind) and not str(
             task.get("rootRunId") or ""
         ).strip():
             raise RuntimeError(
-                "screenplay AI Part requires its Root Run identity"
+                "screenplay AI Part requires its Run identity"
             )
         if kind == "collect_evidence":
             return await self._collect_evidence(task, unit)
         if kind == "generate_draft_scene":
-            return await self._generate_draft_scene(task, unit, runtime, signal)
+            return await self._generate_draft_scene(
+                task, unit, runtime, signal
+            )
         if kind == "generate_episode_metadata":
-            return await self._generate_episode_metadata(task, unit, runtime, signal)
+            return await self._generate_episode_metadata(
+                task, unit, runtime, signal
+            )
         if kind == "generate_review_dimension":
-            return await self._generate_review_dimension(task, unit, runtime, signal)
+            return await self._generate_review_dimension(
+                task, unit, runtime, signal
+            )
         if kind == "generate_document_section":
-            return await self._generate_document_section(task, unit, runtime, signal)
+            return await self._generate_document_section(
+                task, unit, runtime, signal
+            )
         if kind == "validate_manifest_part":
             return self._validate_manifest_part(task, unit)
         if kind == "compose_final_response":
@@ -345,11 +353,11 @@ class ScreenplayTaskModelCalls:
                 or ""
             )[-1_200:],
         }
-        if self._tool_calls is not None:
-            result = await self._tool_calls.run_candidate(
+        if self._candidate_model is not None:
+            result = await self._candidate_model.run_candidate(
                 runtime=runtime,
-                session_id=int(task["sessionId"]),
-                prompt=str(unit_input.get("instruction") or "创作剧本场景"),
+                run_id=str(task["rootRunId"]),
+                turn_id=str(task["turnId"]),
                 system_instruction=_scene_tool_instruction(episode_number, scene_id),
                 user_payload=payload,
                 domain_context=await self._domain_context(
@@ -359,18 +367,19 @@ class ScreenplayTaskModelCalls:
                     expected_part_key=scene_id,
                     runtime=runtime,
                 ),
-                conversation_turn_id=str(task["turnId"]),
-                lineage=_child_lineage(task),
                 reasoning_mode=ReasoningMode.DISABLED,
                 host_candidate_template=_host_scene_candidate_template(
                     scene_id,
                     scene_plans[scene_id],
                 ),
-                candidate_validation_contract={
-                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
-                    "kind": "scene",
-                    "expectedSceneId": scene_id,
-                },
+                normalize=lambda candidate: normalize_screenplay_candidate(
+                    {
+                        "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                        "kind": "scene",
+                        "expectedSceneId": scene_id,
+                    },
+                    candidate,
+                ),
                 signal=signal,
             )
             candidate = result.candidate
@@ -380,24 +389,16 @@ class ScreenplayTaskModelCalls:
                 "episodeNumber": episode_number,
                 "sceneListId": str(evidence["manifest"]["sceneListId"]),
                 "runId": result.run_id,
-                "artifactId": str(candidate["artifactId"]),
             }
         assert self._models is not None
         result = await self._models.run_json(
             runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=str(unit_input.get("instruction") or "创作剧本场景"),
+            run_id=str(task["rootRunId"]),
+            turn_id=str(task["turnId"]),
             system_instruction=_scene_json_instruction(episode_number, scene_id),
             user_payload=payload,
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id=str(task["projectId"]),
-            binding_command_id=f"{task['id']}:{unit['id']}",
-            conversation_turn_id=str(task["turnId"]),
-            task_id=str(task["id"]),
-            unit_id=str(unit["id"]),
-            expected_part_key=scene_id,
             phase="screenplay_scene_generation",
-            lineage=_child_lineage(task),
+            repair_instruction="返回完整场景 JSON，保持 sceneId 不变。",
             validate=lambda value: _validate_scene_json(value, scene_id),
             signal=signal,
         )
@@ -425,11 +426,11 @@ class ScreenplayTaskModelCalls:
             "scenes": [{"sceneId": scene["sceneId"]} for scene in scenes],
             "finalSceneTail": str(scenes[-1]["sceneText"])[-1_200:],
         }
-        if self._tool_calls is not None:
-            result = await self._tool_calls.run_candidate(
+        if self._candidate_model is not None:
+            result = await self._candidate_model.run_candidate(
                 runtime=runtime,
-                session_id=int(task["sessionId"]),
-                prompt=f"整理第 {episode_number} 集标题和连续性摘要",
+                run_id=str(task["rootRunId"]),
+                turn_id=str(task["turnId"]),
                 system_instruction=_episode_metadata_tool_instruction(episode_number),
                 user_payload=user_payload,
                 domain_context=await self._domain_context(
@@ -439,37 +440,30 @@ class ScreenplayTaskModelCalls:
                     expected_part_key=str(episode_number),
                     runtime=runtime,
                 ),
-                conversation_turn_id=str(task["turnId"]),
-                lineage=_child_lineage(task),
                 reasoning_mode=ReasoningMode.DISABLED,
-                candidate_validation_contract={
-                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
-                    "kind": "episode_metadata",
-                    "episodeNumber": episode_number,
-                },
+                normalize=lambda candidate: normalize_screenplay_candidate(
+                    {
+                        "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                        "kind": "episode_metadata",
+                        "episodeNumber": episode_number,
+                    },
+                    candidate,
+                ),
                 signal=signal,
             )
             return {
                 **dict(result.candidate["payload"]),
                 "runId": result.run_id,
-                "artifactId": str(result.candidate["artifactId"]),
             }
         assert self._models is not None
         result = await self._models.run_json(
             runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=f"整理第 {episode_number} 集标题和连续性摘要",
+            run_id=str(task["rootRunId"]),
+            turn_id=str(task["turnId"]),
             system_instruction=_episode_metadata_json_instruction(episode_number),
             user_payload=user_payload,
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id=str(task["projectId"]),
-            binding_command_id=f"{task['id']}:{unit['id']}",
-            conversation_turn_id=str(task["turnId"]),
-            task_id=str(task["id"]),
-            unit_id=str(unit["id"]),
-            expected_part_key=str(episode_number),
             phase="screenplay_episode_metadata",
-            lineage=_child_lineage(task),
+            repair_instruction="返回完整集标题和连续性摘要 JSON。",
             validate=lambda value: _validate_episode_metadata_json(
                 value,
                 episode_number,
@@ -487,12 +481,12 @@ class ScreenplayTaskModelCalls:
         review_input = dict(evidence.get("reviewInput") or {})
         if not review_input:
             raise RuntimeError("review dimension has no immutable input packet")
-        if self._tool_calls is None:
-            raise RuntimeError("review dimension requires screenplay candidate tools")
-        result = await self._tool_calls.run_candidate(
+        if self._candidate_model is None:
+            raise RuntimeError("review dimension requires a candidate model service")
+        result = await self._candidate_model.run_candidate(
             runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=str(unit_input.get("instruction") or "审阅剧本"),
+            run_id=str(task["rootRunId"]),
+            turn_id=str(task["turnId"]),
             system_instruction=_review_dimension_tool_instruction(
                 episode_number,
                 dimension,
@@ -513,19 +507,20 @@ class ScreenplayTaskModelCalls:
                 expected_part_key=f"{episode_number}:{dimension}",
                 runtime=runtime,
             ),
-            conversation_turn_id=str(task["turnId"]),
-            lineage=_child_lineage(task),
-            candidate_validation_contract={
-                "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
-                "kind": "review_dimension",
-                "episodeNumber": episode_number,
-                "dimension": dimension,
-                "allowedSceneIds": list(unit_input.get("sceneIds") or ()),
-                "reviewedDraftId": reviewed_draft_id,
-                "reviewedContentDigest": str(
-                    review_input.get("contentDigest") or ""
-                ),
-            },
+            normalize=lambda candidate: normalize_screenplay_candidate(
+                {
+                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                    "kind": "review_dimension",
+                    "episodeNumber": episode_number,
+                    "dimension": dimension,
+                    "allowedSceneIds": list(unit_input.get("sceneIds") or ()),
+                    "reviewedDraftId": reviewed_draft_id,
+                    "reviewedContentDigest": str(
+                        review_input.get("contentDigest") or ""
+                    ),
+                },
+                candidate,
+            ),
             signal=signal,
         )
         payload = dict(result.candidate["payload"])
@@ -535,12 +530,11 @@ class ScreenplayTaskModelCalls:
             "episodeNumber": episode_number,
             "reviewDimension": dimension,
             "runId": result.run_id,
-            "artifactId": str(result.candidate["artifactId"]),
         }
 
     async def _generate_document_section(self, task, unit, runtime, signal):
-        if self._tool_calls is None:
-            raise RuntimeError("document section requires screenplay candidate tools")
+        if self._candidate_model is None:
+            raise RuntimeError("document section requires a candidate model service")
         unit_input = dict(unit.get("input") or {})
         role = str(task["targetRole"])
         section_key = str(unit_input.get("sectionKey") or "")
@@ -550,10 +544,10 @@ class ScreenplayTaskModelCalls:
             if role == "sceneList" and section_key.startswith("episode-")
             else 0
         )
-        result = await self._tool_calls.run_candidate(
+        result = await self._candidate_model.run_candidate(
             runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=str(unit_input.get("instruction") or "生成剧本交付物章节"),
+            run_id=str(task["rootRunId"]),
+            turn_id=str(task["turnId"]),
             system_instruction=(
                 _scene_list_fragment_tool_instruction(episode_number)
                 if episode_number
@@ -576,20 +570,21 @@ class ScreenplayTaskModelCalls:
                 expected_part_key=section_key,
                 runtime=runtime,
             ),
-            conversation_turn_id=str(task["turnId"]),
-            lineage=_child_lineage(task),
-            candidate_validation_contract=(
-                {
-                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
-                    "kind": "scene_list_fragment",
-                    "episodeNumber": episode_number,
-                }
-                if episode_number
-                else {
-                    "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
-                    "kind": "document_section",
-                    "sectionKey": section_key,
-                }
+            normalize=lambda candidate: normalize_screenplay_candidate(
+                (
+                    {
+                        "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                        "kind": "scene_list_fragment",
+                        "episodeNumber": episode_number,
+                    }
+                    if episode_number
+                    else {
+                        "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
+                        "kind": "document_section",
+                        "sectionKey": section_key,
+                    }
+                ),
+                candidate,
             ),
             signal=signal,
         )
@@ -598,7 +593,6 @@ class ScreenplayTaskModelCalls:
             "contentText": str(result.candidate.get("contentText") or ""),
             "sectionKey": section_key,
             "runId": result.run_id,
-            "artifactId": str(result.candidate["artifactId"]),
         }
 
     def _validate_manifest_part(self, task, unit) -> dict[str, Any]:
@@ -649,19 +643,11 @@ class ScreenplayTaskModelCalls:
         assert self._models is not None
         result = await self._models.run_public_text(
             runtime=runtime,
-            session_id=int(task["sessionId"]),
-            prompt=payload["request"] or payload["instruction"],
+            run_id=str(task["rootRunId"]),
+            turn_id=str(task["turnId"]),
             system_instruction=_final_response_instruction(),
             user_payload=payload,
-            binding_namespace="screenplay.agent.task",
-            binding_aggregate_id=str(task["projectId"]),
-            binding_command_id=f"{task['id']}:{unit['id']}",
-            task_id=str(task["id"]),
-            unit_id=str(unit["id"]),
-            expected_part_key="final_response",
             phase="screenplay_final_response_composition",
-            conversation_turn_id=str(task["turnId"]),
-            lineage=_child_lineage(task),
             signal=signal,
         )
         return {
@@ -718,7 +704,7 @@ class ScreenplayTaskUnitExecutor:
         *,
         runtime,
         composition=None,
-        tool_calling_service: ScreenplayToolCallingService | None = None,
+        candidate_model_service: ScreenplayCandidateModelService | None = None,
     ) -> None:
         self._runtime = runtime
         structured_calls = (
@@ -738,7 +724,7 @@ class ScreenplayTaskUnitExecutor:
             db,
             composition=composition,
             structured_call_service=structured_calls,
-            tool_calling_service=tool_calling_service,
+            candidate_model_service=candidate_model_service,
         )
         self._parts = ScreenplayPartArtifactQuery(db)
 
@@ -758,24 +744,15 @@ class ScreenplayTaskUnitExecutor:
             runtime=self._runtime,
             signal=signal,
         ))
-        artifact_id = str(output.get("artifactId") or "").strip()
-        run_id = str(output.get("runId") or "").strip()
         semantic_key = str(context.unit.semantic_key or context.unit.id)
-        if artifact_id and run_id:
-            ref = await self._parts.validated_ref(
-                artifact_id=artifact_id,
-                run_id=run_id,
-                semantic_key=semantic_key,
-            )
-        else:
-            ref = await self._parts.write_host_part(
-                project_id=str(task["projectId"]),
-                task_id=context.task.id,
-                unit_id=context.unit.id,
-                semantic_key=semantic_key,
-                part_kind=str(unit["kind"]),
-                output=output,
-            )
+        ref = await self._parts.write_host_part(
+            project_id=str(task["projectId"]),
+            task_id=context.task.id,
+            unit_id=context.unit.id,
+            semantic_key=semantic_key,
+            part_kind=str(unit["kind"]),
+            output=output,
+        )
         return _unit_result(ref, output)
 
     def classify_failure(self, error: Exception):
@@ -827,20 +804,7 @@ def _unit_result(ref, output: Mapping[str, Any]) -> LongTaskUnitResult:
     )
 
 
-def _child_lineage(task: Mapping[str, Any]) -> RunLineage:
-    root_run_id = str(task.get("rootRunId") or "").strip()
-    if not root_run_id:
-        raise RuntimeError("screenplay AI Part requires its Root Run identity")
-    return RunLineage(
-        parent_run_id=root_run_id,
-        root_run_id=root_run_id,
-        delegation_id=None,
-        agent_role="screenplay-part",
-        depth=1,
-    )
-
-
-def _requires_child_run(kind: str) -> bool:
+def _requires_run(kind: str) -> bool:
     return str(kind or "").strip() in SCREENPLAY_AI_PART_KINDS
 
 
@@ -1015,9 +979,9 @@ def _validate_scene_json(
 
 def _episode_metadata_tool_instruction(episode_number: int) -> str:
     return f"""你只负责整理第 {episode_number} 集的短元数据，不生成或复述剧本正文。
-完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须严格为：
+只返回一个 JSON 对象，结构必须严格为：
 {{"episodeNumber":{episode_number},"title":"简洁集标题","continuitySummary":"供下一集续写的连续性摘要"}}
-写入成功后只回复一句简短确认。"""
+不得附加解释、Markdown 或其他字段。"""
 
 
 def _episode_metadata_json_instruction(episode_number: int) -> str:
@@ -1050,7 +1014,7 @@ def _review_dimension_tool_instruction(
 ) -> str:
     return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集的 {dimension} 维度。
 宿主已在 reviewInput 中完整提供指定不可变版本的本集正文、场景计划和必要上下文。只能依据这些材料审阅，不得另行检索、声称材料不可读或把系统错误写成审阅意见。
-完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+只返回一个 JSON 对象，结构必须为：
 {{"episodeNumber":{episode_number},"reviewDimension":"{dimension}","title":"第 {episode_number} 集 {dimension} 审阅","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
 问题只能引用这些场景 ID：{list(scene_ids)}。没有问题时 issues=[] 且 verdict=ready。"""
 
@@ -1117,14 +1081,14 @@ def _validate_review_dimension_candidate(
 
 def _document_section_tool_instruction(role: str, section_key: str) -> str:
     return f"""你只生成 {role} 文档中的 {section_key} 章节。
-宿主已提供本章节需要的项目证据。完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+宿主已提供本章节需要的项目证据。只返回一个 JSON 对象，结构必须为：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
 contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。"""
 
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
     return f"""你只规划已采纳结构中的第 {episode_number} 集场景。
-完成后必须且只能调用一次 writeScreenplayCandidatePart。candidate 必须为：
+只返回一个 JSON 对象，结构必须为：
 {{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
 只提交当前集，场景顺序必须可直接用于后续剧本创作。"""
 

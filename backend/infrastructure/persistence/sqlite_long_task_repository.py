@@ -15,6 +15,8 @@ from purra.json_values import thaw_json_mapping
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskRunBinding,
+    LongTaskRunRelation,
     LongTaskSplitResult,
     LongTaskStatus,
     LongTaskUnitRecord,
@@ -49,26 +51,13 @@ class SqliteLongTaskRepository:
         normalized_id = _required(task_id, "long task id")
         try:
             async with self._mutation_transaction():
-                work_item = await self._db.fetch_one(
-                    "SELECT namespace, kind, owner_id, status "
-                    "FROM ai_agent_work_items WHERE id = ?",
-                    [command.work_item_id],
-                )
-                if work_item is None or str(work_item.get("status")) != "open":
-                    raise ValueError("long task requires an open Work Item")
-                if (
-                    str(work_item.get("namespace")) != command.namespace
-                    or str(work_item.get("owner_id")) != command.owner_id
-                ):
-                    raise ValueError("long task scope does not match its Work Item")
                 await self._db.execute(
                     "INSERT INTO ai_agent_long_tasks "
-                    "(id, work_item_id, namespace, kind, owner_id, "
+                    "(id, namespace, kind, owner_id, "
                     "created_by_run_id, total_units, max_parallelism, metadata_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         normalized_id,
-                        command.work_item_id,
                         command.namespace,
                         command.kind,
                         command.owner_id,
@@ -77,6 +66,11 @@ class SqliteLongTaskRepository:
                         command.max_parallelism,
                         _json_dump(command.metadata),
                     ],
+                )
+                await self._db.execute(
+                    "INSERT INTO ai_agent_long_task_runs "
+                    "(task_id, run_id, relation) VALUES (?, ?, 'created')",
+                    [normalized_id, command.created_by_run_id],
                 )
                 for unit in command.units:
                     await self._db.execute(
@@ -126,6 +120,58 @@ class SqliteLongTaskRepository:
             [str(task_id or "").strip()],
         )
         return _task(row) if row is not None else None
+
+    async def bind_run(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        relation: LongTaskRunRelation,
+    ) -> LongTaskRunBinding:
+        normalized_task = _required(task_id, "long task id")
+        normalized_run = _required(run_id, "long task Run id")
+        normalized_relation = LongTaskRunRelation(relation)
+        async with self._mutation_transaction():
+            await self._require(normalized_task)
+            existing = await self._db.fetch_one(
+                "SELECT relation FROM ai_agent_long_task_runs "
+                "WHERE task_id = ? AND run_id = ?",
+                [normalized_task, normalized_run],
+            )
+            if existing is not None:
+                persisted = LongTaskRunRelation(str(existing["relation"]))
+                if persisted is not normalized_relation:
+                    raise ValueError("long task Run binding relation conflicts")
+            else:
+                await self._db.execute(
+                    "INSERT INTO ai_agent_long_task_runs "
+                    "(task_id, run_id, relation) VALUES (?, ?, ?)",
+                    [normalized_task, normalized_run, normalized_relation.value],
+                )
+        return LongTaskRunBinding(
+            task_id=normalized_task,
+            run_id=normalized_run,
+            relation=normalized_relation,
+        )
+
+    async def list_run_bindings(
+        self,
+        task_id: str,
+    ) -> tuple[LongTaskRunBinding, ...]:
+        normalized_task = _required(task_id, "long task id")
+        rows = await self._db.fetch_all(
+            "SELECT task_id, run_id, relation FROM ai_agent_long_task_runs "
+            "WHERE task_id = ? ORDER BY create_time ASC, run_id ASC",
+            [normalized_task],
+        )
+        return tuple(
+            LongTaskRunBinding(
+                task_id=str(row["task_id"]),
+                run_id=str(row["run_id"]),
+                relation=str(row["relation"]),
+            )
+            for row in rows
+        )
 
     async def list_for_owner(
         self,
@@ -750,9 +796,20 @@ class SqliteLongTaskRepository:
                 )
             return task_ids
 
-    async def pause(self, task_id: str) -> LongTaskRecord:
+    async def pause(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int | None = None,
+        reason_code: str | None = None,
+    ) -> LongTaskRecord:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if (
+                expected_revision is not None
+                and task.revision != int(expected_revision)
+            ):
+                raise ValueError("long task revision conflict")
             if task.cancellation_requested_at_ms is not None:
                 return await self._cancel_in_transaction(task)
             if task.status is LongTaskStatus.PAUSED:
@@ -763,15 +820,15 @@ class SqliteLongTaskRepository:
                 )
             await self._update_task_status(task, LongTaskStatus.PAUSED)
             # A pause is a checkpoint boundary, not a five-minute lease wait.
-            # Any in-flight child Run is signaled by the application composition;
+            # Any in-flight executor is signaled by the application composition;
             # releasing its unit here makes an immediate resume deterministic.
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'pending', "
                 "max_attempts = max_attempts + 1, worker_id = NULL, "
-                "lease_expires_at_ms = NULL, "
+                "lease_expires_at_ms = NULL, error_code = COALESCE(?, error_code), "
                 "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
                 "AND status IN ('claimed', 'running')",
-                [task.id],
+                [str(reason_code or "").strip()[:240] or None, task.id],
             )
             return await self._require(task.id)
 
@@ -1059,7 +1116,6 @@ def _task(row: dict[str, Any] | None) -> LongTaskRecord:
         namespace=str(row["namespace"]),
         kind=str(row["kind"]),
         owner_id=str(row["owner_id"]),
-        work_item_id=str(row["work_item_id"]),
         created_by_run_id=str(row["created_by_run_id"]),
         status=str(row["status"]),
         revision=int(row["revision"]),
@@ -1189,7 +1245,6 @@ def _matches_create(task, units, command: LongTaskCreateCommand) -> bool:
         task.namespace != command.namespace
         or task.kind != command.kind
         or task.owner_id != command.owner_id
-        or task.work_item_id != command.work_item_id
         or task.created_by_run_id != command.created_by_run_id
         or task.max_parallelism != command.max_parallelism
         or thaw_json_mapping(task.metadata) != thaw_json_mapping(command.metadata)

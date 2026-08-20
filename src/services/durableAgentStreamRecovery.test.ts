@@ -13,7 +13,6 @@ const snapshot = (
     sessionId: 7,
     conversationId: null,
     status,
-    lineage: { rootRunId: 'run-recover', depth: 0 },
     finalResponse: status === 'done' ? '完成' : '',
     execution: { attempt: 1, cancellationRequested: false },
     provenance: {},

@@ -11,7 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskUnitExecutor,
 )
-from application.screenplay_tool_calling import ScreenplayToolCallingService
+from application.screenplay_candidate_model import ScreenplayCandidateModelService
 from application.screenplay_agent_service import ScreenplayAgentService
 from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
@@ -71,7 +71,7 @@ def _service() -> ScreenplayAgentService:
             db,
             runtime=runtime,
             composition=composition,
-            tool_calling_service=ScreenplayToolCallingService(
+            candidate_model_service=ScreenplayCandidateModelService(
                 db,
                 composition=composition,
             ),

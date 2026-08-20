@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from purra.contracts import (
     RunCreateParams,
+    ExecutionPlan,
     RunId,
     RunStatus,
-    TaskStep,
     TaskStepUpdate,
     TerminalRunStatus,
     TraceRecord,
@@ -37,7 +36,7 @@ class RunBeginResult:
 class RunCommit:
     """One atomic Run state/outbox write requested by the Core controller."""
 
-    replace_steps: tuple[TaskStep, ...] | None = None
+    replace_plan: ExecutionPlan | None = None
     step_updates: tuple[TaskStepUpdate, ...] = ()
     terminal_status: TerminalRunStatus | None = None
     final_response: str | None = None
@@ -46,14 +45,18 @@ class RunCommit:
     events: tuple[AgentEvent, ...] = ()
 
     def __post_init__(self) -> None:
-        replacement = (
-            None if self.replace_steps is None else tuple(self.replace_steps)
-        )
+        replacement = self.replace_plan
+        if replacement is not None and not isinstance(replacement, ExecutionPlan):
+            raise TypeError("run commit replacement must be an ExecutionPlan")
         updates = tuple(self.step_updates)
         events = tuple(self.events)
         update_ids = [update.step_id for update in updates]
         if len(update_ids) != len(set(update_ids)):
             raise ValueError("run commit step updates must be unique")
+        if replacement is not None and updates:
+            raise ValueError(
+                "run commit cannot replace an execution plan and update steps"
+            )
 
         terminal = self.terminal_status
         if terminal is not None:
@@ -74,7 +77,7 @@ class RunCommit:
                 "run commit validated_result is only valid for completed runs"
             )
 
-        object.__setattr__(self, "replace_steps", replacement)
+        object.__setattr__(self, "replace_plan", replacement)
         object.__setattr__(self, "step_updates", updates)
         object.__setattr__(self, "terminal_status", terminal)
         object.__setattr__(
@@ -157,22 +160,7 @@ class RunRepository(Protocol):
         commit: RunCommit,
     ) -> tuple[AgentEvent, ...]: ...
 
-    async def create(self, params: RunCreateParams) -> RunId: ...
-
     async def bind_conversation(self, run_id: RunId, conversation_id: int) -> None: ...
-
-    async def replace_steps(self, run_id: RunId, steps: Sequence[TaskStep]) -> None: ...
-
-    async def update_step(self, run_id: RunId, update: TaskStepUpdate) -> None: ...
-
-    async def transition(
-        self,
-        run_id: RunId,
-        status: TerminalRunStatus,
-        *,
-        final_response: str | None = None,
-        error: str | None = None,
-    ) -> None: ...
 
     async def append_event(self, run_id: RunId, event: AgentEvent) -> None:
         """Append an event not owned by AgentRunController."""

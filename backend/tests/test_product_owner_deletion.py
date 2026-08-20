@@ -64,7 +64,6 @@ async def test_screenplay_project_delete_rejects_active_operation(owner_db):
         ("turn", "planning"),
         ("turn", "running"),
         ("turn", "paused"),
-        ("work_item", "open"),
     ],
 )
 async def test_screenplay_project_delete_rejects_active_pre_operation_owner(
@@ -84,21 +83,12 @@ async def test_screenplay_project_delete_rejects_active_pre_operation_owner(
         "VALUES (93, 'screenplay', ?)",
         [project_id],
     )
-    if active_owner == "turn":
-        await owner_db.execute(
-            "INSERT INTO screenplay_agent_turns "
-            "(id, project_id, session_id, command_id, status, user_content) "
-            "VALUES ('turn-without-operation', ?, 93, 'command', ?, '继续')",
-            [project_id, status],
-        )
-    else:
-        await owner_db.execute(
-            "INSERT INTO ai_agent_work_items "
-            "(id, namespace, kind, owner_id, status) VALUES "
-            "('open-work-without-operation', 'purrtypos.screenplay', "
-            "'screenplayDraft', ?, 'open')",
-            [project_id],
-        )
+    await owner_db.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, status, user_content) "
+        "VALUES ('turn-without-operation', ?, 93, 'command', ?, '继续')",
+        [project_id, status],
+    )
 
     with pytest.raises(AppError) as conflict:
         await delete_screenplay_project_data(owner_db, project_id)
@@ -146,26 +136,17 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     )
     await owner_db.execute(
         "INSERT INTO ai_agent_runs "
-        "(id, session_id, status, prompt, root_run_id, cancellation_epoch, "
+        "(id, session_id, status, prompt, cancellation_epoch, "
         "cancel_requested_at_ms) VALUES "
-        "('run-project-done', 92, 'canceled', 'done', "
-        "'run-project-done', 1, 1), "
-        "('run-foreign-audit', NULL, 'done', 'foreign', NULL, 0, NULL)"
+        "('run-project-done', 92, 'canceled', 'done', 1, 1), "
+        "('run-foreign-audit', NULL, 'done', 'foreign', 0, NULL)"
     )
     await owner_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "(run_id, cancellation_epoch, status, requested_at_ms, "
         "completed_at_ms) VALUES "
         "('run-project-done', 1, 'completed', 1, 2), "
         "('run-foreign-audit', 1, 'completed', 1, 2)"
-    )
-    await owner_db.execute(
-        "INSERT INTO ai_agent_host_child_runs "
-        "(host_child_key, identity_digest, contract_json, generation, "
-        "attempt_key, run_id, terminal_status) VALUES "
-        "('project-done/task/unit/main', 'identity-done', "
-        "'{\"bindingAggregateId\":\"project-done\"}', 1, "
-        "'attempt-project-done', 'run-project-done', 'done')"
     )
     await owner_db.execute(
         "INSERT INTO screenplay_agent_turns "
@@ -180,16 +161,10 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "'digest', 'receipt-before-operation')"
     )
     await owner_db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, status) VALUES "
-        "('work-project-done', 'purrtypos.screenplay', 'screenplayDraft', "
-        "'project-done', 'completed')"
-    )
-    await owner_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units) VALUES ('task-project-done', "
-        "'work-project-done', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'purrtypos.screenplay', 'screenplayDraft', "
         "'project-done', 'run-project-done', 'completed', 1)"
     )
     await owner_db.execute(
@@ -206,10 +181,8 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         'screenplay_agent_turns',
         'ai_agent_long_task_usage',
         'ai_agent_long_tasks',
-        'ai_agent_work_items',
         'ai_writing_chat_requests',
         'ai_sessions',
-        'ai_agent_host_child_runs',
     ):
         assert await owner_db.fetch_one(
             f"SELECT 1 AS present FROM {table} LIMIT 1"
@@ -218,40 +191,42 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "SELECT session_id FROM ai_agent_runs WHERE id = 'run-project-done'"
     ) == {"session_id": None}
     assert await owner_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-project-done'"
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-project-done'"
     ) is None
     assert await owner_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-foreign-audit'"
-    ) == {"root_run_id": "run-foreign-audit"}
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-foreign-audit'"
+    ) == {"run_id": "run-foreign-audit"}
 
-    class CountingParticipant:
+    class CountingProjector:
         calls = 0
 
-        async def project(self, root_run_id, receipt):
+        async def project(self, run_id, receipt):
             self.calls += 1
 
-    participant = CountingParticipant()
-    composition = create_agent_composition(owner_db)
+    projector = CountingProjector()
+    composition = create_agent_composition(
+        owner_db,
+        run_cancellation_projectors=(projector,),
+    )
     try:
         replay = await AgentCancellationService(
             owner_db,
             composition,
-            participants=(participant,),
         ).cancel("run-project-done")
     finally:
         await composition.shutdown()
     assert replay == {
         "status": "canceled",
         "newlyRequested": False,
-        "childrenCanceled": 0,
+        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
         "cancellationReceipt": "tombstoned",
     }
-    assert participant.calls == 0
+    assert projector.calls == 0
     assert await owner_db.fetch_one(
         "SELECT status, cancellation_epoch, execution_owner_id, "
         "lease_expires_at_ms FROM ai_agent_runs "
@@ -263,25 +238,18 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
         "lease_expires_at_ms": None,
     }
     assert await owner_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-project-done'"
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-project-done'"
     ) is None
     await owner_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "(run_id, cancellation_epoch, status, requested_at_ms, "
         "completed_at_ms) VALUES "
         "('run-project-done', 1, 'completed', 3, 4)"
     )
-    await owner_db.execute(
-        "INSERT INTO ai_agent_host_child_runs "
-        "(host_child_key, identity_digest, contract_json, generation, "
-        "attempt_key) VALUES ('project-done/task/unit/main', 'new-identity', "
-        "'{\"bindingAggregateId\":\"project-done\"}', 1, "
-        "'new-attempt-project-done')"
-    )
 
 
-async def test_session_unlink_retains_terminal_host_child_receipt(owner_db):
+async def test_session_unlink_retains_terminal_run_cancellation_receipt(owner_db):
     await owner_db.execute(
         "INSERT INTO ai_sessions (id, scope) VALUES (96, 'screenplay')"
     )
@@ -290,16 +258,8 @@ async def test_session_unlink_retains_terminal_host_child_receipt(owner_db):
         "VALUES ('run-session-audit', 96, 'done', 'done')"
     )
     await owner_db.execute(
-        "INSERT INTO ai_agent_host_child_runs "
-        "(host_child_key, identity_digest, contract_json, generation, "
-        "attempt_key, run_id, terminal_status) VALUES "
-        "('project-audit/task/unit/main', 'identity-audit', "
-        "'{\"bindingAggregateId\":\"project-audit\"}', 1, "
-        "'attempt-project-audit', 'run-session-audit', 'done')"
-    )
-    await owner_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "(run_id, cancellation_epoch, status, requested_at_ms, "
         "completed_at_ms) VALUES "
         "('run-session-audit', 1, 'completed', 1, 2)"
     )
@@ -307,66 +267,16 @@ async def test_session_unlink_retains_terminal_host_child_receipt(owner_db):
     await prepare_session_owner_deletion(owner_db, [96])
 
     assert await owner_db.fetch_one(
-        "SELECT run_id, terminal_status FROM ai_agent_host_child_runs "
-        "WHERE host_child_key = 'project-audit/task/unit/main'"
-    ) == {"run_id": "run-session-audit", "terminal_status": "done"}
-    assert await owner_db.fetch_one(
         "SELECT session_id, status FROM ai_agent_runs "
         "WHERE id = 'run-session-audit'"
     ) == {"session_id": None, "status": "done"}
     assert await owner_db.fetch_one(
-        "SELECT root_run_id, status FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-session-audit'"
-    ) == {"root_run_id": "run-session-audit", "status": "completed"}
+        "SELECT run_id, status FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-session-audit'"
+    ) == {"run_id": "run-session-audit", "status": "completed"}
 
 
-@pytest.mark.parametrize("relation", ["reference", "continuation"])
-async def test_project_delete_preserves_cross_owner_work_linked_to_its_run(
-    owner_db,
-    relation: str,
-):
-    for project_id in ("project-delete", "project-keep"):
-        await owner_db.execute(
-            "INSERT INTO screenplay_projects "
-            "(id, title, source_kind, source_snapshot_json) "
-            "VALUES (?, ?, 'original', '{}')",
-            [project_id, project_id],
-        )
-    await owner_db.execute(
-        "INSERT INTO ai_sessions (id, scope, screenplay_project_id) "
-        "VALUES (94, 'screenplay', 'project-delete')"
-    )
-    await owner_db.execute(
-        "INSERT INTO ai_agent_runs "
-        "(id, session_id, status, prompt, binding_namespace, binding_aggregate_id, "
-        "binding_command_id) VALUES ('run-delete', 94, 'done', 'done', "
-        "'screenplay.agent.turn', 'project-delete', 'command-delete')"
-    )
-    await owner_db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, status) VALUES "
-        "('work-keep', 'purrtypos.screenplay', 'screenplayDraft', "
-        "'project-keep', 'completed')"
-    )
-    await owner_db.execute(
-        "INSERT INTO ai_agent_work_item_runs "
-        "(work_item_id, run_id, relation, work_item_revision) "
-        "VALUES ('work-keep', 'run-delete', ?, 1)",
-        [relation],
-    )
-
-    assert await delete_screenplay_project_data(owner_db, "project-delete") is True
-
-    assert await owner_db.fetch_one(
-        "SELECT owner_id FROM ai_agent_work_items WHERE id = 'work-keep'"
-    ) == {"owner_id": "project-keep"}
-    assert await owner_db.fetch_one(
-        "SELECT relation FROM ai_agent_work_item_runs "
-        "WHERE work_item_id = 'work-keep' AND run_id = 'run-delete'"
-    ) == {"relation": relation}
-
-
-async def test_project_delete_preserves_cross_owner_task_on_owned_work(
+async def test_project_delete_preserves_cross_owner_task(
     owner_db,
 ):
     for project_id in ("project-delete-task", "project-keep-task"):
@@ -377,16 +287,10 @@ async def test_project_delete_preserves_cross_owner_task_on_owned_work(
             [project_id, project_id],
         )
     await owner_db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, status) VALUES "
-        "('work-delete-task', 'purrtypos.screenplay', 'screenplayDraft', "
-        "'project-delete-task', 'completed')"
-    )
-    await owner_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units) VALUES ('task-keep-cross-owner', "
-        "'work-delete-task', 'purrtypos.screenplay', 'screenplayDraft', "
+        "'purrtypos.screenplay', 'screenplayDraft', "
         "'project-keep-task', 'run-cross-owner', 'completed', 1)"
     )
 

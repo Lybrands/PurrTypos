@@ -41,7 +41,10 @@ test('scroll intent raised away from the bottom can resume on return', () => {
   )
 })
 
-const user = (content: string) => ({ role: 'user' as const, content })
+const user = (
+  content: string,
+  identity: { clientTurnId?: string; conversationId?: number; sentAt?: string } = {},
+) => ({ role: 'user' as const, content, ...identity })
 const assistant = (clientTurnId?: string, content = '') => ({
   role: 'assistant' as const,
   content,
@@ -50,44 +53,58 @@ const assistant = (clientTurnId?: string, content = '') => ({
 
 test('initial live turn is recorded without forcing a pin', () => {
   const observed = advanceLiveTurnCursor(undefined, [
-    user('第一问'),
+    user('第一问', { clientTurnId: 'turn-1' }),
     assistant('turn-1'),
   ])
 
-  assert.deepEqual(observed.cursor, { key: 'client:turn-1' })
+  assert.deepEqual(observed.cursor, { key: 'user-client:turn-1' })
   assert.equal(observed.anchorIndex, undefined)
 })
 
 test('stream updates in the same live turn do not pin again', () => {
   const observed = advanceLiveTurnCursor(
-    { key: 'client:turn-1' },
-    [user('第一问'), assistant('turn-1', '正在回答')],
+    { key: 'user-client:turn-1' },
+    [user('第一问', { clientTurnId: 'turn-1' }), assistant('turn-1', '正在回答')],
   )
 
-  assert.deepEqual(observed.cursor, { key: 'client:turn-1' })
+  assert.deepEqual(observed.cursor, { key: 'user-client:turn-1' })
   assert.equal(observed.anchorIndex, undefined)
 })
 
-test('a new client turn pins its preceding user message', () => {
+test('a newly sent user turn pins immediately before its assistant exists', () => {
   const observed = advanceLiveTurnCursor(
-    { key: 'client:turn-1' },
+    { key: 'user-client:turn-1' },
     [
-      user('第一问'),
+      user('第一问', { clientTurnId: 'turn-1' }),
       assistant('turn-1', '已完成'),
-      user('第二问'),
+      user('第二问', { clientTurnId: 'turn-2' }),
+    ],
+  )
+
+  assert.deepEqual(observed.cursor, { key: 'user-client:turn-2' })
+  assert.equal(observed.anchorIndex, 2)
+})
+
+test('the assistant joining a pinned user turn does not pin it again', () => {
+  const observed = advanceLiveTurnCursor(
+    { key: 'user-client:turn-2' },
+    [
+      user('第一问', { clientTurnId: 'turn-1' }),
+      assistant('turn-1', '已完成'),
+      user('第二问', { clientTurnId: 'turn-2' }),
       assistant('turn-2'),
     ],
   )
 
-  assert.deepEqual(observed.cursor, { key: 'client:turn-2' })
-  assert.equal(observed.anchorIndex, 2)
+  assert.deepEqual(observed.cursor, { key: 'user-client:turn-2' })
+  assert.equal(observed.anchorIndex, undefined)
 })
 
 test('stable persisted identity is used when the live client key is absent', () => {
   const observed = advanceLiveTurnCursor(
-    { key: 'run:run-1' },
+    { key: 'user-client:turn-1' },
     [
-      user('继续'),
+      user('继续', { conversationId: 42 }),
       {
         role: 'assistant',
         content: '',
@@ -97,7 +114,7 @@ test('stable persisted identity is used when the live client key is absent', () 
     ],
   )
 
-  assert.deepEqual(observed.cursor, { key: 'conversation:42' })
+  assert.deepEqual(observed.cursor, { key: 'user-conversation:42' })
   assert.equal(observed.anchorIndex, 0)
 })
 
@@ -130,17 +147,17 @@ test('changing run ids cannot repin the same stable user turn', () => {
 
 test('editing an earlier turn pins the replacement user message', () => {
   const observed = advanceLiveTurnCursor(
-    { key: 'client:turn-2' },
-    [user('改写后的第一问'), assistant('turn-edit')],
+    { key: 'user-client:turn-2' },
+    [user('改写后的第一问', { clientTurnId: 'turn-edit' }), assistant('turn-edit')],
   )
 
-  assert.deepEqual(observed.cursor, { key: 'client:turn-edit' })
+  assert.deepEqual(observed.cursor, { key: 'user-client:turn-edit' })
   assert.equal(observed.anchorIndex, 0)
 })
 
-test('an assistant without stable live identity never triggers a pin', () => {
+test('a user without stable identity never triggers a pin', () => {
   const observed = advanceLiveTurnCursor(
-    { key: 'client:turn-1' },
+    { key: 'user-client:turn-1' },
     [user('无标识问题'), assistant()],
   )
 

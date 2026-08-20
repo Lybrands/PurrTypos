@@ -4,10 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from purra.evaluation import (
-    TRACE_EVENT_TYPE,
-    AgentRuntimeRegressionCase,
-)
+from purra.evaluation import AgentRuntimeRegressionCase
+from purra.observability import TRACE_EVENT_TYPE
 
 
 def _trace(stage: str, outcome: str, **details: Any) -> dict[str, Any]:

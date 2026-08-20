@@ -12,6 +12,7 @@ from purra.contracts import (
     ModelStream,
     ModelStreamChunk,
     ReasoningMode,
+    ToolSchema,
 )
 from purra.errors import ContractViolationError
 from purra.model_protocol import generic_capability_snapshot
@@ -164,6 +165,53 @@ async def test_public_chunk_is_observed_before_runtime_consumes_it():
     assert observer.opened[0][0] == managed.receipt
     assert observer.opened[0][1].run_id == "run-1"
     assert observer.opened[0][1].turn_id == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_receipt_fingerprints_model_input_tools_and_context_provenance():
+    AgentModelCall, AgentModelInvocationManager, ModelInvocationContext = _types()
+    manager = AgentModelInvocationManager(_Gateway(), output_observer=_Observer())
+    context = AgentMessage(
+        role="system",
+        content="trusted context",
+        attributes={"context_name": "canon"},
+        host_metadata={
+            "context_evidence_receipts": [{
+                "evidenceId": "canon:1",
+                "source": "canon",
+                "itemId": "book-1",
+                "version": 2,
+            }],
+        },
+    )
+    managed = await manager.stream(
+        (context, AgentMessage(role="user", content="answer")),
+        AgentModelCall(
+            request=_request(),
+            output_intent=AgentOutputIntent.FINAL_PUBLIC,
+            commit_mode=OutputCommitMode.LIVE,
+            reasoning_mode=ReasoningMode.DISABLED,
+            tools=(ToolSchema(
+                name="lookup",
+                description="Look up a fact.",
+                parameters={"type": "object", "properties": {}},
+            ),),
+        ),
+        ModelInvocationContext(run_id="run-1", turn_id="turn-1"),
+    )
+
+    receipt = managed.receipt
+
+    assert len(receipt.input_fingerprint) == 64
+    assert len(receipt.tool_schema_fingerprint) == 64
+    assert [item.to_mapping() for item in receipt.context_evidence] == [{
+        "evidenceId": "canon:1",
+        "contextBlock": "canon",
+        "source": "canon",
+        "itemId": "book-1",
+        "version": 2,
+    }]
+    assert receipt.to_mapping()["callParameters"][0]["toolNames"] == ["lookup"]
 
 
 @pytest.mark.asyncio

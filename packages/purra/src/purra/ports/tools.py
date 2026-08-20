@@ -14,6 +14,7 @@ from purra.contracts import (
     ApprovalResult,
     ApprovalStatus,
     ExecutionState,
+    ExecutionTransition,
     RunId,
     ToolBatchOutcome,
     ToolBatchRequest,
@@ -142,11 +143,9 @@ class ToolExecutionGateway(Protocol):
 
 @runtime_checkable
 class RuntimeObserver(Protocol):
-    """Compatibility observer for the existing Run todo state machine."""
+    """Observe runtime state and expose the compiled active transition."""
 
-    def current_allowed_tool_names(self) -> frozenset[str]: ...
-
-    def future_allowed_tool_names(self) -> frozenset[str]: ...
+    def current_execution_transition(self) -> ExecutionTransition | None: ...
 
     async def record_trace(self, trace: TraceRecord) -> None: ...
 

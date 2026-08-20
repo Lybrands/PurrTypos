@@ -1,0 +1,43 @@
+.agent-message-footer {
+  display: flex;
+  width: fit-content;
+  min-height: 24px;
+  margin-top: 4px;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 24px;
+
+  &.is-user {
+    align-self: flex-end;
+  }
+
+  &.is-assistant {
+    align-self: flex-start;
+  }
+}
+
+.agent-message-footer__persistent,
+.agent-message-footer__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.agent-message-footer__actions,
+.agent-message-footer__time {
+  display: none;
+}
+
+.agent-message-footer__actions.is-persistent,
+.agent-conversation__message:hover .agent-message-footer__actions,
+.agent-conversation__message:focus-within .agent-message-footer__actions {
+  display: flex;
+}
+
+.agent-conversation__message:hover .agent-message-footer__time,
+.agent-conversation__message:focus-within .agent-message-footer__time {
+  display: inline;
+}

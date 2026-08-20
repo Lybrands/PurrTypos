@@ -8,6 +8,7 @@ import pytest
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
+    ContextBlock,
     ModelRequest,
     PlanningCapabilities,
     PlanningConstraints,
@@ -15,6 +16,7 @@ from purra.contracts import (
 from purra.planner import build_planner_messages
 from domains.writing.contracts import WritingDomainContext
 from domains.writing.execution_state import WritingExecutionStateFactory
+from domains.writing.context import WRITING_PLANNING_FACTS_CONTEXT
 from domains.writing.planning import (
     WRITING_TOOL_PLANNING_DEPENDENCIES,
     WritingPlanningPolicy,
@@ -134,7 +136,13 @@ def _bound_chapter_capabilities(
     )
     return PlanningCapabilities(
         available_tool_names=tools,
-        host_planning_facts=facts,
+        planning_context_blocks=(
+            ContextBlock(
+                name=WRITING_PLANNING_FACTS_CONTEXT,
+                content=json.dumps(facts),
+                token_count=1,
+            ),
+        ),
         tool_guidance={
             name: {
                 "purpose": name,

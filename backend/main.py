@@ -109,6 +109,15 @@ async def lifespan(application: FastAPI):
             execution_db=execution_db,
             skills_dir=skills_dir,
         )
+        recovered_long_tasks = await (
+            composition.long_task_repository.recover_after_restart()
+        )
+        if recovered_long_tasks:
+            logging.getLogger(__name__).warning(
+                "Checkpointed %s abandoned long task(s) after restart: %s",
+                len(recovered_long_tasks),
+                ", ".join(recovered_long_tasks),
+            )
         orphan_recovery = AgentOrphanRecoveryService(db, composition)
         recovered_runs = await orphan_recovery.recover(
             after_restart=True,
@@ -123,20 +132,6 @@ async def lifespan(application: FastAPI):
                 "Recovered %s abandoned Agent Run(s) after restart: %s",
                 len(recovered_runs),
                 ", ".join(recovered_runs),
-            )
-
-        from infrastructure.persistence.sqlite_long_task_repository import (
-            SqliteLongTaskRepository,
-        )
-
-        recovered_long_tasks = await SqliteLongTaskRepository(
-            db
-        ).recover_after_restart()
-        if recovered_long_tasks:
-            logging.getLogger(__name__).warning(
-                "Checkpointed %s abandoned long task(s) after restart: %s",
-                len(recovered_long_tasks),
-                ", ".join(recovered_long_tasks),
             )
 
         from infrastructure.persistence.sqlite_screenplay_agent_repository import (
@@ -177,12 +172,14 @@ async def lifespan(application: FastAPI):
             artifact_maintenance_policy,
         )
 
-        from infrastructure.persistence.delegation_store import (
-            recover_delegations,
+        from infrastructure.persistence.sqlite_delegation_repository import (
+            SqliteDelegationRepository,
         )
 
-        recovered_delegations = await recover_delegations(db)
-        if any(recovered_delegations.values()):
+        recovered_delegations = await (
+            SqliteDelegationRepository(db).recover_after_restart()
+        )
+        if recovered_delegations:
             logging.getLogger(__name__).warning(
                 "Recovered Agent delegations after restart: %s",
                 recovered_delegations,

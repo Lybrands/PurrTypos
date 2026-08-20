@@ -20,11 +20,15 @@ class RunStatus(StrEnum):
 
 class DelegationStatus(StrEnum):
     QUEUED = "queued"
-    CLAIMED = "claimed"
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
     CANCELED = "canceled"
+
+
+class DelegationContextMode(StrEnum):
+    ISOLATED = "isolated"
+    SELECTED_PARENT = "selected_parent_context"
 
 
 TerminalRunStatus: TypeAlias = Literal[
@@ -46,7 +50,6 @@ class StepStatus(StrEnum):
 class StepExecutor(StrEnum):
     MODEL = "model"
     TOOL = "tool"
-    AGENT = "agent"
 
 
 class StepType(StrEnum):

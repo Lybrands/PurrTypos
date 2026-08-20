@@ -24,7 +24,6 @@ from application.request_mapping import (
 from schemas.ai import (
     CaptureAiErrorReportRequest,
     ChatStreamRequest,
-    CreateAgentDelegationRequest,
     GenerateTitleRequest,
     ListModelsRequest,
     ResolveToolApprovalRequest,
@@ -326,7 +325,7 @@ async def resolve_pending_tool_approval(
 @router.get("/ai/agent-runs/{run_id}/diagnostics")
 async def get_agent_run_diagnostics(run_id: str):
     """Return diagnostics for one Run or its durable workflow tree."""
-    from purra.evaluation import (
+    from purra.observability import (
         classify_agent_run_failures,
         evaluate_agent_run,
         evaluate_agent_run_performance,
@@ -354,34 +353,40 @@ async def get_agent_run_diagnostics(run_id: str):
         str(event.get("eventType") or "") == "long_task.dispatched"
         for event in root_events
     )
-    child_runs: list[dict[str, Any]] = []
+    related_runs: list[dict[str, Any]] = []
     long_tasks: list[dict[str, Any]] = []
     events = [dict(event, runId=run_id) for event in root_events]
     if dispatched:
-        child_runs, long_tasks = await asyncio.gather(
+        related_runs, long_tasks = await asyncio.gather(
             db.fetch_all(
-                "SELECT id, status, parent_run_id, root_run_id, agent_role, "
-                "run_depth, model_provider, model_name, create_time, update_time "
-                "FROM ai_agent_runs WHERE root_run_id = ? AND id <> ? "
-                "ORDER BY create_time ASC, id ASC",
+                "SELECT DISTINCT r.id, r.status, r.model_provider, r.model_name, "
+                "r.create_time, r.update_time, ltr.task_id, ltr.relation "
+                "FROM ai_agent_long_tasks AS lt "
+                "JOIN ai_agent_long_task_runs AS root_binding "
+                "ON root_binding.task_id = lt.id AND root_binding.run_id = ? "
+                "JOIN ai_agent_long_task_runs AS ltr ON ltr.task_id = lt.id "
+                "JOIN ai_agent_runs AS r ON r.id = ltr.run_id "
+                "WHERE r.id <> ? ORDER BY r.create_time ASC, r.id ASC",
                 [run_id, run_id],
             ),
             db.fetch_all(
                 "SELECT id, kind, status, total_units, completed_units, "
                 "failed_units, create_time, update_time "
-                "FROM ai_agent_long_tasks WHERE created_by_run_id = ? "
+                "FROM ai_agent_long_tasks AS lt WHERE created_by_run_id = ? "
+                "OR EXISTS (SELECT 1 FROM ai_agent_long_task_runs AS ltr "
+                "WHERE ltr.task_id = lt.id AND ltr.run_id = ?) "
                 "ORDER BY create_time ASC, id ASC",
-                [run_id],
+                [run_id, run_id],
             ),
         )
-        child_event_groups = await asyncio.gather(*(
-            get_run_events(db, str(child["id"]))
-            for child in child_runs
+        related_event_groups = await asyncio.gather(*(
+            get_run_events(db, str(related["id"]))
+            for related in related_runs
         ))
-        for child, child_events in zip(child_runs, child_event_groups):
-            child_run_id = str(child["id"])
+        for related, related_events in zip(related_runs, related_event_groups):
+            related_run_id = str(related["id"])
             events.extend(
-                dict(event, runId=child_run_id) for event in child_events
+                dict(event, runId=related_run_id) for event in related_events
             )
         events.sort(key=lambda event: int(event.get("id") or 0))
     workflow_status = None
@@ -424,24 +429,23 @@ async def get_agent_run_diagnostics(run_id: str):
             "kind": "durable_long_task",
             "rootRunId": run_id,
             "status": workflow_status or "done",
-            "runCount": 1 + len(child_runs),
-            "childRunCount": len(child_runs),
-            "activeChildRunIds": [
-                str(child["id"])
-                for child in child_runs
-                if str(child.get("status") or "") == "running"
+            "runCount": 1 + len(related_runs),
+            "relatedRunCount": len(related_runs),
+            "activeRelatedRunIds": [
+                str(related["id"])
+                for related in related_runs
+                if str(related.get("status") or "") == "running"
             ],
-            "childRuns": [{
-                "runId": str(child["id"]),
-                "status": child.get("status"),
-                "parentRunId": child.get("parent_run_id"),
-                "agentRole": child.get("agent_role"),
-                "depth": child.get("run_depth"),
-                "modelProvider": child.get("model_provider"),
-                "modelName": child.get("model_name"),
-                "createTime": child.get("create_time"),
-                "updateTime": child.get("update_time"),
-            } for child in child_runs],
+            "runBindings": [{
+                "runId": str(related["id"]),
+                "taskId": str(related["task_id"]),
+                "relation": related.get("relation"),
+                "status": related.get("status"),
+                "modelProvider": related.get("model_provider"),
+                "modelName": related.get("model_name"),
+                "createTime": related.get("create_time"),
+                "updateTime": related.get("update_time"),
+            } for related in related_runs],
             "longTasks": [{
                 "taskId": str(task["id"]),
                 "kind": task.get("kind"),
@@ -523,65 +527,20 @@ async def get_agent_run_stability_trend(
 async def cancel_agent_run(run_id: str):
     """Persist a cancellation request for the executor that owns this Run."""
 
-    from application.agent_cancellation_service import (
-        AgentCancellationService,
-        RootCancellationTargetError,
-    )
+    from application.agent_cancellation_service import AgentCancellationService
     from application.agent_composition import get_agent_composition
     from dependencies import get_db
 
     composition = get_agent_composition()
-    try:
-        result = await AgentCancellationService(
-            get_db(),
-            composition,
-        ).cancel(run_id)
-    except RootCancellationTargetError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
+    result = await AgentCancellationService(
+        get_db(),
+        composition,
+    ).cancel(run_id)
     if result is None:
         return {"success": False, "error": "Agent Run 不存在"}
     if result["status"] not in {"canceled", "cancel_requested"}:
         return {"success": False, "error": "Agent Run 已结束"}
     return {"success": True, "data": result}
-
-
-@router.post("/ai/agent-runs/{run_id}/delegations")
-async def create_agent_delegation(
-    run_id: str,
-    body: CreateAgentDelegationRequest,
-):
-    from application.agent_delegation_service import AgentDelegationService
-    from application.agent_composition import get_agent_composition
-    from dependencies import get_db
-    from infrastructure.persistence.run_store import get_run
-
-    composition = get_agent_composition()
-    db = get_db()
-    try:
-        parent = await get_run(db, run_id)
-        if parent is None:
-            raise ValueError("Agent Run does not exist")
-        role_registry = await _persisted_run_role_registry(
-            composition,
-            db,
-            parent,
-        )
-        if role_registry is None:
-            raise ValueError("Agent profile does not support delegation")
-        delegation = await AgentDelegationService(
-            composition.delegation_repository,
-            role_registry=role_registry,
-        ).delegate(
-            parent_run_id=run_id,
-            agent_role=body.agentRole,
-            objective=body.objective,
-            input_payload=body.input,
-            required=body.required,
-            priority=body.priority,
-        )
-    except ValueError as error:
-        return {"success": False, "error": str(error)}
-    return {"success": True, "data": delegation}
 
 
 @router.get("/ai/session-runs/latest")
@@ -644,13 +603,8 @@ async def get_latest_session_agent_run(
             ),
         }
     snapshot = await AgentRunQueryService(
-        composition.checkpoint_store,
+        composition.run_snapshot_reader,
         composition.output_repository,
-        role_registry=await _persisted_run_role_registry(
-            composition,
-            db,
-            run,
-        ),
         product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
@@ -690,13 +644,8 @@ async def get_agent_run_snapshot(
     if run is None:
         return {"success": False, "error": "Agent Run 不存在"}
     snapshot = await AgentRunQueryService(
-        composition.checkpoint_store,
+        composition.run_snapshot_reader,
         composition.output_repository,
-        role_registry=await _persisted_run_role_registry(
-            composition,
-            db,
-            run,
-        ),
         product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(
         run_id,
@@ -706,114 +655,6 @@ async def get_agent_run_snapshot(
     if snapshot is None:
         return {"success": False, "error": "Agent Run 不存在"}
     return {"success": True, "data": snapshot}
-
-
-async def _persisted_run_role_registry(composition, db, run):
-    """Resolve optional roles from the target Run or its persisted parent."""
-
-    current = run
-    visited: set[str] = set()
-    resolved_profile = ""
-    resolved_namespace = ""
-    while current is not None:
-        current_id = str(current.get("id") or "").strip()
-        if current_id:
-            if current_id in visited:
-                raise ValueError("Agent Run parent lineage contains a cycle")
-            visited.add(current_id)
-        profile_id, domain_namespace = _persisted_profile_identity(current)
-        inferred_namespace = await _persisted_domain_namespace(db, current)
-        if (
-            domain_namespace
-            and inferred_namespace
-            and domain_namespace != inferred_namespace
-        ):
-            raise ValueError(
-                "persisted Agent domain namespace conflicts with Run binding"
-            )
-        domain_namespace = domain_namespace or inferred_namespace
-        if profile_id:
-            if resolved_profile and resolved_profile != profile_id:
-                raise ValueError("Agent Run lineage has conflicting profiles")
-            resolved_profile = profile_id
-        if domain_namespace:
-            if resolved_namespace and resolved_namespace != domain_namespace:
-                raise ValueError("Agent Run lineage has conflicting domains")
-            resolved_namespace = domain_namespace
-        parent_run_id = str(current.get("parent_run_id") or "").strip()
-        if not parent_run_id:
-            break
-        from infrastructure.persistence.run_store import get_run
-
-        current = await get_run(db, parent_run_id)
-    if not resolved_profile and not resolved_namespace:
-        return None
-    return composition.agent_role_registry_for_persisted_profile(
-        profile_id=resolved_profile,
-        domain_namespace=resolved_namespace,
-    )
-
-
-def _persisted_profile_identity(run) -> tuple[str, str]:
-    raw = run.get("binding_attributes_json")
-    if isinstance(raw, dict):
-        attributes = raw
-    else:
-        try:
-            parsed = json.loads(str(raw or "{}"))
-        except (TypeError, json.JSONDecodeError):
-            parsed = {}
-        attributes = parsed if isinstance(parsed, dict) else {}
-    return (
-        str(attributes.get("agentProfile") or "").strip(),
-        str(attributes.get("domainNamespace") or "").strip(),
-    )
-
-
-async def _persisted_domain_namespace(db, run) -> str:
-    """Infer legacy profile identity only from durable product discriminators."""
-
-    from domains.screenplay_agent.agent_context import (
-        SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-    )
-    from domains.writing.contracts import WRITING_DOMAIN_NAMESPACE
-
-    candidates: set[str] = set()
-    binding_namespace = str(run.get("binding_namespace") or "").strip()
-    if binding_namespace == "writing.chat.request":
-        candidates.add(WRITING_DOMAIN_NAMESPACE)
-    elif binding_namespace.startswith("screenplay.agent."):
-        candidates.add(SCREENPLAY_AGENT_DOMAIN_NAMESPACE)
-
-    session_id = run.get("session_id")
-    if db is not None and session_id is not None:
-        session = await db.fetch_one(
-            "SELECT scope, chapter_id, book_id, screenplay_project_id "
-            "FROM ai_sessions WHERE id = ?",
-            [int(session_id)],
-        )
-        if session is not None:
-            scope = str(session.get("scope") or "").strip()
-            screenplay_owned = bool(
-                scope == "screenplay"
-                or str(session.get("screenplay_project_id") or "").strip()
-            )
-            writing_owned = bool(
-                not screenplay_owned
-                and (
-                    scope in {"chapter", "setting"}
-                    or str(session.get("chapter_id") or "").strip()
-                    or str(session.get("book_id") or "").strip()
-                )
-            )
-            if screenplay_owned:
-                candidates.add(SCREENPLAY_AGENT_DOMAIN_NAMESPACE)
-            elif writing_owned:
-                candidates.add(WRITING_DOMAIN_NAMESPACE)
-
-    if len(candidates) > 1:
-        raise ValueError("persisted Agent profile discriminators conflict")
-    return next(iter(candidates), "")
 
 
 @router.get("/ai/agent-runtime-regressions")
@@ -992,11 +833,12 @@ async def _stream_composed_agent(
     """Run independently and map live updates while an SSE peer is attached."""
 
     from application.agent_composition import get_agent_composition
-    from application.agent_run_service import AgentRunService
     from application.sse_mapping import core_update_to_sse_chunk
+    from application.writing_agent_service import start_writing_agent_run
 
     composition = get_agent_composition()
-    service_stream = AgentRunService(composition).run(
+    service_stream = start_writing_agent_run(
+        composition=composition,
         body=body,
         api_key=api_key,
         provider_options=provider_options,

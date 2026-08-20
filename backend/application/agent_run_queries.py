@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Protocol
 
 from purra.contracts import AgentDelegation, DelegationAggregation
-from purra.ports import CheckpointStore
 from purra.json_values import thaw_json_mapping
 from purra.output import OutputVisibility
 from purra.output.ports import AgentOutputRepository
 from application.sse_mapping import canonical_output_to_sse_chunk
-from domains.agent_roles import AgentRoleRegistry
 
 
 RUN_SNAPSHOT_VERSION = 1
+
+
+class RunSnapshotQuery(Protocol):
+    async def load(
+        self,
+        run_id: str,
+        *,
+        after_event_id: int = 0,
+        limit: int = 100,
+    ): ...
 
 
 class AgentRunQueryService:
@@ -21,15 +30,13 @@ class AgentRunQueryService:
 
     def __init__(
         self,
-        store: CheckpointStore,
+        store: RunSnapshotQuery,
         output_repository: AgentOutputRepository,
         *,
-        role_registry: AgentRoleRegistry | None = None,
         product_event_query=None,
     ) -> None:
         self._store = store
         self._output = output_repository
-        self._role_registry = role_registry
         self._product_events = product_event_query
 
     async def get_snapshot(
@@ -49,12 +56,12 @@ class AgentRunQueryService:
         if normalized_limit < 1 or normalized_limit > 500:
             raise ValueError("event page limit must be between 1 and 500")
 
-        checkpoint = await self._store.load(
+        persisted = await self._store.load(
             normalized_run_id,
             after_event_id=0,
             limit=1,
         )
-        if checkpoint is None:
+        if persisted is None:
             return None
 
         output_page = await self._output.list_events(
@@ -82,10 +89,7 @@ class AgentRunQueryService:
                 "chunk": mapped_chunk,
             }
             envelopes.append(envelope)
-        aggregation = _aggregate_delegations(
-            checkpoint.delegations,
-            self._role_registry,
-        )
+        aggregation = _aggregate_delegations(persisted.delegations)
         product_events = (
             await self._product_events.list_for_run(normalized_run_id)
             if self._product_events is not None
@@ -93,17 +97,14 @@ class AgentRunQueryService:
         )
         return {
             "version": RUN_SNAPSHOT_VERSION,
-            "run": _run_view(
-                thaw_json_mapping(checkpoint.run),
-                self._role_registry,
-            ),
-            "todos": [thaw_json_mapping(step) for step in checkpoint.steps],
+            "run": _run_view(thaw_json_mapping(persisted.run)),
+            "todos": [thaw_json_mapping(step) for step in persisted.steps],
             "events": envelopes,
             "productEvents": product_events,
             "delegations": {
                 "items": [
-                    _delegation_view(item, self._role_registry)
-                    for item in checkpoint.delegations
+                    _delegation_view(item)
+                    for item in persisted.delegations
                 ],
                 "aggregate": _aggregation_view(aggregation),
             },
@@ -118,24 +119,13 @@ class AgentRunQueryService:
 
 def _run_view(
     run: dict[str, Any],
-    role_registry: AgentRoleRegistry | None = None,
 ) -> dict[str, Any]:
-    agent_role = str(run.get("agent_role") or "").strip()
-    definition = role_registry.get(agent_role) if role_registry else None
     return {
         "runId": run.get("id"),
         "sessionId": run.get("session_id"),
         "conversationId": run.get("conversation_id"),
         "status": run.get("status"),
         "mode": run.get("mode"),
-        "lineage": {
-            "parentRunId": run.get("parent_run_id"),
-            "rootRunId": run.get("root_run_id") or run.get("id"),
-            "delegationId": run.get("delegation_id"),
-            "agentRole": agent_role or None,
-            "agentTitle": definition.title if definition else (agent_role or None),
-            "depth": int(run.get("run_depth") or 0),
-        },
         "finalResponse": run.get("final_response") or "",
         "createdAt": run.get("create_time"),
         "updatedAt": run.get("update_time"),
@@ -159,15 +149,12 @@ def _run_view(
 
 def _delegation_view(
     run: AgentDelegation,
-    role_registry: AgentRoleRegistry | None = None,
 ) -> dict[str, Any]:
     return {
         "delegationId": run.id,
-        "parentRunId": run.parent_run_id,
-        "rootRunId": run.root_run_id,
-        "childRunId": run.child_run_id,
-        "agentRole": run.agent_role,
-        "agentTitle": _role_title(run.agent_role, role_registry),
+        "runId": run.run_id,
+        "agentName": run.agent_name,
+        "agentTitle": run.agent_title,
         "objective": run.objective,
         "status": run.status.value,
         "required": run.required,
@@ -179,7 +166,6 @@ def _delegation_view(
 
 def _aggregate_delegations(
     items: tuple[AgentDelegation, ...],
-    role_registry: AgentRoleRegistry | None = None,
 ) -> DelegationAggregation:
     counts = {
         status: sum(item.status.value == status for item in items)
@@ -198,9 +184,8 @@ def _aggregate_delegations(
         required_failures=failures,
         results=tuple({
             "delegationId": item.id,
-            "agentRole": item.agent_role,
-            "agentTitle": _role_title(item.agent_role, role_registry),
-            "childRunId": item.child_run_id,
+            "agentName": item.agent_name,
+            "agentTitle": item.agent_title,
             "summary": item.result_summary or "",
         } for item in items if item.status.value == "done"),
     )
@@ -213,11 +198,3 @@ def _aggregation_view(value: DelegationAggregation) -> dict[str, Any]:
         "requiredFailures": list(value.required_failures),
         "results": [dict(item) for item in value.results],
     }
-
-
-def _role_title(
-    role_id: str,
-    role_registry: AgentRoleRegistry | None,
-) -> str:
-    definition = role_registry.get(role_id) if role_registry else None
-    return definition.title if definition else role_id

@@ -19,7 +19,7 @@ from purra.contracts import (
     StepExecutor,
     StepStatus,
     StepType,
-    TaskPlan,
+    ExecutionPlan,
     TaskSpec,
     TaskStep,
     ToolRiskLevel,
@@ -63,8 +63,8 @@ class _Repository:
     async def commit(self, run_id, commit):
         assert run_id == "run-root"
         self.commits.append(commit)
-        if commit.replace_steps is not None:
-            self.steps = list(commit.replace_steps)
+        if commit.replace_plan is not None:
+            self.steps = list(commit.replace_plan.steps)
         for update in commit.step_updates:
             self.steps = [
                 replace(
@@ -113,13 +113,13 @@ class _Sink:
         return events
 
 
-def _plan(*, revised: bool = False) -> TaskPlan:
+def _plan(*, revised: bool = False) -> ExecutionPlan:
     completed_summary = (
         "Durable execution completed this Planner step."
         if revised
         else None
     )
-    return TaskPlan(
+    return ExecutionPlan(
         title="Durable plan",
         steps=(
             TaskStep(
@@ -146,8 +146,8 @@ def _plan(*, revised: bool = False) -> TaskPlan:
     )
 
 
-def _history_plan() -> TaskPlan:
-    return TaskPlan(
+def _history_plan() -> ExecutionPlan:
+    return ExecutionPlan(
         title="History plan",
         steps=(
             TaskStep(
@@ -217,6 +217,60 @@ async def _started() -> tuple[AgentRunController, _Repository, _Sink]:
     return controller, repository, sink
 
 
+@pytest.mark.asyncio
+async def test_todo_projection_excludes_private_execution_authority():
+    repository = _Repository()
+    sink = _Sink()
+    controller = AgentRunController(repository=repository, event_sink=sink)
+    await controller.start(
+        RunCreateParams(session_id="session-1", prompt="work", mode="agent"),
+        ExecutionPlan(
+            title="Work",
+            steps=(
+                TaskStep(
+                    id="private-prepare",
+                    title="Prepare",
+                    type=StepType.READ,
+                    executor=StepExecutor.TOOL,
+                    suggested_tools=("prepare",),
+                    protocol_private=True,
+                ),
+                TaskStep(
+                    id="deliver",
+                    title="Deliver",
+                    type=StepType.WRITE,
+                    executor=StepExecutor.TOOL,
+                    suggested_tools=("deliver",),
+                    depends_on=("private-prepare",),
+                ),
+            ),
+        ),
+    )
+
+    todos = next(
+        event
+        for event in repository.events
+        if event.type == CoreEventType.RUN_TODOS_UPDATED
+    )
+
+    assert [step.id for step in repository.steps] == [
+        "private-prepare",
+        "deliver",
+    ]
+    assert todos.payload["steps"] == [{
+        "id": "deliver",
+        "title": "Deliver",
+        "type": "write",
+        "executor": "tool",
+        "status": "pending",
+        "risk_level": None,
+        "depends_on": [],
+        "description": None,
+        "result_summary": None,
+        "error": None,
+    }]
+
+
 def _progress_event(*, status: str) -> AgentEvent:
     return AgentEvent(
         type=CoreEventType.LONG_TASK_PROGRESS,
@@ -237,6 +291,7 @@ async def test_durable_checkpoint_atomically_revises_root_plan_before_evidence()
             return LongTaskDispatchReceipt(
                 task_id="task-1",
                 message="Dispatched",
+                admission=_admission(),
             )
 
         async def execute(self, task_id, *, observer, **kwargs):
@@ -291,10 +346,10 @@ async def test_durable_checkpoint_atomically_revises_root_plan_before_evidence()
     revision_commit = next(
         commit
         for commit in repository.commits
-        if commit.replace_steps is not None
+        if commit.replace_plan is not None
         and commit.events
         and commit.events[0].type == CoreEventType.RUN_TODOS_UPDATED
-        and commit.replace_steps[1].title == "Deliver the revised result"
+        and commit.replace_plan.steps[1].title == "Deliver the revised result"
     )
     assert revision_commit.events[0].payload["steps"][1]["title"] == (
         "Deliver the revised result"
@@ -311,10 +366,10 @@ async def test_continuation_executes_existing_receipt_without_redispatch():
             del args, kwargs
             raise AssertionError("continuation must not dispatch a second task")
 
-        async def execute(self, task_id, *, parent_run_id, observer, signal=None):
+        async def execute(self, task_id, *, run_id, observer, signal=None):
             del signal
             assert task_id == "task-existing"
-            assert parent_run_id == "run-root"
+            assert run_id == "run-root"
             await observer(LongTaskExecutionUpdate(
                 event=AgentEvent(
                     type=CoreEventType.LONG_TASK_PROGRESS,
@@ -340,6 +395,7 @@ async def test_continuation_executes_existing_receipt_without_redispatch():
             existing_receipt=LongTaskDispatchReceipt(
                 task_id="task-existing",
                 message="Resumed existing durable task",
+                admission=_admission(),
             ),
         )
     ]
@@ -368,6 +424,7 @@ async def test_invalid_durable_revision_fails_root_and_cancels_old_recipe():
             return LongTaskDispatchReceipt(
                 task_id="task-1",
                 message="Dispatched",
+                admission=_admission(),
             )
 
         async def execute(self, task_id, *, observer, **kwargs):
@@ -427,7 +484,11 @@ async def test_revision_contract_rejection_settles_observer_with_same_error():
     class Dispatcher:
         async def dispatch(self, *args, **kwargs):
             del args, kwargs
-            return LongTaskDispatchReceipt(task_id="task-ack", message="ok")
+            return LongTaskDispatchReceipt(
+                task_id="task-ack",
+                message="ok",
+                admission=_admission(),
+            )
 
         async def execute(self, task_id, *, observer, **kwargs):
             del task_id, kwargs
@@ -472,7 +533,7 @@ async def test_caller_cancel_settles_inflight_revision_observer_and_dispatcher()
     original_commit = repository.commit
 
     async def blocked_commit(run_id, commit):
-        if commit.replace_steps is not None and len(repository.commits) > 0:
+        if commit.replace_plan is not None and len(repository.commits) > 0:
             commit_started.set()
             await asyncio.Event().wait()
         return await original_commit(run_id, commit)
@@ -482,7 +543,11 @@ async def test_caller_cancel_settles_inflight_revision_observer_and_dispatcher()
     class Dispatcher:
         async def dispatch(self, *args, **kwargs):
             del args, kwargs
-            return LongTaskDispatchReceipt(task_id="task-cancel", message="ok")
+            return LongTaskDispatchReceipt(
+                task_id="task-cancel",
+                message="ok",
+                admission=_admission(),
+            )
 
         async def execute(self, task_id, *, observer, **kwargs):
             del task_id, kwargs
@@ -534,6 +599,7 @@ async def test_durable_update_cannot_forge_todo_replacement_event():
             return LongTaskDispatchReceipt(
                 task_id="task-1",
                 message="Dispatched",
+                admission=_admission(),
             )
 
         async def execute(self, task_id, *, observer, **kwargs):
@@ -576,13 +642,13 @@ async def test_durable_update_cannot_forge_todo_replacement_event():
 
 def test_task_plan_still_rejects_unknown_and_cyclic_revision_dependencies():
     with pytest.raises(ValueError, match="reference earlier steps"):
-        TaskPlan(
+        ExecutionPlan(
             title="Unknown dependency",
             steps=(replace(_plan().steps[0], depends_on=("missing",)),),
         )
 
     with pytest.raises(ValueError, match="reference earlier steps"):
-        TaskPlan(
+        ExecutionPlan(
             title="Cyclic dependency",
             steps=(
                 replace(_plan().steps[0], depends_on=("deliver",)),
@@ -599,8 +665,8 @@ def test_task_plan_still_rejects_unknown_and_cyclic_revision_dependencies():
         lambda step: replace(step, type=StepType.REVIEW),
         lambda step: replace(
             step,
-            executor=StepExecutor.AGENT,
-            agent_role="fixture-agent",
+            executor=StepExecutor.TOOL,
+            suggested_tools=("forged_tool",),
         ),
         lambda step: replace(step, depends_on=()),
         lambda step: replace(step, status=StepStatus.PENDING),
@@ -668,7 +734,11 @@ async def test_durable_revision_rejects_changes_to_completed_step_contract(
 @pytest.mark.asyncio
 async def test_durable_revision_rejects_added_or_removed_step_ids():
     controller, _repository, _sink = await _started()
-    revision = replace(_plan(), steps=(_plan().steps[0],))
+    revision = replace(
+        _plan(),
+        steps=(_plan().steps[0],),
+        work_step_ids=("gather",),
+    )
 
     with pytest.raises(
         ContractViolationError,
@@ -705,6 +775,23 @@ async def test_durable_revision_rejects_added_or_removed_step_ids():
 
 
 @pytest.mark.asyncio
+async def test_durable_revision_cannot_hide_an_admitted_work_step():
+    controller, _repository, _sink = await _started()
+    revision = replace(_plan(), work_step_ids=("gather",))
+
+    with pytest.raises(
+        ContractViolationError,
+        match="WorkStep lineage",
+    ):
+        _validate_durable_plan_revision(
+            controller,
+            revision,
+            ("gather", "deliver"),
+            original_plan=_plan(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_non_persisted_durable_revision_fails_before_checkpoint_emission():
     controller, repository, sink = await _started()
     canceled = asyncio.Event()
@@ -715,6 +802,7 @@ async def test_non_persisted_durable_revision_fails_before_checkpoint_emission()
             return LongTaskDispatchReceipt(
                 task_id="task-1",
                 message="Dispatched",
+                admission=_admission(),
             )
 
         async def execute(self, task_id, *, observer, **kwargs):
@@ -759,9 +847,8 @@ async def test_non_persisted_durable_revision_fails_before_checkpoint_emission()
         lambda step: replace(step, type=StepType.REVIEW),
         lambda step: replace(
             step,
-            executor=StepExecutor.AGENT,
-            agent_role="fixture-agent",
-            assignment={"scope": "forged"},
+            executor=StepExecutor.TOOL,
+            suggested_tools=("forged_tool",),
         ),
         lambda step: replace(step, status=StepStatus.DONE),
         lambda step: replace(step, risk_level=ToolRiskLevel.WRITE),
@@ -771,7 +858,7 @@ async def test_non_persisted_durable_revision_fails_before_checkpoint_emission()
     ),
     ids=(
         "type",
-        "executor-role-assignment",
+        "executor",
         "status",
         "risk-level",
         "suggested-tools",
@@ -785,7 +872,7 @@ async def test_durable_revision_rejects_non_whitelisted_future_step_changes(
     controller, _repository, _sink = await _started()
     assert controller.snapshot is not None
     current = controller.snapshot.steps
-    revised = TaskPlan(
+    revised = ExecutionPlan(
         title=controller.snapshot.title,
         goal=controller.snapshot.goal,
         steps=(current[0], mutate(current[1])),
@@ -807,7 +894,7 @@ async def test_durable_revision_allows_future_copy_and_dependency_reordering():
     repository = _Repository()
     sink = _Sink()
     controller = AgentRunController(repository=repository, event_sink=sink)
-    plan = TaskPlan(
+    plan = ExecutionPlan(
         title="Reorder future",
         steps=(
             TaskStep(
@@ -881,6 +968,7 @@ async def test_durable_revision_persists_generic_checkpoint_identity_on_todo_eve
             return LongTaskDispatchReceipt(
                 task_id="task-checkpoint-identity",
                 message="started",
+                admission=_admission(),
                 metadata={"stepIds": ["gather", "deliver"]},
             )
 
@@ -965,7 +1053,11 @@ class _CloseAwareDispatcher:
 
     async def dispatch(self, *args, **kwargs):
         del args, kwargs
-        return LongTaskDispatchReceipt(task_id="task-1", message="Dispatched")
+        return LongTaskDispatchReceipt(
+            task_id="task-1",
+            message="Dispatched",
+            admission=_admission(),
+        )
 
     async def execute(self, task_id, *, observer, **kwargs):
         del task_id, kwargs

@@ -1,10 +1,17 @@
 """PurrA complete-run entry point."""
 
+from purra.context_strategies import ContextStrategy
 from purra.engine.options import AgentCoreRunOptions, DurableTaskContinuation
 from purra.engine.orchestrator import AgentCore
-from purra.engine.planning_validation import (
-    validate_planning_constraints as _validate_planning_constraints,
-    validate_task_constraint_refinement as _validate_task_constraint_refinement,
-)
+from purra.execution_profiles import ExecutionProfile
+from purra.planning_policies import ReactivePlanningPolicy, ToolPlanningPolicy
 
-__all__ = ["AgentCore", "AgentCoreRunOptions", "DurableTaskContinuation"]
+__all__ = [
+    "AgentCore",
+    "AgentCoreRunOptions",
+    "ContextStrategy",
+    "DurableTaskContinuation",
+    "ExecutionProfile",
+    "ReactivePlanningPolicy",
+    "ToolPlanningPolicy",
+]

@@ -8,4 +8,8 @@ export interface AgentConversationExtensions {
     message: AgentConversationMessage,
     index: number,
   ): React.ReactNode
+  renderAssistantActions?(
+    message: AgentConversationMessage,
+    index: number,
+  ): React.ReactNode
 }

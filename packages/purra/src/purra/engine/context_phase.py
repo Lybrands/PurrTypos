@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from purra.context_budget import estimate_json_tokens
@@ -17,7 +17,7 @@ from purra.contracts import (
     RunId,
     StepExecutor,
     TaskContextRequest,
-    TaskPlan,
+    ExecutionPlan,
 )
 from purra.errors import ContextOverflowError, ContractViolationError
 from purra.plan_compiler import projected_planning_tool_schemas
@@ -27,7 +27,7 @@ from purra.tools import resolve_tool_display_name
 
 
 def compile_task_context_request(
-    plan: TaskPlan,
+    plan: ExecutionPlan,
     available_registrations: Sequence[ToolRegistration],
     *,
     run_id: RunId | None = None,
@@ -65,11 +65,6 @@ def compile_task_context_request(
         ),
         run_id=run_id,
     )
-
-
-def host_planning_facts(bundle: ContextBundle) -> Mapping[str, Any]:
-    value = bundle.diagnostics.get("hostPlanningFacts")
-    return value if isinstance(value, Mapping) else {}
 
 
 def planning_tool_guidance(
@@ -177,7 +172,7 @@ def context_demand_diagnostics(
 def assemble_messages(
     original: Sequence[AgentMessage],
     blocks: Iterable[ContextBlock],
-    plan: TaskPlan | None,
+    plan: ExecutionPlan | None,
 ) -> tuple[AgentMessage, ...]:
     leading: list[AgentMessage] = []
     remainder: list[AgentMessage] = []
@@ -197,7 +192,7 @@ def assemble_messages(
     return (*leading, *context_messages, *remainder)
 
 
-def planned_tool_names(plan: TaskPlan) -> frozenset[str]:
+def planned_tool_names(plan: ExecutionPlan) -> frozenset[str]:
     return frozenset(
         name
         for step in plan.steps

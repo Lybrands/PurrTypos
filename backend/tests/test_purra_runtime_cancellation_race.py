@@ -26,7 +26,8 @@ from purra.contracts import (
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.model_protocol import generic_capability_snapshot
-from purra.runtime import AgentRuntime, _stream_tool_batch
+from purra.runtime import AgentRuntime
+from purra.runtime.tool_round import stream_tool_batch as _stream_tool_batch
 
 
 def _request() -> ToolBatchRequest:

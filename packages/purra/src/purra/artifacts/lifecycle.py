@@ -185,8 +185,10 @@ class ArtifactLifecycle:
         artifact_id: str,
         *,
         expected_revision: int,
-        write_lease: ArtifactMutationLease | None = None,
+        write_lease: ArtifactMutationLease,
     ) -> ArtifactRecord:
+        if not isinstance(write_lease, ArtifactMutationLease):
+            raise TypeError("artifact abort write_lease is invalid")
         artifact = await self._require(artifact_id)
         _require_open(artifact)
         if artifact.revision != int(expected_revision):

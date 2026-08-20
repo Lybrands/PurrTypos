@@ -17,9 +17,15 @@ import AssistantOutput from '../AssistantOutput'
 import { hasRenderableErrorMessage } from '../AssistantOutput/errorNoticeMessage'
 import { buildAssistantCopyView } from '../assistantCopy'
 import AgentMessageCopyButton from '../MessageCopyButton'
+import AgentMessageEditButton from '../MessageEditButton'
 import AgentMessageEditor from '../MessageEditor'
+import AgentMessageFooter from '../MessageFooter'
 import AgentUserMessageBody from '../UserMessageBody'
-import { assistantMessageVisible } from '../messageVisibility'
+import {
+  assistantMessageMetadataVisible,
+  assistantMessageVisible,
+  latestAssistantMessageIndex,
+} from '../messageVisibility'
 import {
   advanceLiveTurnCursor,
   agentConversationMessageKey,
@@ -53,6 +59,11 @@ export interface AgentConversationProps {
     message: AgentConversationMessage,
     index: number,
   ) => React.ReactNode
+  afterAssistantMessageActions?: (
+    message: AgentConversationMessage,
+    index: number,
+  ) => React.ReactNode
+  modelLabels?: Readonly<Record<string, string>>
   messageAttachmentsVersion?: string | number
   onEditMessage?: (messageIndex: number, content: string) => void | Promise<void>
   onStructuredAnswer?: (answer: string) => void
@@ -140,6 +151,8 @@ export default function ConversationViewport({
   emptyTitle = '等待开始对话',
   emptyDescription = '发送任务后，这里会展示 Agent 的执行过程与结果。',
   afterAssistantMessage,
+  afterAssistantMessageActions,
+  modelLabels,
   messageAttachmentsVersion,
   onEditMessage,
   onStructuredAnswer,
@@ -159,6 +172,10 @@ export default function ConversationViewport({
   const [editingTarget, setEditingTarget] = React.useState<ViewportEditTarget | null>(null)
   const turnIndexItems = React.useMemo(
     () => buildAgentConversationTurnIndex(messages),
+    [messages],
+  )
+  const latestAssistantIndex = React.useMemo(
+    () => latestAssistantMessageIndex(messages),
     [messages],
   )
 
@@ -322,10 +339,16 @@ export default function ConversationViewport({
       const messageKey = agentConversationMessageKey(index, message)
       const editing = editingTarget?.sessionIdentity === sessionIdentity
         && editingTarget.messageKey === messageKey
+      const canEdit = Boolean(onEditMessage && !loading)
+      const canCopy = Boolean(message.content.trim())
+      const startEditing = canEdit
+        ? () => setEditingTarget(createViewportEditTarget(sessionIdentity, index, message))
+        : undefined
       return (
         <article
           className={`agent-conversation__message is-user${editing ? ' is-editing' : ''}`}
           data-agent-turn-index={index}
+          tabIndex={!editing && (canCopy || canEdit) ? 0 : undefined}
         >
           {editing ? (
             <AgentMessageEditor
@@ -334,15 +357,19 @@ export default function ConversationViewport({
               onCancel={cancelMessageEdit}
             />
           ) : (
-            <AgentUserMessageBody
-              content={message.content}
-              sentAt={message.sentAt}
-              onEdit={onEditMessage && !loading
-                ? () => setEditingTarget(
-                    createViewportEditTarget(sessionIdentity, index, message),
-                  )
-                : undefined}
-            />
+            <>
+              <AgentUserMessageBody content={message.content} />
+              <AgentMessageFooter
+                side="user"
+                sentAt={message.sentAt}
+                actions={canCopy || startEditing ? (
+                  <>
+                    {canCopy ? <AgentMessageCopyButton content={message.content} /> : null}
+                    {startEditing ? <AgentMessageEditButton onClick={startEditing} /> : null}
+                  </>
+                ) : null}
+              />
+            </>
           )}
         </article>
       )
@@ -352,6 +379,7 @@ export default function ConversationViewport({
     const hasVisibleContent = hasVisibleAssistantContent(message)
     const hasStatus = Boolean(hasRenderableErrorMessage(message) || message.termination)
     const attachment = afterAssistantMessage?.(message, index)
+    const extraActions = afterAssistantMessageActions?.(message, index)
     const isLastAssistant = isLast && !message.isError
     const showPlaceholder = Boolean(
       isLastAssistant && loading && !hasVisibleContent && !hasStatus,
@@ -371,7 +399,10 @@ export default function ConversationViewport({
     })) return null
 
     return (
-      <article className="agent-conversation__message is-assistant">
+      <article
+        className="agent-conversation__message is-assistant"
+        tabIndex={extraActions || copyView.visible ? 0 : undefined}
+      >
         {hasVisibleContent || hasStatus || (isLast && loading) ? (
           <AssistantOutput
             index={index}
@@ -390,24 +421,38 @@ export default function ConversationViewport({
         {attachment ? (
           <div className="agent-conversation__artifact">{attachment}</div>
         ) : null}
-        {copyView.visible ? (
-          <div className="agent-conversation__assistant-footer">
-            <AgentMessageCopyButton
-              content={copyView.plainText}
-              markdownContent={copyView.markdown}
-              label="复制回复纯文本"
-            />
-          </div>
-        ) : null}
+        <AgentMessageFooter
+          side="assistant"
+          sentAt={message.sentAt}
+          model={message.model}
+          modelLabels={modelLabels}
+          metadataVisible={assistantMessageMetadataVisible({ isLast, loading })}
+          actionsPersistent={index === latestAssistantIndex}
+          actions={extraActions || copyView.visible ? (
+            <>
+              {extraActions}
+              {copyView.visible ? (
+                <AgentMessageCopyButton
+                  content={copyView.plainText}
+                  markdownContent={copyView.markdown}
+                  label="复制回复纯文本"
+                />
+              ) : null}
+            </>
+          ) : null}
+        />
       </article>
     )
   }, [
     afterAssistantMessage,
+    afterAssistantMessageActions,
     cancelMessageEdit,
     detachFromOutput,
     editingTarget,
+    latestAssistantIndex,
     loading,
     messages.length,
+    modelLabels,
     onEditMessage,
     onResolveToolApproval,
     onStructuredAnswer,

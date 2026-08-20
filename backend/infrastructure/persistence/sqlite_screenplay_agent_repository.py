@@ -566,16 +566,14 @@ class SqliteScreenplayAgentRepository:
             marks = _marks(root_ids)
             active_runs = await self._db.fetch_one(
                 "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
-                f"(id IN ({marks}) OR root_run_id IN ({marks})) AND "
+                f"id IN ({marks}) AND "
                 "(status = 'running' OR execution_owner_id IS NOT NULL OR "
                 "lease_expires_at_ms IS NOT NULL)",
-                [*root_ids, *root_ids],
+                list(root_ids),
             )
             active_delegations = await self._db.fetch_one(
                 "SELECT COUNT(*) AS count FROM ai_agent_delegations WHERE "
-                f"root_run_id IN ({marks}) AND (status IN "
-                "('queued', 'claimed', 'running') OR worker_id IS NOT NULL OR "
-                "claim_expires_at_ms IS NOT NULL)",
+                f"run_id IN ({marks}) AND status IN ('queued', 'running')",
                 list(root_ids),
             )
             if int((active_runs or {}).get("count") or 0) or int(
@@ -611,31 +609,15 @@ class SqliteScreenplayAgentRepository:
             f"WHERE task_id IN ({marks})",
             list(task_ids),
         )
-        work_items = await self._db.fetch_all(
-            f"SELECT work_item_id FROM ai_agent_long_tasks "
-            f"WHERE id IN ({marks})",
-            list(task_ids),
-        )
-        work_item_ids = [str(row["work_item_id"]) for row in work_items]
         for table, column in (
             ("ai_agent_long_task_usage", "task_id"),
             ("ai_agent_long_task_units", "task_id"),
+            ("ai_agent_long_task_runs", "task_id"),
             ("ai_agent_long_tasks", "id"),
         ):
             await self._db.execute(
                 f"DELETE FROM {table} WHERE {column} IN ({marks})",
                 list(task_ids),
-            )
-        if work_item_ids:
-            item_marks = _marks(work_item_ids)
-            await self._db.execute(
-                f"DELETE FROM ai_agent_work_item_runs "
-                f"WHERE work_item_id IN ({item_marks})",
-                work_item_ids,
-            )
-            await self._db.execute(
-                f"DELETE FROM ai_agent_work_items WHERE id IN ({item_marks})",
-                work_item_ids,
             )
 
     async def _remove_task_candidates(self, task_ids: Sequence[str]) -> None:

@@ -162,14 +162,13 @@ git add backend/tests/test_writing_tool_runtime.py backend/tests/test_writing_ch
 git commit -m "fix(writing-agent): preserve candidate first edits"
 ```
 
-## Task 6: 小说 Agent 回归与真实 Provider 验收
+## Task 6: 小说 Agent 回归与手工 Provider 验收
 
 **Files:**
-- Create: `backend/tests/test_writing_agent_real_e2e.py`
 - Verify: existing frontend and backend suites.
 
-- [ ] 增加标记为 `real_provider` 的小范围 E2E：绑定一本测试书和一章短正文，请求“深化弄堂氛围”，观察 LLM 计划、章节读取、计划 revision、候选结果和 Root Run 终态。
-- [ ] E2E 断言：
+- [ ] 项目所有者手工绑定一本测试书和一章短正文，请求“深化弄堂氛围”，观察 LLM 计划、章节读取、计划 revision、候选结果和 Root Run 终态。
+- [ ] 手工验收：
   - 只有一个 Root Run；
   - 初始计划来自 LLM；
   - 工具结果后未完成步骤可变化；
@@ -184,19 +183,7 @@ npm run check:agent-refactor
 git diff --check
 ```
 
-- [ ] 配置真实 Provider 后运行：
-
-```bash
-.venv/bin/python -m pytest backend/tests/test_writing_agent_real_e2e.py -m real_provider -q
-```
-
-- [ ] 若凭据、额度或网络不可用，测试必须报告 skipped/release-blocked；不得用 fake gateway 结果宣称真实 E2E 通过。
-- [ ] 提交 E2E：
-
-```bash
-git add backend/tests/test_writing_agent_real_e2e.py
-git commit -m "test(writing-agent): verify dynamic planning with real provider"
-```
+- [ ] 真实 Provider 验收由项目所有者在仓库测试之外执行；不得用 fake gateway 结果宣称已完成真实验证。
 
 ## Acceptance Checklist
 

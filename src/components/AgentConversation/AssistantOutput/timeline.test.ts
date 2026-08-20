@@ -26,6 +26,7 @@ test('canonical timeline filters model operations and groups consecutive work on
   })
   const operations = {
     'model-1': operation('model-1', 'model', 'succeeded'),
+    'validation-1': operation('validation-1', 'validation', 'succeeded'),
     'tool-1': operation('tool-1', 'tool', 'succeeded'),
     'tool-2': operation('tool-2', 'tool', 'running'),
   }
@@ -55,10 +56,8 @@ test('canonical timeline retains compaction and sequenced delegation without dup
   const base = initialCanonicalOutputState()
   const delegation = {
     delegationId: 'delegation-1',
-    parentRunId: 'run-1',
-    rootRunId: 'run-1',
-    childRunId: 'run-child-1',
-    agentRole: 'reviewer',
+    runId: 'run-1',
+    agentName: 'reviewer',
     agentTitle: '审阅 Agent',
     objective: '检查连续性',
     unitId: null,
@@ -138,9 +137,8 @@ test('canonical timeline retains compaction and sequenced delegation without dup
         'delegation-1': {
           delegationId: 'delegation-1',
           firstSequence: 4,
-          parentRunId: 'run-1',
-          childRunId: 'run-child-1',
-          agentRole: 'reviewer',
+          runId: 'run-1',
+          agentName: 'reviewer',
           agentTitle: '审阅 Agent',
           objective: '检查连续性',
           status: 'running',
@@ -393,7 +391,7 @@ test('execution panel covers active empty work and completed visible operations'
     {
       visible: true,
       active: true,
-      autoOpen: false,
+      autoOpen: true,
       stepCount: 0,
       title: '正在进行',
     },
@@ -417,7 +415,7 @@ test('execution panel covers active empty work and completed visible operations'
     {
       visible: true,
       active: false,
-      autoOpen: false,
+      autoOpen: true,
       stepCount: 1,
       title: '执行了 1 个步骤',
     },

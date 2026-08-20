@@ -10,3 +10,19 @@ export function assistantMessageVisible(input: {
     || Boolean(input.hasStatus)
     || (input.isLast && input.loading)
 }
+
+export function latestAssistantMessageIndex(
+  messages: ReadonlyArray<{ role: string }>,
+): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant') return index
+  }
+  return -1
+}
+
+export function assistantMessageMetadataVisible(input: {
+  isLast: boolean
+  loading: boolean
+}): boolean {
+  return !input.isLast || !input.loading
+}

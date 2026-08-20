@@ -16,17 +16,13 @@ from application.writing_proposal_read_model import (
 )
 from application.agent_composition import set_agent_composition
 from application.agent_composition import get_agent_composition
-from application.agent_cancellation_service import (
-    AgentCancellationService,
-    RootCancellationTargetError,
-)
+from application.agent_cancellation_service import AgentCancellationService
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from database.crud.screenplay_project_deletion import (
     delete_screenplay_project_data,
 )
 from dependencies import set_db
-from domains.writing.agent_roles import build_writing_agent_role_registry
 from domains.screenplay_agent.agent_context import (
     SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
 )
@@ -41,18 +37,12 @@ from infrastructure.persistence.writing_chat_request_store import (
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
-from infrastructure.persistence.run_execution_store import (
-    SqliteExecutionLeaseStore,
-    now_ms,
-)
-from infrastructure.persistence.sqlite_checkpoint_store import (
-    SqliteCheckpointStore,
+from infrastructure.persistence.run_execution_store import now_ms
+from infrastructure.persistence.sqlite_run_snapshot_reader import (
+    SqliteRunSnapshotReader,
 )
 from infrastructure.persistence.sqlite_delegation_repository import (
     SqliteDelegationRepository,
-)
-from infrastructure.persistence.sqlite_host_child_run_registry import (
-    SqliteHostChildRunRegistry,
 )
 from purra.errors import ContractViolationError
 from routers.ai import router as ai_router
@@ -87,9 +77,8 @@ async def temp_db(tmp_path: Path):
 
 def _queries(db: DatabaseConnection) -> AgentRunQueryService:
     return AgentRunQueryService(
-        SqliteCheckpointStore(db),
+        SqliteRunSnapshotReader(db),
         SqliteAgentOutputRepository(db),
-        role_registry=build_writing_agent_role_registry(),
         product_event_query=SqliteWritingProposalReadModel(db),
     )
 
@@ -641,16 +630,6 @@ async def test_session_latest_exposes_an_unposted_active_request_for_fresh_recov
 
 async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     run_id = await _seed_run(temp_db)
-    reservation = await SqliteHostChildRunRegistry(
-        temp_db,
-        reservation_ttl_ms=60_000,
-    ).reserve(
-        host_child_key="terminal-root-unbound-child",
-        identity_digest="terminal-root-unbound-child-digest",
-        contract={"rootRunId": run_id, "parentRunId": run_id},
-        owner_token="terminal-root-worker",
-        timestamp_ms=now_ms(),
-    )
     app = FastAPI()
     app.include_router(ai_router, prefix="/api")
 
@@ -671,7 +650,7 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert first.json()["data"] == {
         "status": "canceled",
         "newlyRequested": True,
-        "childrenCanceled": 0,
+        "delegationsCanceled": 0,
         "terminalized": True,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -679,7 +658,7 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert second.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
-        "childrenCanceled": 0,
+        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -689,17 +668,6 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert snapshot["todos"][0]["status"] == "blocked"
     assert snapshot["events"][-1]["type"] == "run.lifecycle"
     assert snapshot["events"][-1]["payload"]["status"] == "canceled"
-    assert await temp_db.fetch_one(
-        "SELECT generation, attempt_key, reservation_owner, "
-        "reservation_expires_at_ms FROM ai_agent_host_child_runs "
-        "WHERE host_child_key = ?",
-        [reservation.host_child_key],
-    ) == {
-        "generation": reservation.generation,
-        "attempt_key": reservation.attempt_key,
-        "reservation_owner": None,
-        "reservation_expires_at_ms": None,
-    }
 
 
 async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db):
@@ -734,13 +702,13 @@ async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db)
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_runs "
-        "(id, session_id, status, prompt, root_run_id, cancellation_epoch, "
-        "cancel_requested_at_ms) VALUES (?, 77, 'canceled', '', ?, 1, 1)",
-        [root_run_id, root_run_id],
+        "(id, session_id, status, prompt, cancellation_epoch, "
+        "cancel_requested_at_ms) VALUES (?, 77, 'canceled', '', 1, 1)",
+        [root_run_id],
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "(run_id, cancellation_epoch, status, requested_at_ms, "
         "completed_at_ms) VALUES (?, 1, 'completed', 1, 2)",
         [root_run_id],
     )
@@ -750,8 +718,8 @@ async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db)
         [root_run_id],
     )
     assert await temp_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = ?",
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = ?",
         [root_run_id],
     ) is None
     app = FastAPI()
@@ -768,7 +736,7 @@ async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db)
     assert response.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
-        "childrenCanceled": 0,
+        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -778,243 +746,6 @@ async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db)
         "SELECT * FROM ai_agent_runs WHERE id = ?",
         [root_run_id],
     ) == root_before
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
-    ) == {"count": 0}
-
-
-async def test_run_cancel_route_cascades_to_host_child_lineage(temp_db):
-    root_run_id = await _seed_run(temp_db)
-    child_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="host child",
-        mode="agent",
-        parent_run_id=root_run_id,
-        root_run_id=root_run_id,
-        delegation_id=None,
-        agent_role="screenplay-part",
-        run_depth=1,
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{root_run_id}/cancel",
-        json_body={},
-    )
-    child = await temp_db.fetch_one(
-        "SELECT status, cancel_requested_at_ms, execution_owner_id, "
-        "lease_expires_at_ms FROM ai_agent_runs WHERE id = ?",
-        [child_run_id],
-    )
-
-    assert response.json()["data"]["childrenCanceled"] == 1
-    assert child == {
-        "status": "canceled",
-        "cancel_requested_at_ms": child["cancel_requested_at_ms"],
-        "execution_owner_id": None,
-        "lease_expires_at_ms": None,
-    }
-    assert child["cancel_requested_at_ms"] is not None
-
-
-async def test_root_cancellation_service_rejects_child_target_without_writes(
-    temp_db,
-):
-    root_run_id = await _seed_run(temp_db)
-    child_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="host child",
-        mode="agent",
-        parent_run_id=root_run_id,
-        root_run_id=root_run_id,
-        agent_role="screenplay-part",
-        run_depth=1,
-    )
-    sibling_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="sibling child",
-        mode="agent",
-        parent_run_id=root_run_id,
-        root_run_id=root_run_id,
-        agent_role="screenplay-part",
-        run_depth=1,
-    )
-
-    with pytest.raises(RootCancellationTargetError, match="Root Run"):
-        await AgentCancellationService(
-            temp_db,
-            get_agent_composition(),
-        ).cancel(child_run_id)
-
-    rows = await temp_db.fetch_all(
-        "SELECT id, status, cancellation_epoch, cancel_requested_at_ms "
-        "FROM ai_agent_runs WHERE id IN (?, ?, ?) ORDER BY id",
-        [root_run_id, child_run_id, sibling_run_id],
-    )
-    assert {row["id"]: row["status"] for row in rows} == {
-        root_run_id: "running",
-        child_run_id: "running",
-        sibling_run_id: "running",
-    }
-    assert all(int(row["cancellation_epoch"] or 0) == 0 for row in rows)
-    assert all(row["cancel_requested_at_ms"] is None for row in rows)
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
-    ) == {"count": 0}
-
-
-async def test_run_cancel_route_rejects_child_target_as_contract_error(temp_db):
-    root_run_id = await _seed_run(temp_db)
-    child_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="route child",
-        mode="agent",
-        parent_run_id=root_run_id,
-        root_run_id=root_run_id,
-        agent_role="screenplay-part",
-        run_depth=1,
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{child_run_id}/cancel",
-        json_body={},
-    )
-
-    assert response.status_code == 409
-    assert "Root Run" in response.json()["detail"]
-    assert await temp_db.fetch_one(
-        "SELECT status, cancellation_epoch, cancel_requested_at_ms "
-        "FROM ai_agent_runs WHERE id = ?",
-        [root_run_id],
-    ) == {
-        "status": "running",
-        "cancellation_epoch": 0,
-        "cancel_requested_at_ms": None,
-    }
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
-    ) == {"count": 0}
-
-
-async def test_root_cancellation_rejects_malformed_foreign_lineage(temp_db):
-    root_run_id = await _seed_run(temp_db)
-    malformed_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="malformed root",
-        mode="agent",
-    )
-    await temp_db.execute(
-        "UPDATE ai_agent_runs SET root_run_id = ? WHERE id = ?",
-        [root_run_id, malformed_run_id],
-    )
-
-    with pytest.raises(RootCancellationTargetError, match="Root Run"):
-        await AgentCancellationService(
-            temp_db,
-            get_agent_composition(),
-        ).cancel(malformed_run_id)
-
-    assert await temp_db.fetch_one(
-        "SELECT status, cancellation_epoch, cancel_requested_at_ms "
-        "FROM ai_agent_runs WHERE id = ?",
-        [malformed_run_id],
-    ) == {
-        "status": "running",
-        "cancellation_epoch": 0,
-        "cancel_requested_at_ms": None,
-    }
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
-    ) == {"count": 0}
-
-
-@pytest.mark.parametrize(
-    "conflict_kind",
-    ["descendant", "delegation", "host_reservation", "epoch_zero", "failed"],
-)
-async def test_tombstoned_root_cancel_replay_fails_closed_on_conflict(
-    temp_db,
-    conflict_kind,
-):
-    root_run_id = await _seed_run(temp_db)
-    child_run_id = None
-    if conflict_kind == "descendant":
-        child_run_id = await create_run(
-            temp_db,
-            session_id=7,
-            prompt="still active child",
-            mode="agent",
-            parent_run_id=root_run_id,
-            root_run_id=root_run_id,
-            agent_role="screenplay-part",
-            run_depth=1,
-        )
-    if conflict_kind == "host_reservation":
-        await SqliteHostChildRunRegistry(
-            temp_db,
-            reservation_ttl_ms=60_000,
-        ).reserve(
-            host_child_key="active-tombstoned-host",
-            identity_digest="active-tombstoned-host-digest",
-            contract={"rootRunId": root_run_id, "parentRunId": root_run_id},
-            owner_token="host-worker",
-            timestamp_ms=1,
-        )
-    await temp_db.execute(
-        "UPDATE ai_agent_runs SET status = ?, "
-        "cancellation_epoch = ?, cancel_requested_at_ms = 1, "
-        "execution_owner_id = NULL, lease_expires_at_ms = NULL "
-        "WHERE id = ?",
-        [
-            "failed" if conflict_kind == "failed" else "canceled",
-            0 if conflict_kind == "epoch_zero" else 1,
-            root_run_id,
-        ],
-    )
-    if conflict_kind == "delegation":
-        await temp_db.execute(
-            "INSERT INTO ai_agent_delegations "
-            "(id, parent_run_id, root_run_id, agent_role, objective, status, "
-            "worker_id, claim_expires_at_ms) VALUES "
-            "('delegation-active-tombstone', ?, ?, 'researcher', 'active', "
-            "'claimed', 'delegation-worker', 9999999999999)",
-            [root_run_id, root_run_id],
-        )
-    with pytest.raises(
-        ContractViolationError,
-        match=(
-            "terminal Root Run has no cancellation audit"
-            if conflict_kind == "failed"
-            else "tombstoned cancellation"
-        ),
-    ):
-        await AgentCancellationService(
-            temp_db,
-            get_agent_composition(),
-        ).cancel(root_run_id)
-
-    if child_run_id is not None:
-        assert await temp_db.fetch_one(
-            "SELECT status, cancellation_epoch, cancel_requested_at_ms "
-            "FROM ai_agent_runs WHERE id = ?",
-            [child_run_id],
-        ) == {
-            "status": "running",
-            "cancellation_epoch": 0,
-            "cancel_requested_at_ms": None,
-        }
     assert await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations"
     ) == {"count": 0}
@@ -1049,14 +780,14 @@ async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
     assert response.json()["data"] == {
         "status": "cancel_requested",
         "newlyRequested": True,
-        "childrenCanceled": 0,
+        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "draining",
         "cancellationEpoch": 1,
     }
     assert await temp_db.fetch_one(
         "SELECT cancellation_epoch, status FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = ?",
+        "WHERE run_id = ?",
         [run_id],
     ) == {"cancellation_epoch": 1, "status": "draining"}
     assert snapshot is not None
@@ -1065,524 +796,6 @@ async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
         timestamp + 60_000
     )
     assert snapshot["run"]["execution"]["cancellationRequested"] is True
-
-
-async def test_root_cancel_fence_rejects_new_child_run_and_host_receipt(temp_db):
-    timestamp = now_ms()
-    root_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="live root",
-        mode="agent",
-        execution_owner_id="live-worker",
-        heartbeat_at_ms=timestamp,
-        lease_expires_at_ms=timestamp + 60_000,
-    )
-    foreign_root_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="foreign root",
-        mode="agent",
-    )
-    registry = SqliteHostChildRunRegistry(temp_db, reservation_ttl_ms=60_000)
-    reserved = await registry.reserve(
-        host_child_key="reserved-before-root-cancel",
-        identity_digest="reserved-child-digest",
-        contract={
-            "rootRunId": root_run_id,
-            "parentRunId": root_run_id,
-        },
-        owner_token="reserved-worker",
-        timestamp_ms=timestamp,
-    )
-    foreign = await registry.reserve(
-        host_child_key="foreign-reservation",
-        identity_digest="foreign-child-digest",
-        contract={
-            "rootRunId": foreign_root_run_id,
-            "parentRunId": foreign_root_run_id,
-        },
-        owner_token="foreign-worker",
-        timestamp_ms=timestamp,
-    )
-    result = await AgentCancellationService(
-        temp_db,
-        get_agent_composition(),
-    ).cancel(root_run_id)
-    assert result is not None and result["cancellationStatus"] == "draining"
-
-    with pytest.raises(ContractViolationError, match="cancellation"):
-        await create_run(
-            temp_db,
-            session_id=7,
-            prompt="late child",
-            mode="agent",
-            parent_run_id=root_run_id,
-            root_run_id=root_run_id,
-            agent_role="screenplay-part",
-            run_depth=1,
-        )
-    with pytest.raises(ContractViolationError, match="cancellation"):
-        await SqliteHostChildRunRegistry(temp_db).reserve(
-            host_child_key="late-host-child",
-            identity_digest="late-child-digest",
-            contract={
-                "rootRunId": root_run_id,
-                "parentRunId": root_run_id,
-            },
-            owner_token="late-worker",
-            timestamp_ms=timestamp + 1,
-        )
-    with pytest.raises(ValueError, match="cancellation"):
-        await SqliteDelegationRepository(temp_db).create(
-            parent_run_id=root_run_id,
-            agent_role="researcher",
-            objective="late delegation",
-        )
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE root_run_id = ?",
-        [root_run_id],
-    ) == {"count": 1}
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_host_child_runs "
-        "WHERE host_child_key = 'late-host-child'"
-    ) == {"count": 0}
-    assert await temp_db.fetch_one(
-        "SELECT generation, attempt_key, identity_digest, reservation_owner, "
-        "reservation_expires_at_ms FROM ai_agent_host_child_runs "
-        "WHERE host_child_key = ?",
-        [reserved.host_child_key],
-    ) == {
-        "generation": reserved.generation,
-        "attempt_key": reserved.attempt_key,
-        "identity_digest": reserved.identity_digest,
-        "reservation_owner": None,
-        "reservation_expires_at_ms": None,
-    }
-    assert await temp_db.fetch_one(
-        "SELECT reservation_owner, reservation_expires_at_ms "
-        "FROM ai_agent_host_child_runs WHERE host_child_key = ?",
-        [foreign.host_child_key],
-    ) == {
-        "reservation_owner": "foreign-worker",
-        "reservation_expires_at_ms": timestamp + 60_000,
-    }
-
-
-async def test_child_attach_waiting_on_root_cancel_transaction_sees_fence(
-    temp_db,
-    monkeypatch,
-):
-    timestamp = now_ms()
-    root_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="live root",
-        mode="agent",
-        execution_owner_id="live-worker",
-        heartbeat_at_ms=timestamp,
-        lease_expires_at_ms=timestamp + 60_000,
-    )
-    fence_written = asyncio.Event()
-    release_fence = asyncio.Event()
-    original_execute = temp_db.execute
-
-    async def hold_fence(sql, params=None):
-        result = await original_execute(sql, params)
-        if "INSERT INTO ai_agent_run_cancellations" in sql:
-            fence_written.set()
-            await release_fence.wait()
-        return result
-
-    monkeypatch.setattr(temp_db, "execute", hold_fence)
-    cancel_task = asyncio.create_task(
-        AgentCancellationService(
-            temp_db,
-            get_agent_composition(),
-        ).cancel(root_run_id)
-    )
-    await asyncio.wait_for(fence_written.wait(), timeout=1)
-    child_task = asyncio.create_task(
-        create_run(
-            temp_db,
-            session_id=7,
-            prompt="racing child",
-            mode="agent",
-            parent_run_id=root_run_id,
-            root_run_id=root_run_id,
-            agent_role="screenplay-part",
-            run_depth=1,
-        )
-    )
-    await asyncio.sleep(0)
-    release_fence.set()
-    await asyncio.wait_for(cancel_task, timeout=1)
-    with pytest.raises(ContractViolationError, match="cancellation"):
-        await asyncio.wait_for(child_task, timeout=1)
-
-    assert await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE root_run_id = ?",
-        [root_run_id],
-    ) == {"count": 1}
-
-
-async def test_root_cancel_fence_transaction_rolls_back_every_write(
-    temp_db,
-    monkeypatch,
-):
-    root_run_id = await _seed_run(temp_db)
-    reservation_timestamp = now_ms()
-    reserved = await SqliteHostChildRunRegistry(
-        temp_db,
-        reservation_ttl_ms=60_000,
-    ).reserve(
-        host_child_key="rollback-host-child",
-        identity_digest="rollback-host-child-digest",
-        contract={
-            "rootRunId": root_run_id,
-            "parentRunId": root_run_id,
-        },
-        owner_token="rollback-worker",
-        timestamp_ms=reservation_timestamp,
-    )
-    original_execute = temp_db.execute
-
-    async def fail_delegation_cancel(sql, params=None):
-        if (
-            "UPDATE ai_agent_delegations" in sql
-            and "parent_canceled" in sql
-        ):
-            raise RuntimeError("injected delegation cancellation failure")
-        return await original_execute(sql, params)
-
-    monkeypatch.setattr(temp_db, "execute", fail_delegation_cancel)
-    with pytest.raises(RuntimeError, match="injected delegation"):
-        await AgentCancellationService(
-            temp_db,
-            get_agent_composition(),
-        ).cancel(root_run_id)
-    monkeypatch.setattr(temp_db, "execute", original_execute)
-
-    assert await temp_db.fetch_one(
-        "SELECT cancel_requested_at_ms, cancellation_epoch FROM ai_agent_runs "
-        "WHERE id = ?",
-        [root_run_id],
-    ) == {"cancel_requested_at_ms": None, "cancellation_epoch": 0}
-    assert await temp_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations WHERE root_run_id = ?",
-        [root_run_id],
-    ) is None
-    assert await temp_db.fetch_one(
-        "SELECT reservation_owner, reservation_expires_at_ms "
-        "FROM ai_agent_host_child_runs WHERE host_child_key = ?",
-        [reserved.host_child_key],
-    ) == {
-        "reservation_owner": "rollback-worker",
-        "reservation_expires_at_ms": reservation_timestamp + 60_000,
-    }
-
-
-async def test_root_cancel_receipt_recovers_draining_tree_after_restart(temp_db):
-    timestamp = now_ms()
-    root_run_id = await create_run(
-        temp_db,
-        session_id=7,
-        prompt="live root",
-        mode="agent",
-        execution_owner_id="old-process",
-        heartbeat_at_ms=timestamp,
-        lease_expires_at_ms=timestamp + 60_000,
-    )
-    first = await AgentCancellationService(
-        temp_db,
-        get_agent_composition(),
-    ).cancel(root_run_id)
-    assert first is not None and first["cancellationStatus"] == "draining"
-    await temp_db.execute(
-        "UPDATE ai_agent_runs SET lease_expires_at_ms = 0 WHERE id = ?",
-        [root_run_id],
-    )
-
-    recovered = await AgentCancellationService(
-        temp_db,
-        get_agent_composition(),
-    ).cancel(root_run_id)
-
-    assert recovered is not None
-    assert recovered["cancellationStatus"] == "completed"
-    assert recovered["cancellationEpoch"] == first["cancellationEpoch"] == 1
-    assert await temp_db.fetch_one(
-        "SELECT status, cancellation_epoch FROM ai_agent_runs WHERE id = ?",
-        [root_run_id],
-    ) == {"status": "canceled", "cancellation_epoch": 1}
-
-
-async def test_delegation_route_is_visible_in_parent_snapshot(temp_db):
-    run_id = await _seed_run(temp_db)
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "researcher",
-            "objective": "Collect chapter evidence",
-            "input": {"chapterId": 7},
-            "required": True,
-            "priority": 5,
-        },
-    )
-    snapshot = await _queries(temp_db).get_snapshot(run_id)
-
-    assert response.status_code == 200
-    assert response.json()["data"]["status"] == "queued"
-    assert snapshot is not None
-    assert snapshot["delegations"]["aggregate"]["state"] == "pending"
-    assert snapshot["delegations"]["items"][0]["agentRole"] == "researcher"
-    assert snapshot["delegations"]["items"][0]["agentTitle"] == "研究 Agent"
-
-
-async def test_legacy_writing_run_without_profile_attributes_keeps_roles(
-    temp_db,
-):
-    await temp_db.execute(
-        "INSERT OR IGNORE INTO ai_sessions (id, title, scope, book_id) "
-        "VALUES (17, 'Legacy Writing session', 'chapter', 'book-legacy')"
-    )
-    run_id = await create_run(
-        temp_db,
-        session_id=17,
-        prompt="legacy writing run",
-        mode="agent",
-        binding=RunBinding(
-            namespace="writing.chat.request",
-            aggregate_id="17",
-            command_id="legacy-writing-request",
-        ),
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    delegated = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "researcher",
-            "objective": "Keep legacy Writing roles available",
-        },
-    )
-    snapshot = await request_json(
-        app,
-        method="GET",
-        path=f"/api/ai/agent-runs/{run_id}",
-        json_body=None,
-    )
-
-    assert delegated.json()["success"] is True
-    assert delegated.json()["data"]["agentTitle"] == "研究 Agent"
-    assert snapshot.json()["success"] is True
-    assert snapshot.json()["data"]["delegations"]["items"][0][
-        "agentTitle"
-    ] == "研究 Agent"
-
-
-async def test_legacy_writing_run_uses_persisted_session_scope_without_binding(
-    temp_db,
-):
-    await temp_db.execute(
-        "INSERT OR IGNORE INTO ai_sessions (id, title, scope, book_id) "
-        "VALUES (19, 'Legacy setting session', 'setting', 'book-setting')"
-    )
-    run_id = await create_run(
-        temp_db,
-        session_id=19,
-        prompt="legacy unbound writing run",
-        mode="agent",
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "researcher",
-            "objective": "Resolve the persisted Writing session owner",
-        },
-    )
-
-    assert response.json()["success"] is True
-    assert response.json()["data"]["agentTitle"] == "研究 Agent"
-
-
-async def test_persisted_profile_conflict_between_attributes_and_binding_fails_closed(
-    temp_db,
-):
-    await temp_db.execute(
-        "INSERT OR IGNORE INTO ai_sessions (id, title, scope, book_id) "
-        "VALUES (18, 'Conflicted Writing session', 'chapter', 'book-conflict')"
-    )
-    run_id = await create_run(
-        temp_db,
-        session_id=18,
-        prompt="conflicted profile",
-        mode="agent",
-        binding=RunBinding(
-            namespace="writing.chat.request",
-            aggregate_id="18",
-            command_id="conflicted-writing-request",
-            attributes={
-                "agentProfile": "screenplay",
-                "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-            },
-        ),
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "researcher",
-            "objective": "must not trust conflicting profile attributes",
-        },
-    )
-
-    assert response.json()["success"] is False
-    assert "conflict" in response.json()["error"].lower()
-    assert await SqliteDelegationRepository(temp_db).list_for_parent(run_id) == ()
-
-
-async def test_delegation_route_rejects_roles_missing_from_business_registry(
-    temp_db,
-):
-    run_id = await _seed_run(temp_db)
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "unregistered-role",
-            "objective": "Must not be accepted",
-        },
-    )
-    snapshot = await _queries(temp_db).get_snapshot(run_id)
-
-    assert response.json()["success"] is False
-    assert "unsupported Agent role" in response.json()["error"]
-    assert snapshot is not None
-    assert snapshot["delegations"]["items"] == []
-
-
-async def _seed_screenplay_run(
-    db: DatabaseConnection,
-    *,
-    persist_profile_attributes: bool = True,
-) -> str:
-    await db.execute(
-        "INSERT OR IGNORE INTO ai_sessions (id, title, scope) "
-        "VALUES (8, 'Screenplay session', 'screenplay')"
-    )
-    return await create_run(
-        db,
-        session_id=8,
-        prompt="screenplay run",
-        mode="agent",
-        binding=RunBinding(
-            namespace="screenplay.agent.turn",
-            aggregate_id="project-1",
-            command_id="turn-1",
-            attributes=(
-                {
-                    "agentProfile": "screenplay",
-                    "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-                }
-                if persist_profile_attributes else {}
-            ),
-        ),
-    )
-
-
-async def test_screenplay_snapshot_uses_its_optional_role_registry(temp_db):
-    run_id = await _seed_screenplay_run(temp_db)
-    await SqliteDelegationRepository(temp_db).create(
-        parent_run_id=run_id,
-        agent_role="researcher",
-        objective="legacy cross-profile fixture",
-        input_payload=None,
-        required=False,
-        priority=0,
-        max_depth=3,
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="GET",
-        path=f"/api/ai/agent-runs/{run_id}",
-        json_body=None,
-    )
-
-    assert response.json()["success"] is True
-    item = response.json()["data"]["delegations"]["items"][0]
-    assert item["agentRole"] == "researcher"
-    assert item["agentTitle"] == "researcher"
-
-
-async def test_screenplay_parent_rejects_writing_delegation_roles(temp_db):
-    run_id = await _seed_screenplay_run(temp_db)
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "researcher",
-            "objective": "must not cross profile boundaries",
-        },
-    )
-    stored = await SqliteDelegationRepository(temp_db).list_for_parent(run_id)
-
-    assert response.json()["success"] is False
-    assert "does not support delegation" in response.json()["error"]
-    assert stored == ()
-
-
-async def test_legacy_screenplay_parent_without_profile_attributes_stays_no_role(
-    temp_db,
-):
-    run_id = await _seed_screenplay_run(
-        temp_db,
-        persist_profile_attributes=False,
-    )
-    app = FastAPI()
-    app.include_router(ai_router, prefix="/api")
-
-    response = await request_json(
-        app,
-        method="POST",
-        path=f"/api/ai/agent-runs/{run_id}/delegations",
-        json_body={
-            "agentRole": "researcher",
-            "objective": "must not infer Writing roles",
-        },
-    )
-
-    assert response.json()["success"] is False
-    assert "does not support delegation" in response.json()["error"]
-    assert await SqliteDelegationRepository(temp_db).list_for_parent(run_id) == ()
 
 
 @pytest.mark.parametrize(

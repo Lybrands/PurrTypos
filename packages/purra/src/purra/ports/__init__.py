@@ -1,8 +1,4 @@
-"""Compatibility facade for dependency-inversion ports owned by PurrA.
-
-Concrete port definitions live in focused modules.  Existing callers may keep
-using ``purra.ports`` while migrations adopt the narrower import paths.
-"""
+"""Stable public umbrella for PurrA dependency-inversion ports."""
 
 from purra.ports.context import (
     ContextCompressionHook,
@@ -14,19 +10,22 @@ from purra.ports.context import (
 )
 from purra.ports.model import CancellationSignal, ModelGateway
 from purra.ports.persistence import (
-    CheckpointStore, DelegationRepository, ExecutionLeaseStore,
+    DelegationRepository,
+    ExecutionLeaseStore,
+    RunControlStore,
+    RunRecoveryStore,
 )
 from purra.ports.planning import (
-    DynamicTaskPlanner,
+    DynamicWorkPlanner,
     ExecutionStateFactory,
     PlanningPolicy,
     ResponseJudge,
     ResponseJudgePolicy,
     ResponseValidator,
-    TaskPlanner,
-    TaskPlanningConstraintProvider,
+    WorkPlanner,
+    WorkPlanningConstraintProvider,
 )
-from purra.ports.projection import DomainEventProjector
+from purra.ports.projection import DomainEventProjector, RunCancellationProjector
 from purra.ports.run_lifecycle import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     TERMINAL_RUN_EVENT_TYPES,

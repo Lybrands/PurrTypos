@@ -8,7 +8,6 @@ execution to PurrA.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -24,13 +23,16 @@ from purra.contracts import (
     MessageRole,
     AgentRunResult,
     RunBinding,
-    RunProvenance,
     RunStatus,
     ExecutionRecipe,
     ExecutionRecipeStep,
     StepStatus,
 )
-from purra.api import AgentCoreRunOptions, DurableTaskContinuation
+from purra.api import (
+    AgentCoreRunOptions,
+    DurableTaskContinuation,
+    RunRecoverySnapshot,
+)
 from purra.errors import (
     ModelGatewayError,
     RunCommitProjectionError,
@@ -56,12 +58,10 @@ from application.screenplay_agent_task_executor import ScreenplayTaskUnitExecuto
 from application.screenplay_checkpoint_planning import (
     SqliteScreenplayCheckpointRepository,
 )
-from application.screenplay_tool_calling import ScreenplayToolCallingService
-from application.run_provenance import digest_model_endpoint
+from application.screenplay_candidate_model import ScreenplayCandidateModelService
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
-    run_execution_intent,
 )
 from application.request_mapping import context_window_tokens
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
@@ -81,7 +81,10 @@ from infrastructure.persistence.sqlite_screenplay_agent_repository import (
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
-from infrastructure.persistence.run_execution_store import now_ms
+from infrastructure.persistence.run_execution_store import (
+    SqliteRunControlStore,
+    now_ms,
+)
 
 
 _ACTIVE_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -107,6 +110,11 @@ class ScreenplayAgentService:
         )
         self._owner_id = str(owner_id)
         self._composition = composition
+        self._run_control = (
+            composition.run_control_store
+            if composition is not None
+            else SqliteRunControlStore(db)
+        )
         self._run_service = (
             AgentRunService(composition) if composition is not None else None
         )
@@ -176,7 +184,6 @@ class ScreenplayAgentService:
             return
         try:
             request = _root_request(turn, runtime)
-            body = _ScreenplayRunInput.from_turn(turn, runtime)
             model_request = request.model
             window = int(request.context_window or 200_000)
             output_limit = resolve_invocation_output_limit(
@@ -196,17 +203,9 @@ class ScreenplayAgentService:
                 turn_id,
             )
             async for _update in self._run_service.run(
-                body=body,
+                request=request,
                 api_key=runtime.apiKey.get_secret_value(),
-                provider_options={
-                    "model": model_request.model,
-                    **dict(model_request.options),
-                },
-                signal=asyncio.Event(),
-                provenance=_root_provenance(runtime, turn),
-                enable_delegation=False,
-                mapped_request=request,
-                base_options=AgentCoreRunOptions(
+                options=AgentCoreRunOptions(
                     turn_id=turn_id,
                     output_limit=output_limit,
                     default_context_window_tokens=window,
@@ -227,6 +226,7 @@ class ScreenplayAgentService:
                         public_presentation=PublicPresentationMode.NONE,
                     ),
                 ),
+                signal=asyncio.Event(),
                 run_binding_lifecycle=lifecycle,
                 long_task_executor=self._unit_executor_factory(runtime),
             ):
@@ -241,7 +241,7 @@ class ScreenplayAgentService:
             self._db,
             runtime=runtime,
             composition=self._composition,
-            tool_calling_service=ScreenplayToolCallingService(
+            candidate_model_service=ScreenplayCandidateModelService(
                 self._db,
                 composition=self._composition,
             ),
@@ -329,23 +329,26 @@ class ScreenplayAgentService:
             ):
                 raise AppError("screenplay continuation reservation is not owned", 409)
             recipe = _execution_recipe_from_metadata(task.metadata.get("recipe"))
+            admission = TaskAdmissionDecision(
+                mode=ExecutionMode.DURABLE,
+                reason_code="durable_continuation",
+                covered_step_ids=tuple(step.id for step in plan.steps),
+                execution_recipe=recipe,
+            )
             continuation = DurableTaskContinuation(
-                source_root_run_id=source_root_run_id,
-                continuation_command=continuation_command,
-                plan=plan,
-                admission=TaskAdmissionDecision(
-                    mode=ExecutionMode.DURABLE,
-                    reason_code="durable_continuation",
-                    covered_step_ids=tuple(step.id for step in plan.steps),
-                    execution_recipe=recipe,
+                source=RunRecoverySnapshot(
+                    run_id=source_root_run_id,
+                    status=RunStatus.CANCELED,
+                    execution_plan=plan,
                 ),
+                continuation_command=continuation_command,
                 receipt=LongTaskDispatchReceipt(
                     task_id=task.id,
                     message="Resume existing durable task",
+                    admission=admission,
                 ),
             )
             request = _root_request(turn, runtime)
-            body = _ScreenplayRunInput.from_turn(turn, runtime)
             model_request = request.model
             window = int(request.context_window or 200_000)
             output_limit = resolve_invocation_output_limit(
@@ -368,17 +371,9 @@ class ScreenplayAgentService:
                 reservation=reservation,
             )
             async for _update in self._run_service.run(
-                body=body,
+                request=request,
                 api_key=runtime.apiKey.get_secret_value(),
-                provider_options={
-                    "model": model_request.model,
-                    **dict(model_request.options),
-                },
-                signal=asyncio.Event(),
-                provenance=_root_provenance(runtime, turn),
-                enable_delegation=False,
-                mapped_request=request,
-                base_options=AgentCoreRunOptions(
+                options=AgentCoreRunOptions(
                     turn_id=operation.turn_id,
                     output_limit=output_limit,
                     default_context_window_tokens=window,
@@ -409,6 +404,7 @@ class ScreenplayAgentService:
                     ),
                     durable_continuation=continuation,
                 ),
+                signal=asyncio.Event(),
                 run_binding_lifecycle=lifecycle,
                 long_task_executor=self._unit_executor_factory(runtime),
             ):
@@ -740,21 +736,24 @@ class ScreenplayAgentService:
             [turn["project_id"], turn["session_id"], turn["rowid"]],
         )
 
-    async def _active_root_ids(self, root_ids: Sequence[str]) -> tuple[str, ...]:
-        if not root_ids:
+    async def _active_root_ids(self, run_ids: Sequence[str]) -> tuple[str, ...]:
+        if not run_ids:
             return ()
-        rows = await self._db.fetch_all(
-            "SELECT root.id FROM ai_agent_runs AS root WHERE "
-            f"root.id IN ({_sql_marks(root_ids)}) AND ("
-            "root.status = 'running' OR EXISTS (SELECT 1 FROM ai_agent_runs "
-            "AS child WHERE child.root_run_id = root.id AND "
-            "child.id <> root.id AND child.status = 'running') OR EXISTS "
-            "(SELECT 1 FROM ai_agent_run_cancellations AS cancellation "
-            "WHERE cancellation.root_run_id = root.id AND "
-            "cancellation.status = 'draining')) ORDER BY root.id",
-            list(root_ids),
+        activity = await self._run_control.inspect_activity(
+            run_ids=tuple(run_ids),
         )
-        return tuple(str(row["id"]) for row in rows)
+        running = {
+            run_id
+            for run_id in run_ids
+            if (
+                (state := await self._run_control.get(run_id)) is not None
+                and state.status is RunStatus.RUNNING
+            )
+        }
+        return tuple(sorted({
+            *running,
+            *activity.draining_cancellation_run_ids,
+        }))
 
     async def _truncate_runtime_active(
         self,
@@ -773,46 +772,11 @@ class ScreenplayAgentService:
             )
             if int((claimed_turns or {}).get("count") or 0):
                 return True
-        if root_ids:
-            marks = _sql_marks(root_ids)
-            active = await self._db.fetch_one(
-                "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE "
-                f"(id IN ({marks}) OR root_run_id IN ({marks})) AND "
-                "(status = 'running' OR execution_owner_id IS NOT NULL OR "
-                "lease_expires_at_ms IS NOT NULL)",
-                [*root_ids, *root_ids],
-            )
-            if int((active or {}).get("count") or 0):
-                return True
-            delegations = await self._db.fetch_one(
-                "SELECT COUNT(*) AS count FROM ai_agent_delegations WHERE "
-                f"root_run_id IN ({marks}) AND (status IN "
-                "('queued', 'claimed', 'running') OR worker_id IS NOT NULL OR "
-                "claim_expires_at_ms IS NOT NULL)",
-                list(root_ids),
-            )
-            if int((delegations or {}).get("count") or 0):
-                return True
-        if task_ids:
-            units = await self._db.fetch_one(
-                "SELECT COUNT(*) AS count FROM ai_agent_long_task_units WHERE "
-                f"task_id IN ({_sql_marks(task_ids)}) AND (status IN "
-                "('claimed', 'running') OR worker_id IS NOT NULL OR "
-                "lease_expires_at_ms IS NOT NULL)",
-                list(task_ids),
-            )
-            if int((units or {}).get("count") or 0):
-                return True
-        if cancellation_roots:
-            receipts = await self._db.fetch_one(
-                "SELECT COUNT(*) AS count FROM ai_agent_run_cancellations "
-                f"WHERE root_run_id IN ({_sql_marks(cancellation_roots)}) "
-                "AND status <> 'completed'",
-                list(cancellation_roots),
-            )
-            if int((receipts or {}).get("count") or 0):
-                return True
-        return False
+        activity = await self._run_control.inspect_activity(
+            run_ids=tuple({*root_ids, *cancellation_roots}),
+            task_ids=tuple(task_ids),
+        )
+        return not activity.quiescent
 
     @staticmethod
     def _remember_task(key: str, task: asyncio.Task[None]) -> None:
@@ -896,38 +860,6 @@ def _capability_requirements(stored: Mapping[str, Any], runtime):
         streaming_required=bool(raw.get("streamingRequired", True)),
         cancellation_required=bool(raw.get("cancellationRequired", True)),
     )
-
-
-@dataclass(frozen=True, slots=True)
-class _ScreenplayRunInput:
-    messages: list[dict[str, Any]]
-    apiProvider: str
-    baseURL: str | None
-    contextWindow: str | None
-    options: dict[str, Any]
-
-    @classmethod
-    def from_turn(cls, turn: Mapping[str, Any], runtime):
-        return cls(
-            messages=[{"role": "user", "content": str(turn["userContent"])}],
-            apiProvider=str(runtime.apiProvider),
-            baseURL=runtime.baseURL,
-            contextWindow=runtime.contextWindow,
-            options=dict(runtime.options),
-        )
-
-    def model_copy(self, *, update: dict[str, Any] | None = None):
-        return replace(self, **dict(update or {}))
-
-    def model_dump(self, *args, **kwargs) -> dict[str, Any]:
-        del args, kwargs
-        return {
-            "messages": list(self.messages),
-            "apiProvider": self.apiProvider,
-            "baseURL": self.baseURL,
-            "contextWindow": self.contextWindow,
-            "options": dict(self.options),
-        }
 
 
 class _ScreenplayTurnRunLifecycle:
@@ -1130,43 +1062,6 @@ def _execution_recipe_from_metadata(value: object) -> ExecutionRecipe:
         steps=tuple(parsed),
         max_parallelism=int(raw.get("maxParallelism") or 1),
         metadata={key: item for key, item in raw.items() if key not in reserved},
-    )
-
-
-def _root_provenance(runtime, turn: Mapping[str, Any]) -> RunProvenance:
-    request = model_request_from_runtime(runtime)
-    profile = json.dumps(
-        {
-            "provider": runtime.apiProvider,
-            "model": request.model,
-            "contextWindow": runtime.contextWindow,
-            "projectId": turn["projectId"],
-            "turnId": turn["id"],
-            "commandId": turn["commandId"],
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return RunProvenance(
-        model_provider=request.provider,
-        model_name=request.model,
-        context_window=context_window_tokens(
-            runtime.contextWindow or runtime.options.get("context_window")
-        ),
-        endpoint_digest=digest_model_endpoint(runtime.baseURL),
-        request_profile_digest=hashlib.sha256(
-            profile.encode("utf-8")
-        ).hexdigest(),
-        capability_snapshot=request.capability_snapshot.to_mapping(
-            include_digest=True,
-        ),
-        execution_intent=run_execution_intent(
-            request,
-            reasoning_mode_from_options(runtime.options),
-            output_contract="assistant_text",
-            tool_protocol_contract="screenplay_host_tools",
-        ),
     )
 
 

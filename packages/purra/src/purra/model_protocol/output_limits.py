@@ -13,6 +13,7 @@ from purra.normalization import positive_int
 class InvocationOutputLimitSource(StrEnum):
     USER_OVERRIDE = "user_override"
     MODEL_PROFILE = "model_profile"
+    WORKFLOW_POLICY = "workflow_policy"
 
 
 @dataclass(frozen=True, slots=True)

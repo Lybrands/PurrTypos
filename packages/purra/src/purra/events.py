@@ -25,7 +25,6 @@ class CoreEventType(StrEnum):
     APPROVAL_RESOLVED = "approval.resolved"
     DELEGATION_CREATED = "delegation.created"
     DELEGATION_CLAIMED = "delegation.claimed"
-    DELEGATION_EVENT = "delegation.event"
     DELEGATION_COMPLETED = "delegation.completed"
     DELEGATION_FAILED = "delegation.failed"
     DELEGATION_CANCELED = "delegation.canceled"

@@ -7,8 +7,11 @@ from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from time import perf_counter
 from typing import Any, AsyncIterator, Callable, Iterable, Mapping, Sequence
-from uuid import uuid4
 
+from purra.agent_presets import (
+    AgentPreset,
+    AgentPresetSnapshot,
+)
 from purra.cancellation import (
     OperationCanceled,
     await_with_cancellation,
@@ -21,6 +24,7 @@ from purra.context_budget import (
     resolve_context_budget_claims,
     resolve_task_context_budget_claims,
 )
+from purra.context_strategies import ContextStrategy
 from purra.context_orchestration.contracts import (
     ConversationCompactionResult,
 )
@@ -45,22 +49,17 @@ from purra.contracts import (
     ExecutionState,
     MessageOrigin,
     MessageRole,
-    PlannerLimits,
-    PlanningCapabilities,
-    PlanningConstraints,
-    PlanningKind,
     ResponseConstraints,
     RunCreateParams,
     RunId,
     RunProvenance,
-    RunLineage,
     RunStatus,
     RuntimeLimits,
     RuntimeOutcome,
     StepExecutor,
     StepStatus,
     TaskContextRequest,
-    TaskPlan,
+    ExecutionPlan,
     TaskStep,
     ToolExecutionLimits,
     TraceRecord,
@@ -69,7 +68,6 @@ from purra.normalization import optional_text as _optional_text
 from purra.errors import (
     ContextOverflowError,
     ContractViolationError,
-    InvalidPlannerOutputError,
     UnsupportedModelFeatureError,
 )
 from purra.events import AgentEvent, CoreEventType
@@ -77,41 +75,34 @@ from purra.engine.context_phase import (
     assemble_messages as _assemble_messages,
     compile_task_context_request as _compile_task_context_request,
     context_demand_diagnostics as _context_demand_diagnostics,
-    host_planning_facts as _host_planning_facts,
     merge_context_claims as _merge_context_claims,
     planned_tool_names as _planned_tool_names,
-    planning_tool_guidance as _planning_tool_guidance,
     validate_context_allocations as _validate_context_allocations,
 )
+from purra.engine.context_capability import ContextCapability
 from purra.engine.canonical_sink import (
     BufferedEventSink as _BufferedEventSink,
     runtime_output_event as _runtime_output_event,
 )
 from purra.engine.durable_execution import (
     bind_event_to_run as _bind_event_to_run,
-    complete_admitted_task as _complete_admitted_task,
-    complete_durable_continuation as _complete_durable_continuation,
-    validate_task_admission_coverage as _validate_task_admission_coverage,
-)
-from purra.engine.dynamic_planning import (
-    DynamicPlanningOrchestrator as _DynamicPlanningOrchestrator,
-    safe_model_only_plan as _safe_model_only_plan,
 )
 from purra.engine.options import AgentCoreRunOptions
+from purra.engine.planning_phase import PlanningCapability, PlanningPhaseResult
+from purra.engine.task_orchestration import TaskOrchestrationCapability
 from purra.delegation import (
-    AgentCoreSubmitter,
-    AgentDelegationCoordinator,
-    ChildRunRequestFactory,
+    DelegatedAgentExecutor,
+    DelegationCoordinator,
+    DelegationPolicy,
     build_delegation_tool_registration,
 )
+from purra.delegation.dynamic_executor import DynamicDelegatedAgentExecutor
 from purra.execution import AgentRunHandle, AgentRunSupervisor
 from purra.engine.planning_validation import (
     effective_registrations as _effective_registrations,
-    validate_plan_authority as _validate_plan_authority,
-    validate_planning_constraints as _validate_planning_constraints,
-    validate_task_constraint_refinement as _validate_task_constraint_refinement,
 )
 from purra.engine.tool_catalog import AugmentedToolCatalog as _AugmentedToolCatalog
+from purra.execution_profiles import ExecutionProfile
 from purra.host_planned_tool_gateway import HostPlannedToolGateway
 from purra.json_values import thaw_json_mapping
 from purra.model_protocol import resolve_invocation_output_limit
@@ -120,16 +111,9 @@ from purra.model_invocation import (
     ModelInvocationContext,
 )
 from purra.model_execution import AgentModelResponseJudge, AgentModelTaskRunner
-from purra.planner import (
-    AgentPlanner,
-    effective_planning_tool_names,
-)
-from purra.plan_constraints import (
-    agent_assignment_coverage_violations,
-)
+from purra.planner import effective_planning_tool_names
+from purra.planning_policies import ReactivePlanningPolicy
 from purra.plan_compiler import (
-    compile_task_plan,
-    projected_planning_tool_names,
     projected_planning_tool_schemas,
     runtime_tool_names_for_planning_names,
 )
@@ -140,17 +124,14 @@ from purra.ports import (
     ContextProvider,
     ConversationCompactor,
     DelegationRepository,
-    DynamicTaskPlanner,
     ExecutionLeaseStore,
     ExecutionStateFactory,
     PlanningPolicy,
     ResponseJudge,
     ResponseValidator,
     RunRepository,
-    StagedContextProvider,
     TaskContextDemandProvider,
-    TaskPlanningConstraintProvider,
-    TaskPlanner,
+    WorkPlanner,
     ToolCatalog,
     ToolIdempotencyGateway,
     ToolRegistration,
@@ -176,7 +157,6 @@ from purra.task_admission import (
     LongTaskDispatcher,
     LongTaskExecutionStatus,
     LongTaskExecutionUpdate,
-    TaskAdmissionDecision,
     TaskAdmissionEvaluator,
 )
 from purra.timing import duration_ms as _duration_ms
@@ -184,11 +164,13 @@ from purra.operations import AgentOperationController, OperationScope
 
 
 class AgentCore:
-    """Compose planning, context, model/tool runtime and run lifecycle.
+    """Compose context, model/tool runtime and optional execution capabilities.
 
     ``submit`` is the only complete-run entry and returns a stable,
     server-owned execution handle.
     Concrete domain tools enter only as registrations in ``tool_catalog``.
+    A bare Core is reactive. Planning requires both an explicit planner and an
+    explicit non-reactive policy.
     """
 
     def __init__(
@@ -196,8 +178,11 @@ class AgentCore:
         *,
         model_gateway: ModelGateway,
         run_repository: RunRepository,
-        planner: TaskPlanner | None = None,
+        preset: AgentPreset | None = None,
+        execution_profile: ExecutionProfile | None = None,
+        planner: WorkPlanner | None = None,
         planning_policy: PlanningPolicy | None = None,
+        context_strategy: ContextStrategy | str | None = None,
         context_provider: ContextProvider | None = None,
         context_provider_factory: (
             Callable[[AgentModelTaskRunner], ContextProvider] | None
@@ -208,8 +193,7 @@ class AgentCore:
         ) = None,
         execution_state_factory: ExecutionStateFactory | None = None,
         tool_catalog: ToolCatalog | None = None,
-        agent_role_guidance: Mapping[str, Any] | None = None,
-        max_parallel_agents: int = 1,
+        delegation_policy: DelegationPolicy = DelegationPolicy(),
         task_admission_evaluator: TaskAdmissionEvaluator | None = None,
         long_task_dispatcher: LongTaskDispatcher | None = None,
         approval_gateway: ApprovalGateway | None = None,
@@ -225,10 +209,44 @@ class AgentCore:
         execution_owner_id: str | None = None,
         execution_lease_duration_ms: int | None = None,
         delegation_repository: DelegationRepository | None = None,
-        child_core_submitter: AgentCoreSubmitter | None = None,
-        child_request_factory: ChildRunRequestFactory | None = None,
+        delegated_agent_executor: DelegatedAgentExecutor | None = None,
     ) -> None:
+        if preset is not None:
+            if not isinstance(preset, AgentPreset):
+                raise TypeError("preset must be an AgentPreset")
+            if any((
+                execution_profile is not None,
+                planner is not None,
+                planning_policy is not None,
+                context_strategy is not None,
+                context_provider is not None,
+                context_provider_factory is not None,
+                conversation_compactor is not None,
+                conversation_compactor_factory is not None,
+                execution_state_factory is not None,
+                tool_catalog is not None,
+                task_admission_evaluator is not None,
+                long_task_dispatcher is not None,
+                runtime_limits != RuntimeLimits(),
+                recovery_policy != RecoveryPolicy(),
+            )):
+                raise ValueError(
+                    "AgentPreset cannot be mixed with Agent composition arguments"
+                )
+            execution_profile = preset.execution_profile
+            context_provider = preset.context_provider
+            context_provider_factory = preset.context_provider_factory
+            conversation_compactor = preset.conversation_compactor
+            conversation_compactor_factory = preset.conversation_compactor_factory
+            execution_state_factory = preset.execution_state_factory
+            tool_catalog = preset.tool_catalog
+            runtime_limits = preset.runtime_limits
+            recovery_policy = preset.recovery_policy
+        if not isinstance(delegation_policy, DelegationPolicy):
+            raise TypeError("delegation_policy must be a DelegationPolicy")
+        self._preset = preset
         self._model_gateway = model_gateway
+        self._output_repository = output_repository
         self._runtime_limits = runtime_limits
         self._recovery_policy = recovery_policy
         if (output_repository is None) != (output_publisher is None):
@@ -280,100 +298,120 @@ class AgentCore:
                     operation_controller=self._operations,
                 )
             )
-        self._task_admission_evaluator = task_admission_evaluator
-        self._long_task_dispatcher = long_task_dispatcher
-        default_planner_limits = PlannerLimits()
-        self._planner = planner or AgentPlanner(
-            model_gateway,
-            PlannerLimits(
-                max_tool_steps=min(
-                    default_planner_limits.max_tool_steps,
-                    max(0, runtime_limits.max_model_rounds - 2),
-                ),
-                # Initial planning may encounter one structural violation and
-                # then one authenticated assignment-coverage violation. Keep
-                # both repairs bounded while allowing the composed runtime to
-                # return the corrected plan instead of installing stale work.
-                max_repair_attempts=min(
-                    2,
-                    max(1, runtime_limits.max_model_rounds),
-                ),
-            ),
-            operation_controller=self._operations,
-            output_observer=self._output_processor,
-            model_manager=self._model_invocations,
+        if execution_profile is not None and any((
+            planner is not None,
+            planning_policy is not None,
+            context_strategy is not None,
+            task_admission_evaluator is not None,
+            long_task_dispatcher is not None,
+        )):
+            raise ValueError(
+                "execution profile cannot be mixed with orchestration arguments"
+            )
+        if execution_profile is None:
+            if planner is not None and planning_policy is None:
+                raise ValueError("planner requires an explicit planning policy")
+            resolved_policy = planning_policy or ReactivePlanningPolicy()
+            if context_strategy is None:
+                context_strategy = ContextStrategy.SINGLE_PASS
+            execution_profile = ExecutionProfile(
+                planner=planner,
+                planning_policy=resolved_policy,
+                context_strategy=ContextStrategy(context_strategy),
+                task_admission_evaluator=task_admission_evaluator,
+                long_task_dispatcher=long_task_dispatcher,
+            )
+        self._execution_profile = execution_profile
+        self._task_admission_evaluator = (
+            execution_profile.task_admission_evaluator
         )
-        self._planning_policy = planning_policy or _DefaultPlanningPolicy()
+        self._long_task_dispatcher = execution_profile.long_task_dispatcher
+        self._task_orchestration = (
+            TaskOrchestrationCapability(
+                self._task_admission_evaluator,
+                self._long_task_dispatcher,
+            )
+            if self._task_admission_evaluator is not None
+            or self._long_task_dispatcher is not None
+            else None
+        )
+        self._planning_policy = execution_profile.planning_policy
+        self._planning_enabled = execution_profile.planning_enabled
+        self._context_strategy = execution_profile.context_strategy
+        self._planner = execution_profile.planner
+        if self._planning_enabled and self._planner is None:
+            raise ValueError(
+                "planned execution profile requires an explicit planner"
+            )
+        if not self._planning_enabled and self._planner is not None:
+            raise ValueError(
+                "reactive execution profile cannot configure an unused planner"
+            )
         self._context_provider = context_provider or _EmptyContextProvider()
         self._execution_state_factory = (
             execution_state_factory or _DefaultExecutionStateFactory()
         )
-        self._delegation_coordinator: AgentDelegationCoordinator | None = None
-        delegation_parts = (
-            delegation_repository,
-            child_core_submitter,
-            child_request_factory,
-        )
-        if any(part is not None for part in delegation_parts):
-            if not all(part is not None for part in delegation_parts):
+        self._approval_gateway = approval_gateway or InMemoryApprovalGateway()
+        self._delegation_coordinator: DelegationCoordinator | None = None
+        self._dynamic_delegated_executor: DynamicDelegatedAgentExecutor | None = None
+        base_tool_catalog = tool_catalog or InMemoryToolCatalog(())
+        if delegation_repository is not None:
+            if tool_idempotency_gateway is None:
                 raise ValueError(
-                    "delegation repository, child submitter and request "
-                    "factory must be configured together"
+                    "delegated Agents require a tool idempotency gateway"
                 )
             if self._output_processor is None or self._operations is None:
                 raise ValueError(
                     "delegation requires canonical output infrastructure"
                 )
-            if not agent_role_guidance:
-                raise ValueError("delegation requires agent role guidance")
-            self._delegation_coordinator = AgentDelegationCoordinator(
+            if delegated_agent_executor is None:
+                self._dynamic_delegated_executor = DynamicDelegatedAgentExecutor(
+                    tool_catalog=base_tool_catalog,
+                    model_gateway=self._model_gateway,
+                    model_manager=self._model_invocations,
+                    output_processor=self._output_processor,
+                    operation_controller=self._operations,
+                    approval_gateway=self._approval_gateway,
+                    tool_idempotency_gateway=tool_idempotency_gateway,
+                    policy=delegation_policy,
+                    context_provider=context_provider,
+                    context_provider_factory=context_provider_factory,
+                    conversation_compactor=conversation_compactor,
+                    conversation_compactor_factory=(
+                        conversation_compactor_factory
+                    ),
+                    execution_state_factory=execution_state_factory,
+                    runtime_limits=runtime_limits,
+                    recovery_policy=recovery_policy,
+                    tool_execution_limits=tool_execution_limits,
+                )
+                delegated_agent_executor = self._dynamic_delegated_executor
+            self._delegation_coordinator = DelegationCoordinator(
                 repository=delegation_repository,
-                core=child_core_submitter,
+                executor=delegated_agent_executor,
                 output_processor=self._output_processor,
                 operation_controller=self._operations,
-                child_request_factory=child_request_factory,
-                worker_id=(
-                    execution_owner_id
-                    or getattr(run_repository, "owner_id", None)
-                    or f"agent-core-{uuid4().hex}"
-                ),
-                max_parallel_children=max_parallel_agents,
-                role_titles={
-                    str(role_id): str(value.get("title") or role_id)
-                    for role_id, value in (agent_role_guidance or {}).items()
-                    if isinstance(value, Mapping)
-                },
+                max_parallel=delegation_policy.max_parallel,
             )
-        base_tool_catalog = tool_catalog or InMemoryToolCatalog(())
+        elif delegated_agent_executor is not None:
+            raise ValueError(
+                "delegated Agent executor requires a delegation repository"
+            )
+        elif delegation_policy != DelegationPolicy():
+            raise ValueError(
+                "delegation policy requires a delegation repository"
+            )
         if self._delegation_coordinator is not None:
-            role_guidance = {
-                str(role_id): {
-                    "title": str(
-                        value.get("title")
-                        if isinstance(value, Mapping)
-                        else role_id
-                    ),
-                    "description": str(
-                        value.get("description")
-                        if isinstance(value, Mapping)
-                        else ""
-                    ),
-                }
-                for role_id, value in (agent_role_guidance or {}).items()
-            }
             self._tool_catalog = _AugmentedToolCatalog(
                 base_tool_catalog,
                 (build_delegation_tool_registration(
                     self._delegation_coordinator,
-                    role_guidance=role_guidance,
+                    delegation_policy,
                 ),),
             )
         else:
             self._tool_catalog = base_tool_catalog
         self._registrations = tuple(self._tool_catalog.registrations())
-        self._agent_role_guidance = dict(agent_role_guidance or {})
-        self._max_parallel_agents = max(1, int(max_parallel_agents))
-        self._approval_gateway = approval_gateway or InMemoryApprovalGateway()
         # This is deliberately not replaceable by a domain ``execute`` hook:
         # every registered handler crosses the same Core policy boundary.
         self._tool_executor = CoreToolExecutor(
@@ -421,6 +459,8 @@ class AgentCore:
     async def close(self) -> None:
         if self._run_supervisor is not None:
             await self._run_supervisor.close()
+        if self._delegation_coordinator is not None:
+            await self._delegation_coordinator.close()
 
     async def submit(
         self,
@@ -428,13 +468,84 @@ class AgentCore:
         *,
         options: AgentCoreRunOptions | None = None,
     ) -> AgentRunHandle:
+        if not isinstance(request, AgentRunRequest):
+            raise TypeError("AgentCore.submit requires AgentRunRequest")
         if self._run_supervisor is None:
             raise ContractViolationError(
                 "AgentCore.submit requires canonical output infrastructure"
             )
+        resolved_options = options or AgentCoreRunOptions()
+        if self._preset is not None:
+            resolved_options = await self._restore_continuation_preset(
+                resolved_options
+            )
+            request = self._preset.apply(request)
+            snapshot = self._preset.snapshot(request)
+            persisted = resolved_options.agent_preset_snapshot
+            if persisted is not None and persisted != snapshot:
+                raise ContractViolationError(
+                    "Run options carry a different AgentPreset snapshot"
+                )
+            resolved_options = replace(
+                resolved_options,
+                agent_preset_snapshot=snapshot,
+            )
+        elif resolved_options.agent_preset_snapshot is not None:
+            raise ContractViolationError(
+                "AgentPreset snapshot cannot be used without a configured Preset"
+            )
         return await self._run_supervisor.submit(
             request,
-            options=options or AgentCoreRunOptions(),
+            options=resolved_options,
+        )
+
+    async def _restore_continuation_preset(
+        self,
+        options: AgentCoreRunOptions,
+    ) -> AgentCoreRunOptions:
+        continuation = options.durable_continuation
+        if continuation is None:
+            return options
+        source = continuation.source
+        stored = source.agent_preset_snapshot
+        if not stored:
+            if self._output_repository is None:
+                raise ContractViolationError(
+                    "durable continuation cannot load its AgentPreset snapshot"
+                )
+            events = await self._output_repository.list_events(
+                source.run_id,
+                after_sequence=0,
+                limit=1,
+            )
+            stored = (
+                events[0].payload.get("agentPreset", {})
+                if events
+                else {}
+            )
+        if not stored:
+            raise ContractViolationError(
+                "durable continuation source has no AgentPreset snapshot"
+            )
+        snapshot = AgentPresetSnapshot.from_mapping(stored)
+        if (
+            options.agent_preset_snapshot is not None
+            and options.agent_preset_snapshot != snapshot
+        ):
+            raise ContractViolationError(
+                "durable continuation selected a different AgentPreset snapshot"
+            )
+        restored = replace(
+            source,
+            agent_preset_snapshot=snapshot.to_mapping(),
+        )
+        return replace(
+            options,
+            agent_preset_snapshot=snapshot,
+            durable_continuation=replace(
+                continuation,
+                source=restored,
+            ),
         )
 
     def _supervised_execution(
@@ -478,6 +589,7 @@ class AgentCore:
             event_sink=sink,
         )
         runtime_stream = None
+        delegation_bound = False
         compaction_source_request = request
         pre_planning_compaction: dict[str, Any] = {
             "outcome": "not_configured",
@@ -490,7 +602,12 @@ class AgentCore:
                     mode=request.mode,
                     turn_id=options.turn_id,
                     provenance=options.provenance,
-                    lineage=options.lineage, binding=options.binding,
+                    binding=options.binding,
+                    agent_preset_snapshot=(
+                        options.agent_preset_snapshot.to_mapping()
+                        if options.agent_preset_snapshot is not None
+                        else {}
+                    ),
                 )
             )
             model_tasks = AgentModelTaskRunner(
@@ -531,6 +648,10 @@ class AgentCore:
                 raise TypeError(
                     "conversation compactor factory returned an invalid port"
                 )
+            context_capability = ContextCapability(
+                self._context_strategy,
+                context_provider,
+            )
             for event in sink.drain():
                 yield event
 
@@ -556,14 +677,22 @@ class AgentCore:
                 return
 
             if (continuation := options.durable_continuation) is not None:
-                async for event in _complete_durable_continuation(
-                    controller, request, continuation, self._long_task_dispatcher, sink, signal,
+                task_orchestration = self._task_orchestration or (
+                    TaskOrchestrationCapability(None, None)
+                )
+                async for event in task_orchestration.continue_durable(
+                    controller,
+                    request,
+                    continuation,
+                    sink,
+                    signal,
                 ):
                     yield event
                 yield _run_result(controller)
                 return
 
-            # Reserve against every enabled planning schema.
+            # Reserve against every enabled runtime schema. Planned profiles
+            # may narrow the visible set after compiling their ExecutionPlan.
             reservation_started = perf_counter()
             try:
                 context_claims = await await_with_cancellation(
@@ -605,7 +734,7 @@ class AgentCore:
                     minimum_message_tokens=options.minimum_message_tokens,
                 )
                 compactor = conversation_compactor
-                if compactor is not None:
+                if compactor is not None and context_capability.uses_staged_context:
                     compaction_started = asyncio.Event()
                     compaction_started_payload: dict[str, Any] = {}
 
@@ -772,31 +901,14 @@ class AgentCore:
                             completed_event,
                         )
                         yield completed_event
-                staged_context_provider = (
-                    context_provider
-                    if isinstance(context_provider, StagedContextProvider)
-                    else None
-                )
                 planning_bundle = await await_with_cancellation(
-                    (
-                        staged_context_provider.build_planning_context(
-                            request,
-                            reserved_budget,
-                            signal,
-                        )
-                        if staged_context_provider is not None
-                        else context_provider.build_context(
-                            request,
-                            reserved_budget,
-                            signal,
-                        )
+                    context_capability.build_initial(
+                        request,
+                        reserved_budget,
+                        signal,
                     ),
                     signal,
                 )
-                if not isinstance(planning_bundle, ContextBundle):
-                    raise ContractViolationError(
-                        "context provider must return ContextBundle"
-                    )
                 _validate_context_allocations(planning_bundle, reserved_budget)
                 bundle = planning_bundle
             except OperationCanceled:
@@ -832,311 +944,59 @@ class AgentCore:
                 yield _run_result(controller)
                 return
 
-            planning_started = perf_counter()
-            planning_fallback_model_only = False
-            capabilities: PlanningCapabilities | None = None
-            admission: TaskAdmissionDecision | None = None
-            try:
-                planning_tool_names = projected_planning_tool_names(
-                    registrations,
-                    enabled_names,
-                )
-                base_capabilities = PlanningCapabilities(
-                    available_tool_names=planning_tool_names,
-                    available_agent_roles=frozenset(
-                        self._agent_role_guidance
-                    ),
+            if self._planning_enabled:
+                planning_result = await PlanningCapability(
+                    planner=self._planner,
+                    policy=self._planning_policy,
+                    runtime_limits=self._runtime_limits,
+                    task_orchestration=self._task_orchestration,
+                ).execute(
+                    request=request,
+                    planning_bundle=planning_bundle,
+                    registrations=registrations,
+                    enabled_names=enabled_names,
+                    display_locale=display_locale,
                     model_supports_tools=options.model_supports_tools,
-                    host_planning_facts=_host_planning_facts(planning_bundle),
-                    tool_guidance=_planning_tool_guidance(
-                        registrations,
-                        enabled_names,
-                        display_locale,
-                    ),
-                    agent_role_guidance=self._agent_role_guidance,
-                    max_parallel_agents=self._max_parallel_agents,
+                    controller=controller,
+                    signal=signal,
+                    turn_id=options.turn_id,
                 )
-                constraints = self._planning_policy.planning_constraints(
-                    request,
-                    base_capabilities,
-                )
-                _validate_planning_constraints(
-                    base_capabilities,
-                    constraints,
-                    runtime_tool_names=enabled_names,
-                )
-                capabilities = replace(
-                    base_capabilities,
-                    constraints=constraints,
-                )
-                should_plan = bool(
-                    self._planning_policy.should_plan(request, capabilities)
-                )
-                plan: TaskPlan | None = None
-                planning_kind: PlanningKind | None = None
-                if should_plan:
-                    planning = await await_with_cancellation(
-                        self._planner.create_plan(
-                            request,
-                            capabilities,
-                            signal,
-                            run_id=controller.run_id,
-                            turn_id=options.turn_id,
-                        ),
-                        signal,
-                    )
-                    if planning.model_call_parameters:
-                        for parameters in planning.model_call_parameters:
-                            await controller.record_event(
-                                CoreEventType.MODEL_CALL_RECORDED,
-                                {
-                                    "phase": "planning",
-                                    "count": 1,
-                                    "toolNames": [],
-                                    "toolChoice": "none",
-                                    "parameters": dict(parameters),
-                                },
-                            )
-                    elif planning.model_call_count > 0:
-                        await controller.record_event(
-                            CoreEventType.MODEL_CALL_RECORDED,
-                            {
-                                "phase": "planning",
-                                "count": planning.model_call_count,
-                                "toolNames": [],
-                                "toolChoice": "none",
-                            },
-                        )
-                    if (
-                        planning.plan.task_spec is not None
-                        and isinstance(
-                            self._planning_policy,
-                            TaskPlanningConstraintProvider,
-                        )
-                    ):
-                        constraints = (
-                            self._planning_policy.planning_constraints_for_task(
-                                request,
-                                capabilities,
-                                planning.plan.task_spec,
-                            )
-                        )
-                        _validate_task_constraint_refinement(
-                            capabilities.constraints,
-                            constraints,
-                        )
-                        _validate_planning_constraints(
-                            base_capabilities,
-                            constraints,
-                            runtime_tool_names=enabled_names,
-                        )
-                        capabilities = replace(
-                            capabilities,
-                            constraints=constraints,
-                        )
-                    compiled = compile_task_plan(
-                        planning.plan,
-                        registrations,
-                        constraints=constraints,
-                        satisfied_tool_names=(
-                            constraints.execution_satisfied_tool_names
-                        ),
-                        enabled_tool_names=enabled_names,
-                    )
-                    plan = compiled.plan
-                    planning_kind = planning.kind
-                    _validate_plan_authority(
-                        plan,
-                        enabled_names,
-                        available_agent_roles=capabilities.available_agent_roles,
-                        constraints=constraints,
-                        max_tool_steps=max(
-                            0,
-                            self._runtime_limits.max_model_rounds - 2,
-                        ),
-                    )
-                    if (
-                        self._task_admission_evaluator is not None
-                        and (
-                            plan.task_spec is not None
-                            or any(
-                                step.executor is StepExecutor.AGENT
-                                for step in plan.steps
-                            )
-                        )
-                    ):
-                        admission = await await_with_cancellation(
-                            self._task_admission_evaluator.evaluate(
-                                request,
-                                plan,
-                                signal,
-                            ),
-                            signal,
-                        )
-                        _validate_task_admission_coverage(plan, admission)
-                        await controller.record_event(
-                            CoreEventType.TASK_ADMISSION_DECIDED,
-                            admission.to_event_payload(),
-                        )
-                    elif any(
-                        step.executor is StepExecutor.AGENT
-                        for step in plan.steps
-                    ):
-                        raise ContractViolationError(
-                            "Agent plan steps require a task admission evaluator"
-                        )
-                    await controller.install_plan(plan)
+            else:
+                planning_result = PlanningPhaseResult.reactive()
                 await controller.record_trace(TraceRecord(
-                    stage="planning",
-                    outcome=(planning_kind.value if planning_kind else "skipped"),
-                    details={
-                        "toolCount": len(enabled_names),
-                        "planningCapabilityCount": len(
-                            capabilities.available_tool_names
-                        ),
-                        "contextSatisfiedToolCount": len(
-                            constraints.context_satisfied_tool_names
-                        ),
-                        "planningExcludedToolCount": len(
-                            constraints.planning_excluded_tool_names
-                        ),
-                        "satisfiedToolDependencyEdgeCount": len(
-                            constraints.satisfied_tool_dependency_edges
-                        ),
-                        "requiredAnyToolCount": len(
-                            constraints.required_any_tool_names
-                        ),
-                        "agentRoleCount": len(
-                            capabilities.available_agent_roles
-                        ),
-                        "requiredAnyAgentRoleCount": len(
-                            constraints.required_any_agent_roles
-                        ),
-                        "minimumRootAgentCount": (
-                            constraints.minimum_root_agent_count
-                        ),
-                        "planningExcludedExecutorCount": len(
-                            constraints.planning_excluded_executors
-                        ),
-                        "allowModelOnlyFallback": (
-                            constraints.allow_model_only_fallback
-                        ),
-                        "planned": should_plan,
-                        "hostInsertedPrerequisiteCount": (
-                            len(compiled.inserted_tool_names)
-                            if should_plan
-                            else 0
-                        ),
-                        "hostLoweredProtocolToolCount": (
-                            len(compiled.lowered_tool_names)
-                            if should_plan
-                            else 0
-                        ),
-                    },
-                    duration_ms=_duration_ms(planning_started),
+                    stage="execution_profile",
+                    outcome="reactive",
+                    details={"toolCount": len(enabled_names)},
                 ))
-            except OperationCanceled:
-                await controller.record_trace(TraceRecord(
-                    stage="planning",
-                    outcome="canceled",
-                    duration_ms=_duration_ms(planning_started),
-                ))
-                await controller.cancel("request_canceled")
+
+            if planning_result.terminal:
                 for event in sink.drain():
                     yield event
                 yield _run_result(controller)
                 return
-            except InvalidPlannerOutputError as error:
-                await _record_safe_exception(
-                    controller,
-                    stage="planning",
-                    outcome="invalid",
-                    error=error,
-                    started=planning_started,
-                    safe_details={
-                        "reasonCode": error.code,
-                        "validationReason": str(error)[:240],
-                    },
-                )
-                if (
-                    capabilities is not None
-                    and not capabilities.constraints.allow_model_only_fallback
-                ):
-                    await controller.record_trace(TraceRecord(
-                        stage="planning",
-                        outcome="fallback_denied",
-                        details={
-                            "reasonCode": error.code,
-                            "hostPolicy": "deny_model_only_fallback",
-                        },
-                        duration_ms=_duration_ms(planning_started),
-                    ))
-                    await controller.fail("planning_invalid")
-                    for event in sink.drain():
-                        yield event
-                    yield _run_result(controller)
-                    return
-                # Planner JSON is untrusted model output. After its bounded
-                # repair is exhausted, preserve a useful conversation by
-                # installing a host-authored, model-only plan. This keeps every
-                # tool and side effect disabled while allowing the runtime to
-                # explain the limitation or answer from already trusted context.
-                plan = _safe_model_only_plan(
-                    title="安全降级回复",
-                    goal="在不调用工具的情况下回应用户",
-                    step_id="respond-after-invalid-plan",
-                )
-                await controller.install_plan(plan)
-                planning_fallback_model_only = True
-                await controller.record_trace(TraceRecord(
-                    stage="planning",
-                    outcome="fallback_model_only",
-                    details={
-                        "reasonCode": error.code,
-                        "fallbackToolCount": 0,
-                    },
-                    duration_ms=_duration_ms(planning_started),
-                ))
-            except ContractViolationError as error:
-                await _record_safe_exception(
-                    controller,
-                    stage="planning",
-                    outcome="contract_violation",
-                    error=error,
-                    started=planning_started,
-                )
-                await controller.fail("planning_contract_violation")
-                for event in sink.drain():
-                    yield event
-                yield _run_result(controller)
-                return
-            except Exception as error:
-                await _record_safe_exception(
-                    controller,
-                    stage="planning",
-                    outcome="failed",
-                    error=error,
-                    started=planning_started,
-                )
-                await controller.fail("planning_failed")
-                for event in sink.drain():
-                    yield event
-                yield _run_result(controller)
-                return
+
+            plan = planning_result.execution_plan
+            capabilities = planning_result.capabilities
+            admission = planning_result.admission
 
             if (
                 admission is not None
                 and admission.mode is not ExecutionMode.INLINE
                 and plan is not None
             ):
-                async for admitted_event in _complete_admitted_task(
-                    controller=controller,
-                    request=request,
-                    plan=plan,
-                    admission=admission,
-                    dispatcher=self._long_task_dispatcher,
-                    sink=sink,
-                    signal=signal,
+                if self._task_orchestration is None:
+                    raise ContractViolationError(
+                        "task admission requires task orchestration"
+                    )
+                async for admitted_event in (
+                    self._task_orchestration.complete_admission(
+                        controller=controller,
+                        request=request,
+                        plan=plan,
+                        admission=admission,
+                        sink=sink,
+                        signal=signal,
+                    )
                 ):
                     yield admitted_event
                 yield _run_result(controller)
@@ -1145,22 +1005,7 @@ class AgentCore:
             for event in sink.drain():
                 yield event
 
-            planning_hook: _DynamicPlanningOrchestrator | None = None
-            if (
-                should_plan
-                and plan is not None
-                and not planning_fallback_model_only
-                and isinstance(self._planner, DynamicTaskPlanner)
-            ):
-                planning_hook = _DynamicPlanningOrchestrator(
-                    planner=self._planner,
-                    request=request,
-                    capabilities=capabilities,
-                    controller=controller,
-                    enabled_names=enabled_names,
-                    registrations=registrations,
-                    turn_id=options.turn_id,
-                )
+            planning_hook = planning_result.dynamic_planning
             selected_names = (
                 runtime_tool_names_for_planning_names(
                     registrations,
@@ -1190,7 +1035,7 @@ class AgentCore:
                 task_context: TaskContextRequest | None = None
                 task_context_claims: tuple[ContextBudgetClaim, ...] = ()
                 if (
-                    staged_context_provider is not None
+                    context_capability.staged_provider is not None
                     and plan is not None
                     and plan.task_spec is not None
                 ):
@@ -1200,12 +1045,12 @@ class AgentCore:
                         run_id=controller.run_id,
                     )
                     if isinstance(
-                        staged_context_provider,
+                        context_capability.staged_provider,
                         TaskContextDemandProvider,
                     ):
                         task_context_claims = await await_with_cancellation(
                             resolve_task_context_budget_claims(
-                                staged_context_provider,
+                                context_capability.staged_provider,
                                 request,
                                 task_context,
                                 signal,
@@ -1228,37 +1073,19 @@ class AgentCore:
                     runtime_reserve_tokens=options.runtime_reserve_tokens,
                     minimum_message_tokens=options.minimum_message_tokens,
                 )
-                context_mode = "legacy_reserved"
-                if staged_context_provider is not None:
+                context_mode = "single_pass"
+                if context_capability.staged_provider is not None:
                     retrieval_started = perf_counter()
-                    if task_context is not None:
-                        bundle = await await_with_cancellation(
-                            staged_context_provider.build_task_context(
-                                request,
-                                budget,
-                                task_context,
-                                signal,
-                            ),
+                    bundle, context_mode = await await_with_cancellation(
+                        context_capability.build_execution(
+                            request,
+                            budget,
+                            planning_bundle,
+                            task_context,
                             signal,
-                        )
-                        context_mode = "task_spec"
-                    else:
-                        # Missing TaskSpec is a compatibility condition, not
-                        # permission to silently omit previously available
-                        # context. Rebuild through the legacy full path.
-                        bundle = await await_with_cancellation(
-                            context_provider.build_context(
-                                request,
-                                budget,
-                                signal,
-                            ),
-                            signal,
-                        )
-                        context_mode = "legacy_fallback"
-                    if not isinstance(bundle, ContextBundle):
-                        raise ContractViolationError(
-                            "context provider must return ContextBundle"
-                        )
+                        ),
+                        signal,
+                    )
                     await controller.record_trace(TraceRecord(
                         stage="context_retrieval",
                         outcome=context_mode,
@@ -1297,7 +1124,7 @@ class AgentCore:
                     "selectedToolCount": len(selected_names),
                 }
                 compactor = conversation_compactor
-                if compactor is not None:
+                if compactor is not None and context_capability.uses_staged_context:
                     resolved_context_tokens = estimate_agent_messages_tokens(
                         _assemble_messages((), bundle.blocks, plan)
                     )
@@ -1514,6 +1341,13 @@ class AgentCore:
                     messages=_assemble_messages(request.messages, bundle.blocks, plan),
                     context_window=budget.window_tokens,
                 )
+                if self._dynamic_delegated_executor is not None:
+                    self._dynamic_delegated_executor.bind_run(
+                        controller.run_id,
+                        request,
+                        prepared_request.messages,
+                    )
+                    delegation_bound = True
                 estimated_input_tokens = estimate_agent_messages_tokens(
                     prepared_request.messages
                 )
@@ -1849,6 +1683,8 @@ class AgentCore:
             if run_id is not None:
                 with suppress(Exception):
                     await self._approval_gateway.cancel_pending(run_id)
+                if delegation_bound and self._dynamic_delegated_executor is not None:
+                    self._dynamic_delegated_executor.release_run(run_id)
             snapshot = controller.snapshot
             if snapshot is not None and not snapshot.terminal:
                 # This private execution iterator is owned by Supervisor. If
@@ -1876,23 +1712,6 @@ class AgentCore:
             await self._output_processor.accept_runtime_event(
                 _runtime_output_event(event, run_id)
             )
-
-
-class _DefaultPlanningPolicy:
-    def planning_constraints(
-        self,
-        request: AgentRunRequest,
-        capabilities: PlanningCapabilities,
-    ) -> PlanningConstraints:
-        del request, capabilities
-        return PlanningConstraints()
-
-    def should_plan(
-        self,
-        request: AgentRunRequest,
-        capabilities: PlanningCapabilities,
-    ) -> bool:
-        return bool(request.tools_enabled and capabilities.available_tool_names)
 
 
 class _EmptyContextProvider:

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from purra.contracts import (
     AgentRunRequest,
+    ContextBlock,
     ContextBudget,
     ContextBundle,
     ExecutionState,
@@ -16,6 +18,8 @@ from purra.contracts import (
     RuntimeLimits,
     TaskContextRequest,
 )
+from purra.context_budget import estimate_json_tokens
+from purra.context_strategies import ContextStrategy
 from purra.ports import CancellationSignal, ToolCatalog
 from purra.recovery import RecoveryPolicy
 
@@ -26,6 +30,8 @@ from domains.screenplay_agent.prompts import build_screenplay_planning_policy
 ScreenplayPlanningContextLoader = Callable[
     [str], Awaitable[Mapping[str, Any]]
 ]
+
+SCREENPLAY_PLANNING_FACTS_CONTEXT = "screenplay_planning_facts"
 
 
 class ScreenplayExecutionStateFactory:
@@ -127,10 +133,24 @@ class ScreenplayHostContextProvider:
         facts.pop("stageCommand", None)
         if context.stage_command is not None:
             facts["stageCommand"] = context.stage_command.to_mapping()
-        return ContextBundle(diagnostics={
-            "contextMode": "screenplay-root-planning",
-            "hostPlanningFacts": facts,
-        })
+        planning_facts = json.dumps(
+            facts,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return ContextBundle(
+            blocks=(ContextBlock(
+                name=SCREENPLAY_PLANNING_FACTS_CONTEXT,
+                content=planning_facts,
+                token_count=estimate_json_tokens(facts),
+                untrusted=False,
+            ),),
+            diagnostics={
+                "contextMode": "screenplay-root-planning",
+                "hostPlanningFacts": facts,
+            },
+        )
 
     async def build_task_context(
         self,
@@ -147,13 +167,13 @@ class ScreenplayHostContextProvider:
 class ScreenplayDomainAdapter:
     tool_catalog: ToolCatalog
     planning_policy: ScreenplayToolLoopPolicy = ScreenplayToolLoopPolicy()
+    context_strategy: ContextStrategy = ContextStrategy.STAGED
     execution_state_factory: ScreenplayExecutionStateFactory = (
         ScreenplayExecutionStateFactory()
     )
     context_provider: ScreenplayHostContextProvider = (
         ScreenplayHostContextProvider()
     )
-    agent_role_registry: None = None
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_model_rounds=8,
         max_progress_rounds=8,

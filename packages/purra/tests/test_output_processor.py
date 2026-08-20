@@ -70,6 +70,8 @@ def _receipt(spec: OutputStreamSpec) -> ModelInvocationReceipt:
         output_intent=spec.intent,
         commit_mode=spec.commit_mode,
         output_limit=_limit(),
+        input_fingerprint="input-fingerprint",
+        tool_schema_fingerprint="tool-schema-fingerprint",
     )
 
 
@@ -92,6 +94,7 @@ class _Repository:
     def __init__(self):
         self.specs = {}
         self.events = []
+        self.promoted = ()
         self.fail_next = False
 
     async def open_stream(self, spec):
@@ -127,6 +130,10 @@ class _Repository:
     async def abort_stream(self, output_stream_id, error_code):
         del output_stream_id, error_code
         return self.events[-1]
+
+    async def publish_stream_content_as_commentary(self, output_stream_id):
+        del output_stream_id
+        return self.promoted
 
 
 class _Publisher:
@@ -168,9 +175,13 @@ async def test_live_chunk_is_persisted_then_published_without_rechunking():
     )
 
     assert [event.payload["delta"] for event in events] == ["甲乙"]
-    assert repository.events == publisher.published
-    assert publisher.published[0].source is OutputSource.PROVIDER
-    assert publisher.published[0].channel is OutputChannel.FINAL
+    opened, content = repository.events
+    assert opened.kind is OutputEventKind.STREAM_OPENED
+    assert opened.visibility is OutputVisibility.PRIVATE
+    assert opened.payload["inputFingerprint"] == "input-fingerprint"
+    assert publisher.published == [content]
+    assert content.source is OutputSource.PROVIDER
+    assert content.channel is OutputChannel.FINAL
 
 
 @pytest.mark.asyncio
@@ -186,6 +197,31 @@ async def test_execution_public_provider_chunk_uses_commentary_channel():
 
     assert publisher.published[-1].channel is OutputChannel.COMMENTARY
     assert publisher.published[-1].payload == {"delta": "我会先核对当前正文"}
+
+
+@pytest.mark.asyncio
+async def test_promoted_commentary_is_published_after_repository_commit():
+    processor, repository, publisher, _recovery = await _opened_processor(
+        _spec(
+            intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+            commit_mode=OutputCommitMode.PRIVATE,
+        )
+    )
+    await processor.accept_provider_chunk(
+        "output-1",
+        ModelStreamChunk(content_delta="我先核对当前正文"),
+    )
+    promoted = replace(
+        repository.events[-1],
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+    )
+    repository.promoted = (promoted,)
+
+    result = await processor.publish_model_stream_commentary("output-1")
+
+    assert result == (promoted,)
+    assert publisher.published == [promoted]
 
 
 @pytest.mark.asyncio

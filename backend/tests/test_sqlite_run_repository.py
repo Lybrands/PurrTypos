@@ -9,10 +9,10 @@ import pytest
 import pytest_asyncio
 
 from purra.contracts import (
+    ExecutionPlan,
     RunCreateParams,
     RunExecutionIntent,
     RunBinding,
-    RunLineage,
     RunProvenance,
     RunStatus,
     StepExecutor,
@@ -72,11 +72,6 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "binding_aggregate_id",
         "binding_command_id",
         "binding_attributes_json",
-        "parent_run_id",
-        "root_run_id",
-        "delegation_id",
-        "agent_role",
-        "run_depth",
         "execution_owner_id",
         "lease_expires_at_ms",
         "heartbeat_at_ms",
@@ -95,10 +90,10 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "step_type",
         "risk_level",
         "description",
-        "agent_role",
         "assignment_json",
         "depends_on_json",
     }.issubset(todo_columns)
+    assert "agent_role" not in todo_columns
 
     run_id = await repository.create(RunCreateParams(
         session_id=7,
@@ -153,37 +148,6 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "test.progress",
         "agentRunTrace",
     ]
-
-
-@pytest.mark.asyncio
-async def test_host_child_lineage_does_not_require_a_delegation_claim(run_db):
-    repository = SqliteRunRepository(run_db)
-    await run_db.execute(
-        "INSERT INTO ai_agent_runs (id, status, prompt, root_run_id) VALUES "
-        "('run-root', 'running', '', 'run-root'), "
-        "('run-parent', 'running', '', 'run-root')"
-    )
-
-    run_id = await repository.create(RunCreateParams(
-        session_id=None,
-        prompt="durable batch child",
-        mode="agent",
-        lineage=RunLineage(
-            parent_run_id="run-parent",
-            root_run_id="run-root",
-            delegation_id=None,
-            agent_role="screenplay_draft_batch_worker",
-            depth=1,
-        ),
-    ))
-
-    run = await get_run(run_db, run_id)
-    assert run is not None
-    assert run["parent_run_id"] == "run-parent"
-    assert run["root_run_id"] == "run-root"
-    assert run["delegation_id"] is None
-    assert run["agent_role"] == "screenplay_draft_batch_worker"
-    assert run["run_depth"] == 1
 
 
 @pytest.mark.asyncio
@@ -312,6 +276,11 @@ async def test_schema_migrates_existing_agent_runs_without_fabricating_provenanc
             status TEXT NOT NULL DEFAULT 'running',
             mode TEXT DEFAULT NULL,
             prompt TEXT NOT NULL DEFAULT '',
+            parent_run_id TEXT DEFAULT NULL,
+            root_run_id TEXT DEFAULT NULL,
+            delegation_id TEXT DEFAULT NULL,
+            agent_role TEXT DEFAULT NULL,
+            run_depth INTEGER NOT NULL DEFAULT 0,
             final_response TEXT DEFAULT '',
             create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -339,6 +308,13 @@ async def test_schema_migrates_existing_agent_runs_without_fabricating_provenanc
             "binding_command_id",
             "binding_attributes_json",
         }.issubset(columns)
+        assert {
+            "parent_run_id",
+            "root_run_id",
+            "delegation_id",
+            "agent_role",
+            "run_depth",
+        }.isdisjoint(columns)
         historical = await get_run(db, "run-before-provenance")
         assert historical is not None
         assert historical["request_profile_digest"] is None
@@ -348,6 +324,32 @@ async def test_schema_migrates_existing_agent_runs_without_fabricating_provenanc
         assert historical["binding_attributes_json"] is None
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_removes_obsolete_task_plan_agent_role(tmp_path: Path):
+    legacy = DatabaseConnection(tmp_path)
+    await legacy.init()
+    try:
+        await legacy.execute(
+            "ALTER TABLE ai_agent_run_todos ADD COLUMN agent_role TEXT"
+        )
+    finally:
+        await legacy.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    try:
+        columns = {
+            str(row["name"])
+            for row in await migrated.fetch_all(
+                "PRAGMA table_info(ai_agent_run_todos)"
+            )
+        }
+    finally:
+        await migrated.close()
+
+    assert "agent_role" not in columns
 
 
 @pytest.mark.asyncio
@@ -453,41 +455,6 @@ async def test_sqlite_repository_rejects_updates_for_unknown_steps(run_db):
             step_id="missing",
             status=StepStatus.DONE,
         ))
-
-
-@pytest.mark.asyncio
-async def test_sqlite_repository_round_trips_agent_plan_metadata(run_db):
-    repository = SqliteRunRepository(run_db)
-    run_id = await repository.create(RunCreateParams(
-        session_id=None,
-        prompt="parallel screenplay work",
-        mode="agent",
-    ))
-    await repository.replace_steps(run_id, [
-        TaskStep(
-            id="write-1",
-            title="创作第一集",
-            type=StepType.WRITE,
-            executor=StepExecutor.AGENT,
-            agent_role="screenplay_writer",
-            assignment={"sceneIds": ["s01"]},
-        ),
-        TaskStep(
-            id="review-1",
-            title="审校第一集",
-            type=StepType.REVIEW,
-            executor=StepExecutor.AGENT,
-            agent_role="screenplay_reviewer",
-            assignment={"sceneIds": ["s01"]},
-            depends_on=("write-1",),
-        ),
-    ])
-
-    todos = await get_run_todos(run_db, run_id)
-
-    assert todos[0]["agentRole"] == "screenplay_writer"
-    assert todos[0]["assignment"] == {"sceneIds": ["s01"]}
-    assert todos[1]["dependsOn"] == ["write-1"]
 
 
 @pytest.mark.asyncio
@@ -871,7 +838,10 @@ async def test_sqlite_repository_commit_atomically_writes_plan_terminal_and_even
     )
     returned = await repository.commit(
         begun.run_id,
-        RunCommit(replace_steps=(step,), events=(todo_event,)),
+        RunCommit(
+            replace_plan=ExecutionPlan(title="Answer", steps=(step,)),
+            events=(todo_event,),
+        ),
     )
     terminal_event = AgentEvent(
         type=CoreEventType.RUN_COMPLETED,
@@ -1038,7 +1008,10 @@ async def test_sqlite_repository_commit_rolls_back_steps_terminal_and_outbox_tog
     )
     await repository.commit(
         begun.run_id,
-        RunCommit(replace_steps=(step,), events=(installed,)),
+        RunCommit(
+            replace_plan=ExecutionPlan(title="Answer", steps=(step,)),
+            events=(installed,),
+        ),
     )
     events_before = await get_run_events(run_db, begun.run_id)
 

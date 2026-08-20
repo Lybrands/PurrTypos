@@ -27,10 +27,8 @@ async def run_artifact_maintenance(
     report = await repository.maintain(policy, timestamp_ms=timestamp_ms)
     if report.changed:
         logger.info(
-            "Artifact maintenance releasedClaims=%s purgedWorkItems=%s "
-            "purgedArtifacts=%s",
+            "Artifact maintenance releasedClaims=%s purgedArtifacts=%s",
             report.released_claims,
-            report.purged_work_items,
             report.purged_artifacts,
         )
     if report.consistency_issues:
@@ -84,7 +82,6 @@ def artifact_maintenance_report_view(
             report.invalid_target_claims_released
         ),
         "releasedClaims": report.released_claims,
-        "purgedWorkItems": report.purged_work_items,
         "purgedArtifacts": report.purged_artifacts,
         "consistencyIssues": report.consistency_issues,
         "changed": report.changed,
@@ -99,11 +96,6 @@ def artifact_maintenance_snapshot_view(
     return {
         "checkedAtMs": snapshot.checked_at_ms,
         "scopeRunId": snapshot.scope_run_id,
-        "workItemCount": snapshot.work_item_count,
-        "openWorkItems": snapshot.open_work_items,
-        "completedWorkItems": snapshot.completed_work_items,
-        "canceledWorkItems": snapshot.canceled_work_items,
-        "unknownWorkItems": snapshot.unknown_work_items,
         "artifactCount": snapshot.artifact_count,
         "openArtifacts": snapshot.open_artifacts,
         "finalizedArtifacts": snapshot.finalized_artifacts,

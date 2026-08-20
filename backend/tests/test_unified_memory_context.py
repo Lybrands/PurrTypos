@@ -15,7 +15,7 @@ from purra.contracts import (
     TaskSpec,
 )
 from purra.context_budget import allocate_context_budget
-from purra.evidence import RunEvidenceStore
+from purra.evidence import CONTEXT_EVIDENCE_RECEIPTS_KEY, RunEvidenceStore
 from database.connection import DatabaseConnection
 from domains.writing.memory_context import (
     MemoryContextRequest,
@@ -434,7 +434,7 @@ async def test_unified_retriever_prioritizes_story_and_deduplicates_semantic(db)
     assert pack.receipts[0].chapter_id == "chapter-1"
 
 
-def test_evidence_store_records_memory_context_receipts():
+def test_evidence_store_records_context_evidence_receipts():
     store = RunEvidenceStore()
     message = AgentMessage(
         role=MessageRole.DEVELOPER,
@@ -442,7 +442,7 @@ def test_evidence_store_records_memory_context_receipts():
         origin=MessageOrigin.HOST_CONTEXT,
         attributes={"context_name": "writing_retrieval"},
         host_metadata={
-            "memory_context_receipts": [{
+            CONTEXT_EVIDENCE_RECEIPTS_KEY: [{
                 "evidenceId": "story:r-1:v3",
                 "source": "story_state",
                 "itemId": "r-1",
@@ -513,7 +513,7 @@ async def test_context_provider_emits_reusable_pack_and_durable_usage_receipt(db
         block for block in bundle.blocks
         if block.name == WRITING_RETRIEVAL_CONTEXT
     )
-    receipts = retrieval.host_metadata["memory_context_receipts"]
+    receipts = retrieval.host_metadata[CONTEXT_EVIDENCE_RECEIPTS_KEY]
     assert receipts[0]["source"] == "story_state"
     assert receipts[0]["version"] == 1
     assert "memory_context_pack" in retrieval.content

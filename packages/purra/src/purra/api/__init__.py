@@ -5,7 +5,30 @@ packages, but complete execution is entered through this module.  Runtime
 implementation modules are not application entry points.
 """
 
-from purra.engine import AgentCore, AgentCoreRunOptions, DurableTaskContinuation
+from purra.engine import (
+    AgentCore,
+    AgentCoreRunOptions,
+    ContextStrategy,
+    DurableTaskContinuation,
+    ExecutionProfile,
+    ReactivePlanningPolicy,
+    ToolPlanningPolicy,
+)
+from purra.adapters import InMemoryAgentAdapters, InMemoryDurableAdapters
+from purra.agent_presets import (
+    AgentPreset,
+    AgentPresetSnapshot,
+    PromptSection,
+)
+from purra.contracts import PlanningResult, WorkPlan, WorkStep
+from purra.delegation import (
+    DelegatedAgentExecutor,
+    DelegatedAgentRequest,
+    DelegatedAgentResult,
+    DelegationContextMode,
+    DelegationPolicy,
+)
+from purra.delegation.dynamic_executor import DynamicDelegatedAgentExecutor
 from purra.execution import AgentRunHandle
 from purra.model_execution import (
     AgentModelResponseJudge,
@@ -13,14 +36,62 @@ from purra.model_execution import (
     AgentModelTaskRunner,
     AgentModelTextResult,
 )
+from purra.planner import AgentPlanner
+from purra.orphan_recovery import (
+    OrphanRecoveryCoordinator,
+    OrphanRunSettlement,
+)
+from purra.ports import WorkPlanner
+from purra.run_recovery import RunRecoverySnapshot
+from purra.run_control import (
+    OrphanRunCandidate,
+    OrphanRunDecision,
+    OrphanRunDisposition,
+    OrphanRunReason,
+    OrphanTaskEvidence,
+    RunActivitySnapshot,
+    RunCancellationReceipt,
+    decide_orphan_run,
+)
 
 __all__ = [
     "AgentCore",
+    "AgentPreset",
+    "AgentPresetSnapshot",
+    "InMemoryAgentAdapters",
+    "InMemoryDurableAdapters",
     "AgentCoreRunOptions",
+    "ContextStrategy",
+    "DelegatedAgentExecutor",
+    "DelegatedAgentRequest",
+    "DelegatedAgentResult",
+    "DelegationContextMode",
+    "DelegationPolicy",
+    "DynamicDelegatedAgentExecutor",
     "DurableTaskContinuation",
+    "ExecutionProfile",
+    "ReactivePlanningPolicy",
+    "PromptSection",
+    "OrphanRunCandidate",
+    "OrphanRecoveryCoordinator",
+    "OrphanRunSettlement",
+    "OrphanRunDecision",
+    "OrphanRunDisposition",
+    "OrphanRunReason",
+    "OrphanTaskEvidence",
+    "RunActivitySnapshot",
+    "RunCancellationReceipt",
+    "RunRecoverySnapshot",
+    "ToolPlanningPolicy",
     "AgentRunHandle",
     "AgentModelResponseJudge",
     "AgentModelTask",
     "AgentModelTaskRunner",
     "AgentModelTextResult",
+    "AgentPlanner",
+    "PlanningResult",
+    "WorkPlan",
+    "WorkPlanner",
+    "WorkStep",
+    "decide_orphan_run",
 ]
