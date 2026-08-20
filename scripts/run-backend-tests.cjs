@@ -35,7 +35,7 @@ const python = candidates.find(supportsPytest)
 if (!python) {
   console.error(
     'No Python interpreter with pytest and PurrA was found. Install ' +
-      'backend/requirements.txt and packages/purra, or set PURRTYPOS_PYTHON.',
+      'backend/requirements.txt, or set PURRTYPOS_PYTHON.',
   )
   process.exit(1)
 }
@@ -46,7 +46,7 @@ const hasExplicitTarget = forwardedArgs.some((argument) => {
   return selector.includes('::') || fs.existsSync(path.resolve(projectRoot, selector))
 })
 const pytestArgs = [
-  ...(hasExplicitTarget ? [] : ['backend/tests', 'packages/purra/tests']),
+  ...(hasExplicitTarget ? [] : ['backend/tests']),
   ...forwardedArgs,
 ]
 
