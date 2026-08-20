@@ -1,5 +1,8 @@
 # PurrA 独立仓库迁移：阶段 A 验证记录
 
+> 历史记录：阶段 A 之后的最终拆仓结果见
+> `2026-08-21-purra-repository-extraction-phase-c-verification.md`。
+
 > 日期：2026-08-21
 >
 > 结论：Monorepo 内公共边界和 wheel 消费路径已经收口；阶段 B 将以当前源码建立

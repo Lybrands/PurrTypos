@@ -1,6 +1,6 @@
 # PurrA 独立仓库迁移设计与验收清单
 
-> 状态：阶段 A 已完成；公开仓库方案已确认，等待阶段 B 发布。
+> 状态：阶段 A、B、C 已完成；PurrTypos 已锁定外部 PurrA 提交。
 >
 > 日期：2026-08-21
 
@@ -20,27 +20,13 @@ Python 分发包引用。
 
 ## 2. 当前事实
 
-PurrA 已具备独立包的主要基础：
-
-- `packages/purra/pyproject.toml` 定义了 `purra` 0.1.0；
-- 运行时只依赖 Python 标准库；
-- `packages/purra/tests` 不导入 PurrTypos 的 Application、Domain 或
-  Infrastructure；
-- CI 已构建 wheel/sdist，并在干净虚拟环境中执行安装后冒烟测试；
-- README 已声明 `purra.api`、公共契约和端口边界；
-- PurrTypos 已通过 Composition Root 注入 Provider、SQLite、领域工具和传输适配。
-
-当前尚不能直接拆仓：
-
-- 开发服务器、Electron 开发进程和 `backend/main.py` 仍通过
-  `packages/purra/src`/`PYTHONPATH` 加载源码；
-- Electron 源码分发仍把 `packages/purra/src/purra` 直接复制进后端资源；
-- PurrTypos 生产代码仍存在对 `purra.run_state`、
-  `purra.output.processor`、`purra.context_orchestration.compaction` 等非顶层公共面
-  的导入，需要逐一判定为“正式公开”或“改为公共入口”；
-- 后端测试与 PurrA 自身测试目前由同一脚本从两个源码目录共同执行；
-- 近期 Agent 改造仍经常同时修改 `packages/purra` 与 `backend`，版本协调规则尚未
-  经历真实跨仓验证。
+- PurrA 公开仓库为 `https://github.com/Lybrands/purra`，采用 MIT 许可证；
+- PurrA 包级测试、结构门禁、wheel/sdist 构建和安装后冒烟由其独立 CI 负责；
+- PurrTypos 通过 `backend/requirements-purra.txt` 锁定完整提交
+  `fdbada4f38b55aacbd66a57e5ba6f3cc7a3c2569`，不依赖 `main`；
+- 开发、CI、Web/Electron 资源准备和 PyInstaller 共用同一依赖文件；
+- PurrTypos 仓库已删除 `packages/purra`，只保留宿主导入、适配和持久化测试；
+- Provider、SQLite、领域工具和传输适配仍由 PurrTypos Composition Root 注入。
 
 ## 3. 目标边界
 
@@ -105,7 +91,7 @@ PurrTypos 的生产代码只能导入 PurrA 文档明确承诺的公共模块。
 
 ## 5. 迁移阶段
 
-### 阶段 A：Monorepo 内边界收口
+### 阶段 A：Monorepo 内边界收口（已完成）
 
 1. 盘点所有 PurrTypos 生产代码和测试对 `purra.*` 的导入。
 2. 为每个非公共导入作出“公开”或“移除”决定，并留下静态架构测试。
@@ -117,7 +103,7 @@ PurrTypos 的生产代码只能导入 PurrA 文档明确承诺的公共模块。
 
 阶段 A 完成前，不创建独立仓库，不删除原目录。
 
-### 阶段 B：以干净历史创建公开 PurrA 仓库
+### 阶段 B：以干净历史创建公开 PurrA 仓库（已完成）
 
 把当前已审计的 `packages/purra` 提升为新仓库根目录，补齐 MIT 许可证和
 独立 CI，以单个干净初始提交发布到 `Lybrands/purra`。不要迁移 Monorepo 提交历史，
@@ -143,7 +129,7 @@ purra/
 若 0.1.0 从未作为独立制品发布，可把第一次独立发布标记为 `v0.1.0`；若已对外
 发布，则按已有兼容承诺选择下一个版本，禁止覆盖同名制品。
 
-### 阶段 C：PurrTypos 改为版本依赖
+### 阶段 C：PurrTypos 改为版本依赖（已完成）
 
 1. PurrTypos 使用不可变 tag/commit 或包制品锁定 PurrA，禁止依赖 `main` 分支。
 2. CI 和产品构建安装同一个 PurrA 版本；不得出现“测试用源码、发布用 wheel”的
@@ -189,29 +175,29 @@ Artifact 和恢复事实。代码版本回退不等于数据可以回退，因�
 
 ### 7.1 PurrA 仓库门禁
 
-- [ ] `python -m pytest` 通过；
-- [ ] wheel 和 sdist 构建成功；
-- [ ] 干净虚拟环境只安装 wheel 后，能够通过公共 API 完成一个 Agent Run；
-- [ ] `src/purra` 与测试均不导入 PurrTypos 或产品模块；
-- [ ] wheel 内容不包含 PurrTypos 文档、测试夹具或业务资源；
-- [ ] 公共 API 导入面和序列化兼容测试通过；
+- [x] `python -m pytest` 通过；
+- [x] wheel 和 sdist 构建成功；
+- [x] 干净虚拟环境只安装 wheel 后，能够通过公共 API 完成一个 Agent Run；
+- [x] `src/purra` 与测试均不导入 PurrTypos 或产品模块；
+- [x] wheel 内容不包含 PurrTypos 文档、测试夹具或业务资源；
+- [x] 公共 API 导入面和序列化兼容测试通过；
 - [ ] tag、包元数据版本和 CHANGELOG 一致；
 - [ ] 发布制品不可覆盖，并记录 SHA256。
 
 ### 7.2 PurrTypos 仓库门禁
 
-- [ ] 仓库内不存在 `packages/purra` 源码副本；
-- [ ] 生产代码只导入审定的 PurrA 公共模块；
-- [ ] 启动和测试脚本不把 PurrA 源码路径加入 `PYTHONPATH`/`sys.path`；
+- [x] 仓库内不存在 `packages/purra` 源码副本；
+- [x] 生产代码只导入审定的 PurrA 公共模块；
+- [x] 启动和测试脚本不把 PurrA 源码路径加入 `PYTHONPATH`/`sys.path`；
 - [ ] 新 clone 只按依赖文件安装即可运行后端测试；
-- [ ] `npm run check:agent-refactor` 通过；
-- [ ] 使用安装后的 PurrA wheel 通过全部后端和宿主适配测试；
+- [x] `npm run check:agent-refactor` 通过；
+- [x] 使用安装后的 PurrA 分发包通过全部后端和宿主适配测试；
 - [ ] 临时 SQLite 的创建、重启、事件重放、取消和恢复通过；
 - [ ] Web、Electron 开发启动与打包制品启动通过；
 - [ ] 小型真实 Provider E2E 覆盖工具调用、公开输出、Artifact/Revision、刷新重放和
       中断恢复；缺少凭证时标记为产品发布阻塞，而不是把模拟测试报告成真实验证；
 - [ ] 迁移验证启动的所有开发服务已停止，相关端口无监听者；
-- [ ] `git diff --check` 通过。
+- [x] `git diff --check` 通过。
 
 ## 8. 风险与控制
 
@@ -246,7 +232,8 @@ Artifact 和恢复事实。代码版本回退不等于数据可以回退，因�
 - 在没有需求前部署私有包注册中心；
 - 借拆仓改变现有 Writing/Screenplay 产品协议。
 
-## 11. 开始实施前的最终输入
+## 11. 已确认的发布输入
 
-已确认：仓库为公开的 `Lybrands/purra`，使用干净初始提交和 MIT 许可证。
-PurrTypos 的外部依赖锁定方式在阶段 C 实施前确定，不阻塞阶段 B 建库。
+公开仓库为 `Lybrands/purra`，使用干净初始历史和 MIT 许可证。PurrTypos 第一版通过
+完整 Git 提交 SHA 的 GitHub 源码归档安装 PurrA；出现多个稳定消费者或正式制品发布
+需求时，再增加不可覆盖的 tag、Release wheel 和 SHA256 清单。
