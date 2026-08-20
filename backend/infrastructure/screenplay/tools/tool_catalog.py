@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from database.crud.screenplay_source_receipts import record_source_receipts
-from purra.artifacts.errors import ArtifactValidationError
+from purra.artifacts import ArtifactValidationError
 
 from domains.screenplay_agent.tools import (
     ScreenplayToolInputError,

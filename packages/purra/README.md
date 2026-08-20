@@ -59,6 +59,17 @@ requires the next minor release while PurrA remains pre-1.0. `purra.engine`,
 host compatibility surfaces. CI builds both wheel and sdist, installs the
 wheel into a clean environment, and runs one Agent through public imports.
 
+The supported top-level host modules for this line are `api`, `artifacts`,
+`cancellation`, `context_budget`, `context_orchestration`,
+`context_strategies`, `contracts`, `errors`, `evaluation`, `events`,
+`evidence`, `json_values`, `long_tasks`, `model_call_parameters`,
+`model_execution`, `model_invocation`, `model_protocol`, `normalization`,
+`observability`, `orphan_recovery`, `output`, `ports`, `recovery`,
+`run_control`, `stream_ownership`, `structured_output`, `task_admission`,
+`testing`, and `tools`. Hosts import symbols exported by those module roots;
+their implementation submodules are not compatibility surfaces unless this
+README explicitly names one.
+
 ## Dependency direction
 
 ```text

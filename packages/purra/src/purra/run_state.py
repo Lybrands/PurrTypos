@@ -830,3 +830,16 @@ def _unique_step_id(base: str, used: frozenset[str]) -> str:
     while f"{base}-{suffix}" in used:
         suffix += 1
     return f"{base}-{suffix}"
+
+
+def canonicalize_execution_plan(plan: ExecutionPlan) -> ExecutionPlan:
+    """Apply the same initial step-state rules used when Core opens a Run."""
+
+    snapshot = RunStateMachine.initialize("canonical-plan", plan)
+    return ExecutionPlan(
+        title=snapshot.title,
+        goal=snapshot.goal,
+        task_spec=snapshot.task_spec,
+        steps=snapshot.steps,
+        work_step_ids=snapshot.work_step_ids,
+    )

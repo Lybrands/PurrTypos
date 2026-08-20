@@ -31,15 +31,21 @@ from purra.output.ports import (
     CommittedResultFactsProvider,
     ValidatedResultCommitter,
 )
-
-_LAZY_RESPONSE_TRANSACTION_EXPORTS = frozenset({
-    "AgentResponseTransaction",
-    "ResponseTransactionValidationError",
-})
+_LAZY_EXPORT_MODULES = {
+    "AgentOutputProcessor": "processor",
+    "OutputRecoveryObserver": "processor",
+    "AgentResponseTransaction": "response_transaction",
+    "ResponseTransactionValidationError": "response_transaction",
+}
 
 
 def __getattr__(name: str):
-    if name in _LAZY_RESPONSE_TRANSACTION_EXPORTS:
+    module_name = _LAZY_EXPORT_MODULES.get(name)
+    if module_name == "processor":
+        from purra.output import processor
+
+        return getattr(processor, name)
+    if module_name == "response_transaction":
         from purra.output import response_transaction
 
         return getattr(response_transaction, name)
@@ -48,4 +54,4 @@ def __getattr__(name: str):
 
 __all__ = [
     name for name in globals() if not name.startswith("_")
-] + sorted(_LAZY_RESPONSE_TRANSACTION_EXPORTS)
+] + sorted(_LAZY_EXPORT_MODULES)

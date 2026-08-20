@@ -19,7 +19,21 @@ from purra.artifacts.maintenance import (
     ArtifactMaintenanceSnapshot,
 )
 from purra.artifacts.access import ArtifactAccessController
-from purra.artifacts.ports import ArtifactAccessAuthorizer
+from purra.artifacts.errors import (
+    ArtifactAccessDeniedError,
+    ArtifactConflictError,
+    ArtifactError,
+    ArtifactNotFoundError,
+    ArtifactStateError,
+    ArtifactValidationError,
+)
+from purra.artifacts.ports import (
+    ArtifactAccessAuthorizer,
+    ArtifactClaimRepository,
+    ArtifactMaintenanceRepository,
+    ArtifactRepository,
+    ArtifactValidator,
+)
 from purra.artifacts.continuity import (
     ArtifactAccessDecision,
     ArtifactAccessGrant,
@@ -35,6 +49,7 @@ from purra.artifacts.continuity import (
 
 __all__ = [
     "ArtifactAccessController",
+    "ArtifactAccessDeniedError",
     "ArtifactAccessAuthorizer",
     "ArtifactAccessDecision",
     "ArtifactAccessGrant",
@@ -46,18 +61,27 @@ __all__ = [
     "ArtifactBatch",
     "ArtifactBatchReceipt",
     "ArtifactClaimLeaseCommand",
+    "ArtifactClaimRepository",
+    "ArtifactConflictError",
     "ArtifactCreateCommand",
     "ArtifactFinalizeCommand",
     "ArtifactMutationLease",
     "ArtifactMaintenancePolicy",
+    "ArtifactMaintenanceRepository",
     "ArtifactMaintenanceReport",
     "ArtifactMaintenanceSnapshot",
     "ArtifactLifecycle",
+    "ArtifactError",
+    "ArtifactNotFoundError",
     "ArtifactOwnerRef",
     "ArtifactRecord",
+    "ArtifactRepository",
     "ArtifactResumeCandidate",
     "ArtifactStatus",
+    "ArtifactStateError",
     "ArtifactValidationResult",
+    "ArtifactValidationError",
+    "ArtifactValidator",
     "ArtifactWriteClaim",
     "ArtifactWriteClaimCommand",
 ]

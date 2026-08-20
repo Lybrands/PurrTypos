@@ -10,9 +10,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from purra.context_orchestration.compaction import (
-    ContextCompressionCoordinator,
-)
+from purra.context_orchestration import ContextCompressionCoordinator
 from purra.context_strategies import ContextStrategy
 from purra.contracts import (
     AgentMessage,

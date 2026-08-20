@@ -12,7 +12,7 @@ from typing import Any
 
 from purra.contracts import SessionId
 from purra.json_values import thaw_json_mapping
-from purra.long_tasks.contracts import (
+from purra.long_tasks import (
     LongTaskCreateCommand,
     LongTaskRecord,
     LongTaskRunBinding,

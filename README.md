@@ -27,8 +27,9 @@
 # 1. 安装前端依赖
 npm install
 
-# 2. 安装后端依赖（路径相对仓库根目录）
+# 2. 安装后端依赖与本仓 PurrA 包（路径相对仓库根目录）
 pip install -r backend/requirements.txt
+pip install --no-build-isolation -e packages/purra
 ```
 
 如 Electron 二进制下载失败（"Electron failed to install correctly"），可尝试：

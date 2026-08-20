@@ -32,6 +32,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements.txt
       - run: python -m pip install -r backend/requirements.txt
+      - run: python -m pip install --no-deps --no-build-isolation -e packages/purra
       - name: Build PurrA distributions
         run: |
           python -m pip install build
@@ -41,4 +42,8 @@ jobs:
           python -m venv "$RUNNER_TEMP/purra-smoke"
           "$RUNNER_TEMP/purra-smoke/bin/python" -m pip install --no-deps packages/purra/dist/*.whl
           "$RUNNER_TEMP/purra-smoke/bin/python" packages/purra/tests/installed_distribution_smoke.py
+      - name: Install the built wheel for host tests
+        run: |
+          python -m pip install --force-reinstall --no-deps packages/purra/dist/*.whl
+          python -c 'import pathlib, purra; assert "packages/purra/src" not in pathlib.Path(purra.__file__).as_posix()'
       - run: python -m pytest backend/tests packages/purra/tests
