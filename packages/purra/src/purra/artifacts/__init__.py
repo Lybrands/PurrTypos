@@ -12,12 +12,14 @@ from purra.artifacts.contracts import (
     ArtifactValidationResult,
 )
 from purra.artifacts.lifecycle import ArtifactLifecycle
+from purra.artifacts.ownership import ArtifactOwnerRef
 from purra.artifacts.maintenance import (
     ArtifactMaintenancePolicy,
     ArtifactMaintenanceReport,
     ArtifactMaintenanceSnapshot,
 )
 from purra.artifacts.access import ArtifactAccessController
+from purra.artifacts.ports import ArtifactAccessAuthorizer
 from purra.artifacts.continuity import (
     ArtifactAccessDecision,
     ArtifactAccessGrant,
@@ -27,14 +29,13 @@ from purra.artifacts.continuity import (
     ArtifactAccessRequest,
     ArtifactClaimLeaseCommand,
     ArtifactResumeCandidate,
-    ArtifactScope,
-    ArtifactScopeBinding,
     ArtifactWriteClaim,
     ArtifactWriteClaimCommand,
 )
 
 __all__ = [
     "ArtifactAccessController",
+    "ArtifactAccessAuthorizer",
     "ArtifactAccessDecision",
     "ArtifactAccessGrant",
     "ArtifactAccessMode",
@@ -52,10 +53,9 @@ __all__ = [
     "ArtifactMaintenanceReport",
     "ArtifactMaintenanceSnapshot",
     "ArtifactLifecycle",
+    "ArtifactOwnerRef",
     "ArtifactRecord",
     "ArtifactResumeCandidate",
-    "ArtifactScope",
-    "ArtifactScopeBinding",
     "ArtifactStatus",
     "ArtifactValidationResult",
     "ArtifactWriteClaim",

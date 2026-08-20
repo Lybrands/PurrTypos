@@ -78,22 +78,6 @@ class ResolveToolApprovalRequest(BaseModel):
     approved: bool
 
 
-class CreateAgentDelegationRequest(BaseModel):
-    agentRole: str
-    objective: str
-    input: Dict[str, Any] = Field(default_factory=dict)
-    required: bool = True
-    priority: int = 0
-
-    @field_validator("agentRole", "objective")
-    @classmethod
-    def require_text(cls, value: str) -> str:
-        normalized = str(value or "").strip()
-        if not normalized:
-            raise ValueError("value must not be empty")
-        return normalized
-
-
 class CaptureAiErrorReportRequest(BaseModel):
     streamId: str
     agentRunId: Optional[str] = None

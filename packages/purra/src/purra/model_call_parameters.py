@@ -43,7 +43,7 @@ def build_model_call_parameters(
     }
     if invocation.request.profile_id is not None:
         result["profileId"] = invocation.request.profile_id
-    capabilities = invocation.request.output_capabilities
+    capabilities = invocation.request.capability_snapshot.output
     if (
         capabilities.max_output_tokens is not None
         or capabilities.thinking_token_accounting.value != "unknown"

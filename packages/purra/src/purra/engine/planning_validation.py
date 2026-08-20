@@ -10,10 +10,9 @@ from purra.contracts import (
     PlanningConstraints,
     StepExecutor,
     StepType,
-    TaskPlan,
+    ExecutionPlan,
 )
 from purra.errors import ContractViolationError
-from purra.plan_constraints import agent_assignment_coverage_violations
 from purra.ports import ToolCatalog, ToolRegistration
 
 
@@ -42,10 +41,9 @@ def effective_registrations(
 
 
 def validate_plan_authority(
-    plan: TaskPlan,
+    plan: ExecutionPlan,
     enabled_names: frozenset[str],
     *,
-    available_agent_roles: frozenset[str] = frozenset(),
     constraints: PlanningConstraints = PlanningConstraints(),
     max_tool_steps: int,
 ) -> None:
@@ -62,25 +60,6 @@ def validate_plan_authority(
             )
         if step.executor is StepExecutor.MODEL and step.suggested_tools:
             raise ContractViolationError("model plan steps cannot grant tools")
-        if step.executor is StepExecutor.AGENT:
-            if step.agent_role is None:
-                raise ContractViolationError(
-                    "agent plan step requires an agent role"
-                )
-            if step.agent_role in constraints.planning_excluded_agent_roles:
-                raise ContractViolationError(
-                    "plan selects an Agent role excluded by the request: "
-                    + step.agent_role
-                )
-            if step.agent_role not in available_agent_roles:
-                raise ContractViolationError(
-                    "plan selects an Agent role outside request scope: "
-                    + step.agent_role
-                )
-            if step.suggested_tools:
-                raise ContractViolationError(
-                    "agent plan steps cannot grant tools"
-                )
         if step.executor is StepExecutor.TOOL:
             if len(step.suggested_tools) != 1:
                 raise ContractViolationError(
@@ -117,12 +96,6 @@ def validate_plan_authority(
             f"at most {max_tool_steps} while reserving correction and final "
             "response rounds"
         )
-    assignment_violations = agent_assignment_coverage_violations(
-        plan,
-        constraints.agent_assignment_coverages,
-    )
-    if assignment_violations:
-        raise ContractViolationError("; ".join(assignment_violations))
 
 
 def validate_planning_constraints(
@@ -155,52 +128,12 @@ def validate_planning_constraints(
             "planning constraints name unavailable private runtime tools: "
             + ", ".join(sorted(unknown_execution))
         )
-    unknown_roles = (
-        constraints.planning_excluded_agent_roles
-        | constraints.required_any_agent_roles
-        | frozenset(
-            coverage.agent_role
-            for coverage in constraints.agent_assignment_coverages
-        )
-    ) - capabilities.available_agent_roles
-    if unknown_roles:
-        raise ContractViolationError(
-            "planning constraints name unavailable Agent roles: "
-            + ", ".join(sorted(unknown_roles))
-        )
-    unavailable_required_roles = (
-        constraints.required_any_agent_roles
-        & constraints.planning_excluded_agent_roles
-    )
-    if unavailable_required_roles:
-        raise ContractViolationError(
-            "required Agent roles must remain selectable: "
-            + ", ".join(sorted(unavailable_required_roles))
-        )
-    if (
-        constraints.required_any_agent_roles
-        and StepExecutor.AGENT in constraints.planning_excluded_executors
-    ):
-        raise ContractViolationError(
-            "required Agent roles need the Agent executor to remain selectable"
-        )
     if (
         constraints.required_any_tool_names
         and StepExecutor.TOOL in constraints.planning_excluded_executors
     ):
         raise ContractViolationError(
             "required tools need the tool executor to remain selectable"
-        )
-    if constraints.minimum_root_agent_count > capabilities.max_parallel_agents:
-        raise ContractViolationError(
-            "minimum initial Agent frontier exceeds the host parallel limit"
-        )
-    if (
-        constraints.minimum_root_agent_count > 0
-        and not capabilities.available_agent_roles
-    ):
-        raise ContractViolationError(
-            "minimum initial Agent frontier requires available Agent roles"
         )
     overlap = (
         constraints.context_satisfied_tool_names
@@ -307,16 +240,6 @@ def validate_task_constraint_refinement(
             base.execution_satisfied_tool_names
             - refined.execution_satisfied_tool_names
         )
-        or (
-            base.planning_excluded_agent_roles
-            - refined.planning_excluded_agent_roles
-        )
-        or base.required_any_agent_roles - refined.required_any_agent_roles
-        or any(
-            coverage not in refined.agent_assignment_coverages
-            for coverage in base.agent_assignment_coverages
-        )
-        or refined.minimum_root_agent_count < base.minimum_root_agent_count
         or (
             base.planning_excluded_executors
             - refined.planning_excluded_executors

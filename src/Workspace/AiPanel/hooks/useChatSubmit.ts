@@ -307,6 +307,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         role: "assistant" as const,
         content: "",
         clientTurnId,
+        sentAt: userSentAt,
+        model: cfg?.name ?? requestSelectedModel,
         turnStartedAt,
         commentary: "",
       };
@@ -326,9 +328,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
               sentAt: userSentAt,
             },
             {
-              role: "assistant",
-              content: "",
-              clientTurnId,
+              ...assistantPlaceholder,
               error: "请先在设置中添加模型并填写 API Key",
               isError: true,
             },
@@ -338,9 +338,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
             ...prev,
             { role: "user", content: userText, clientTurnId, sentAt: userSentAt },
             {
-              role: "assistant",
-              content: "",
-              clientTurnId,
+              ...assistantPlaceholder,
               error: "请先在设置中添加模型并填写 API Key",
               isError: true,
             },

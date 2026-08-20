@@ -209,6 +209,7 @@ test('canonical long-task progress restores the long task id without public plan
           id: 'document:evidence',
           position: 0,
           kind: 'collect_evidence',
+          title: '读取原作内容',
           status: 'completed',
           attempt: 1,
           maxAttempts: 2,
@@ -216,6 +217,7 @@ test('canonical long-task progress restores the long task id without public plan
           id: 'section:characters',
           position: 1,
           kind: 'generate_document_section',
+          title: '分析人物',
           status: 'claimed',
           attempt: 1,
           maxAttempts: 4,
@@ -223,6 +225,7 @@ test('canonical long-task progress restores the long task id without public plan
           id: 'section:story',
           position: 2,
           kind: 'generate_document_section',
+          title: '梳理故事',
           status: 'claimed',
           attempt: 1,
           maxAttempts: 4,
@@ -230,6 +233,7 @@ test('canonical long-task progress restores the long task id without public plan
           id: 'compose-final-response',
           position: 3,
           kind: 'compose_final_response',
+          title: '生成回复',
           status: 'pending',
           attempt: 0,
           maxAttempts: 2,
@@ -448,22 +452,16 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
     turnStartedAt: performance.now() + 60_000,
   }
   const root = seed.rootRunId
-  const child = 'child-screenplay-research'
   const delegation = 'delegation-screenplay-research'
   const dependencies = { cfg: model, appMessage }
-  const childEvent = (sequence, overrides) => canonical(child, sequence, {
-    turnId: seed.turnId,
-    ...overrides,
-  })
   const delegationEvent = (sequence, payload) => canonical(root, sequence, {
     turnId: seed.turnId,
     kind: 'delegation.event',
     channel: 'delegation',
     payload: {
       delegationId: delegation,
-      parentRunId: root,
-      childRunId: child,
-      agentRole: 'researcher',
+      runId: root,
+      agentName: 'researcher',
       agentTitle: '研究 Agent',
       objective: '核验场景证据',
       ...payload,
@@ -591,57 +589,6 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
       },
     }),
     delegationEvent(11, { eventType: 'status', status: 'running' }),
-    delegationEvent(12, {
-      eventType: 'child_output',
-      status: 'running',
-      event: childEvent(1, {
-        kind: 'operation.started',
-        channel: 'operation',
-        payload: {
-          operationId: 'child-tool-verify',
-          kind: 'tool',
-          display: {
-            labelKey: 'agent.operation.tool',
-            labelParams: { toolName: 'verifySceneEvidence' },
-          },
-        },
-      }),
-    }),
-    delegationEvent(13, {
-      eventType: 'child_output',
-      status: 'running',
-      event: childEvent(2, {
-        kind: 'operation.finished',
-        channel: 'operation',
-        payload: {
-          operationId: 'child-tool-verify',
-          status: 'succeeded',
-        },
-      }),
-    }),
-    delegationEvent(14, {
-      eventType: 'child_output',
-      status: 'running',
-      event: childEvent(3, {
-        outputStreamId: 'child-final',
-        invocationId: 'child-invocation',
-        source: 'provider',
-        kind: 'provider.content_delta',
-        channel: 'final',
-        payload: { delta: '三条场景证据已核验。' },
-      }),
-    }),
-    delegationEvent(15, {
-      eventType: 'child_output',
-      status: 'running',
-      event: childEvent(4, {
-        outputStreamId: 'child-final',
-        invocationId: 'child-invocation',
-        kind: 'stream.committed',
-        channel: 'final',
-        payload: { finishReason: 'stop' },
-      }),
-    }),
     delegationEvent(16, { eventType: 'status', status: 'done' }),
     canonical(root, 17, {
       turnId: seed.turnId,
@@ -786,14 +733,15 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
   })
   assert.deepEqual(restored?.delegations?.map((item) => [
     item.delegationId,
-    item.childRunId,
+    item.runId,
     item.status,
-  ]), [[delegation, child, 'done']])
-  const childMessage = restored?.subAgentActivities?.[0]?.message
-  assert.equal(childMessage?.content, '三条场景证据已核验。')
+  ]), [[delegation, root, 'done']])
+  const delegationMessage = restored?.subAgentActivities?.[0]?.message
+  assert.equal(delegationMessage?.content, '')
+  assert.equal(delegationMessage?.agentRunId, root)
   assert.deepEqual(
-    childMessage?.canonicalOutput?.operationOrder,
-    ['child-tool-verify'],
+    delegationMessage?.canonicalOutput?.operationOrder,
+    [],
   )
   assert.deepEqual(
     restored?.taskPlan?.steps.map((step) => step.resultSummary),
@@ -805,7 +753,7 @@ test('screenplay canonical Root lifecycle is identical live and on replay', () =
   )
 })
 
-test('replay keeps the Root Run public plan isolated from child Run events', () => {
+test('replay keeps the owning Run public plan isolated from foreign Run events', () => {
   const replay = new AgentChunkReplay()
   const seed = {
     turnId: 'turn-root-plan-ownership',
@@ -841,7 +789,7 @@ test('replay keeps the Root Run public plan isolated from child Run events', () 
     channel: 'final',
     payload: { delta: 'Root 回答' },
   }), dependencies)
-  replay.dispatch(seed, canonical('child-run-a', 1, {
+  replay.dispatch(seed, canonical('foreign-run-a', 1, {
     payload: {
       eventType: 'run.todo_updated',
       data: {
@@ -849,24 +797,24 @@ test('replay keeps the Root Run public plan isolated from child Run events', () 
         status: 'done',
         step: {
           id: 'draft',
-          title: '子 Run 改写步骤',
+          title: '外部 Run 改写步骤',
           type: 'write',
           status: 'done',
         },
       },
     },
   }), dependencies)
-  replay.dispatch(seed, canonical('child-run-a', 2, {
+  replay.dispatch(seed, canonical('foreign-run-a', 2, {
     kind: 'run.lifecycle',
     payload: { status: 'done' },
   }), dependencies)
-  replay.dispatch(seed, canonical('child-run-a', 3, {
+  replay.dispatch(seed, canonical('foreign-run-a', 3, {
     outputStreamId: 'foreign-final',
     invocationId: 'foreign-invocation',
     source: 'provider',
     kind: 'provider.content_delta',
     channel: 'final',
-    payload: { delta: '子 Run 回答' },
+    payload: { delta: '外部 Run 回答' },
   }), dependencies)
 
   let assistant = replay.assistant(seed.turnId)

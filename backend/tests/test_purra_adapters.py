@@ -34,6 +34,7 @@ from purra.model_protocol import (
 )
 from purra.ports import ModelGateway
 from purra.runtime import AgentRuntime
+from purra.testing import assert_model_gateway_conforms
 from infrastructure.models import provider_model_gateway
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from infrastructure.models.profiles.registry import resolve_model_profile
@@ -349,7 +350,23 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
         })
         return {"stream": _chunks(), "model": "resolved-model"}
 
+    async def _complete(key, messages, options, provider, signal):
+        assert key == "secret"
+        assert messages[0]["content"] == "hello"
+        assert options["model"] == "requested-model"
+        assert provider == "anthropic"
+        assert signal is None
+        return {
+            "message": {"role": "assistant", "content": "complete"},
+            "model": "resolved-model",
+            "finish_reason": "stop",
+        }
+
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _complete,
+    )
     gateway = ProviderModelGateway("secret")
     request = ModelRequest(
         provider="anthropic",
@@ -368,8 +385,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
             "metadata": {"tags": ["writing"]},
         },
     )
-    stream = await gateway.stream(
-        [AgentMessage(
+    messages = (AgentMessage(
             role="user",
             content="hello",
             attributes={
@@ -384,8 +400,8 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
                     "text": "private receipt",
                 }],
             },
-        )],
-        ModelInvocation(
+        ),)
+    invocation = ModelInvocation(
             request=request,
             tools=(ToolSchema(
                 name="readThing",
@@ -398,12 +414,17 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
             tool_choice=ToolChoiceMode.REQUIRED,
             output_limit=_limit(2_048),
             reasoning_mode=ReasoningMode.DISABLED,
-        ),
+        )
+    chunks, completion = await assert_model_gateway_conforms(
+        gateway=gateway,
+        messages=messages,
+        invocation=invocation,
+        expected_model="resolved-model",
+        expected_tool_names=("readThing",),
     )
 
     assert isinstance(gateway, ModelGateway)
-    assert stream.model == "resolved-model"
-    chunks = [chunk async for chunk in stream.chunks]
+    assert completion.message.content == "complete"
     assert chunks[0].content_delta == "ok"
     assert chunks[0].reasoning_delta == "brief"
     assert chunks[0].finish_reason == "tool_calls"
@@ -624,6 +645,30 @@ async def test_provider_model_gateway_standardizes_upstream_stream_interruptions
     assert captured.value.code == "upstream_stream_interrupted"
     assert captured.value.retryable is True
     assert "secret" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_provider_model_gateway_standardizes_completion_failures(monkeypatch):
+    async def _complete(*_args, **_kwargs):
+        raise httpx.ReadError("completion contained private transport details")
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _complete,
+    )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        await ProviderModelGateway("secret").complete(
+            [AgentMessage(role="user", content="hello")],
+            ModelInvocation(
+                request=ModelRequest(provider="openai", model="model"),
+                tool_choice=ToolChoiceMode.NONE,
+            ),
+        )
+
+    assert captured.value.code == "upstream_stream_interrupted"
+    assert captured.value.retryable is True
+    assert "private" not in str(captured.value)
 
 
 @pytest.mark.asyncio

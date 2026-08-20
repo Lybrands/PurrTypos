@@ -7,12 +7,16 @@ from typing import Any, Protocol, runtime_checkable
 
 from purra.contracts import (
     AgentDelegation,
-    AgentRunResult,
+    DelegationContextMode,
     DelegationAggregation,
-    DelegationClaim,
-    RunCheckpoint,
     RunExecutionLease,
     RunId,
+)
+from purra.run_recovery import RunRecoverySnapshot
+from purra.run_control import (
+    OrphanRunCandidate,
+    RunActivitySnapshot,
+    RunCancellationReceipt,
 )
 from purra.ports.run_lifecycle import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
@@ -55,76 +59,131 @@ class DelegationRepository(Protocol):
     async def create(
         self,
         *,
-        parent_run_id: RunId,
-        agent_role: str,
+        run_id: RunId,
+        batch_id: str,
+        agent_name: str,
+        agent_title: str,
+        agent_instruction: str,
         objective: str,
         input_payload: Mapping[str, Any] | None = None,
+        context_mode: DelegationContextMode = DelegationContextMode.ISOLATED,
         required: bool = True,
         priority: int = 0,
-        max_depth: int = 3,
     ) -> AgentDelegation: ...
 
-    async def claim_next(
+    async def start(
         self,
-        *,
-        parent_run_id: RunId,
-        worker_id: str,
-        max_parallel_children: int,
-        agent_role: str | None = None,
-    ) -> DelegationClaim | None: ...
-
-    async def claim(
-        self,
-        *,
         delegation_id: str,
-        parent_run_id: RunId,
-        worker_id: str,
-        max_parallel_children: int,
-    ) -> DelegationClaim | None: ...
-
-    async def record_result(
-        self,
         *,
-        delegation_id: str,
-        child_run_id: RunId,
-        result: AgentRunResult,
-    ) -> bool: ...
+        run_id: RunId,
+        batch_id: str,
+    ) -> AgentDelegation | None: ...
 
-    async def attach_child_run(
+    async def complete(
         self,
-        *,
         delegation_id: str,
-        child_run_id: RunId,
-        worker_id: str,
+        *,
+        run_id: RunId,
+        batch_id: str,
+        result_summary: str,
     ) -> bool: ...
 
     async def fail(
         self,
-        *,
         delegation_id: str,
-        worker_id: str,
+        *,
+        run_id: RunId,
+        batch_id: str,
         error: str,
     ) -> bool: ...
 
-    async def list_for_parent(
+    async def cancel(
         self,
-        parent_run_id: RunId,
+        delegation_id: str,
+        *,
+        run_id: RunId,
+        batch_id: str,
+        reason: str,
+    ) -> bool: ...
+
+    async def list_for_run(
+        self,
+        run_id: RunId,
     ) -> tuple[AgentDelegation, ...]: ...
 
-    async def aggregate(self, parent_run_id: RunId) -> DelegationAggregation: ...
+    async def aggregate_batch(
+        self,
+        run_id: RunId,
+        batch_id: str,
+    ) -> DelegationAggregation: ...
 
-    async def cancel_children(self, parent_run_id: RunId) -> int: ...
+    async def cancel_batch(self, run_id: RunId, batch_id: str) -> int: ...
 
 
 @runtime_checkable
-class CheckpointStore(Protocol):
+class RunRecoveryStore(Protocol):
     async def load(
         self,
         run_id: RunId,
         *,
         after_event_id: int = 0,
         limit: int = 100,
-    ) -> RunCheckpoint | None: ...
+    ) -> RunRecoverySnapshot | None: ...
+
+
+@runtime_checkable
+class RunControlStore(ExecutionLeaseStore, Protocol):
+    """Atomic persistence required to control Runs without a live handle."""
+
+    async def claim_for_cancellation(
+        self,
+        run_id: RunId,
+        owner_id: str,
+        *,
+        lease_duration_ms: int,
+        timestamp_ms: int | None = None,
+    ) -> bool: ...
+
+    async def load_cancellation_receipt(
+        self,
+        run_id: RunId,
+    ) -> RunCancellationReceipt | None: ...
+
+    async def fence_cancellation(
+        self,
+        run_id: RunId,
+    ) -> RunCancellationReceipt: ...
+
+    async def complete_cancellation(
+        self,
+        run_id: RunId,
+        *,
+        terminalized: bool,
+    ) -> RunCancellationReceipt: ...
+
+    async def list_orphans(
+        self,
+        *,
+        timestamp_ms: int | None = None,
+        after_restart: bool = False,
+    ) -> tuple[OrphanRunCandidate, ...]: ...
+
+    async def claim_orphan(
+        self,
+        candidate: OrphanRunCandidate,
+        owner_id: str,
+        *,
+        lease_duration_ms: int,
+        timestamp_ms: int | None = None,
+        after_restart: bool = False,
+    ) -> bool: ...
+
+    async def inspect_activity(
+        self,
+        *,
+        run_ids: tuple[RunId, ...] = (),
+        task_ids: tuple[str, ...] = (),
+    ) -> RunActivitySnapshot: ...
 
 
 __all__ = [name for name in globals() if not name.startswith("_")]

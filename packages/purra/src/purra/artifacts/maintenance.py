@@ -11,6 +11,7 @@ from purra.normalization import (
     positive_int,
 )
 
+
 @dataclass(frozen=True, slots=True)
 class ArtifactMaintenancePolicy:
     """Bound safe lease cleanup and optional terminal-state retention.
@@ -18,19 +19,19 @@ class ArtifactMaintenancePolicy:
     Claims are disposable execution leases, so invalid claims are always
     eligible for cleanup. Artifact content is durable recovery/audit state and
     is only eligible for deletion when ``terminal_retention_ms`` is explicit.
-    Open Work Items and open Artifacts are never retention-GC candidates.
+    Open Artifacts are never retention-GC candidates.
     """
 
     terminal_retention_ms: int | None = None
-    max_purge_work_items: int = 100
-    max_purge_run_artifacts: int = 100
+    max_purge_artifacts: int = 100
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "terminal_retention_ms", optional_non_negative_int(
             self.terminal_retention_ms, "terminal_retention_ms"
         ))
-        for name in ("max_purge_work_items", "max_purge_run_artifacts"):
-            object.__setattr__(self, name, positive_int(getattr(self, name), name))
+        object.__setattr__(self, "max_purge_artifacts", positive_int(
+            self.max_purge_artifacts, "max_purge_artifacts"
+        ))
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +41,6 @@ class ArtifactMaintenanceReport:
     expired_claims_released: int = 0
     unavailable_run_claims_released: int = 0
     invalid_target_claims_released: int = 0
-    purged_work_items: int = 0
     purged_artifacts: int = 0
     consistency_issues: int = 0
 
@@ -49,7 +49,6 @@ class ArtifactMaintenanceReport:
             "expired_claims_released",
             "unavailable_run_claims_released",
             "invalid_target_claims_released",
-            "purged_work_items",
             "purged_artifacts",
             "consistency_issues",
         ):
@@ -67,7 +66,6 @@ class ArtifactMaintenanceReport:
     def changed(self) -> bool:
         return bool(
             self.released_claims
-            or self.purged_work_items
             or self.purged_artifacts
         )
 
@@ -78,10 +76,6 @@ class ArtifactMaintenanceSnapshot:
 
     checked_at_ms: int
     scope_run_id: str | None = None
-    open_work_items: int = 0
-    completed_work_items: int = 0
-    canceled_work_items: int = 0
-    unknown_work_items: int = 0
     open_artifacts: int = 0
     finalized_artifacts: int = 0
     aborted_artifacts: int = 0
@@ -98,10 +92,6 @@ class ArtifactMaintenanceSnapshot:
         ))
         object.__setattr__(self, "scope_run_id", optional_text(self.scope_run_id))
         for name in (
-            "open_work_items",
-            "completed_work_items",
-            "canceled_work_items",
-            "unknown_work_items",
             "open_artifacts",
             "finalized_artifacts",
             "aborted_artifacts",
@@ -113,15 +103,6 @@ class ArtifactMaintenanceSnapshot:
             "consistency_issues",
         ):
             object.__setattr__(self, name, non_negative_int(getattr(self, name), name))
-
-    @property
-    def work_item_count(self) -> int:
-        return (
-            self.open_work_items
-            + self.completed_work_items
-            + self.canceled_work_items
-            + self.unknown_work_items
-        )
 
     @property
     def artifact_count(self) -> int:

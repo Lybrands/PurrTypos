@@ -325,14 +325,13 @@ git add backend/application/screenplay_agent_planner.py backend/database/crud/sc
 git commit -m "refactor(screenplay-agent): retire independent planner runs"
 ```
 
-## Task 10: 完整门禁与真实 Provider E2E
+## Task 10: 完整离线门禁与手工 Provider 验收
 
 **Files:**
-- Modify: `backend/tests/test_screenplay_multi_model_e2e.py`
 - Verify all related suites.
 
-- [ ] 扩展 real_provider case，覆盖 answer、正式 create、一次 checkpoint revision、手动 cancel、resume 和 Candidate 生成。
-- [ ] E2E 必须断言：
+- [ ] 项目所有者手工覆盖 answer、正式 create、一次 checkpoint revision、手动 cancel、resume 和 Candidate 生成。
+- [ ] 手工验收必须确认：
   - 每个用户 Turn 一个 Root Run；
   - answer 不创建 Operation；
   - formal task 一个 Operation；
@@ -350,19 +349,7 @@ npm run test:screenplay-acceptance
 git diff --check
 ```
 
-- [ ] 配置真实 Provider 后运行：
-
-```bash
-npm run test:screenplay-real-e2e
-```
-
-- [ ] 缺少凭据、额度或网络时标记 RELEASE BLOCKER，不得用 simulated provider 替代。
-- [ ] 提交 E2E：
-
-```bash
-git add backend/tests/test_screenplay_multi_model_e2e.py
-git commit -m "test(screenplay-agent): verify root run durable workflow"
-```
+- [ ] 真实 Provider 验收在仓库测试之外执行，不得用 simulated provider 替代。
 
 ## Acceptance Checklist
 

@@ -21,6 +21,7 @@ from purra.contracts import (
     ContextBudgetClaim,
     DomainContext,
     ExecutionState,
+    ExecutionTransition,
     MessageRole,
     ModelCompletion,
     ModelFinishReason,
@@ -33,6 +34,7 @@ from purra.contracts import (
     ResponseConstraints,
     RuntimeLimits,
     RuntimeOutcome,
+    StepExecutor,
     ToolBatchOutcome,
     ToolBatchRequest,
     ToolBatchResult,
@@ -131,6 +133,14 @@ class RecordingObserver:
             return frozenset()
         return frozenset().union(*self.scopes[self.scope_index + 1:])
 
+    def current_execution_transition(self) -> ExecutionTransition:
+        return ExecutionTransition(
+            step_id=f"test-step-{self.scope_index}",
+            executor=StepExecutor.TOOL if self.scopes else StepExecutor.MODEL,
+            allowed_tool_names=self.current_allowed_tool_names(),
+            future_tool_names=self.future_allowed_tool_names(),
+        )
+
     async def record_trace(self, trace: TraceRecord) -> None:
         self.traces.append(trace)
 
@@ -147,6 +157,26 @@ class RecordingObserver:
         self.completed_tool_rounds += 1
         self.completed_tool_outcomes.append(ToolBatchOutcome(outcome))
         self.scope_index += 1
+
+
+class RecordingOutputObserver:
+    def __init__(self):
+        self.commentary_streams: list[str] = []
+
+    async def open_model_stream(self, receipt, spec):
+        del receipt, spec
+
+    async def accept_provider_chunk(self, output_stream_id, chunk):
+        del output_stream_id, chunk
+
+    async def finish_model_stream(self, output_stream_id, finish_reason):
+        del output_stream_id, finish_reason
+
+    async def abort_model_stream(self, output_stream_id, error_code):
+        del output_stream_id, error_code
+
+    async def publish_model_stream_commentary(self, output_stream_id):
+        self.commentary_streams.append(output_stream_id)
 
 
 class RecoveryPlanningHook:
@@ -826,6 +856,45 @@ async def test_structured_tool_call_during_response_repair_is_rejected():
     )
     assert _result(updates).outcome is RuntimeOutcome.FAILED
     assert _result(updates).error_code == "tool_call_during_response_repair"
+
+
+@pytest.mark.asyncio
+async def test_structured_tool_call_during_public_presentation_is_rejected():
+    model = ScriptedModelGateway([
+        _answer("private tool-capable answer"),
+        _tool_call("remembered-call", "readA"),
+    ])
+    tools = ScriptedToolGateway([])
+    observer = RecordingObserver()
+
+    updates = await _collect(
+        AgentRuntime(
+            model_gateway=model,
+            tool_execution_gateway=tools,
+            observer=observer,
+        ),
+        tools=(_schema("readA"),),
+        scope_tools_to_observer=False,
+    )
+
+    assert len(model.invocations) == 2
+    assert model.invocations[0].tools
+    assert model.invocations[1].tools == ()
+    assert model.invocations[1].tool_choice is ToolChoiceMode.NONE
+    assert tools.requests == []
+    assert not any(
+        isinstance(update, AgentEvent)
+        and update.type == CoreEventType.TOOL_CALLS_STARTED
+        for update in updates
+    )
+    assert _result(updates).error_code == (
+        "tool_call_during_public_presentation"
+    )
+    assert any(
+        trace.stage == "tool_authorization"
+        and trace.outcome == "rejected_during_public_presentation"
+        for trace in observer.traces
+    )
 
 
 @pytest.mark.asyncio
@@ -2354,11 +2423,14 @@ async def test_runtime_promotes_tool_round_content_to_public_commentary():
         ),),
         finish_reason=ModelFinishReason.TOOL_CALLS,
     )]
+    output = RecordingOutputObserver()
+    model = ScriptedModelGateway([tool_round, _answer("核对完成。")])
     updates = await _collect(
         AgentRuntime(
-            model_gateway=ScriptedModelGateway([tool_round, _answer("核对完成。")]),
+            model_gateway=model,
             tool_execution_gateway=ScriptedToolGateway([_batch("call-a", "readA")]),
             observer=RecordingObserver([{"readA"}, set()]),
+            output_observer=output,
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -2374,6 +2446,7 @@ async def test_runtime_promotes_tool_round_content_to_public_commentary():
         }
         for update in updates
     )
+    assert len(output.commentary_streams) == 1
     assert _result(updates).final_response == "核对完成。"
 
 
@@ -2414,16 +2487,18 @@ async def test_runtime_repairs_one_missing_required_call_before_execution():
 @pytest.mark.asyncio
 async def test_runtime_repairs_one_unauthorized_batch_with_zero_execution():
     model = ScriptedModelGateway([
-        _tool_call("call-b", "readB"),
-        _tool_call("call-a", "readA"),
+        _tool_call("call-b", "readB", content_delta="不应公开。"),
+        _tool_call("call-a", "readA", content_delta="现在读取资料。"),
         _answer("done"),
     ])
     tools = ScriptedToolGateway([_batch("call-a", "readA")])
     observer = RecordingObserver([{"readA"}, set()])
+    output = RecordingOutputObserver()
     runtime = AgentRuntime(
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
+        output_observer=output,
     )
 
     updates = await _collect(
@@ -2437,6 +2512,7 @@ async def test_runtime_repairs_one_unauthorized_batch_with_zero_execution():
     assert observer.started_tools == [("readA",)]
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
     assert _result(updates).final_response == "done"
+    assert len(output.commentary_streams) == 1
     assert any(
         trace.stage == "tool_authorization"
         and trace.outcome == "unauthorized_tool_retry"

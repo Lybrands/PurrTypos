@@ -113,9 +113,13 @@ class ContextCompressionCoordinator:
             trigger_reason=trigger_reason,
         )
 
-        operation_id = await self._start_compaction_operation(
-            operation_scope,
-            snapshot.phase,
+        operation_id = (
+            await self._start_compaction_operation(
+                operation_scope,
+                snapshot.phase,
+            )
+            if compression_required
+            else None
         )
         try:
             result = await self._prepare_result(

@@ -44,6 +44,7 @@ from purra.operations import (
     OperationStatus,
 )
 from purra.planner import build_planner_messages
+from purra.testing import assert_context_compression_hook_conforms
 from application.conversation_compaction import (
     ConversationCompactionService,
     ConversationSummaryCompressionPolicy,
@@ -225,6 +226,17 @@ async def test_core_compactor_depends_only_on_application_compression_hook():
 
 
 @pytest.mark.asyncio
+async def test_application_compression_passes_shared_hook_conformance():
+    await assert_context_compression_hook_conforms(
+        hook=ConversationCompactionService(
+            _Repository(()),
+            ModelBackedConversationSummarizer(_model_tasks(_Gateway())),
+        ),
+        request=_request((), context_window=32_000),
+    )
+
+
+@pytest.mark.asyncio
 async def test_core_default_uses_recent_twenty_message_window_only_without_hook():
     turns = _turns(30)
 
@@ -261,6 +273,34 @@ async def test_compaction_has_one_authoritative_operation_lifecycle():
     assert started.kind is OperationKind.CONTEXT_COMPACTION
     assert finished.operation_id == started.operation_id
     assert finished.status is OperationStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_below_threshold_check_does_not_create_compaction_operation():
+    class _Hook:
+        def __init__(self):
+            self.calls = 0
+
+        async def compress(self, compression, signal=None):
+            self.calls += 1
+            return ConversationCompactionResult(
+                compression.request,
+                "application_no_change",
+            )
+
+    output = _OperationOutput()
+    hook = _Hook()
+    result = await ContextCompressionCoordinator(
+        hook,
+        operation_controller=AgentOperationController(output),
+    ).prepare(
+        _request(_turns(8), context_window=200_000),
+        operation_scope=OperationScope(run_id="run-1"),
+    )
+
+    assert result.outcome == "application_no_change"
+    assert hook.calls == 1
+    assert output.events == []
 
 
 @pytest.mark.asyncio

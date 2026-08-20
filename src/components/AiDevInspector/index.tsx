@@ -13,7 +13,7 @@ import {
   selectAiDebugRun,
   subscribeAiDebugStore,
   type AiDebugRun,
-  type AiDebugChildRun,
+  type AiDebugDelegationActivity,
   type AiDebugRunStatus,
   type AiDebugModelCall,
   type AiDebugTool,
@@ -632,14 +632,6 @@ function StabilityCard({ run }: { run: AiDebugRun }) {
           </strong>
         </div>
         <div>
-          <span>Work Item</span>
-          <strong>
-            {artifactMaintenance
-              ? `${artifactMaintenance.workItemCount} · 未完成 ${artifactMaintenance.openWorkItems}`
-              : "—"}
-          </strong>
-        </div>
-        <div>
           <span>Writer Claim</span>
           <strong>
             {artifactMaintenance
@@ -875,65 +867,64 @@ function StabilityCard({ run }: { run: AiDebugRun }) {
   );
 }
 
-function ChildRunList({
+function DelegationActivityList({
   items,
   now,
 }: {
-  items: AiDebugChildRun[];
+  items: AiDebugDelegationActivity[];
   now: number;
 }) {
   if (!items.length) return null;
   return (
     <>
       <div className="ai-dev-inspector__section-title">
-        <span>子 Agent / 子 Run</span>
+        <span>Agent 委派</span>
         <small>
           {items.filter((item) => item.status === "completed").length}/{items.length} 完成
         </small>
       </div>
-      <div className="ai-dev-inspector__child-runs">
-        {items.map((child, index) => {
-          const modelCalls = child.modelCalls.reduce(
+      <div className="ai-dev-inspector__delegation-activities">
+        {items.map((activity, index) => {
+          const modelCalls = activity.modelCalls.reduce(
             (sum, call) => sum + call.count,
             0,
           );
-          const active = !["completed", "failed", "aborted"].includes(child.status);
+          const active = !["completed", "failed", "aborted"].includes(activity.status);
           return (
             <details
-              key={child.delegationId}
-              className="ai-dev-inspector__child-run"
-              data-status={child.status}
-              open={active || child.status === "failed"}
+              key={activity.delegationId}
+              className="ai-dev-inspector__delegation-activity"
+              data-status={activity.status}
+              open={active || activity.status === "failed"}
             >
               <summary>
                 <span>
-                  <strong>{child.agentTitle || child.agentRole}</strong>
+                  <strong>{activity.agentTitle || activity.agentName}</strong>
                   <small>#{index + 1}</small>
                 </span>
-                <span>{STATUS_LABELS[child.status]}</span>
+                <span>{STATUS_LABELS[activity.status]}</span>
               </summary>
               <div>
-                {child.objective && <p>{child.objective}</p>}
+                {activity.objective && <p>{activity.objective}</p>}
                 <dl>
-                  <div><dt>Delegation</dt><dd title={child.delegationId}>{child.delegationId}</dd></div>
-                  <div><dt>Child Run</dt><dd title={child.childRunId}>{child.childRunId || "等待创建"}</dd></div>
-                  <div><dt>任务单元</dt><dd>{child.unitId || "—"}</dd></div>
-                  <div><dt>执行尝试</dt><dd>{child.attempt ?? 1}</dd></div>
-                  <div><dt>耗时</dt><dd>{formatDuration((child.finishedAt ?? now) - child.startedAt)}</dd></div>
+                  <div><dt>Delegation</dt><dd title={activity.delegationId}>{activity.delegationId}</dd></div>
+                  <div><dt>任务单元</dt><dd>{activity.unitId || "—"}</dd></div>
+                  <div><dt>执行尝试</dt><dd>{activity.attempt ?? 1}</dd></div>
+                  <div><dt>耗时</dt><dd>{formatDuration((activity.finishedAt ?? now) - activity.startedAt)}</dd></div>
                   <div><dt>模型调用</dt><dd>{modelCalls} 次</dd></div>
-                  <div><dt>工具调用</dt><dd>{child.tools.length} 个</dd></div>
+                  <div><dt>工具调用</dt><dd>{activity.tools.length} 个</dd></div>
                 </dl>
-                {child.error && <div className="ai-dev-inspector__error">{child.error}</div>}
-                {child.commentary && (
+                {activity.error && <div className="ai-dev-inspector__error">{activity.error}</div>}
+                {activity.commentary && (
                   <details className="ai-dev-inspector__text-block">
-                    <summary>子 Agent 公开说明 <small>{child.commentary.length} 字符</small></summary>
-                    <pre>{child.commentary}</pre>
+                    <summary>委派说明 <small>{activity.commentary.length} 字符</small></summary>
+                    <pre>{activity.commentary}</pre>
                   </details>
                 )}
-                {child.output && (
+                {activity.output && (
                   <details className="ai-dev-inspector__text-block">
-                    <summary>子 Agent 输出 <small>{child.output.length} 字符</small></summary>
-                    <pre>{child.output}</pre>
+                    <summary>委派输出 <small>{activity.output.length} 字符</small></summary>
+                    <pre>{activity.output}</pre>
                   </details>
                 )}
               </div>
@@ -951,30 +942,30 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
     (sum, call) => sum + call.count,
     0,
   );
-  const childModelCallCount = run.childRuns.reduce(
-    (sum, child) => sum + child.modelCalls.reduce(
-      (childSum, call) => childSum + call.count,
+  const delegationModelCallCount = run.delegationActivities.reduce(
+    (sum, activity) => sum + activity.modelCalls.reduce(
+      (activitySum, call) => activitySum + call.count,
       0,
     ),
     0,
   );
-  const modelCallCount = rootModelCallCount + childModelCallCount;
+  const modelCallCount = rootModelCallCount + delegationModelCallCount;
   const modelCallRows = [
     ...run.modelCalls.map((call) => ({
       key: `root:${call.id}`,
       call,
-      source: '根 Run',
+      source: '主流程',
     })),
-    ...run.childRuns.flatMap((child) => child.modelCalls.map((call) => ({
-      key: `${child.id}:${call.id}`,
+    ...run.delegationActivities.flatMap((activity) => activity.modelCalls.map((call) => ({
+      key: `${activity.id}:${call.id}`,
       call,
-      source: child.agentTitle || child.agentRole,
+      source: activity.agentTitle || activity.agentName,
     }))),
   ];
   const modelToolNames = [...new Set(
     [
       ...run.modelCalls,
-      ...run.childRuns.flatMap((child) => child.modelCalls),
+      ...run.delegationActivities.flatMap((activity) => activity.modelCalls),
     ].flatMap((call) => call.toolNames),
   )];
   const contextBudget = run.contextBudget as Record<string, unknown> | undefined;
@@ -1006,7 +997,7 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
         </div>
         <div>
           <span>模型调用</span>
-          <strong title={`根 Run ${rootModelCallCount} 次 · 子 Run ${childModelCallCount} 次`}>
+          <strong title={`主流程 ${rootModelCallCount} 次 · 委派 ${delegationModelCallCount} 次`}>
             {modelCallCount} 次
           </strong>
         </div>
@@ -1036,7 +1027,7 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
         </div>
       </div>
 
-      <ChildRunList items={run.childRuns} now={now} />
+      <DelegationActivityList items={run.delegationActivities} now={now} />
 
       {run.error && <div className="ai-dev-inspector__error">{run.error}</div>}
       <FailureDiagnosisCard
@@ -1050,7 +1041,7 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
       <div className="ai-dev-inspector__section-title">
         <span>传入模型的工具函数</span>
         <small>
-          {modelToolNames.length} 个 · 根 {rootModelCallCount} 次 / 子 {childModelCallCount} 次
+          {modelToolNames.length} 个 · 根 {rootModelCallCount} 次 / 子 {delegationModelCallCount} 次
         </small>
       </div>
       {modelToolNames.length > 0 ? (

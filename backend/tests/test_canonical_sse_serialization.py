@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from purra.output import (
@@ -67,3 +68,49 @@ def test_private_canonical_output_is_not_written_to_public_sse() -> None:
     )
 
     assert canonical_output_to_sse_chunk(event) is None
+
+
+def test_sse_keeps_public_plan_and_filters_private_recipe_progress() -> None:
+    now = datetime.now(timezone.utc)
+    plan = AgentOutputEvent(
+        event_id="event-plan",
+        output_stream_id=None,
+        run_id="run-1",
+        turn_id=None,
+        invocation_id=None,
+        sequence=1,
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.LIFECYCLE,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "eventType": "run.todos_updated",
+            "data": {
+                "title": "续写故事",
+                "steps": [
+                    {"id": "understand-source", "title": "理解原作"},
+                    {"id": "draft-continuation", "title": "撰写续篇"},
+                ],
+            },
+        },
+        occurred_at=now,
+        emitted_at=now,
+    )
+    progress = replace(
+        plan,
+        event_id="event-recipe-progress",
+        sequence=2,
+        visibility=OutputVisibility.PRIVATE,
+        payload={
+            "eventType": "long_task.progress",
+            "data": {"taskId": "recipe-task-1"},
+        },
+    )
+
+    plan_wire = canonical_output_to_sse_chunk(plan)
+
+    assert plan_wire is not None
+    assert canonical_output_to_sse_chunk(progress) is None
+    assert plan_wire["kind"] == "runtime.event"
+    assert plan_wire["payload"] == plan.payload
+    assert "agentRunTodosUpdated" not in plan_wire

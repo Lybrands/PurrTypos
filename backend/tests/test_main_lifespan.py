@@ -15,12 +15,8 @@ from exceptions import DatabaseNotReadyError
 from infrastructure.persistence import run_store
 from purra.contracts import RunBinding, RunCreateParams
 from purra.long_tasks import LongTaskCreateCommand, LongTaskStatus, LongTaskUnitSpec
-from purra.work_items.contracts import WorkItemCreateCommand
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
-)
-from infrastructure.persistence.sqlite_work_item_repository import (
-    SqliteWorkItemRepository,
 )
 
 
@@ -210,14 +206,11 @@ async def test_lifespan_startup_checkpoints_long_task_abandoned_by_previous_proc
 ):
     seed_db = database_connection.DatabaseConnection(tmp_path)
     await seed_db.init()
-    await SqliteWorkItemRepository(seed_db).create(
-        "startup-long-work",
-        WorkItemCreateCommand(
-            namespace="test",
-            kind="large_write",
-            owner_id="owner",
-            created_by_run_id="run-parent",
-        ),
+    creator_run_id = await run_store.create_run(
+        seed_db,
+        session_id=None,
+        prompt="create durable task",
+        mode="agent",
     )
     repository = SqliteLongTaskRepository(seed_db)
     task = await repository.create(
@@ -226,8 +219,7 @@ async def test_lifespan_startup_checkpoints_long_task_abandoned_by_previous_proc
             namespace="test",
             kind="large_write",
             owner_id="owner",
-            work_item_id="startup-long-work",
-            created_by_run_id="run-parent",
+            created_by_run_id=creator_run_id,
             units=(
                 LongTaskUnitSpec(id="batch-1", position=0, max_attempts=1),
             ),
@@ -255,6 +247,12 @@ async def test_lifespan_startup_checkpoints_long_task_abandoned_by_previous_proc
         assert unit.worker_id is None
         assert unit.lease_expires_at_ms is None
         assert unit.error_code == "execution_recovery_after_restart"
+        creator_run = await run_store.get_run(created[0], creator_run_id)
+        creator_events = await run_store.get_run_events(created[0], creator_run_id)
+        assert creator_run is not None and creator_run["status"] == "canceled"
+        assert creator_events[-1]["payload"]["reason"] == (
+            "durable_task_interrupted"
+        )
 
 
 @pytest.mark.asyncio
@@ -275,30 +273,17 @@ async def test_lifespan_startup_reaps_claim_owned_by_terminal_run(
         [run_id],
     )
     await seed_db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, created_by_run_id) "
-        "VALUES ('startup-item', 'test', 'draft', 'owner', ?)",
-        [run_id],
-    )
-    await seed_db.execute(
-        "INSERT INTO ai_agent_work_item_runs "
-        "(work_item_id, run_id, relation, work_item_revision) "
-        "VALUES ('startup-item', ?, 'created', 1)",
-        [run_id],
-    )
-    await seed_db.execute(
         "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, run_id, artifact_scope, "
-        "work_item_id, created_by_run_id) VALUES "
-        "('startup-artifact', 'test', 'draft', 'owner', ?, "
-        "'work_item', 'startup-item', ?)",
+        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+        "created_by_run_id) VALUES "
+        "('startup-artifact', 'test', 'draft', 'owner', 'run', ?, ?)",
         [run_id, run_id],
     )
     await seed_db.execute(
         "INSERT INTO ai_agent_artifact_claims "
-        "(artifact_id, work_item_id, run_id, claim_token, "
+        "(artifact_id, run_id, claim_token, "
         "acquired_revision, expires_at_ms) VALUES "
-        "('startup-artifact', 'startup-item', ?, 'startup-claim', "
+        "('startup-artifact', ?, 'startup-claim', "
         "1, 9999999999999)",
         [run_id],
     )

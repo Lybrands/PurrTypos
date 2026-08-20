@@ -343,8 +343,8 @@ class ScreenplayAgentRootCompletionProjector:
         placeholders = ",".join("?" for _ in root_ids)
         rows = await self._db.fetch_all(
             "SELECT id FROM ai_agent_runs WHERE id IN (" + placeholders + ") "
-            "OR root_run_id IN (" + placeholders + ") ORDER BY id",
-            [*sorted(root_ids), *sorted(root_ids)],
+            "ORDER BY id",
+            sorted(root_ids),
         )
         operation = await self._operations.load(operation_id)
         if operation is None:

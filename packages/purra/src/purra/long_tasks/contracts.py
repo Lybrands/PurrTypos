@@ -35,6 +35,28 @@ class LongTaskStatus(StrEnum):
         }
 
 
+class LongTaskRunRelation(StrEnum):
+    """Why a Run is linked to a durable task."""
+
+    CREATED = "created"
+    CONTINUATION = "continuation"
+    REFERENCE = "reference"
+
+
+@dataclass(frozen=True, slots=True)
+class LongTaskRunBinding:
+    task_id: str
+    run_id: str
+    relation: LongTaskRunRelation
+
+    def __post_init__(self) -> None:
+        for name in ("task_id", "run_id"):
+            object.__setattr__(self, name, required_text(
+                getattr(self, name), f"long task Run binding {name}"
+            ))
+        object.__setattr__(self, "relation", LongTaskRunRelation(self.relation))
+
+
 class LongTaskUnitStatus(StrEnum):
     PENDING = "pending"
     WAITING_RETRY = "waiting_retry"
@@ -149,7 +171,6 @@ class LongTaskCreateCommand:
     namespace: str
     kind: str
     owner_id: str
-    work_item_id: str
     created_by_run_id: str
     units: tuple[LongTaskUnitSpec, ...]
     max_parallelism: int = 1
@@ -160,7 +181,6 @@ class LongTaskCreateCommand:
             "namespace",
             "kind",
             "owner_id",
-            "work_item_id",
             "created_by_run_id",
         ):
             object.__setattr__(
@@ -210,7 +230,6 @@ class LongTaskRecord:
     namespace: str
     kind: str
     owner_id: str
-    work_item_id: str
     created_by_run_id: str
     status: LongTaskStatus
     revision: int
@@ -230,7 +249,6 @@ class LongTaskRecord:
             "namespace",
             "kind",
             "owner_id",
-            "work_item_id",
             "created_by_run_id",
         ):
             object.__setattr__(
@@ -443,6 +461,8 @@ def _require_acyclic(units: tuple[LongTaskUnitSpec, ...]) -> None:
 __all__ = [
     "LongTaskCreateCommand",
     "LongTaskRecord",
+    "LongTaskRunBinding",
+    "LongTaskRunRelation",
     "LongTaskStatus",
     "LongTaskSplitResult",
     "LongTaskUnitRecord",

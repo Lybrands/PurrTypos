@@ -35,7 +35,7 @@ class PlanningPolicy(Protocol):
 
 
 @runtime_checkable
-class TaskPlanningConstraintProvider(Protocol):
+class WorkPlanningConstraintProvider(Protocol):
     """Refine host constraints after semantic TaskSpec selection."""
 
     def planning_constraints_for_task(
@@ -47,7 +47,7 @@ class TaskPlanningConstraintProvider(Protocol):
 
 
 @runtime_checkable
-class TaskPlanner(Protocol):
+class WorkPlanner(Protocol):
     async def create_plan(
         self,
         request: AgentRunRequest,
@@ -60,7 +60,7 @@ class TaskPlanner(Protocol):
 
 
 @runtime_checkable
-class DynamicTaskPlanner(Protocol):
+class DynamicWorkPlanner(Protocol):
     """Optional planner capability for result-driven runtime revisions."""
 
     async def revise_plan(

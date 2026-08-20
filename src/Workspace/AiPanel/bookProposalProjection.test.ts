@@ -16,7 +16,6 @@ const productSnapshot = (proposalId: string): AiAgentRunSnapshot => ({
     sessionId: 7,
     conversationId: null,
     status: 'running',
-    lineage: { rootRunId: 'run-1', depth: 0 },
     finalResponse: '',
     execution: { attempt: 1, cancellationRequested: false },
     provenance: {},

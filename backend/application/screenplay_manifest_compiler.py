@@ -42,6 +42,38 @@ DOCUMENT_SECTIONS = {
     "sceneList": ("episode_plan",),
 }
 
+DOCUMENT_SECTION_TITLES = {
+    "sourceAnalysis": {
+        "characters": "分析人物",
+        "story": "梳理故事",
+        "world": "分析世界观",
+        "themes": "提炼主题",
+        "adaptation_risks": "评估改编风险",
+    },
+    "creativeBrief": {
+        "positioning": "明确项目定位",
+        "premise": "提炼核心命题",
+        "characters": "设计核心人物",
+        "world": "建立剧本世界",
+        "adaptation_rules": "制定改编规则",
+    },
+    "structure": {
+        "series_arc": "设计全剧主线",
+        "episode_plan": "规划分集结构",
+        "character_arcs": "设计人物弧",
+        "hooks": "设计剧情钩子",
+    },
+    "sceneList": {"episode_plan": "规划场景"},
+}
+
+REVIEW_DIMENSION_TITLES = {
+    "continuity": "检查连续性",
+    "character_arc": "审阅人物弧",
+    "structure_rhythm": "审阅结构节奏",
+    "dialogue": "审阅对白",
+    "format": "检查剧本格式",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class CompiledScreenplayManifest:
@@ -142,7 +174,7 @@ def compile_screenplay_manifest(
             max_parallelism=parallelism,
             metadata={
                 "targetRole": target_role,
-                "recipeVersion": 4,
+                "recipeVersion": 5,
                 "manifestId": manifest.id,
                 "manifestDigest": manifest.digest,
                 "assemblyStrategy": strategy,
@@ -369,6 +401,7 @@ def _recipe_step(part, *, plan_step_id):
         } else 2),
         metadata={
             "input": metadata,
+            "displayTitle": _display_title(part, metadata),
             "partKind": part.kind.value,
             "semanticKey": part.semantic_key,
             "effectClass": (
@@ -498,6 +531,42 @@ def _part_phase(part, *, target_role):
     if part.kind is ScreenplayPartKind.VALIDATION and target_role == "review":
         return ScreenplayPlanPhase.REVIEW
     return ScreenplayPlanPhase.CREATION
+
+
+def _display_title(part, metadata):
+    episode_number = metadata.get("episodeNumber")
+    target_role = str(metadata.get("targetRole") or "")
+    if part.kind is ScreenplayPartKind.EVIDENCE:
+        if target_role == "sourceAnalysis":
+            return "读取原作内容"
+        if episode_number is not None:
+            noun = (
+                "剧本"
+                if metadata.get("evidenceKind") == "review_input"
+                else "素材"
+            )
+            return f"读取第 {episode_number} 集{noun}"
+        return "读取项目内容"
+    if part.kind is ScreenplayPartKind.DRAFT_SCENE:
+        return f"生成第 {episode_number} 集场景"
+    if part.kind is ScreenplayPartKind.EPISODE_METADATA:
+        return f"整理第 {episode_number} 集信息"
+    if part.kind is ScreenplayPartKind.REVIEW_DIMENSION:
+        dimension = str(metadata.get("reviewDimension") or "")
+        return REVIEW_DIMENSION_TITLES.get(dimension, "审阅剧本")
+    if part.kind is ScreenplayPartKind.DOCUMENT_SECTION:
+        section = str(metadata.get("sectionKey") or "")
+        return DOCUMENT_SECTION_TITLES.get(target_role, {}).get(
+            section,
+            "生成交付内容",
+        )
+    if part.kind is ScreenplayPartKind.VALIDATION:
+        if target_role == "sourceAnalysis":
+            return "检查分析结果"
+        if episode_number is not None:
+            return f"检查第 {episode_number} 集结果"
+        return "检查生成结果"
+    return "生成回复"
 
 
 __all__ = [

@@ -15,6 +15,8 @@ from purra.contracts import (
     ToolSchema,
 )
 from purra.json_values import freeze_json_mapping
+from purra.json_values import thaw_json_mapping
+from purra.evidence import ContextEvidenceReceipt
 from purra.model_protocol import (
     InvocationOutputLimit,
     resolve_invocation_output_limit,
@@ -89,6 +91,11 @@ class ModelInvocationReceipt:
     output_intent: AgentOutputIntent
     commit_mode: OutputCommitMode
     output_limit: InvocationOutputLimit
+    input_fingerprint: str
+    tool_schema_fingerprint: str
+    context_evidence: tuple[ContextEvidenceReceipt, ...] = field(
+        default_factory=tuple
+    )
     call_parameters: tuple[Mapping[str, object], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -115,9 +122,48 @@ class ModelInvocationReceipt:
             raise TypeError("invocation receipt requires an output limit")
         object.__setattr__(
             self,
+            "input_fingerprint",
+            required_text(self.input_fingerprint, "model input fingerprint"),
+        )
+        object.__setattr__(
+            self,
+            "tool_schema_fingerprint",
+            required_text(
+                self.tool_schema_fingerprint,
+                "model tool schema fingerprint",
+            ),
+        )
+        evidence = tuple(self.context_evidence)
+        if not all(isinstance(item, ContextEvidenceReceipt) for item in evidence):
+            raise TypeError(
+                "invocation context evidence must be ContextEvidenceReceipt values"
+            )
+        object.__setattr__(self, "context_evidence", evidence)
+        object.__setattr__(
+            self,
             "call_parameters",
             tuple(freeze_json_mapping(item) for item in self.call_parameters),
         )
+
+    def to_mapping(self) -> dict[str, object]:
+        return {
+            "invocationId": self.invocation_id,
+            "outputStreamId": self.output_stream_id,
+            "runId": self.run_id,
+            "turnId": self.turn_id,
+            "model": self.model,
+            "outputIntent": self.output_intent.value,
+            "commitMode": self.commit_mode.value,
+            "outputLimit": self.output_limit.to_mapping(),
+            "inputFingerprint": self.input_fingerprint,
+            "toolSchemaFingerprint": self.tool_schema_fingerprint,
+            "contextEvidence": [
+                item.to_mapping() for item in self.context_evidence
+            ],
+            "callParameters": [
+                thaw_json_mapping(item) for item in self.call_parameters
+            ],
+        }
 
 
 @dataclass(frozen=True, slots=True)

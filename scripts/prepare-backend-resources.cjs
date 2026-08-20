@@ -22,6 +22,7 @@ const SKIP_NAMES = new Set([
   '.git',
   '.mypy_cache',
   '.pytest_cache',
+  'tests',
   '.DS_Store',
 ])
 

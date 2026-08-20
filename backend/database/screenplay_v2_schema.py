@@ -338,7 +338,6 @@ async def init_screenplay_v2_runtime_schema(db) -> None:
     # deleted from upgraded test databases instead of copied forward.
     for table in (
         "ai_agent_runs",
-        "ai_agent_work_items",
         "ai_agent_long_tasks",
         "ai_agent_artifacts",
     ):

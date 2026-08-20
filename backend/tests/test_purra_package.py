@@ -10,6 +10,17 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
 PACKAGE_DIR = ROOT_DIR / "packages" / "purra"
+PORTABLE_CONFORMANCE = (
+    PACKAGE_DIR / "tests" / "test_standalone_agent_conformance.py"
+)
+SECOND_HOST_CONFORMANCE = (
+    PACKAGE_DIR / "tests" / "test_second_host_conformance.py"
+)
+HOST_ADAPTER_CONFORMANCE = PACKAGE_DIR / "src" / "purra" / "testing.py"
+PACKAGE_READMES = (
+    PACKAGE_DIR / "README.md",
+    PACKAGE_DIR / "README.zh-CN.md",
+)
 
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
@@ -50,6 +61,85 @@ def test_purra_is_an_independent_dependency_free_distribution():
     assert project.get("dependencies") == []
     assert (PACKAGE_DIR / "src" / "purra" / "api" / "__init__.py").is_file()
     assert not (BACKEND_DIR / "application" / "screenplay_model_run.py").exists()
+
+
+def test_public_purra_readmes_do_not_bind_the_framework_to_a_product():
+    forbidden = ("purrtypos", "screenplay", "writing-owned", "剧本", "写作领域")
+    violations = [
+        f"{path.name} contains {term!r}"
+        for path in PACKAGE_READMES
+        for term in forbidden
+        if term in path.read_text(encoding="utf-8").casefold()
+    ]
+    assert not violations, "PurrA public docs contain product semantics:\n" + "\n".join(
+        violations
+    )
+
+
+def test_portable_agent_conformance_uses_only_public_purra_boundaries():
+    source = PORTABLE_CONFORMANCE.read_text(encoding="utf-8")
+    imported_roots = {
+        name.split(".", 1)[0]
+        for name in _imports(PORTABLE_CONFORMANCE)
+    }
+
+    assert imported_roots <= {
+        "__future__",
+        "asyncio",
+        "dataclasses",
+        "datetime",
+        "pytest",
+        "purra",
+    }
+    assert "_execute_run" not in source
+    assert "core.submit(" in source
+    assert "backend" not in imported_roots
+
+
+def test_host_adapter_conformance_has_no_test_framework_or_host_dependency():
+    imported_roots = {
+        name.split(".", 1)[0]
+        for name in _imports(HOST_ADAPTER_CONFORMANCE)
+    }
+
+    assert imported_roots <= {
+        "__future__",
+        "asyncio",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "json",
+        "purra",
+        "uuid",
+    }
+    assert "pytest" not in imported_roots
+    assert "backend" not in imported_roots
+
+
+def test_second_host_uses_public_composition_and_keeps_its_style_out_of_core():
+    source = SECOND_HOST_CONFORMANCE.read_text(encoding="utf-8")
+    imported_roots = {
+        name.split(".", 1)[0]
+        for name in _imports(SECOND_HOST_CONFORMANCE)
+    }
+    core_source = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((PACKAGE_DIR / "src" / "purra").rglob("*.py"))
+    )
+
+    assert imported_roots <= {
+        "__future__",
+        "dataclasses",
+        "json",
+        "pytest",
+        "purra",
+    }
+    assert "core.submit(" in source
+    assert "MessageOrigin.HOST_CONTEXT" in source
+    assert "_execute_run" not in source
+    assert "backend" not in imported_roots
+    assert "operations.incident" not in core_source
+    assert "readServiceStatus" not in core_source
 
 
 def test_complete_agent_execution_uses_the_public_api():

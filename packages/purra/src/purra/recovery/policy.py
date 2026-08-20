@@ -17,7 +17,6 @@ _STANDARD_LIMITS: Mapping[RecoveryCause, int] = MappingProxyType({
     RecoveryCause.MISSING_REQUIRED_TOOL_CALL_REPLAN: 1,
     RecoveryCause.UNSTRUCTURED_TOOL_PROTOCOL: 1,
     RecoveryCause.EMPTY_MODEL_RESPONSE: 2,
-    RecoveryCause.DEFERRED_MODEL_RESPONSE: 1,
     RecoveryCause.RESPONSE_CONSTRAINT_DETERMINISTIC: 1,
     RecoveryCause.RESPONSE_CONSTRAINT_SEMANTIC: 1,
     RecoveryCause.FUTURE_TOOL_STEP: 1,

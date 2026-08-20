@@ -17,6 +17,7 @@ import TaskProgress from './TaskProgress'
 import type { AgentSessionId } from '../../agent-runtime'
 import type { AgentConversationController } from './controller'
 import type { AgentConversationExtensions } from './extensions'
+import { buildAgentModelLabels } from './messageMetadata'
 import { buildAgentConversationPanelView } from './panelView'
 import './Panel.scss'
 
@@ -166,6 +167,10 @@ export default function AgentConversationPanel({
     resuming: controller.conversation.resuming,
     stopping: controller.conversation.stopping,
   })
+  const modelLabels = React.useMemo(() => buildAgentModelLabels([
+    ...controller.composer.modelConfigs,
+    ...(controller.composer.selectedModel ? [controller.composer.selectedModel] : []),
+  ]), [controller.composer.modelConfigs, controller.composer.selectedModel])
 
   const setIndexOpen = React.useCallback((open: boolean) => {
     if (indexOpen == null) setUncontrolledIndexOpen(open)
@@ -237,6 +242,8 @@ export default function AgentConversationPanel({
           onResolveToolApproval={controller.actions.resolveToolApproval}
           onSubmitErrorReport={controller.actions.onSubmitErrorReport}
           afterAssistantMessage={extensions?.renderAssistantAttachment}
+          afterAssistantMessageActions={extensions?.renderAssistantActions}
+          modelLabels={modelLabels}
         />
         <Composer
           value={controller.composer.value}

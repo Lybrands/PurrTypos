@@ -66,14 +66,6 @@ export function agentConversationMessageKey(
   return `message:${index}:${message.role}`
 }
 
-function stableAssistantTurnKey(
-  message: AgentConversationMessage,
-): string | undefined {
-  if (message.clientTurnId) return `client:${message.clientTurnId}`
-  if (message.conversationId != null) return `conversation:${message.conversationId}`
-  return undefined
-}
-
 function stableUserTurnKey(
   message: AgentConversationMessage,
 ): string | undefined {
@@ -83,32 +75,27 @@ function stableUserTurnKey(
   return undefined
 }
 
-function latestLiveTurn(
+function latestStableUserTurn(
   messages: AgentConversationMessage[],
 ): { key: string; anchorIndex: number } | undefined {
-  for (let assistantIndex = messages.length - 1; assistantIndex >= 0; assistantIndex -= 1) {
-    const message = messages[assistantIndex]
-    if (message.role !== 'assistant') continue
-    for (let userIndex = assistantIndex - 1; userIndex >= 0; userIndex -= 1) {
-      const user = messages[userIndex]
-      if (user.role !== 'user') continue
-      const key = stableAssistantTurnKey(message) ?? stableUserTurnKey(user)
-      return key ? { key, anchorIndex: userIndex } : undefined
-    }
-    return undefined
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message.role !== 'user') continue
+    const key = stableUserTurnKey(message)
+    return key ? { key, anchorIndex: index } : undefined
   }
   return undefined
 }
 
 /**
- * Records the initial/restored turn, then reports only a genuinely new stable
- * assistant turn. Streaming mutations retain the same key and do not re-pin.
+ * Records the initial/restored turn, then reports a newly appended stable user
+ * turn immediately. Assistant streaming retains the user key and does not re-pin.
  */
 export function advanceLiveTurnCursor(
   previous: LiveTurnCursor | undefined,
   messages: AgentConversationMessage[],
 ): LiveTurnObservation {
-  const current = latestLiveTurn(messages)
+  const current = latestStableUserTurn(messages)
   const cursor = current ? { key: current.key } : {}
   if (!previous || !current || previous.key === current.key) return { cursor }
   return { cursor, anchorIndex: current.anchorIndex }

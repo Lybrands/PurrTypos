@@ -8,6 +8,8 @@ from purra.contracts import SessionId
 from purra.long_tasks.contracts import (
     LongTaskCreateCommand,
     LongTaskRecord,
+    LongTaskRunBinding,
+    LongTaskRunRelation,
     LongTaskSplitResult,
     LongTaskUnitRecord,
     LongTaskUnitResult,
@@ -19,6 +21,12 @@ from purra.recovery import FailureDecision, FailureSignal
 
 @runtime_checkable
 class LongTaskRepository(Protocol):
+    """Durable task store.
+
+    ``create`` atomically persists the task, its units and the CREATED binding
+    for ``created_by_run_id``.
+    """
+
     async def create(
         self,
         task_id: str,
@@ -26,6 +34,21 @@ class LongTaskRepository(Protocol):
     ) -> LongTaskRecord: ...
 
     async def load(self, task_id: str) -> LongTaskRecord | None: ...
+
+    async def bind_run(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        relation: LongTaskRunRelation,
+    ) -> LongTaskRunBinding:
+        """Append idempotently; an existing relation cannot be rewritten."""
+        ...
+
+    async def list_run_bindings(
+        self,
+        task_id: str,
+    ) -> Sequence[LongTaskRunBinding]: ...
 
     async def list_for_owner(
         self,
@@ -110,6 +133,7 @@ class LongTaskRepository(Protocol):
         *,
         worker_id: str,
         split: LongTaskSplitResult,
+        decision: FailureDecision,
     ) -> LongTaskRecord: ...
 
     async def interrupt_unit(
@@ -121,7 +145,13 @@ class LongTaskRepository(Protocol):
         reason_code: str,
     ) -> LongTaskRecord: ...
 
-    async def pause(self, task_id: str) -> LongTaskRecord: ...
+    async def pause(
+        self,
+        task_id: str,
+        *,
+        expected_revision: int | None = None,
+        reason_code: str | None = None,
+    ) -> LongTaskRecord: ...
 
     async def resume(
         self,
@@ -140,6 +170,14 @@ class LongTaskRepository(Protocol):
     ) -> LongTaskRecord: ...
 
     async def finalize_if_complete(self, task_id: str) -> LongTaskRecord: ...
+
+    async def recover_after_restart(
+        self,
+        *,
+        reason_code: str = "execution_recovery_after_restart",
+    ) -> Sequence[str]:
+        """Pause running tasks and release process-owned unit leases."""
+        ...
 
 
 @runtime_checkable

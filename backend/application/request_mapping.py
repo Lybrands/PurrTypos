@@ -12,7 +12,6 @@ from purra.contracts import (
     ModelRequest,
     RunBinding,
     RunProvenance,
-    RunLineage,
 )
 from purra.api import AgentCoreRunOptions
 from purra.output import (
@@ -175,35 +174,14 @@ def validate_writing_request_contract(
     to_writing_agent_request(body, provider_options)
 
 
-def to_agent_request(
-    body: ChatStreamRequest,
-    provider_options: Mapping[str, Any],
-) -> AgentRunRequest:
-    return to_writing_agent_request(body, provider_options)
-
-
-def agent_context_claims(
-    request: AgentRunRequest,
-) -> tuple[ContextBudgetClaim, ...]:
-    if request.domain_context.namespace == WRITING_DOMAIN_NAMESPACE:
-        return writing_context_claims(request)
-    raise ValueError(
-        "generic Agent mapping supports only the Writing domain"
-    )
-
-
 def writing_run_options(
     request: AgentRunRequest,
     provider_options: Mapping[str, Any],
     *,
     force_planned_tool_choice: bool = True,
     provenance: RunProvenance | None = None,
-    lineage: RunLineage | None = None,
     response_judge_policies: Sequence[ResponseJudgePolicy] = (),
-    agent_role: str | None = None,
-    output_work_units: int = 1,
 ) -> AgentCoreRunOptions:
-    del agent_role, output_work_units
     output_limit = resolve_invocation_output_limit(
         request.model.capability_snapshot,
         request.model.options.get("max_tokens"),
@@ -228,7 +206,6 @@ def writing_run_options(
         force_planned_tool_choice=force_planned_tool_choice,
         reasoning_mode=reasoning_mode_from_options(provider_options),
         provenance=provenance,
-        lineage=lineage,
         binding=(
             RunBinding(
                 namespace="writing.chat.request",
@@ -257,35 +234,6 @@ def writing_run_options(
             else None
         ),
     )
-
-
-def agent_run_options(
-    request: AgentRunRequest,
-    provider_options: Mapping[str, Any],
-    *,
-    force_planned_tool_choice: bool = True,
-    provenance: RunProvenance | None = None,
-    lineage: RunLineage | None = None,
-    response_judge_policies: Sequence[ResponseJudgePolicy] = (),
-    agent_role: str | None = None,
-    output_work_units: int = 1,
-) -> AgentCoreRunOptions:
-    if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
-        raise ValueError(
-            "generic Agent run options support only the Writing domain"
-        )
-    return writing_run_options(
-        request,
-        provider_options,
-        force_planned_tool_choice=force_planned_tool_choice,
-        provenance=provenance,
-        lineage=lineage,
-        response_judge_policies=response_judge_policies,
-        agent_role=agent_role,
-        output_work_units=output_work_units,
-    )
-
-
 def _has_caller_tool_definitions(value: Any) -> bool:
     """Detect a caller-owned tool contract without silently discarding it."""
 

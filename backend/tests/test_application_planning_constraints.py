@@ -163,23 +163,23 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     facts = bundle.diagnostics["hostPlanningFacts"]
     messages = build_planner_messages(
         request,
-        PlanningCapabilities(host_planning_facts=facts),
+        PlanningCapabilities(planning_context_blocks=bundle.blocks),
         PlannerLimits(),
     )
     policy = facts["planningRules"][0]
-    system_prompt = str(messages[0].content)
-    encoded_policy = json.dumps(
-        policy,
-        ensure_ascii=False,
-    )[1:-1]
+    planner_payload = json.loads(str(messages[1].content))
+    planning_content = planner_payload["planningContext"][0]["content"]
+    planner_facts = json.loads(planning_content)
 
-    assert bundle.blocks == ()
+    assert len(bundle.blocks) == 1
+    assert bundle.blocks[0].name == "screenplay_planning_facts"
+    assert bundle.blocks[0].untrusted is False
     assert facts["project"]["id"] == "project-1"
     assert facts["stageCommand"] == stage_command
     assert facts["planningRules"] == [policy]
-    assert system_prompt.count(encoded_policy) == 1
+    assert planner_facts["planningRules"] == [policy]
     assert "needsTodos:true" in policy
     assert "stepBindings" in policy
     assert "Revision" in policy
-    assert '"targetRole":"sourceAnalysis"' in system_prompt
-    assert '"targetRole":"review"' not in system_prompt
+    assert '"targetRole":"sourceAnalysis"' in planning_content
+    assert '"targetRole":"review"' not in planning_content

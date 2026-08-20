@@ -23,13 +23,9 @@ from purra.ports import (
     CONTROLLER_OWNED_RUN_EVENT_TYPES,
     RunBeginResult,
     RunCommit,
-    DelegationRepository,
     validate_run_commit_lifecycle,
 )
 from infrastructure.persistence import run_store
-from infrastructure.persistence.sqlite_delegation_repository import (
-    SqliteDelegationRepository,
-)
 from infrastructure.persistence.run_execution_store import now_ms
 
 
@@ -43,15 +39,11 @@ class SqliteRunRepository:
         *,
         owner_id: str | None = None,
         lease_duration_ms: int = DEFAULT_RUN_LEASE_DURATION_MS,
-        delegation_repository: DelegationRepository | None = None,
     ):
         self._db = db
         self._write_lock = asyncio.Lock()
         self._owner_id = str(owner_id or f"executor-{uuid4().hex}").strip()
         self._lease_duration_ms = int(lease_duration_ms)
-        self._delegations = (
-            delegation_repository or SqliteDelegationRepository(db)
-        )
         if self._lease_duration_ms <= 0:
             raise ValueError("lease duration must be positive")
 
@@ -178,8 +170,11 @@ class SqliteRunRepository:
                 "cancel-requested run only accepts a canceled terminal commit"
             )
 
-        if commit.replace_steps is not None:
-            await self.replace_steps(normalized_run_id, commit.replace_steps)
+        if commit.replace_plan is not None:
+            await self.replace_steps(
+                normalized_run_id,
+                commit.replace_plan.steps,
+            )
         for update in commit.step_updates:
             await self.update_step(normalized_run_id, update)
         if commit.terminal_status is not None:
@@ -192,38 +187,17 @@ class SqliteRunRepository:
 
     async def create(self, params: RunCreateParams) -> RunId:
         created_at = now_ms()
-        lineage = params.lineage
-        async def create_row() -> RunId:
-            return await run_store.create_run(
-                self._db,
-                session_id=_sqlite_session_id(params.session_id),
-                prompt=params.prompt,
-                mode=params.mode,
-                provenance=params.provenance,
-                binding=params.binding,
-                execution_owner_id=self._owner_id,
-                heartbeat_at_ms=created_at,
-                lease_expires_at_ms=created_at + self._lease_duration_ms,
-                parent_run_id=(lineage.parent_run_id if lineage else None),
-                root_run_id=(lineage.root_run_id if lineage else None),
-                delegation_id=(lineage.delegation_id if lineage else None),
-                agent_role=(lineage.agent_role if lineage else None),
-                run_depth=(lineage.depth if lineage else 0),
-            )
-        if lineage is None or lineage.delegation_id is None:
-            return await create_row()
-        async with self._db.transaction():
-            run_id = await create_row()
-            attached = await self._delegations.attach_child_run(
-                delegation_id=lineage.delegation_id,
-                child_run_id=run_id,
-                worker_id=self._owner_id,
-            )
-            if not attached:
-                raise ContractViolationError(
-                    "child run could not attach to the claimed delegation"
-                )
-        return run_id
+        return await run_store.create_run(
+            self._db,
+            session_id=_sqlite_session_id(params.session_id),
+            prompt=params.prompt,
+            mode=params.mode,
+            provenance=params.provenance,
+            binding=params.binding,
+            execution_owner_id=self._owner_id,
+            heartbeat_at_ms=created_at,
+            lease_expires_at_ms=created_at + self._lease_duration_ms,
+        )
 
     async def bind_conversation(self, run_id: RunId, conversation_id: int) -> None:
         await run_store.set_run_conversation_id(self._db, run_id, conversation_id)
@@ -329,8 +303,7 @@ def _storage_step(step: TaskStep) -> dict:
         "executor": step.executor.value,
         "riskLevel": step.risk_level.value if step.risk_level else None,
         "suggestedTools": list(step.suggested_tools),
-        "agentRole": step.agent_role,
-        "assignment": thaw_json_mapping(step.assignment),
+        "assignment": {},
         "dependsOn": list(step.depends_on),
         "description": step.description,
         "resultSummary": step.result_summary,

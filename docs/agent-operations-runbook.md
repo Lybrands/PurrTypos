@@ -88,7 +88,7 @@ POST /api/ai/tool-approvals/{approval_id}
 GET /api/ai/agent-runs/{run_id}/diagnostics
 ```
 
-诊断包含 Run 终态、Trace 覆盖、工具治理、受控恢复决策、性能信息以及 Artifact/Work Item 运维快照，不包含人工 Pilot 评分。`recovery.decisions` 会说明每次重试、兼容降级或重规划为何被允许/拒绝；`artifactMaintenance` 会区分有效、过期、失联和目标状态失效的 writer claim，并报告结构一致性。两者都只保存控制元数据，不包含工具 JSON、Artifact 正文或 claim token。
+诊断包含 Run 终态、Trace 覆盖、工具治理、受控恢复决策、性能信息以及 Artifact/LongTask 运维快照，不包含人工 Pilot 评分。`recovery.decisions` 会说明每次重试、兼容降级或重规划为何被允许/拒绝；`artifactMaintenance` 会区分有效、过期、失联和目标状态失效的 writer claim，并报告结构一致性。两者都只保存控制元数据，不包含工具 JSON、Artifact 正文或 claim token。
 
 调试面板的“安全维护 Artifact”调用：
 
@@ -96,7 +96,7 @@ GET /api/ai/agent-runs/{run_id}/diagnostics
 POST /api/ai/artifacts/maintenance
 ```
 
-该入口没有保留期参数，只回收可以确定失效的 writer claim，不删除 Artifact、批次或 Work Item。终态内容清理仍只能通过宿主环境变量显式配置，不能由调试面板触发。
+该入口没有保留期参数，只回收可以确定失效的 writer claim，不删除 Artifact、批次或 LongTask。终态内容清理仍只能通过宿主环境变量显式配置，不能由调试面板触发。
 
 确定性检查：
 
@@ -160,8 +160,11 @@ GET /api/ai/agent-security-redteam
 
 ```bash
 .venv/bin/python -m pytest \
+  packages/purra/tests/test_standalone_agent_conformance.py \
+  packages/purra/tests/test_model_tool_gateway_conformance.py \
+  packages/purra/tests/test_durable_execution.py -q
+.venv/bin/python -m pytest \
   backend/tests/test_purra_runtime.py \
-  backend/tests/test_purra_engine.py \
   backend/tests/test_agent_composition.py \
   backend/tests/test_ai_composed_sse_wire_contract.py \
   backend/tests/test_main_lifespan.py -q

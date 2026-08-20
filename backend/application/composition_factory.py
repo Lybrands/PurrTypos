@@ -6,21 +6,17 @@ from functools import partial
 
 from application.agent_composition import AgentComposition
 from application.screenplay_agent_profile import (
-    build_screenplay_profile_extension,
+    build_screenplay_agent_profile,
 )
-from application.screenplay_agent_task_executor import (
-    normalize_screenplay_candidate,
-)
-from application.writing_agent_profile import build_writing_profile_extension
-from infrastructure.screenplay import ScreenplayCandidateCompletionProjector
+from application.writing_agent_profile import build_writing_agent_profile
 from infrastructure.screenplay.agent_root_completion_projector import (
     ScreenplayAgentRootCompletionProjector,
 )
 from infrastructure.screenplay.agent_continuation_begin_projector import (
     ScreenplayContinuationBeginProjector,
 )
-from infrastructure.screenplay.agent_root_cancellation_participant import (
-    ScreenplayRootCancellationParticipant,
+from infrastructure.screenplay.agent_run_cancellation_projector import (
+    ScreenplayRunCancellationProjector,
 )
 
 
@@ -41,16 +37,15 @@ def create_agent_composition(
 ) -> AgentComposition:
     """Install product profiles without teaching generic composition domains."""
 
-    writing_extension_factory = partial(
-        build_writing_profile_extension,
+    writing_profile_factory = partial(
+        build_writing_agent_profile,
         skills_dir=kwargs.pop("skills_dir", None),
     )
     supplied_projector = kwargs.pop("run_commit_projector", None)
+    supplied_cancellation_projectors = tuple(
+        kwargs.pop("run_cancellation_projectors", ())
+    )
     screenplay_projectors = (
-        ScreenplayCandidateCompletionProjector(
-            db,
-            candidate_normalizer=normalize_screenplay_candidate,
-        ),
         ScreenplayAgentRootCompletionProjector(db),
     )
     run_commit_projector = (
@@ -62,14 +57,14 @@ def create_agent_composition(
         db,
         run_begin_projector=ScreenplayContinuationBeginProjector(db),
         run_commit_projector=run_commit_projector,
-        root_cancellation_participants=(
-            ScreenplayRootCancellationParticipant(db),
+        run_cancellation_projectors=(
+            ScreenplayRunCancellationProjector(db),
+            *supplied_cancellation_projectors,
         ),
-        profile_extension_factories=(
-            writing_extension_factory,
+        profile_factories=(
+            writing_profile_factory,
             partial(
-                build_screenplay_profile_extension,
-                candidate_normalizer=normalize_screenplay_candidate,
+                build_screenplay_agent_profile,
             ),
         ),
         **kwargs,

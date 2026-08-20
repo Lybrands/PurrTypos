@@ -8,7 +8,7 @@ import {
   groupAiDebugRunsByTurn,
   hydrateAiDebugRunSnapshot,
   recordAiDebugChunk,
-  recordAiDebugRunContinuation,
+  recordAiDebugRunEvent,
   recordScreenplayAiDebugChunk,
   startAiDebugRun,
 } from "./store.ts";
@@ -116,14 +116,6 @@ function persistedSnapshot(
       conversationId: null,
       status,
       mode: 'agent',
-      lineage: {
-        parentRunId: null,
-        rootRunId: runId,
-        delegationId: null,
-        agentRole: null,
-        agentTitle: null,
-        depth: 0,
-      },
       finalResponse: '',
       createdAt: '2026-08-05 17:00:00',
       updatedAt: '2026-08-05 17:00:10',
@@ -498,7 +490,7 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
   );
 });
 
-test("durable child activity is accounted under the orchestration root", () => {
+test("same-Run delegated model activity stays under its owning Run", () => {
   clearAiDebugRuns();
   startAiDebugRun("screenplay-workflow", {
     apiKey: "key",
@@ -518,19 +510,19 @@ test("durable child activity is accounted under the orchestration root", () => {
   });
   recordAiDebugChunk("screenplay-workflow", { done: true });
 
-  recordAiDebugRunContinuation("run-root", canonicalEvent(1, {
-    runId: "run-child",
+  recordAiDebugRunEvent("run-root", canonicalEvent(1, {
+    runId: "run-root",
     kind: "run.lifecycle",
     payload: { status: "running" },
   }));
-  recordAiDebugRunContinuation(
+  recordAiDebugRunEvent(
     "run-root",
-    modelOperation(2, "run-child", "child-model", {
+    modelOperation(2, "run-root", "delegated-model", {
       phase: "generation",
       round: 1,
     }),
   );
-  recordAiDebugRunContinuation("run-root", { done: true });
+  recordAiDebugRunEvent("run-root", { done: true });
 
   const run = getAiDebugSnapshot().runs[0];
   assert.equal(run.agentRunId, "run-root");
@@ -539,7 +531,7 @@ test("durable child activity is accounted under the orchestration root", () => {
   assert.ok((run.finishedAt || 0) >= run.startedAt);
 });
 
-test("delegated child Runs keep independent diagnostics under the root", () => {
+test("delegations keep status metadata inside the owning Run", () => {
   clearAiDebugRuns();
   startAiDebugRun("screenplay-multi-agent", {
     apiKey: "key",
@@ -559,9 +551,8 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
     payload: {
       eventType: "status",
       delegationId: "delegation-writer-a",
-      parentRunId: "run-root",
-      childRunId: "run-child-a",
-      agentRole: "screenplay_writer",
+      runId: "run-root",
+      agentName: "screenplay_writer",
       agentTitle: "剧本 Writer · ep05",
       objective: "创作第五集",
       unitId: "ep05",
@@ -571,51 +562,11 @@ test("delegated child Runs keep independent diagnostics under the root", () => {
       priority: 0,
     },
   }));
-  recordAiDebugChunk("screenplay-multi-agent", canonicalEvent(3, {
-    runId: "run-root",
-    kind: "delegation.event",
-    channel: "delegation",
-    payload: {
-      eventType: "child_output",
-      parentRunId: "run-root",
-      delegationId: "delegation-writer-a",
-      childRunId: "run-child-a",
-      agentRole: "screenplay_writer",
-      agentTitle: "剧本 Writer · ep05",
-      objective: "创作第五集",
-      unitId: "ep05",
-      attempt: 2,
-      event: modelOperation(1, "run-child-a", "child-a-model", {
-        phase: "generation",
-        round: 1,
-      }),
-    },
-  }));
-  recordAiDebugChunk("screenplay-multi-agent", canonicalEvent(4, {
-    runId: "run-root",
-    kind: "delegation.event",
-    channel: "delegation",
-    payload: {
-      eventType: "child_output",
-      parentRunId: "run-root",
-      delegationId: "delegation-writer-a",
-      childRunId: "run-child-a",
-      agentRole: "screenplay_writer",
-      agentTitle: "剧本 Writer · ep05",
-      objective: "创作第五集",
-      unitId: "ep05",
-      attempt: 2,
-      event: providerDelta(2, "run-child-a", "commentary", "检查连续性"),
-    },
-  }));
-
   const run = getAiDebugSnapshot().runs[0];
   assert.equal(run.agentRunId, "run-root");
   assert.equal(run.modelCalls.length, 0);
-  assert.equal(run.childRuns.length, 1);
-  assert.equal(run.childRuns[0].childRunId, "run-child-a");
-  assert.equal(run.childRuns[0].unitId, "ep05");
-  assert.equal(run.childRuns[0].attempt, 2);
-  assert.equal(run.childRuns[0].modelCalls.length, 1);
-  assert.equal(run.childRuns[0].commentary, "检查连续性");
+  assert.equal(run.delegationActivities.length, 1);
+  assert.equal(run.delegationActivities[0].unitId, "ep05");
+  assert.equal(run.delegationActivities[0].attempt, 2);
+  assert.equal(run.delegationActivities[0].status, "thinking");
 });

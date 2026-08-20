@@ -271,9 +271,11 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
     ):
         await first.execute(
             "INSERT INTO ai_agent_artifacts "
-            "(id, namespace, kind, owner_id) VALUES "
-            "(?, 'purrtypos.screenplay', 'screenplayDraft', ?)",
-            [artifact_id, owner_id],
+            "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+            "created_by_run_id) VALUES "
+            "(?, 'purrtypos.screenplay', 'screenplayDraft', ?, 'project', ?, "
+            "'run')",
+            [artifact_id, owner_id, owner_id],
         )
         await first.execute(
             "INSERT INTO ai_agent_artifact_batches "
@@ -285,8 +287,8 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
         )
         await first.execute(
             "INSERT INTO ai_agent_artifact_claims "
-            "(artifact_id, work_item_id, run_id, claim_token, "
-            "acquired_revision, expires_at_ms) VALUES (?, 'work', 'run', "
+            "(artifact_id, run_id, claim_token, "
+            "acquired_revision, expires_at_ms) VALUES (?, 'run', "
             "'claim', 1, 9999999999999)",
             [artifact_id],
         )
@@ -314,7 +316,6 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
     )
     for table in (
         "ai_agent_runs",
-        "ai_agent_work_items",
         "ai_agent_long_tasks",
         "ai_agent_artifacts",
     ):
@@ -385,7 +386,6 @@ async def test_startup_retires_legacy_screenplay_store_without_touching_writing_
         }
         for table in (
             "ai_agent_runs",
-            "ai_agent_work_items",
             "ai_agent_long_tasks",
             "ai_agent_artifacts",
         ):
@@ -450,18 +450,6 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
         "'screenplayDraft', 'digest')"
     )
     await first.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, status) VALUES "
-        "('legacy-active-work', 'purrtypos.screenplay', 'draft', "
-        "'legacy-active-project', 'open')"
-    )
-    await first.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, status) VALUES "
-        "('native-kept-work', 'purrtypos.screenplay', 'draft', "
-        "'native-kept-project', 'open')"
-    )
-    await first.execute(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, status, prompt, binding_namespace, "
         "binding_aggregate_id, binding_command_id) VALUES "
@@ -470,9 +458,10 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
     )
     await first.execute(
         "INSERT INTO ai_agent_runs "
-        "(id, parent_run_id, root_run_id, status, prompt) VALUES "
-        "('legacy-active-child', 'legacy-active-run', 'legacy-active-run', "
-        "'running', '旧子运行')"
+        "(id, status, prompt, binding_namespace, binding_aggregate_id, "
+        "binding_command_id) VALUES ('legacy-active-secondary', 'running', "
+        "'旧辅助运行', 'screenplay.agent.task', 'legacy-active-project', "
+        "'legacy-secondary-command')"
     )
     conversation_id = await first.execute_and_get_id(
         "INSERT INTO ai_conversations (session_id, prompt, response) "
@@ -508,17 +497,17 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
     )
     await first.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units, metadata_json) VALUES "
-        "('native-kept-task', 'native-kept-work', 'purrtypos.screenplay', "
+        "('native-kept-task', 'purrtypos.screenplay', "
         "'draft', 'native-kept-project', 'native-kept-run', 'completed', 1, "
         "'{\"sessionId\":9701,\"kept\":true}')"
     )
     await first.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "status, total_units) VALUES ('legacy-cross-task', "
-        "'native-kept-work', 'purrtypos.screenplay', 'draft', "
+        "'purrtypos.screenplay', 'draft', "
         "'legacy-active-project', 'legacy-active-run', 'completed', 1)"
     )
     await first.execute(
@@ -557,24 +546,16 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
             "WHERE id = 'legacy-active-turn'"
         ) is None
         assert await reopened.fetch_one(
-            "SELECT id FROM ai_agent_work_items "
-            "WHERE id = 'legacy-active-work'"
-        ) is None
-        assert await reopened.fetch_one(
             "SELECT id FROM screenplay_projects "
             "WHERE id = 'native-kept-project'"
         ) == {"id": "native-kept-project"}
-        assert await reopened.fetch_one(
-            "SELECT id FROM ai_agent_work_items "
-            "WHERE id = 'native-kept-work'"
-        ) == {"id": "native-kept-work"}
         assert await reopened.fetch_one(
             "SELECT status, session_id FROM ai_agent_runs "
             "WHERE id = 'legacy-active-run'"
         ) == {"status": "canceled", "session_id": None}
         assert await reopened.fetch_one(
             "SELECT status FROM ai_agent_runs "
-            "WHERE id = 'legacy-active-child'"
+            "WHERE id = 'legacy-active-secondary'"
         ) == {"status": "canceled"}
         assert await reopened.fetch_one(
             "SELECT request_id FROM ai_writing_chat_requests "
@@ -599,9 +580,6 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
             "WHERE id = 'native-kept-task'"
         )
         assert json.loads(retained_task["metadata_json"]) == {"kept": True}
-        assert await reopened.fetch_one(
-            "SELECT id FROM ai_agent_work_items WHERE id = 'native-kept-work'"
-        ) == {"id": "native-kept-work"}
         assert await reopened.fetch_one(
             "SELECT id FROM ai_agent_long_tasks WHERE id = 'legacy-cross-task'"
         ) is None

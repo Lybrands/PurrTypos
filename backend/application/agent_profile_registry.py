@@ -1,4 +1,4 @@
-"""Immutable composition registry for product Agent profiles."""
+"""Generic host profile contract and immutable registry."""
 
 from __future__ import annotations
 
@@ -7,34 +7,43 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Protocol, runtime_checkable
 
 from purra.api import AgentModelTaskRunner
-from purra.contracts import AgentRunRequest
+from purra.context_strategies import ContextStrategy
+from purra.contracts import AgentRunRequest, RuntimeLimits
 from purra.long_tasks import LongTaskRepository
-from purra.ports import ContextProvider, ResponseJudgePolicy
+from purra.ports import (
+    ContextProvider,
+    ExecutionStateFactory,
+    PlanningPolicy,
+    ResponseJudgePolicy,
+    ToolCatalog,
+)
+from purra.recovery import RecoveryPolicy
 from purra.task_admission import LongTaskDispatcher, TaskAdmissionEvaluator
-from purra.work_items.ports import WorkItemRepository
-
-
-@dataclass(frozen=True, slots=True)
-class AgentProfileRegistration:
-    id: str
-    domain_namespace: str
-    adapter: Any
-
-    def __post_init__(self) -> None:
-        profile_id = str(self.id or "").strip()
-        namespace = str(self.domain_namespace or "").strip()
-        if not profile_id or not namespace:
-            raise ValueError("Agent profile id and domain namespace are required")
-        object.__setattr__(self, "id", profile_id)
-        object.__setattr__(self, "domain_namespace", namespace)
 
 
 ContextProviderFactory = Callable[[AgentModelTaskRunner], ContextProvider]
 
 
 @runtime_checkable
-class AgentProfileExtension(Protocol):
-    def profile_registration(self) -> AgentProfileRegistration: ...
+class AgentProfileAdapter(Protocol):
+    """Product-neutral capabilities consumed by the composition root."""
+
+    planning_policy: PlanningPolicy | None
+    context_strategy: ContextStrategy
+    execution_state_factory: ExecutionStateFactory
+    tool_catalog: ToolCatalog
+    context_provider: ContextProvider | None
+    runtime_limits: RuntimeLimits
+    recovery_policy: RecoveryPolicy
+
+
+@runtime_checkable
+class AgentProfile(Protocol):
+    """One host-owned Agent style and all of its optional hooks."""
+
+    id: str
+    domain_namespace: str
+    adapter: AgentProfileAdapter
 
     async def prepare_request(
         self,
@@ -53,7 +62,6 @@ class AgentProfileExtension(Protocol):
     def create_long_task_dispatcher(
         self,
         *,
-        work_item_repository: WorkItemRepository | None = None,
         long_task_repository: LongTaskRepository | None = None,
         executor: Any = None,
     ) -> LongTaskDispatcher | None: ...
@@ -62,11 +70,18 @@ class AgentProfileExtension(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class StaticAgentProfileExtension:
-    registration: AgentProfileRegistration
+class StaticAgentProfile:
+    id: str
+    domain_namespace: str
+    adapter: AgentProfileAdapter
 
-    def profile_registration(self) -> AgentProfileRegistration:
-        return self.registration
+    def __post_init__(self) -> None:
+        profile_id = str(self.id or "").strip()
+        namespace = str(self.domain_namespace or "").strip()
+        if not profile_id or not namespace:
+            raise ValueError("Agent profile id and domain namespace are required")
+        object.__setattr__(self, "id", profile_id)
+        object.__setattr__(self, "domain_namespace", namespace)
 
     async def prepare_request(
         self,
@@ -91,11 +106,10 @@ class StaticAgentProfileExtension:
     def create_long_task_dispatcher(
         self,
         *,
-        work_item_repository: WorkItemRepository | None = None,
         long_task_repository: LongTaskRepository | None = None,
         executor: Any = None,
     ) -> LongTaskDispatcher | None:
-        del work_item_repository, long_task_repository, executor
+        del long_task_repository, executor
         return None
 
     def clear_active_executions(self) -> None:
@@ -103,41 +117,60 @@ class StaticAgentProfileExtension:
 
 
 class AgentProfileRegistry:
-    def __init__(self, registrations: Iterable[AgentProfileRegistration]):
-        items = tuple(registrations)
-        by_id = {item.id: item for item in items}
-        by_namespace = {item.domain_namespace: item for item in items}
+    def __init__(self, profiles: Iterable[AgentProfile]):
+        items = tuple(profiles)
         if not items:
             raise ValueError("Agent profile registry cannot be empty")
-        if len(by_id) != len(items) or len(by_namespace) != len(items):
-            raise ValueError("Agent profile ids and namespaces must be unique")
-        self._registrations = items
+        by_id: dict[str, AgentProfile] = {}
+        by_namespace: dict[str, AgentProfile] = {}
+        for profile in items:
+            profile_id = str(profile.id or "").strip()
+            namespace = str(profile.domain_namespace or "").strip()
+            if not profile_id or not namespace:
+                raise ValueError(
+                    "Agent profile id and domain namespace are required"
+                )
+            if profile_id in by_id or namespace in by_namespace:
+                raise ValueError(
+                    "Agent profile ids and namespaces must be unique"
+                )
+            by_id[profile_id] = profile
+            by_namespace[namespace] = profile
+        self._profiles = items
         self._by_id = by_id
         self._by_namespace = by_namespace
 
     @property
     def ids(self) -> tuple[str, ...]:
-        return tuple(item.id for item in self._registrations)
+        return tuple(profile.id for profile in self._profiles)
 
-    def require(self, profile_id: str) -> AgentProfileRegistration:
+    def require(self, profile_id: str) -> AgentProfile:
         normalized = str(profile_id or "").strip()
-        registration = self._by_id.get(normalized)
-        if registration is None:
-            raise ValueError(f"unsupported Agent profile: {normalized or '<empty>'}")
-        return registration
+        profile = self._by_id.get(normalized)
+        if profile is None:
+            raise ValueError(
+                f"unsupported Agent profile: {normalized or '<empty>'}"
+            )
+        return profile
 
-    def for_request(self, request: AgentRunRequest) -> AgentProfileRegistration:
+    def for_request(self, request: AgentRunRequest) -> AgentProfile:
         return self.for_domain_namespace(request.domain_context.namespace)
 
-    def for_domain_namespace(
-        self,
-        domain_namespace: str,
-    ) -> AgentProfileRegistration:
+    def for_domain_namespace(self, domain_namespace: str) -> AgentProfile:
         normalized = str(domain_namespace or "").strip()
-        registration = self._by_namespace.get(normalized)
-        if registration is None:
+        profile = self._by_namespace.get(normalized)
+        if profile is None:
             raise ValueError(
                 "unsupported Agent domain namespace: "
                 f"{normalized or '<empty>'}"
             )
-        return registration
+        return profile
+
+
+__all__ = [
+    "AgentProfile",
+    "AgentProfileAdapter",
+    "AgentProfileRegistry",
+    "ContextProviderFactory",
+    "StaticAgentProfile",
+]

@@ -100,7 +100,6 @@ class SqliteWritingChatRequestStore:
             )
             active_run = await self._db.fetch_one(
                 "SELECT id FROM ai_agent_runs WHERE session_id = ? "
-                "AND parent_run_id IS NULL "
                 "AND status IN ('pending', 'queued', 'running', 'paused') "
                 "LIMIT 1",
                 [int(session_id)],
@@ -197,7 +196,7 @@ class SqliteWritingChatRequestStore:
         if expected_run_ids is not None:
             rows = await self._db.fetch_all(
                 "SELECT id FROM ai_agent_runs WHERE session_id = ? "
-                "AND parent_run_id IS NULL ORDER BY rowid ASC",
+                "ORDER BY rowid ASC",
                 [int(session_id)],
             )
             current = {str(row["id"]) for row in rows}

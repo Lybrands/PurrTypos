@@ -30,11 +30,13 @@ BANNED_WRITING_IDENTIFIERS = {
     "setting_entity_id",
 }
 BANNED_WRITING_TEXT_FRAGMENTS = {
+    "memory_context_receipts",
     "queryoutline",
     "getchaptercontent",
     "associatedoutlines",
     "associated chapters",
     "selected memories",
+    "story_state",
     "大纲",
     "章节",
     "人物",

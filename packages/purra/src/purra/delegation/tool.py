@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
+from uuid import uuid4
 
 from purra.cancellation import OperationCanceled, await_with_cancellation
 from purra.contracts import (
@@ -19,70 +19,57 @@ from purra.contracts import (
 )
 from purra.errors import ContractViolationError
 from purra.ports import CancellationSignal, ToolRegistration
-from purra.delegation.coordinator import AgentDelegationCoordinator
-
-
-_MAX_DELEGATIONS_PER_CALL = 3
+from purra.delegation.coordinator import DelegationCoordinator
+from purra.delegation.policy import DelegationPolicy
 
 
 def build_delegation_tool_registration(
-    coordinator: AgentDelegationCoordinator,
-    *,
-    role_guidance: Mapping[str, Mapping[str, str]],
+    coordinator: DelegationCoordinator,
+    policy: DelegationPolicy = DelegationPolicy(),
 ) -> ToolRegistration:
-    if not isinstance(coordinator, AgentDelegationCoordinator):
+    if not isinstance(coordinator, DelegationCoordinator):
         raise TypeError("delegation tool requires the canonical coordinator")
-    roles = {
-        str(role_id).strip(): {
-            "title": str(value.get("title") or role_id).strip(),
-            "description": str(value.get("description") or "").strip(),
-        }
-        for role_id, value in role_guidance.items()
-        if str(role_id).strip()
-    }
-    if not roles:
-        raise ValueError("delegation tool requires at least one agent role")
+    if not isinstance(policy, DelegationPolicy):
+        raise TypeError("delegation tool requires a DelegationPolicy")
 
     async def handle(
         state: ExecutionState,
         arguments: dict[str, Any],
         signal: CancellationSignal | None = None,
     ) -> ToolHandlerResult:
-        parent_run_id = str(state.run_id or "").strip()
-        if not parent_run_id:
+        run_id = str(state.run_id or "").strip()
+        if not run_id:
             raise ContractViolationError(
-                "delegation tool requires a bound parent run"
+                "delegation tool requires a bound Run"
             )
-        items = _validated_items(arguments, roles)
+        items = _validated_items(arguments, policy)
+        batch_id = f"delegation-batch-{uuid4().hex}"
         created = [
             await coordinator.create(
-                parent_run_id=parent_run_id,
-                agent_role=item["agentRole"],
+                run_id=run_id,
+                batch_id=batch_id,
+                agent_name=item["agentName"],
+                agent_title=item["title"],
+                agent_instruction=item["instruction"],
                 objective=item["objective"],
                 input_payload=item["input"],
+                context_mode=policy.context_mode,
                 required=item["required"],
                 priority=item["priority"],
             )
             for item in items
         ]
 
-        async def run_children() -> None:
-            handles = await asyncio.gather(*(
-                coordinator.claim_and_submit(
-                    delegation.id,
-                    parent_run_id=parent_run_id,
-                )
-                for delegation in created
-            ))
-            await asyncio.gather(*(handle.wait() for handle in handles))
-
         try:
-            await await_with_cancellation(run_children(), signal)
+            await await_with_cancellation(
+                coordinator.execute_batch(created, signal),
+                signal,
+            )
         except OperationCanceled:
-            await coordinator.cancel_children(parent_run_id)
+            await coordinator.cancel_batch(run_id, batch_id)
             raise
 
-        aggregate = await coordinator.aggregate(parent_run_id)
+        aggregate = await coordinator.aggregate_batch(run_id, batch_id)
         return ToolHandlerResult(
             json.dumps(
                 {
@@ -95,7 +82,7 @@ def build_delegation_tool_registration(
                 separators=(",", ":"),
             ),
             error_code=(
-                "required_subagent_failed"
+                "required_delegation_failed"
                 if aggregate.state == "blocked"
                 else None
             ),
@@ -106,16 +93,15 @@ def build_delegation_tool_registration(
         schema=ToolSchema(
             name="delegateToAgents",
             display_names={
-                "zh-CN": "委派子 Agent 协作",
-                "en-US": "Delegate to Sub-agents",
+                "zh-CN": "创建并调用子 Agent",
+                "en-US": "Create and invoke Agents",
             },
             description=(
-                "Delegate 1-3 independent tasks to role-scoped child agents "
-                "and wait for their results. Available roles: "
-                + "; ".join(
-                    f"{role_id} ({value['description']})"
-                    for role_id, value in roles.items()
-                )
+                f"Create 1-{policy.max_agents_per_call} task-specific Agents, "
+                "invoke them with isolated "
+                "context and bounded read-only tools, wait for completion, and "
+                "return their results. Define each Agent's name, title, and "
+                "instruction for the current task."
             ),
             parameters={
                 "type": "object",
@@ -123,20 +109,40 @@ def build_delegation_tool_registration(
                     "delegations": {
                         "type": "array",
                         "minItems": 1,
-                        "maxItems": _MAX_DELEGATIONS_PER_CALL,
+                        "maxItems": policy.max_agents_per_call,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "agentRole": {
+                                "agentName": {
                                     "type": "string",
-                                    "enum": sorted(roles),
+                                    "minLength": 1,
+                                    "maxLength": policy.max_agent_name_chars,
                                 },
-                                "objective": {"type": "string"},
+                                "title": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": policy.max_title_chars,
+                                },
+                                "instruction": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": policy.max_instruction_chars,
+                                },
+                                "objective": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": policy.max_objective_chars,
+                                },
                                 "input": {"type": "object"},
                                 "required": {"type": "boolean"},
                                 "priority": {"type": "integer"},
                             },
-                            "required": ["agentRole", "objective"],
+                            "required": [
+                                "agentName",
+                                "title",
+                                "instruction",
+                                "objective",
+                            ],
                             "additionalProperties": False,
                         },
                     },
@@ -148,38 +154,61 @@ def build_delegation_tool_registration(
         handler=handle,
         policy=ToolPolicy(
             mode=ToolExecutionMode.PROPOSE,
-            title="调用子 Agent",
+            title="创建并调用子 Agent",
             risk_level=ToolRiskLevel.WRITE,
         ),
+        # The coordinator persists every delegation transition and canonical
+        # status event itself. Wrapping it in the generic tool-receipt
+        # transaction would nest durable boundaries across asynchronous model
+        # work and prevent those events from committing.
         host_managed_durability=True,
     )
 
 
 def _validated_items(
     arguments: Mapping[str, Any],
-    roles: Mapping[str, Mapping[str, str]],
+    policy: DelegationPolicy,
 ) -> list[dict[str, Any]]:
     raw_items = arguments.get("delegations")
     if (
         not isinstance(raw_items, Sequence)
         or isinstance(raw_items, (str, bytes, bytearray))
-        or not 1 <= len(raw_items) <= _MAX_DELEGATIONS_PER_CALL
+        or not 1 <= len(raw_items) <= policy.max_agents_per_call
     ):
         raise ContractViolationError(
-            "delegations must contain between one and three tasks"
+            "delegations must contain between one and "
+            f"{policy.max_agents_per_call} tasks"
         )
     items: list[dict[str, Any]] = []
+    agent_names: set[str] = set()
     for raw in raw_items:
         if not isinstance(raw, Mapping):
             raise ContractViolationError("delegation task must be an object")
-        role = str(raw.get("agentRole") or "").strip()
-        objective = str(raw.get("objective") or "").strip()
-        if role not in roles or not objective:
+        agent_name = _bounded_text(
+            raw.get("agentName"),
+            "agentName",
+            policy.max_agent_name_chars,
+        )
+        title = _bounded_text(raw.get("title"), "title", policy.max_title_chars)
+        instruction = _bounded_text(
+            raw.get("instruction"),
+            "instruction",
+            policy.max_instruction_chars,
+        )
+        objective = _bounded_text(
+            raw.get("objective"),
+            "objective",
+            policy.max_objective_chars,
+        )
+        if agent_name in agent_names:
             raise ContractViolationError(
-                "delegation task has an unsupported role or empty objective"
+                "delegated Agent names must be unique within a tool call"
             )
+        agent_names.add(agent_name)
         items.append({
-            "agentRole": role,
+            "agentName": agent_name,
+            "title": title,
+            "instruction": instruction,
             "objective": objective,
             "input": (
                 dict(raw.get("input"))
@@ -190,6 +219,15 @@ def _validated_items(
             "priority": int(raw.get("priority") or 0),
         })
     return items
+
+
+def _bounded_text(value: object, label: str, maximum: int) -> str:
+    normalized = str(value or "").strip()
+    if not normalized or len(normalized) > maximum:
+        raise ContractViolationError(
+            f"delegation {label} must contain between 1 and {maximum} characters"
+        )
+    return normalized
 
 
 __all__ = ["build_delegation_tool_registration"]

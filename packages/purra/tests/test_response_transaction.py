@@ -15,7 +15,7 @@ from purra.contracts import (
 )
 from purra.model_invocation import ModelInvocationContext
 from purra.model_protocol import generic_capability_snapshot
-from purra.engine import AgentCoreRunOptions
+from purra.api import AgentCoreRunOptions
 
 
 def _types():

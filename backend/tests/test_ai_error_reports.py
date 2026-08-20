@@ -103,11 +103,10 @@ async def test_historical_report_recovers_durable_task_type(
     )
     await report_db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
-        "total_units, max_parallelism) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, namespace, kind, owner_id, created_by_run_id, "
+        "total_units, max_parallelism) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             "task-history",
-            "work-history",
             "purrtypos.screenplay",
             "screenplay_draft_generation",
             "project-1",

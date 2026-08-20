@@ -116,6 +116,16 @@ export function useBookConversationExtensions({
       const cards = message.isError
         ? []
         : getBookAssistantAttachmentsForMessage(attachments, message)
+      if (cards.length === 0) return null
+      return (
+        <div className="book-assistant-attachments">
+          {cards.map((card) => (
+            <SettingDiffCard key={card.proposalId} card={card} />
+          ))}
+        </div>
+      )
+    },
+    renderAssistantActions: (message, index) => {
       const previous = messages[index - 1]
       const favoriteContent = getAssistantRenderableMarkdown(message).trim()
       const canFavorite = Boolean(
@@ -124,26 +134,18 @@ export function useBookConversationExtensions({
         && previous?.role === 'user'
         && !(running && index === messages.length - 1),
       )
-      if (cards.length === 0 && !canFavorite) return null
+      if (!canFavorite) return null
       return (
-        <div className="book-assistant-attachments">
-          {cards.map((card) => (
-            <SettingDiffCard key={card.proposalId} card={card} />
-          ))}
-          {canFavorite ? (
-            <div className="book-assistant-attachments__actions">
-              <PurrTooltip title="收藏">
-                <PurrButton
-                  type="text"
-                  size="small"
-                  icon={<StarIcon style={{ fontSize: 12 }} />}
-                  onClick={() => onAddFavorite(previous.content, favoriteContent)}
-                  aria-label="收藏回复"
-                />
-              </PurrTooltip>
-            </div>
-          ) : null}
-        </div>
+        <PurrTooltip title="收藏">
+          <PurrButton
+            type="text"
+            size="small"
+            icon={<StarIcon style={{ fontSize: 12 }} />}
+            className="agent-message-action-button"
+            onClick={() => onAddFavorite(previous.content, favoriteContent)}
+            aria-label="收藏回复"
+          />
+        </PurrTooltip>
       )
     },
   }), [

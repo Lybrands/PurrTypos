@@ -1,17 +1,17 @@
 # PurrA 模型无关长任务执行与恢复设计
 
 > 日期：2026-08-11
-> 状态：已实现；本地合同门禁通过，真实 Provider E2E 因缺少凭据仍是发布阻塞项
+> 状态：已实现；自动化门禁仅覆盖离线合同、协议与状态机，真实 Provider 验证由项目所有者手工执行
 > 取代：`2026-08-10-purra-execution-reliability-design.md`
 > 范围：PurrA 通用模型协议、长任务语义分片、持久化恢复、失败与取消收口、剧本审阅配方、最终输出协议
 > 依据：当前代码、已持久化的真实失败 Run、PurrA/剧本分层章程，以及本轮已确认的产品约束。
 
 ## 0. 实施与发布门禁状态
 
-2026-08-11 已完成本设计对应的 Core、Profile、Operation、LongTask、Artifact、取消、恢复与前端投影改造。当前状态必须区分为两类：
+2026-08-11 已完成本设计对应的 Core、Profile、Operation、LongTask、Artifact、取消、恢复与前端投影改造。自动化门禁范围如下：
 
 - 本地合同门禁已通过：注册 profile 统一请求/finish/usage/reasoning/tool argument stream/cancel 合同；Core 厂商名隔离；显式换模恢复；Run 级 usage 幂等汇总；Candidate/Revision/Assistant final 原子收口；暂停与取消恢复测试。
-- 真实 Provider E2E 未执行成功，不得视为通过：本机缺少 `DEEPSEEK_API_KEY`、`ZAI_API_KEY`、`MIMO_API_KEY`，DeepSeek reasoning on/off、GLM-5.2、MiMo V2.5 Pro 四项均以 `RELEASE BLOCKER` skip。发布前必须在具备真实凭据的环境执行 `npm run test:screenplay-real-e2e`。
+- 仓库不维护或执行付费真实 Provider E2E；真实模型、账号、网络与额度验证由项目所有者在仓库门禁之外手工完成。
 
 本次 1M 上下文能力快照 digest：
 

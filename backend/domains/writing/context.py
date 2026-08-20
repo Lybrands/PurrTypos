@@ -17,6 +17,7 @@ from purra.contracts import (
     TaskContextRequest,
 )
 from purra.json_values import thaw_json_mapping
+from purra.evidence import CONTEXT_EVIDENCE_RECEIPTS_KEY
 from purra.ports import CancellationSignal
 from domains.writing.associated_context import (
     AssociatedContextResult,
@@ -43,6 +44,7 @@ WRITING_RETRIEVAL_CONTEXT = "writing_retrieval"
 WRITING_BINDING_CONTEXT = "writing_session_binding"
 WRITING_EVIDENCE_POLICY_CONTEXT = "writing_evidence_policy"
 WRITING_AGENT_POLICY_CONTEXT = "writing_agent_policy"
+WRITING_PLANNING_FACTS_CONTEXT = "writing_planning_facts"
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,13 +147,27 @@ class WritingContextProvider:
             policy,
             *(existing_rules if isinstance(existing_rules, list) else []),
         ]
+        planning_facts = json.dumps(
+            host_facts,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         return ContextBundle(
-            blocks=(ContextBlock(
-                name=WRITING_AGENT_POLICY_CONTEXT,
-                content=policy,
-                token_count=estimate_json_tokens(policy),
-                untrusted=False,
-            ),),
+            blocks=(
+                ContextBlock(
+                    name=WRITING_AGENT_POLICY_CONTEXT,
+                    content=policy,
+                    token_count=estimate_json_tokens(policy),
+                    untrusted=False,
+                ),
+                ContextBlock(
+                    name=WRITING_PLANNING_FACTS_CONTEXT,
+                    content=planning_facts,
+                    token_count=estimate_json_tokens(host_facts),
+                    untrusted=False,
+                ),
+            ),
             diagnostics={
                 "memoryTokens": 0,
                 "associatedTokens": 0,
@@ -306,7 +322,7 @@ class WritingContextProvider:
                             associated_result.outline_source_records
                         )
                     ],
-                    "memory_context_receipts": [
+                    CONTEXT_EVIDENCE_RECEIPTS_KEY: [
                         receipt.to_mapping()
                         for receipt in memory_result.receipts
                     ],

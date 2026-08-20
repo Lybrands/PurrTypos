@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Sequence
 
-from purra.contracts import ExecutionRecipe, TaskPlan
+from purra.contracts import ExecutionRecipe, ExecutionPlan
 from purra.normalization import (
     non_negative_int,
     optional_text,
@@ -107,6 +107,7 @@ class TaskAdmissionDecision:
 class LongTaskDispatchReceipt:
     task_id: str
     message: str
+    admission: TaskAdmissionDecision
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -116,6 +117,11 @@ class LongTaskDispatchReceipt:
         object.__setattr__(self, "message", required_text(
             self.message, "long task dispatch message"
         ))
+        if (
+            not isinstance(self.admission, TaskAdmissionDecision)
+            or self.admission.mode is not ExecutionMode.DURABLE
+        ):
+            raise ValueError("long task dispatch receipt requires durable admission")
         object.__setattr__(self, "metadata", freeze_json_mapping(self.metadata))
 
 
@@ -132,15 +138,15 @@ class LongTaskExecutionUpdate:
 
     event: AgentEvent
     persist: bool = True
-    plan_revision: TaskPlan | None = None
+    plan_revision: ExecutionPlan | None = None
     plan_revision_metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.plan_revision is not None and not isinstance(
             self.plan_revision,
-            TaskPlan,
+            ExecutionPlan,
         ):
-            raise TypeError("long task plan revision must be a TaskPlan")
+            raise TypeError("long task plan revision must be an ExecutionPlan")
         metadata = freeze_json_mapping(self.plan_revision_metadata)
         if metadata and self.plan_revision is None:
             raise ValueError(

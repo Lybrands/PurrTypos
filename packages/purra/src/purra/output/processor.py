@@ -27,7 +27,6 @@ from purra.output.contracts import (
     AgentOutputIntent,
     DelegationOutputEvent,
     DomainEffectOutput,
-    FederatedOutputEvent,
     OutputChannel,
     OutputEventKind,
     OutputSource,
@@ -97,6 +96,30 @@ class AgentOutputProcessor:
         opened = await self._persist_open(spec)
         self._streams[spec.output_stream_id] = opened
         self._chunk_indices.setdefault(spec.output_stream_id, 0)
+        try:
+            await self._append(AgentOutputEventDraft(
+                run_id=spec.run_id,
+                turn_id=spec.turn_id,
+                output_stream_id=spec.output_stream_id,
+                invocation_id=spec.invocation_id,
+                source_event_key=f"provider:{spec.invocation_id}:stream-opened",
+                source=OutputSource.PROVIDER,
+                kind=OutputEventKind.STREAM_OPENED,
+                channel=OutputChannel.DIAGNOSTIC,
+                visibility=OutputVisibility.PRIVATE,
+                payload=receipt.to_mapping(),
+                occurred_at=datetime.now(timezone.utc),
+            ))
+        except BaseException:
+            try:
+                await self.abort_model_stream(
+                    spec.output_stream_id,
+                    "invocation_receipt_persistence_failed",
+                )
+            finally:
+                self._streams.pop(spec.output_stream_id, None)
+                self._chunk_indices.pop(spec.output_stream_id, None)
+            raise
         return opened
 
     async def begin_run_lifecycle(
@@ -242,6 +265,23 @@ class AgentOutputProcessor:
             raise await self._persistence_error(spec.run_id, error) from error
         await self._publish_if_visible(event)
         return event
+
+    async def publish_model_stream_commentary(
+        self,
+        output_stream_id: str,
+    ) -> tuple[AgentOutputEvent, ...]:
+        spec = self._require_stream(output_stream_id)
+        try:
+            events = await self._repository.publish_stream_content_as_commentary(
+                output_stream_id
+            )
+        except ContractViolationError:
+            raise
+        except Exception as error:
+            raise await self._persistence_error(spec.run_id, error) from error
+        for event in events:
+            await self._publish_if_visible(event)
+        return events
 
     async def accept_operation_event(
         self,
@@ -433,53 +473,6 @@ class AgentOutputProcessor:
             occurred_at=event.occurred_at,
         ))
 
-    async def accept_federated_event(
-        self,
-        event: FederatedOutputEvent,
-    ) -> AgentOutputEvent:
-        if not isinstance(event, FederatedOutputEvent):
-            raise TypeError("output processor requires a FederatedOutputEvent")
-        source = event.source_event
-        return await self._append(AgentOutputEventDraft(
-            run_id=event.parent_run_id,
-            turn_id=source.turn_id,
-            output_stream_id=None,
-            invocation_id=source.invocation_id,
-            source_event_key=(
-                f"delegation:{event.delegation_id}:{source.event_id}"
-            ),
-            source=OutputSource.RUNTIME,
-            kind=OutputEventKind.DELEGATION,
-            channel=OutputChannel.DELEGATION,
-            visibility=source.visibility,
-            payload={
-                "eventType": "child_output",
-                "delegationId": event.delegation_id,
-                "parentRunId": event.parent_run_id,
-                "sourceRunId": source.run_id,
-                "agentRole": event.agent_role,
-                "agentTitle": event.agent_title,
-                "objective": event.objective,
-                "sourceSequence": source.sequence,
-                "event": {
-                    "eventId": source.event_id,
-                    "outputStreamId": source.output_stream_id,
-                    "runId": source.run_id,
-                    "turnId": source.turn_id,
-                    "invocationId": source.invocation_id,
-                    "sequence": source.sequence,
-                    "source": source.source.value,
-                    "kind": source.kind.value,
-                    "channel": source.channel.value,
-                    "visibility": source.visibility.value,
-                    "payload": thaw_json_mapping(source.payload),
-                    "occurredAt": source.occurred_at.isoformat(),
-                    "emittedAt": source.emitted_at.isoformat(),
-                },
-            },
-            occurred_at=source.occurred_at,
-        ))
-
     async def accept_delegation_event(
         self,
         event: DelegationOutputEvent,
@@ -487,8 +480,8 @@ class AgentOutputProcessor:
         if not isinstance(event, DelegationOutputEvent):
             raise TypeError("output processor requires a DelegationOutputEvent")
         return await self._append(AgentOutputEventDraft(
-            run_id=event.parent_run_id,
-            turn_id=self._run_turn_ids.get(event.parent_run_id),
+            run_id=event.run_id,
+            turn_id=self._run_turn_ids.get(event.run_id),
             output_stream_id=None,
             invocation_id=None,
             source_event_key=f"delegation-status:{event.event_id}",
@@ -498,10 +491,10 @@ class AgentOutputProcessor:
             visibility=OutputVisibility.PUBLIC,
             payload={
                 "eventType": "status",
+                "batchId": event.batch_id,
                 "delegationId": event.delegation_id,
-                "parentRunId": event.parent_run_id,
-                "childRunId": event.child_run_id,
-                "agentRole": event.agent_role,
+                "runId": event.run_id,
+                "agentName": event.agent_name,
                 "agentTitle": event.agent_title,
                 "objective": event.objective,
                 "status": event.status,

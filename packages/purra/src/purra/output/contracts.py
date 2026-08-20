@@ -84,6 +84,10 @@ class OutputEventKind(StrEnum):
     RUNTIME = "runtime.event"
 
 
+TERMINAL_STREAM_ABORT_ERROR_CODE = "run_terminalized"
+TERMINAL_STREAM_ABORT_CAUSE = "run_terminal_commit"
+
+
 class ResponseTransactionMode(StrEnum):
     DIRECT_LIVE = "direct_live"
     VALIDATED_RESULT = "validated_result"
@@ -518,53 +522,25 @@ class RuntimeOutputEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class FederatedOutputEvent:
-    parent_run_id: RunId
-    delegation_id: str
-    source_event: AgentOutputEvent
-    agent_role: str | None = None
-    agent_title: str | None = None
-    objective: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "parent_run_id",
-            required_text(self.parent_run_id, "parent run id"),
-        )
-        object.__setattr__(
-            self,
-            "delegation_id",
-            required_text(self.delegation_id, "delegation id"),
-        )
-        if not isinstance(self.source_event, AgentOutputEvent):
-            raise TypeError("federated output requires an AgentOutputEvent")
-        if self.source_event.run_id == self.parent_run_id:
-            raise ValueError("federated output source must be a child run")
-        object.__setattr__(self, "agent_role", optional_text(self.agent_role))
-        object.__setattr__(self, "agent_title", optional_text(self.agent_title))
-        object.__setattr__(self, "objective", optional_text(self.objective))
-
-
-@dataclass(frozen=True, slots=True)
 class DelegationOutputEvent:
     event_id: str
-    parent_run_id: RunId
+    run_id: RunId
+    batch_id: str
     delegation_id: str
     status: str
-    agent_role: str
+    agent_name: str
     agent_title: str | None
     objective: str
-    child_run_id: RunId | None
     error_code: str | None
     occurred_at: datetime
 
     def __post_init__(self) -> None:
         for attribute, label in (
             ("event_id", "delegation output event id"),
-            ("parent_run_id", "parent run id"),
+            ("run_id", "delegation Root Run id"),
+            ("batch_id", "delegation batch id"),
             ("delegation_id", "delegation id"),
-            ("agent_role", "delegation agent role"),
+            ("agent_name", "delegation agent name"),
             ("objective", "delegation objective"),
         ):
             object.__setattr__(
@@ -575,7 +551,6 @@ class DelegationOutputEvent:
         status = required_text(self.status, "delegation status")
         if status not in {
             "queued",
-            "claimed",
             "running",
             "done",
             "failed",
@@ -583,11 +558,6 @@ class DelegationOutputEvent:
         }:
             raise ValueError("invalid delegation output status")
         object.__setattr__(self, "status", status)
-        object.__setattr__(
-            self,
-            "child_run_id",
-            optional_text(self.child_run_id),
-        )
         object.__setattr__(
             self,
             "agent_title",

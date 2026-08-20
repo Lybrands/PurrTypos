@@ -12,13 +12,19 @@ from purra.artifacts import (
     ArtifactCreateCommand,
     ArtifactFinalizeCommand,
     ArtifactLifecycle,
+    ArtifactMutationLease,
+    ArtifactOwnerRef,
+    ArtifactRecord,
     ArtifactStatus,
 )
-from purra.artifacts.scope import ArtifactScope
+from purra.artifacts.continuity import ArtifactWriteClaimCommand
 from purra.json_values import freeze_json_mapping, thaw_json_mapping
 
 from infrastructure.persistence.sqlite_artifact_repository import (
     SqliteArtifactRepository,
+)
+from infrastructure.persistence.sqlite_artifact_claim_repository import (
+    SqliteArtifactClaimRepository,
 )
 from infrastructure.screenplay.tools.candidate_artifact import (
     SCREENPLAY_CANDIDATE_KIND,
@@ -59,6 +65,7 @@ class ScreenplayPartArtifactQuery:
         self._db = db
         self._repository = SqliteArtifactRepository(db)
         self._lifecycle = ArtifactLifecycle(self._repository)
+        self._claims = SqliteArtifactClaimRepository(db)
 
     async def require(
         self,
@@ -83,7 +90,7 @@ class ScreenplayPartArtifactQuery:
         semantic_key = str(
             metadata.get("semanticKey") or metadata.get("unitId") or ""
         ).strip()
-        run_id = str(artifact.run_id or artifact.created_by_run_id or "").strip()
+        run_id = str(artifact.created_by_run_id or "").strip()
         receipt = {
             "valid": True,
             "artifactId": artifact.id,
@@ -137,7 +144,7 @@ class ScreenplayPartArtifactQuery:
         artifact = await self._repository.load(str(artifact_id or "").strip())
         if artifact is None or artifact.status is not ArtifactStatus.FINALIZED:
             raise RuntimeError("screenplay candidate Artifact is not finalized")
-        if str(artifact.run_id or "") != str(run_id or ""):
+        if str(artifact.created_by_run_id or "") != str(run_id or ""):
             raise RuntimeError("screenplay candidate Artifact Run does not match")
         batches = tuple(await self._repository.list_batches(artifact.id))
         if len(batches) != 1 or len(batches[0].items) != 1:
@@ -174,21 +181,33 @@ class ScreenplayPartArtifactQuery:
         part_kind: str,
         output: Mapping[str, Any],
     ) -> ValidatedPartArtifactRef:
-        run_id = f"screenplay-host:{task_id}:{unit_id}"
-        artifact = await self._repository.find_for_run(
+        run = await self._db.fetch_one(
+            "SELECT COALESCE(u.run_id, t.created_by_run_id) AS run_id "
+            "FROM ai_agent_long_tasks AS t "
+            "JOIN ai_agent_long_task_units AS u ON u.task_id = t.id "
+            "WHERE t.id = ? AND u.unit_id = ?",
+            [task_id, unit_id],
+        )
+        run_id = str((run or {}).get("run_id") or "").strip()
+        if not run_id:
+            raise RuntimeError("screenplay Part Artifact requires a bound Run")
+        owner_ref = ArtifactOwnerRef(
+            kind="long_task_unit",
+            id=f"{task_id}:{unit_id}",
+        )
+        artifact = await self._repository.find_for_owner(
             namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
             kind=SCREENPLAY_PART_ARTIFACT_KIND,
             owner_id=project_id,
-            run_id=run_id,
+            owner_ref=owner_ref,
         )
         if artifact is None:
             artifact = await self._lifecycle.begin(ArtifactCreateCommand(
                 namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
                 kind=SCREENPLAY_PART_ARTIFACT_KIND,
                 owner_id=project_id,
-                run_id=run_id,
+                owner_ref=owner_ref,
                 created_by_run_id=run_id,
-                scope=ArtifactScope.RUN,
                 expected_item_count=1,
                 metadata={
                     "taskId": task_id,
@@ -203,6 +222,7 @@ class ScreenplayPartArtifactQuery:
             if _canonical(thaw_json_mapping(batches[0].items[0])) != _canonical(item):
                 raise RuntimeError("screenplay Part Artifact content conflicts")
         elif artifact.status is ArtifactStatus.OPEN:
+            write_lease = await self._write_lease(artifact, run_id)
             await self._lifecycle.append(ArtifactAppendCommand(
                 artifact_id=artifact.id,
                 expected_revision=artifact.revision,
@@ -210,6 +230,7 @@ class ScreenplayPartArtifactQuery:
                 batch_id=unit_id,
                 idempotency_key=f"{task_id}:{unit_id}:host-part",
                 items=(item,),
+                write_lease=write_lease,
                 coverage_keys=(semantic_key,),
             ))
             artifact = await self._repository.load(artifact.id)
@@ -217,9 +238,11 @@ class ScreenplayPartArtifactQuery:
                 raise RuntimeError("screenplay Part Artifact disappeared")
             batches = tuple(await self._repository.list_batches(artifact.id))
         if artifact.status is ArtifactStatus.OPEN:
+            write_lease = await self._write_lease(artifact, run_id)
             artifact = await self._lifecycle.finalize(ArtifactFinalizeCommand(
                 artifact_id=artifact.id,
                 expected_revision=artifact.revision,
+                write_lease=write_lease,
                 expected_item_count=1,
                 expected_coverage_keys=(semantic_key,),
                 resource_ref=f"{SCREENPLAY_PART_REF_PREFIX}{artifact.id}",
@@ -271,6 +294,22 @@ class ScreenplayPartArtifactQuery:
         for row in rows:
             result[str(row["unit_id"])] = await self.require(str(row["output_ref"]))
         return result
+
+    async def _write_lease(
+        self,
+        artifact: ArtifactRecord,
+        run_id: str,
+    ) -> ArtifactMutationLease:
+        claim = await self._claims.acquire(ArtifactWriteClaimCommand(
+            artifact_id=artifact.id,
+            run_id=run_id,
+            expected_revision=artifact.revision,
+            lease_duration_ms=300_000,
+        ))
+        return ArtifactMutationLease(
+            run_id=claim.run_id,
+            claim_token=claim.claim_token,
+        )
 
 
 def _artifact_id_from_ref(value: str) -> str:

@@ -65,32 +65,8 @@ class CanonicalRunRepository:
         # same transaction. Do not feed them through the live sink a second time.
         return ()
 
-    async def create(self, params):
-        return await self._repository.create(params)
-
     async def bind_conversation(self, run_id, conversation_id):
         return await self._repository.bind_conversation(run_id, conversation_id)
-
-    async def replace_steps(self, run_id, steps):
-        return await self._repository.replace_steps(run_id, steps)
-
-    async def update_step(self, run_id, update):
-        return await self._repository.update_step(run_id, update)
-
-    async def transition(
-        self,
-        run_id,
-        status,
-        *,
-        final_response=None,
-        error=None,
-    ):
-        return await self._repository.transition(
-            run_id,
-            status,
-            final_response=final_response,
-            error=error,
-        )
 
     async def append_event(self, run_id, event):
         return await self._repository.append_event(run_id, event)

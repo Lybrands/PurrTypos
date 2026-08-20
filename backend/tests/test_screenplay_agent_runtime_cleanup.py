@@ -47,24 +47,18 @@ async def _seed(db: DatabaseConnection) -> None:
     await db.execute(
         "INSERT INTO ai_agent_runs "
         "(id, session_id, conversation_id, prompt, binding_namespace, "
-        "binding_aggregate_id, binding_command_id, root_run_id) VALUES "
+        "binding_aggregate_id, binding_command_id) VALUES "
         "('run-target', 10, 100, 'target', 'screenplay.agent.turn', "
-        "'project-target', 'turn-target', 'run-target'), "
-        "('run-child', NULL, NULL, 'child', 'screenplay.agent.task', "
-        "'project-target', 'task-target:unit-1', 'run-target'), "
+        "'project-target', 'turn-target'), "
         "('run-other', 20, 200, 'other', 'screenplay.agent.turn', "
-        "'project-other', 'turn-other', 'run-other')"
+        "'project-other', 'turn-other')"
     )
     await db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "(run_id, cancellation_epoch, status, requested_at_ms, "
         "completed_at_ms) VALUES "
         "('run-target', 1, 'completed', 1, 2), "
         "('run-other', 1, 'completed', 1, 2)"
-    )
-    await db.execute(
-        "UPDATE ai_agent_runs SET parent_run_id = 'run-target' "
-        "WHERE id = 'run-child'"
     )
     await db.execute(
         "INSERT INTO screenplay_agent_turns "
@@ -85,33 +79,19 @@ async def _seed(db: DatabaseConnection) -> None:
         "'task-other', 'review', 'digest-other')"
     )
     await db.execute(
-        "INSERT INTO ai_agent_work_items "
-        "(id, namespace, kind, owner_id, created_by_run_id) VALUES "
-        "('work-target', 'purrtypos.screenplay', 'screenplay.review', "
-        "'project-target', 'run-target'), "
-        "('work-other', 'purrtypos.screenplay', 'screenplay.review', "
-        "'project-other', 'run-other')"
-    )
-    await db.execute(
         "INSERT INTO ai_agent_long_tasks "
-        "(id, work_item_id, namespace, kind, owner_id, created_by_run_id, "
+        "(id, namespace, kind, owner_id, created_by_run_id, "
         "total_units) VALUES "
-        "('task-target', 'work-target', 'purrtypos.screenplay', "
+        "('task-target', 'purrtypos.screenplay', "
         "'screenplay.review', 'project-target', 'run-target', 1), "
-        "('task-other', 'work-other', 'purrtypos.screenplay', "
+        "('task-other', 'purrtypos.screenplay', "
         "'screenplay.review', 'project-other', 'run-other', 1)"
     )
     await db.execute(
         "INSERT INTO ai_agent_long_task_units "
         "(task_id, unit_id, semantic_key, position, run_id) VALUES "
-        "('task-target', 'unit-1', 'unit-1', 1, 'run-child'), "
+        "('task-target', 'unit-1', 'unit-1', 1, 'run-target'), "
         "('task-other', 'unit-1', 'unit-1', 1, 'run-other')"
-    )
-    await db.execute(
-        "INSERT INTO ai_agent_work_item_runs "
-        "(work_item_id, run_id, relation, work_item_revision) VALUES "
-        "('work-target', 'run-target', 'created', 1), "
-        "('work-other', 'run-other', 'created', 1)"
     )
     for index in range(4):
         await db.execute(
@@ -138,8 +118,7 @@ async def _seed(db: DatabaseConnection) -> None:
     )
     await db.execute(
         "INSERT INTO ai_agent_run_events (run_id, event_type) VALUES "
-        "('run-target', 'legacy'), ('run-child', 'legacy'), "
-        "('run-other', 'legacy')"
+        "('run-target', 'legacy'), ('run-other', 'legacy')"
     )
     await db.execute(
         "INSERT INTO ai_agent_approvals "
@@ -150,9 +129,10 @@ async def _seed(db: DatabaseConnection) -> None:
     )
     await db.execute(
         "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, run_id, created_by_run_id) VALUES "
+        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+        "created_by_run_id) VALUES "
         "('artifact-target', 'purrtypos.screenplay', 'review', "
-        "'project-target', 'run-target', 'run-target')"
+        "'project-target', 'run', 'run-target', 'run-target')"
     )
     await db.execute(
         "INSERT INTO screenplay_deliverables (id, project_id, role) VALUES "
@@ -204,7 +184,7 @@ async def test_dry_run_resolves_exact_relationships_without_text_matching(cleanu
     plan = await build_cleanup_plan(cleanup_db, project_ids=("project-target",))
 
     assert plan.table_counts["screenplay_agent_chunks"] == 4
-    assert plan.run_ids == ("run-child", "run-target")
+    assert plan.run_ids == ("run-target",)
     assert "run-other" not in plan.run_ids
     assert plan.table_counts["ai_conversations"] == 1
     assert plan.table_counts["ai_agent_run_cancellations"] == 1
@@ -238,27 +218,26 @@ async def test_cleanup_preserves_domain_documents_artifacts_and_review_decisions
         "SELECT id FROM ai_agent_runs WHERE id = 'run-other'"
     )
     assert await cleanup_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-target'"
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-target'"
     ) is None
     assert await cleanup_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-other'"
-    ) == {"root_run_id": "run-other"}
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-other'"
+    ) == {"run_id": "run-other"}
     await cleanup_db.execute(
         "INSERT INTO ai_agent_runs "
-        "(id, status, prompt, root_run_id) "
-        "VALUES ('run-target', 'done', 'rebuilt', 'run-target')"
+        "(id, status, prompt) VALUES ('run-target', 'done', 'rebuilt')"
     )
     await cleanup_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms, "
+        "(run_id, cancellation_epoch, status, requested_at_ms, "
         "completed_at_ms) VALUES ('run-target', 1, 'completed', 3, 4)"
     )
     assert await cleanup_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-target'"
-    ) == {"root_run_id": "run-target"}
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-target'"
+    ) == {"run_id": "run-target"}
 
 
 @pytest.mark.asyncio
@@ -266,7 +245,7 @@ async def test_cleanup_digest_changes_when_owned_cancellation_receipt_appears(
     cleanup_db,
 ):
     await cleanup_db.execute(
-        "DELETE FROM ai_agent_run_cancellations WHERE root_run_id = 'run-target'"
+        "DELETE FROM ai_agent_run_cancellations WHERE run_id = 'run-target'"
     )
     stale = await build_cleanup_plan(
         cleanup_db,
@@ -274,7 +253,7 @@ async def test_cleanup_digest_changes_when_owned_cancellation_receipt_appears(
     )
     await cleanup_db.execute(
         "INSERT INTO ai_agent_run_cancellations "
-        "(root_run_id, cancellation_epoch, status, requested_at_ms) "
+        "(run_id, cancellation_epoch, status, requested_at_ms) "
         "VALUES ('run-target', 1, 'completed', 1)"
     )
 
@@ -286,48 +265,28 @@ async def test_cleanup_digest_changes_when_owned_cancellation_receipt_appears(
         )
 
     assert await cleanup_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-target'"
-    ) == {"root_run_id": "run-target"}
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-target'"
+    ) == {"run_id": "run-target"}
 
 
 @pytest.mark.asyncio
-async def test_cleanup_owns_continuation_lineage_receipts_but_not_foreign_receipts(
+async def test_cleanup_owns_independent_continuation_run_by_binding(
     cleanup_db,
 ):
     await cleanup_db.execute(
         "INSERT INTO ai_agent_runs (id, session_id, prompt, status, "
         "binding_namespace, binding_aggregate_id, binding_command_id, "
-        "binding_attributes_json, root_run_id) VALUES "
+        "binding_attributes_json) VALUES "
         "('run-continuation', 10, '', 'done', 'screenplay.conversation_turn', "
-        "'project-target', 'resume-1', '{\"continuationOf\":\"run-target\"}', "
-        "'run-continuation'), "
-        "('run-continuation-child', NULL, '', 'done', "
-        "'screenplay.agent.task', 'project-target', 'part-1', '{}', "
-        "'run-continuation')"
+        "'project-target', 'resume-1', '{\"continuationOf\":\"run-target\"}')"
     )
-    await cleanup_db.execute(
-        "UPDATE ai_agent_runs SET parent_run_id = 'run-continuation' "
-        "WHERE id = 'run-continuation-child'"
-    )
-    for key, run_id in (
-        ("receipt-target", "run-continuation-child"),
-        ("receipt-other", "run-other"),
-    ):
-        await cleanup_db.execute(
-            "INSERT INTO ai_agent_host_child_runs "
-            "(host_child_key, identity_digest, contract_json, attempt_key, "
-            "run_id, terminal_status) VALUES (?, ?, '{}', ?, ?, 'done')",
-            [key, f"digest-{key}", f"attempt-{key}", run_id],
-        )
 
     plan = await build_cleanup_plan(
         cleanup_db,
         project_ids=("project-target",),
     )
     assert "run-continuation" in plan.run_ids
-    assert "run-continuation-child" in plan.run_ids
-    assert plan.table_counts["ai_agent_host_child_runs"] == 1
     await apply_cleanup(
         cleanup_db,
         plan.digest,
@@ -335,13 +294,8 @@ async def test_cleanup_owns_continuation_lineage_receipts_but_not_foreign_receip
     )
 
     assert await cleanup_db.fetch_one(
-        "SELECT host_child_key FROM ai_agent_host_child_runs "
-        "WHERE host_child_key = 'receipt-target'"
+        "SELECT id FROM ai_agent_runs WHERE id = 'run-continuation'"
     ) is None
-    assert await cleanup_db.fetch_one(
-        "SELECT host_child_key FROM ai_agent_host_child_runs "
-        "WHERE host_child_key = 'receipt-other'"
-    ) == {"host_child_key": "receipt-other"}
     assert await cleanup_db.fetch_one(
         "SELECT id FROM ai_agent_runs WHERE id = 'run-other'"
     )
@@ -370,9 +324,9 @@ async def test_cleanup_rolls_back_every_table_after_any_delete_failure(cleanup_d
         "SELECT id FROM ai_agent_runs WHERE id = 'run-target'"
     )
     assert await cleanup_db.fetch_one(
-        "SELECT root_run_id FROM ai_agent_run_cancellations "
-        "WHERE root_run_id = 'run-target'"
-    ) == {"root_run_id": "run-target"}
+        "SELECT run_id FROM ai_agent_run_cancellations "
+        "WHERE run_id = 'run-target'"
+    ) == {"run_id": "run-target"}
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,6 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 
-from purra.events import CoreEventType
 from purra.output import OutputEventKind, OutputVisibility, RuntimeOutputEvent
 from application.agent_composition import set_agent_composition
 from application.composition_factory import create_agent_composition
@@ -213,7 +212,6 @@ def _event_name(event: dict[str, Any]) -> str:
         "toolApprovalResolved",
         "agentDelegationCreated",
         "agentDelegationUpdated",
-        "agentSubRunEvent",
         "toolIndexCompleted",
         "toolResults",
         "agentRunCompleted",
@@ -392,7 +390,6 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 "status": "done",
                 "risk_level": "read",
                 "suggested_tools": [],
-                "agent_role": None,
                 "assignment": {},
                 "depends_on": [],
                 "description": None,
@@ -407,7 +404,6 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 "status": "running",
                 "risk_level": "write",
                 "suggested_tools": [],
-                "agent_role": None,
                 "assignment": {},
                 "depends_on": ["understand-source"],
                 "description": "只调整未完成步骤",
@@ -511,9 +507,6 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 "executor": "model",
                 "status": "running",
                 "risk_level": "read",
-                "suggested_tools": [],
-                "agent_role": None,
-                "assignment": {},
                 "depends_on": [],
                 "description": None,
                 "result_summary": None,
@@ -526,9 +519,6 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 "executor": "model",
                 "status": "pending",
                 "risk_level": "write",
-                "suggested_tools": [],
-                "agent_role": None,
-                "assignment": {},
                 "depends_on": [],
                 "description": None,
                 "result_summary": None,
@@ -610,7 +600,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
 
 
 @pytest.mark.asyncio
-async def test_composed_parent_streams_live_child_agent_lifecycle(
+async def test_composed_run_streams_same_run_delegation_lifecycle(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -618,29 +608,16 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
     planner_calls: list[str] = []
     runtime_calls: list[str] = []
 
-    def _has_child_role_instruction(messages: list[dict[str, Any]]) -> bool:
+    def _has_delegated_role_instruction(messages: list[dict[str, Any]]) -> bool:
         return any(
             message.get("role") == "system"
-            and "read-only research sub-agent" in str(message.get("content") or "")
-            for message in messages
-        )
-
-    def _is_child_planning_call(messages: list[dict[str, Any]]) -> bool:
-        return any(
-            message.get("role") == "user"
-            and "核验三条关键证据" in str(message.get("content") or "")
+            and "独立核验关键证据" in str(message.get("content") or "")
             for message in messages
         )
 
     async def _planner(_key, messages, _options, _provider, signal=None):
         assert signal is not None
-        if _is_child_planning_call(messages):
-            planner_calls.append("child")
-            content = {
-                "needsTodos": False,
-                "reason": "the child can answer from supplied context",
-            }
-        elif "parent" in planner_calls:
+        if "parent" in planner_calls:
             planner_calls.append("parent-replan")
             content = {
                 "needsTodos": False,
@@ -672,19 +649,19 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
 
     async def _runtime(_key, messages, options, _provider, signal=None):
         assert signal is not None
-        child = _has_child_role_instruction(messages)
+        delegated = _has_delegated_role_instruction(messages)
         tool_names = [
             item["function"]["name"]
             for item in options.get("tools", [])
         ]
 
         async def _stream():
-            if child:
-                runtime_calls.append("child")
-                assert tool_names == []
+            if delegated:
+                runtime_calls.append("delegated")
+                assert "delegateToAgents" not in tool_names
                 yield {
                     "choices": [{
-                        "delta": {"content": "子 Agent 已核验三条证据。"},
+                        "delta": {"content": "研究 Agent 已核验三条证据。"},
                         "finish_reason": "stop",
                     }],
                 }
@@ -702,9 +679,13 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
                                 "function": {
                                     "name": "delegateToAgents",
                                     "arguments": json.dumps({
-                                        "delegations": [{
-                                            "agentRole": "researcher",
-                                            "objective": "核验三条关键证据",
+                                            "delegations": [{
+                                                "agentName": "evidence-researcher",
+                                                "title": "证据研究 Agent",
+                                                "instruction": (
+                                                    "独立核验关键证据，并简洁报告结论。"
+                                                ),
+                                                "objective": "核验三条关键证据",
                                             "input": {"scope": "current request"},
                                         }],
                                     }, ensure_ascii=False),
@@ -723,10 +704,12 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
             result = json.loads(tool_message["content"])
             assert result["state"] == "ready"
             assert result["counts"]["done"] == 1
-            assert result["results"][0]["summary"] == "子 Agent 已核验三条证据。"
+            assert result["results"][0]["resultSummary"] == (
+                "研究 Agent 已核验三条证据。"
+            )
             yield {
                 "choices": [{
-                    "delta": {"content": "父 Agent 已根据子 Agent 结果完成综合。"},
+                    "delta": {"content": "主 Agent 已根据研究结果完成综合。"},
                     "finish_reason": "stop",
                 }],
             }
@@ -762,61 +745,50 @@ async def test_composed_parent_streams_live_child_agent_lifecycle(
         for event in events
         if "agentDelegationUpdated" in event
     ]
-    child_events = [
-        event["agentSubRunEvent"]
-        for event in events
-        if "agentSubRunEvent" in event
-    ]
     assert len(created) == 1, events
     assert [item["status"] for item in updated] == [
-        "claimed",
         "running",
         "done",
     ], updated
     delegation_id = created[0]["delegationId"]
-    assert created[0]["agentTitle"] == "研究 Agent"
+    assert created[0]["agentTitle"] == "证据研究 Agent"
     assert all(item["delegationId"] == delegation_id for item in updated)
-    assert all(item["agentTitle"] == "研究 Agent" for item in updated)
-    assert updated[1]["childRunId"]
-    assert updated[2]["childRunId"] == updated[1]["childRunId"]
-    assert "resultSummary" not in updated[2]
-    assert child_events, events
-    assert all(
-        item["delegationId"] == delegation_id
-        and item["childRunId"] == updated[1]["childRunId"]
-        for item in child_events
-    )
-    assert any(
-        item["chunk"].get("delta") == "子 Agent 已核验三条证据。"
-        for item in child_events
-    )
-    assert planner_calls == ["parent", "child", "parent-replan"]
-    assert runtime_calls == ["parent-delegate", "child", "parent-final"]
+    assert all(item["agentTitle"] == "证据研究 Agent" for item in updated)
+    run_id = created[0]["runId"]
+    assert all(item["runId"] == run_id for item in updated)
+    assert "resultSummary" not in updated[-1]
+    assert "childRunId" not in json.dumps(events)
+    assert planner_calls == ["parent", "parent-replan"]
+    assert runtime_calls == ["parent-delegate", "delegated", "parent-final"]
     assert sum(event.get("done") is True for event in events) == 1
 
-    parent_run_id = created[0]["runId"]
-    snapshot = await composition.checkpoint_store.load(
-        parent_run_id,
+    snapshot = await composition.run_snapshot_reader.load(
+        run_id,
         after_event_id=0,
         limit=100,
     )
     assert snapshot is not None
     assert len(snapshot.delegations) == 1
     assert snapshot.delegations[0].status.value == "done"
-    persisted_child_events = [
-        item for item in snapshot.events
-        if item["eventType"] == CoreEventType.DELEGATION_EVENT
-        and item["payload"].get("eventType") == "child_output"
+    assert snapshot.delegations[0].agent_name == "evidence-researcher"
+    assert snapshot.delegations[0].agent_instruction == (
+        "独立核验关键证据，并简洁报告结论。"
+    )
+    canonical_outputs = await composition.output_repository.list_events(
+        run_id,
+        after_sequence=0,
+        limit=500,
+    )
+    delegated_outputs = [
+        item for item in canonical_outputs
+        if item.turn_id == delegation_id
     ]
-    assert persisted_child_events
-    # The parent journal preserves the exact canonical child event, including
-    # Provider deltas, so live delivery and reconnect replay share one source.
-    persisted_child_kinds = [
-        item["payload"]["event"]["kind"]
-        for item in persisted_child_events
-    ]
-    assert OutputEventKind.PROVIDER_CONTENT_DELTA in persisted_child_kinds
-    assert OutputEventKind.RUNTIME in persisted_child_kinds
+    assert delegated_outputs
+    assert all(item.run_id == run_id for item in delegated_outputs)
+    assert any(
+        item.kind is OutputEventKind.PROVIDER_CONTENT_DELTA
+        for item in delegated_outputs
+    )
 
 
 def _assert_terminal_exclusive(
@@ -1194,50 +1166,29 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
-        "agentRunTodoUpdated",
         "agentRunTodosUpdated",
         "agentRunTodoUpdated",
         "agentRunFailed",
         "error",
     ]
     assert events[1]["agentRunTodosUpdated"]["runId"] == "<run-1>"
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
-    assert events[3]["agentRunTodoUpdated"] == {
-        "runId": "<run-1>",
-        "stepId": "host-prerequisite-listBookCharacters-1",
-        "step": {
-            "id": "host-prerequisite-listBookCharacters-1",
-            "title": "查看人物列表",
-            "type": "read",
-            "executor": "tool",
-            "status": "failed",
-            "riskLevel": "read",
-            "suggestedTools": ["listBookCharacters"],
-            "description": (
-                "Host-inserted prerequisite for getBookCharacters; derived "
-                "from the registered tool context contract."
-            ),
-                "resultSummary": (
-                    "Tool execution failed; runtime replanning requested."
-                ),
-                "error": "tool_execution_failed",
-            },
-            "status": "running",
-        }
-    assert events[5]["agentRunTodoUpdated"]["stepId"] == "read-characters"
-    assert events[5]["agentRunTodoUpdated"]["step"]["status"] == "failed"
+    assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "pending"
+    assert events[3]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
+    assert "host-prerequisite" not in json.dumps(events)
+    assert events[4]["agentRunTodoUpdated"]["stepId"] == "read-characters"
+    assert events[4]["agentRunTodoUpdated"]["step"]["status"] == "failed"
     assert (
-        events[5]["agentRunTodoUpdated"]["step"]["error"]
+        events[4]["agentRunTodoUpdated"]["step"]["error"]
         == "missing_required_tool_call"
     )
-    assert events[6] == {
+    assert events[5] == {
         "agentRunFailed": {
             "runId": "<run-1>",
             "status": "failed",
             "error": "missing_required_tool_call",
         },
     }
-    assert events[7] == {
+    assert events[6] == {
         "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
     }
     assert not any("reasoningDelta" in event for event in events)
@@ -2010,7 +1961,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         if "agentRunTodosUpdated" in event
     )
     assert [step["suggestedTools"] for step in todo_steps] == [
-        ["getChapterContent"],
+        [],
         [],
     ]
     assert "queryOutline" not in json.dumps(
@@ -2018,13 +1969,21 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         ensure_ascii=False,
     )
     stored_todos = await db.fetch_all(
-        "SELECT step_id, status FROM ai_agent_run_todos "
+        "SELECT step_id, status, expected_tools FROM ai_agent_run_todos "
         "WHERE run_id = ? ORDER BY sort ASC",
         [run_id],
     )
     assert stored_todos == [
-        {"step_id": "read-current-chapter", "status": "done"},
-        {"step_id": "compare-evidence", "status": "done"},
+        {
+            "step_id": "read-current-chapter",
+            "status": "done",
+            "expected_tools": '["getChapterContent"]',
+        },
+        {
+            "step_id": "compare-evidence",
+            "status": "done",
+            "expected_tools": "[]",
+        },
     ]
     visible_text = "".join(
         str(event.get("delta") or "")
@@ -2637,7 +2596,6 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
         "agentRunStarted",
         "agentRunTodosUpdated",
         "contextBudget",
-        "agentRunTodoUpdated",
         "agentRunTodoUpdated",
         "toolApprovalRequired",
     ]

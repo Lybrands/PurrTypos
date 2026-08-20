@@ -372,17 +372,17 @@ test('long-task completion does not settle the public plan before Root Run event
     }],
   })
   dispatch(2, 'run.todo_updated', {
-    runId: 'child-run-2',
+    runId: 'foreign-run-2',
     stepId: 'draft',
     status: 'running',
     step: {
       id: 'draft',
-      title: '子 Run 改写步骤',
+      title: '外部 Run 改写步骤',
       type: 'write',
       status: 'done',
     },
-  }, 'child-run-2')
-  dispatch(3, 'run.completed', { runId: 'child-run-2' }, 'child-run-2')
+  }, 'foreign-run-2')
+  dispatch(3, 'run.completed', { runId: 'foreign-run-2' }, 'foreign-run-2')
 
   let message = harness.readMessages().at(-1)
   assert.equal(message?.taskPlan?.status, 'running')

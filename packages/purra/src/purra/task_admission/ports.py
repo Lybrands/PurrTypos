@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Protocol, runtime_checkable
 
-from purra.contracts import AgentRunRequest, TaskPlan
+from purra.contracts import AgentRunRequest, ExecutionPlan
 from purra.ports import CancellationSignal
 from purra.task_admission.contracts import (
     LongTaskDispatchReceipt,
@@ -26,7 +26,7 @@ class TaskAdmissionEvaluator(Protocol):
     async def evaluate(
         self,
         request: AgentRunRequest,
-        plan: TaskPlan,
+        plan: ExecutionPlan,
         signal: CancellationSignal | None = None,
     ) -> TaskAdmissionDecision: ...
 
@@ -36,10 +36,10 @@ class LongTaskDispatcher(Protocol):
     async def dispatch(
         self,
         request: AgentRunRequest,
-        plan: TaskPlan,
+        plan: ExecutionPlan,
         decision: TaskAdmissionDecision,
         *,
-        parent_run_id: str,
+        run_id: str,
         signal: CancellationSignal | None = None,
     ) -> LongTaskDispatchReceipt: ...
 
@@ -47,7 +47,7 @@ class LongTaskDispatcher(Protocol):
         self,
         task_id: str,
         *,
-        parent_run_id: str,
+        run_id: str,
         observer: LongTaskExecutionObserver,
         signal: CancellationSignal | None = None,
     ) -> LongTaskExecutionResult: ...

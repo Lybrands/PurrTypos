@@ -8,6 +8,9 @@ from typing import Any, AsyncIterator
 
 from purra.cancellation import OperationCanceled, is_canceled as _is_canceled
 from purra.contracts import (
+    AgentMessage,
+    MessageOrigin,
+    MessageRole,
     ToolBatchOutcome,
     ToolBatchRequest,
     ToolBatchResult,
@@ -262,3 +265,30 @@ def results_match_calls(
     results: Sequence[ToolCallResult],
 ) -> bool:
     return [call.id for call in calls] == [result.tool_call_id for result in results]
+
+
+def continuation_messages(
+    calls: Sequence[ToolCall],
+    results: Sequence[ToolCallResult],
+    *,
+    content: str,
+    reasoning: str,
+) -> list[AgentMessage]:
+    messages = [AgentMessage(
+        role=MessageRole.ASSISTANT,
+        content=content,
+        reasoning=reasoning or None,
+        tool_calls=tuple(calls),
+        origin=MessageOrigin.MODEL,
+    )]
+    messages.extend(
+        AgentMessage(
+            role=MessageRole.TOOL,
+            content=result.content,
+            tool_call_id=result.tool_call_id,
+            origin=MessageOrigin.HOST_TOOL_RESULT,
+            host_metadata={"purra_tool_name": result.tool_name},
+        )
+        for result in results
+    )
+    return messages

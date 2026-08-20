@@ -13,17 +13,22 @@ from purra.artifacts import (
     ArtifactCreateCommand,
     ArtifactFinalizeCommand,
     ArtifactLifecycle,
+    ArtifactMutationLease,
+    ArtifactOwnerRef,
     ArtifactRecord,
     ArtifactStatus,
     ArtifactValidationResult,
 )
-from purra.artifacts.scope import ArtifactScope
+from purra.artifacts.continuity import ArtifactWriteClaimCommand
 from purra.contracts import ExecutionState
 from purra.json_values import thaw_json_mapping
 
 from domains.screenplay_agent.tools.errors import ScreenplayToolInputError
 from infrastructure.persistence.sqlite_artifact_repository import (
     SqliteArtifactRepository,
+)
+from infrastructure.persistence.sqlite_artifact_claim_repository import (
+    SqliteArtifactClaimRepository,
 )
 
 
@@ -151,6 +156,7 @@ class ScreenplayCandidateArtifacts:
             self._repository,
             validator=_CandidateValidator(),
         )
+        self._claims = SqliteArtifactClaimRepository(db)
         self._candidate_normalizer = candidate_normalizer
 
     async def write(
@@ -197,11 +203,12 @@ class ScreenplayCandidateArtifacts:
             _candidate_item(scope, arguments),
             artifact_id="",
         )
-        artifact = await self._repository.find_for_run(
+        owner_ref = ArtifactOwnerRef(kind="agent_run", id=run_id)
+        artifact = await self._repository.find_for_owner(
             namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
             kind=SCREENPLAY_CANDIDATE_KIND,
             owner_id=project_id,
-            run_id=run_id,
+            owner_ref=owner_ref,
         )
         if artifact is None:
             validation_contract = scope.get("candidateValidation")
@@ -214,9 +221,8 @@ class ScreenplayCandidateArtifacts:
                 namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
                 kind=SCREENPLAY_CANDIDATE_KIND,
                 owner_id=project_id,
-                run_id=run_id,
+                owner_ref=owner_ref,
                 created_by_run_id=run_id,
-                scope=ArtifactScope.RUN,
                 expected_item_count=1,
                 metadata={
                     "taskId": str(scope.get("taskId") or ""),
@@ -243,6 +249,7 @@ class ScreenplayCandidateArtifacts:
             if _canonical(stored) != _canonical(item):
                 raise RuntimeError("screenplay_candidate_part_conflict")
             return _receipt(artifact, already_written=True)
+        write_lease = await self._write_lease(artifact, run_id)
         receipt = await self._lifecycle.append(ArtifactAppendCommand(
             artifact_id=artifact.id,
             expected_revision=artifact.revision,
@@ -252,6 +259,7 @@ class ScreenplayCandidateArtifacts:
                 f"{scope.get('taskId')}:{scope.get('unitId')}:candidate-part"
             ),
             items=(item,),
+            write_lease=write_lease,
             coverage_keys=(
                 f"{scope.get('expectedPartType')}:{scope.get('expectedPartKey')}",
             ),
@@ -289,7 +297,7 @@ class ScreenplayCandidateArtifacts:
                 "candidateValidationDigest": _digest(validation_contract),
             })
         if (
-            artifact.run_id != run_id
+            artifact.created_by_run_id != run_id
             or {
                 key: str(metadata.get(key) or "")
                 for key in expected_metadata
@@ -367,11 +375,11 @@ class ScreenplayCandidateArtifacts:
 
     async def inspect(self, state: ExecutionState) -> dict[str, Any]:
         run_id = str(state.run_id or "").strip()
-        artifact = await self._repository.find_for_run(
+        artifact = await self._repository.find_for_owner(
             namespace=SCREENPLAY_CANDIDATE_NAMESPACE,
             kind=SCREENPLAY_CANDIDATE_KIND,
             owner_id=str(state.domain.get("projectId") or ""),
-            run_id=run_id,
+            owner_ref=ArtifactOwnerRef(kind="agent_run", id=run_id),
         )
         if artifact is None:
             return {"status": "empty", "acceptedParts": 0}
@@ -386,9 +394,11 @@ class ScreenplayCandidateArtifacts:
         artifact = candidate.pop("_artifact")
         batches = candidate.pop("_batches")
         if artifact.status is ArtifactStatus.OPEN:
+            write_lease = await self._write_lease(artifact, run_id)
             artifact = await self._lifecycle.finalize(ArtifactFinalizeCommand(
                 artifact_id=artifact.id,
                 expected_revision=artifact.revision,
+                write_lease=write_lease,
                 expected_item_count=1,
                 expected_coverage_keys=batches[0].coverage_keys,
                 resource_ref=(
@@ -438,7 +448,8 @@ class ScreenplayCandidateArtifacts:
         # A Run can create only one screenplay candidate by catalog contract.
         row = await self._db.fetch_all(
             "SELECT * FROM ai_agent_artifacts WHERE namespace = ? AND kind = ? "
-            "AND run_id = ? ORDER BY create_time",
+            "AND owner_ref_kind = 'agent_run' AND owner_ref_id = ? "
+            "ORDER BY create_time",
             [SCREENPLAY_CANDIDATE_NAMESPACE, SCREENPLAY_CANDIDATE_KIND, run_id],
         )
         artifacts = []
@@ -447,6 +458,22 @@ class ScreenplayCandidateArtifacts:
             if loaded is not None:
                 artifacts.append(loaded)
         return tuple(artifacts)
+
+    async def _write_lease(
+        self,
+        artifact: ArtifactRecord,
+        run_id: str,
+    ) -> ArtifactMutationLease:
+        claim = await self._claims.acquire(ArtifactWriteClaimCommand(
+            artifact_id=artifact.id,
+            run_id=run_id,
+            expected_revision=artifact.revision,
+            lease_duration_ms=300_000,
+        ))
+        return ArtifactMutationLease(
+            run_id=claim.run_id,
+            claim_token=claim.claim_token,
+        )
 
 
 def _candidate_item(scope, arguments: Mapping[str, Any]) -> dict[str, Any]:

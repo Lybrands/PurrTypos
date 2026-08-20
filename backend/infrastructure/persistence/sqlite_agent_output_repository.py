@@ -30,6 +30,8 @@ from purra.output import (
     OutputStreamSpec,
     OutputVisibility,
     RunLifecycleOutputDraft,
+    TERMINAL_STREAM_ABORT_CAUSE,
+    TERMINAL_STREAM_ABORT_ERROR_CODE,
 )
 from purra.ports import RunBeginResult, RunCommit
 from purra.ports.projection import RunBeginProjector, RunCommitProjector
@@ -61,7 +63,7 @@ class SqliteAgentOutputRepository:
             raise TypeError("output repository requires an OutputStreamSpec")
         async with self._db.transaction(cancellation_linearizable=True):
             run = await self._db.fetch_one(
-                "SELECT id FROM ai_agent_runs WHERE id = ?",
+                "SELECT id, status FROM ai_agent_runs WHERE id = ?",
                 [spec.run_id],
             )
             if run is None:
@@ -78,7 +80,18 @@ class SqliteAgentOutputRepository:
                     raise ContractViolationError(
                         "output stream id or invocation id is already bound"
                     )
+                if (
+                    run["status"] != RunStatus.RUNNING.value
+                    and existing["status"] == "open"
+                ):
+                    raise ContractViolationError(
+                        "terminal run cannot retain an open output stream"
+                    )
                 return spec
+            if run["status"] != RunStatus.RUNNING.value:
+                raise ContractViolationError(
+                    "terminal run cannot open a new output stream"
+                )
             await self._db.execute(
                 "INSERT INTO ai_agent_output_streams "
                 "(id, run_id, turn_id, invocation_id, intent, commit_mode) "
@@ -235,11 +248,6 @@ class SqliteAgentOutputRepository:
         # a concurrent terminal commit therefore follows the existing
         # idempotency/conflict path and is never overwritten.
         async with self._runs.write_transaction():
-            await self._validate_host_child_response_policy(
-                run_id,
-                expected_status=expected_status,
-                has_validated_result=validated_result_draft is not None,
-            )
             existing = await self._existing_event_for_draft(event_draft)
             if existing is not None:
                 run = await self._db.fetch_one(
@@ -260,7 +268,16 @@ class SqliteAgentOutputRepository:
                     run_id,
                     validated_result_draft,
                 )
-                return (*related, *validated, existing)
+                terminal_aborts = await self._terminal_stream_abort_replay_events(
+                    run_id,
+                    commit.terminal_status,
+                )
+                return (*related, *validated, *terminal_aborts, existing)
+            terminal_abort_drafts = await self._open_stream_abort_drafts(
+                run_id,
+                commit.terminal_status,
+                event_draft.occurred_at,
+            )
             atomic_drafts = (
                 *related_drafts,
                 *(
@@ -268,6 +285,7 @@ class SqliteAgentOutputRepository:
                     if validated_result_draft is not None
                     else ()
                 ),
+                *terminal_abort_drafts,
             )
             for item in atomic_drafts:
                 if await self._existing_event_for_draft(item) is not None:
@@ -312,40 +330,87 @@ class SqliteAgentOutputRepository:
                         validated_result_draft
                     ),
                 )
+            terminal_aborts = tuple(
+                [
+                    await self._append_event_in_transaction(item)
+                    for item in terminal_abort_drafts
+                ]
+            )
+            if terminal_abort_drafts:
+                await self._db.execute(
+                    "UPDATE ai_agent_output_streams SET status = 'aborted', "
+                    "error_code = ?, finish_reason = NULL, "
+                    "update_time = CURRENT_TIMESTAMP WHERE run_id = ? "
+                    "AND status = 'open'",
+                    [TERMINAL_STREAM_ABORT_ERROR_CODE, run_id],
+                )
             lifecycle = await self._append_event_in_transaction(event_draft)
-            return (*related, *validated, lifecycle)
+            return (*related, *validated, *terminal_aborts, lifecycle)
 
-    async def _validate_host_child_response_policy(
+    async def _open_stream_abort_drafts(
         self,
         run_id: str,
-        *,
-        expected_status: RunStatus,
-        has_validated_result: bool,
-    ) -> None:
-        if expected_status is not RunStatus.DONE:
-            return
-        run = await self._db.fetch_one(
-            "SELECT binding_attributes_json FROM ai_agent_runs WHERE id = ?",
+        terminal_status: RunStatus | None,
+        occurred_at: datetime,
+    ) -> tuple[AgentOutputEventDraft, ...]:
+        if terminal_status is None:
+            return ()
+        rows = await self._db.fetch_all(
+            "SELECT * FROM ai_agent_output_streams "
+            "WHERE run_id = ? AND status = 'open' ORDER BY id",
             [run_id],
         )
-        if run is None:
-            raise ContractViolationError("run lifecycle Run does not exist")
-        attributes = _json_mapping(run.get("binding_attributes_json"))
-        host_child = attributes.get("hostChild")
-        if not isinstance(host_child, Mapping):
-            return
-        if host_child.get("protocol") != "purra.host-child/v1":
-            raise ContractViolationError(
-                "host child response policy has an invalid protocol"
+        return tuple(
+            _terminal_stream_abort_draft(
+                _stream_spec(row),
+                terminal_status,
+                occurred_at,
             )
-        response_mode = str(host_child.get("responseMode") or "")
-        expects_validated = response_mode == "validated_result"
-        if response_mode not in {"validated_result", "direct_live"} or (
-            expects_validated != has_validated_result
-        ):
+            for row in rows
+        )
+
+    async def _terminal_stream_abort_replay_events(
+        self,
+        run_id: str,
+        terminal_status: RunStatus | None,
+    ) -> tuple[AgentOutputEvent, ...]:
+        if terminal_status is None:
+            return ()
+        open_stream = await self._db.fetch_one(
+            "SELECT id FROM ai_agent_output_streams "
+            "WHERE run_id = ? AND status = 'open' LIMIT 1",
+            [run_id],
+        )
+        if open_stream is not None:
             raise ContractViolationError(
-                "host child response policy conflicts with terminal output"
+                "terminal Run replay found an open output stream"
             )
+        rows = await self._db.fetch_all(
+            "SELECT e.*, s.status AS stream_status, "
+            "s.error_code AS stream_error_code "
+            "FROM ai_agent_run_events AS e "
+            "JOIN ai_agent_output_streams AS s ON s.id = e.output_stream_id "
+            "WHERE e.run_id = ? AND e.kind = ? ORDER BY e.sequence, e.id",
+            [run_id, OutputEventKind.STREAM_ABORTED.value],
+        )
+        events = []
+        for row in rows:
+            payload = _json_mapping(row.get("payload_json"))
+            if (
+                payload.get("cause") != TERMINAL_STREAM_ABORT_CAUSE
+                or payload.get("runStatus") != terminal_status.value
+            ):
+                continue
+            if (
+                row.get("stream_status") != "aborted"
+                or row.get("stream_error_code")
+                != TERMINAL_STREAM_ABORT_ERROR_CODE
+            ):
+                raise ContractViolationError(
+                    "terminal stream abort event does not match stream state"
+                )
+            events.append(_event(row))
+        return tuple(events)
 
     async def _validated_replay_events(
         self,
@@ -421,6 +486,104 @@ class SqliteAgentOutputRepository:
                 [reason.value, stream_id],
             )
             return event
+
+    async def publish_stream_content_as_commentary(
+        self,
+        output_stream_id: str,
+    ) -> tuple[AgentOutputEvent, ...]:
+        stream_id = required_text(output_stream_id, "output stream id")
+        async with self._db.transaction(cancellation_linearizable=True):
+            stream = await self._require_stream(stream_id)
+            if stream["status"] != "committed":
+                raise ContractViolationError(
+                    "only a committed model stream can publish commentary"
+                )
+            spec = _stream_spec(stream)
+            if spec.intent is not AgentOutputIntent.STRUCTURED_PRIVATE:
+                raise ContractViolationError(
+                    "only private model content can be promoted to commentary"
+                )
+
+            commentary_key = f"provider:{spec.invocation_id}:commentary"
+            committed_key = f"stream:{stream_id}:commentary:committed"
+            existing_commentary = await self._db.fetch_one(
+                "SELECT * FROM ai_agent_run_events WHERE source_event_key = ?",
+                [commentary_key],
+            )
+            existing_commit = await self._db.fetch_one(
+                "SELECT * FROM ai_agent_run_events WHERE source_event_key = ?",
+                [committed_key],
+            )
+            if existing_commentary is not None or existing_commit is not None:
+                if existing_commentary is None or existing_commit is None:
+                    raise ContractViolationError(
+                        "partial commentary publication already exists"
+                    )
+                return (_event(existing_commentary), _event(existing_commit))
+
+            tool_call = await self._db.fetch_one(
+                "SELECT id FROM ai_agent_run_events "
+                "WHERE output_stream_id = ? AND source = ? AND kind = ? LIMIT 1",
+                [
+                    stream_id,
+                    OutputSource.PROVIDER.value,
+                    OutputEventKind.PROVIDER_TOOL_CALL_DELTA.value,
+                ],
+            )
+            if tool_call is None:
+                raise ContractViolationError(
+                    "commentary publication requires a Provider tool call"
+                )
+            rows = await self._db.fetch_all(
+                "SELECT payload_json, occurred_at FROM ai_agent_run_events "
+                "WHERE output_stream_id = ? AND source = ? AND kind = ? "
+                "AND channel = ? AND visibility = ? ORDER BY sequence, id",
+                [
+                    stream_id,
+                    OutputSource.PROVIDER.value,
+                    OutputEventKind.PROVIDER_CONTENT_DELTA.value,
+                    OutputChannel.DIAGNOSTIC.value,
+                    OutputVisibility.PRIVATE.value,
+                ],
+            )
+            content = "".join(
+                str(_json_mapping(row.get("payload_json")).get("delta") or "")
+                for row in rows
+            )
+            if not content.strip():
+                return ()
+
+            commentary = await self._append_event_in_transaction(
+                AgentOutputEventDraft.public_text(
+                    run_id=spec.run_id,
+                    turn_id=spec.turn_id,
+                    output_stream_id=spec.output_stream_id,
+                    invocation_id=spec.invocation_id,
+                    source_event_key=commentary_key,
+                    source=OutputSource.PROVIDER,
+                    channel=OutputChannel.COMMENTARY,
+                    delta=content,
+                    occurred_at=datetime.fromisoformat(str(rows[0]["occurred_at"])),
+                ),
+                allow_committed_stream=True,
+            )
+            committed = await self._append_event_in_transaction(
+                AgentOutputEventDraft(
+                    run_id=spec.run_id,
+                    turn_id=spec.turn_id,
+                    output_stream_id=spec.output_stream_id,
+                    invocation_id=spec.invocation_id,
+                    source_event_key=committed_key,
+                    source=OutputSource.RUNTIME,
+                    kind=OutputEventKind.STREAM_COMMITTED,
+                    channel=OutputChannel.COMMENTARY,
+                    visibility=OutputVisibility.PUBLIC,
+                    payload={"finishReason": str(stream.get("finish_reason") or "")},
+                    occurred_at=_now(),
+                ),
+                allow_committed_stream=True,
+            )
+            return commentary, committed
 
     async def abort_stream(
         self,
@@ -566,6 +729,8 @@ class SqliteAgentOutputRepository:
     async def _append_event_in_transaction(
         self,
         draft: AgentOutputEventDraft,
+        *,
+        allow_committed_stream: bool = False,
     ) -> AgentOutputEvent:
         existing = await self._existing_event_for_draft(draft)
         if existing is not None:
@@ -573,7 +738,9 @@ class SqliteAgentOutputRepository:
 
         if draft.output_stream_id is not None:
             stream = await self._require_stream(draft.output_stream_id)
-            if stream["status"] != "open":
+            if stream["status"] != "open" and not (
+                allow_committed_stream and stream["status"] == "committed"
+            ):
                 raise ContractViolationError(
                     "canonical event requires an open output stream"
                 )
@@ -627,12 +794,11 @@ class SqliteAgentOutputRepository:
                     "domain event projector must return None"
                 )
 
-        sequence_key = draft.turn_id or draft.run_id
         sequence_row = await self._db.fetch_one(
             "SELECT COALESCE(MAX(sequence), 0) AS value "
             "FROM ai_agent_run_events "
-            "WHERE COALESCE(turn_id, run_id) = ?",
-            [sequence_key],
+            "WHERE run_id = ?",
+            [draft.run_id],
         )
         sequence = int((sequence_row or {}).get("value") or 0) + 1
         emitted_at = _now()
@@ -819,6 +985,32 @@ def _stream_spec(row: dict[str, Any]) -> OutputStreamSpec:
         invocation_id=str(row["invocation_id"]),
         intent=AgentOutputIntent(str(row["intent"])),
         commit_mode=OutputCommitMode(str(row["commit_mode"])),
+    )
+
+
+def _terminal_stream_abort_draft(
+    spec: OutputStreamSpec,
+    terminal_status: RunStatus,
+    occurred_at: datetime,
+) -> AgentOutputEventDraft:
+    if terminal_status is RunStatus.RUNNING:
+        raise ValueError("terminal stream abort requires a terminal Run status")
+    return AgentOutputEventDraft(
+        run_id=spec.run_id,
+        turn_id=spec.turn_id,
+        output_stream_id=spec.output_stream_id,
+        invocation_id=spec.invocation_id,
+        source_event_key=f"stream:{spec.output_stream_id}:aborted",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.STREAM_ABORTED,
+        channel=_stream_channel(spec),
+        visibility=_stream_visibility(spec),
+        payload={
+            "errorCode": TERMINAL_STREAM_ABORT_ERROR_CODE,
+            "cause": TERMINAL_STREAM_ABORT_CAUSE,
+            "runStatus": terminal_status.value,
+        },
+        occurred_at=occurred_at,
     )
 
 

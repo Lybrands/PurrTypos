@@ -79,11 +79,10 @@ export interface AiDebugMessage {
   tool_call_id?: string;
 }
 
-export interface AiDebugChildRun {
+export interface AiDebugDelegationActivity {
   id: string;
   delegationId: string;
-  childRunId?: string;
-  agentRole: string;
+  agentName: string;
   agentTitle?: string;
   objective: string;
   unitId?: string;
@@ -132,7 +131,7 @@ export interface AiDebugRun {
   agentRunId?: string;
   agentPlan?: unknown;
   delegations: unknown[];
-  childRuns: AiDebugChildRun[];
+  delegationActivities: AiDebugDelegationActivity[];
   approvals: unknown[];
   error?: string;
   errorReport?: AiErrorReport;
@@ -361,7 +360,7 @@ function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
       return { type: "operation", label: "操作已结束" };
     }
     if (chunk.kind === "delegation.event") {
-      return { type: "delegation", label: "子 Agent 事件" };
+      return { type: "delegation", label: "Agent 委派事件" };
     }
     if (chunk.kind === "run.lifecycle") {
       return { type: "agent", label: "Agent Run 状态已更新" };
@@ -539,8 +538,7 @@ function delegationStatus(
 
 function delegationMetadata(value: unknown): {
   delegationId: string;
-  childRunId?: string;
-  agentRole: string;
+  agentName: string;
   agentTitle?: string;
   objective: string;
   unitId?: string;
@@ -554,13 +552,12 @@ function delegationMetadata(value: unknown): {
     ? raw.input as Record<string, unknown>
     : {};
   const delegationId = String(raw.delegationId || "").trim();
-  const agentRole = String(raw.agentRole || "").trim();
-  if (!delegationId || !agentRole) return null;
+  const agentName = String(raw.agentName || "").trim();
+  if (!delegationId || !agentName) return null;
   const parsedAttempt = Number(raw.attempt ?? input.attempt);
   return {
     delegationId,
-    childRunId: String(raw.childRunId || "").trim() || undefined,
-    agentRole,
+    agentName,
     agentTitle: String(raw.agentTitle || "").trim() || undefined,
     objective: String(raw.objective || "").trim(),
     unitId: String(raw.unitId || input.unitId || "").trim() || undefined,
@@ -572,34 +569,30 @@ function delegationMetadata(value: unknown): {
   };
 }
 
-function updateChildRuns(
+function updateDelegationActivities(
   run: AiDebugRun,
   chunk: AiDebugChunk,
   now: number,
-): AiDebugChildRun[] {
+): AiDebugDelegationActivity[] {
   if (
     !isCanonicalOutputEvent(chunk)
     || chunk.kind !== "delegation.event"
-  ) return run.childRuns;
+  ) return run.delegationActivities;
   const metadata = delegationMetadata(chunk.payload);
-  if (!metadata) return run.childRuns;
-  const childEvent = isCanonicalOutputEvent(chunk.payload.event)
-    ? chunk.payload.event
-    : null;
-  const index = run.childRuns.findIndex(
+  if (!metadata) return run.delegationActivities;
+  const index = run.delegationActivities.findIndex(
     (item) => item.delegationId === metadata.delegationId,
   );
-  const existing = index >= 0 ? run.childRuns[index] : undefined;
-  const base: AiDebugChildRun = existing ?? {
-    id: `${run.id}-child-${metadata.delegationId}`,
+  const existing = index >= 0 ? run.delegationActivities[index] : undefined;
+  const base: AiDebugDelegationActivity = existing ?? {
+    id: `${run.id}-delegation-${metadata.delegationId}`,
     delegationId: metadata.delegationId,
-    childRunId: metadata.childRunId,
-    agentRole: metadata.agentRole,
+    agentName: metadata.agentName,
     agentTitle: metadata.agentTitle,
     objective: metadata.objective,
     unitId: metadata.unitId,
     attempt: metadata.attempt,
-    taskType: "子 Agent",
+    taskType: "委派 Agent",
     status: "preparing",
     startedAt: now,
     updatedAt: now,
@@ -612,51 +605,24 @@ function updateChildRuns(
   };
   let next = {
     ...base,
-    childRunId: metadata.childRunId || base.childRunId,
-    agentRole: metadata.agentRole || base.agentRole,
+    agentName: metadata.agentName || base.agentName,
     agentTitle: metadata.agentTitle || base.agentTitle,
     objective: metadata.objective || base.objective,
     unitId: metadata.unitId || base.unitId,
     attempt: metadata.attempt || base.attempt,
     updatedAt: now,
   };
-  if (childEvent) {
-    const status = nextStatus(next as unknown as AiDebugRun, childEvent);
-    const terminal = TERMINAL_STATUSES.has(status);
-    const delta = childEvent.kind === "provider.content_delta"
-      ? String(childEvent.payload.delta || "")
-      : "";
-    next = {
-      ...next,
-      status,
-      finishedAt: terminal ? next.finishedAt ?? now : next.finishedAt,
-      childRunId: childEvent.runId || next.childRunId,
-      output: next.output + (childEvent.channel === "final" ? delta : ""),
-      commentary: next.commentary + (
-        childEvent.channel === "commentary" ? delta : ""
-      ),
-      modelCalls: appendModelCall(
-        next as unknown as AiDebugRun,
-        childEvent,
-        now,
-      ),
-      tools: upsertTools(next as unknown as AiDebugRun, childEvent, now),
-      events: appendEvent(next as unknown as AiDebugRun, childEvent, now),
-      eventCount: next.eventCount + 1,
-    };
-  } else {
-    const status = delegationStatus(metadata.status, next.status);
-    next = {
-      ...next,
-      status,
-      finishedAt: TERMINAL_STATUSES.has(status)
-        ? next.finishedAt ?? now
-        : next.finishedAt,
-      error: metadata.error || next.error,
-    };
-  }
-  if (index < 0) return [...run.childRuns, next];
-  return run.childRuns.map((item, itemIndex) => itemIndex === index ? next : item);
+  const status = delegationStatus(metadata.status, next.status);
+  next = {
+    ...next,
+    status,
+    finishedAt: TERMINAL_STATUSES.has(status)
+      ? next.finishedAt ?? now
+      : next.finishedAt,
+    error: metadata.error || next.error,
+  };
+  if (index < 0) return [...run.delegationActivities, next];
+  return run.delegationActivities.map((item, itemIndex) => itemIndex === index ? next : item);
 }
 
 function upsertDebugDelegation(items: unknown[], value: unknown): unknown[] {
@@ -735,7 +701,7 @@ export function startAiDebugRun(
     }],
     eventCount: 1,
     delegations: [],
-    childRuns: [],
+    delegationActivities: [],
     approvals: [],
   };
   const withoutSameId = state.runs.filter((item) => item.id !== streamId);
@@ -787,20 +753,13 @@ export function hydrateAiDebugRunSnapshot(data: {
     const now = Date.now();
     const startedAt = persistedTimestamp(snapshot.run.createdAt, now);
     const source = String(data.source || '').trim() || 'Agent 历史恢复';
-    const runRole = String(
-      snapshot.run.lineage.agentTitle || snapshot.run.lineage.agentRole || '',
-    ).trim();
     const run: AiDebugRun = {
       id: debugRunId,
       turnId: data.turnId,
       sessionId: snapshot.run.sessionId ?? undefined,
       conversationId: snapshot.run.conversationId ?? undefined,
       source,
-      taskType: runRole
-        ? `持久化 Agent Run · ${runRole}`
-        : snapshot.run.lineage.depth > 0
-          ? '持久化子 Run'
-          : '持久化主 Run',
+      taskType: '持久化 Agent Run',
       status: persistedRunStatus(snapshot.run.status),
       startedAt,
       updatedAt: persistedTimestamp(snapshot.run.updatedAt, now),
@@ -832,7 +791,7 @@ export function hydrateAiDebugRunSnapshot(data: {
         ? { status: snapshot.run.status, steps: snapshot.todos }
         : undefined,
       delegations: snapshot.delegations.items.map((item) => sanitizeValue(item)),
-      childRuns: [],
+      delegationActivities: [],
       approvals: [],
       persistedEventCursor: 0,
     };
@@ -857,7 +816,7 @@ export function hydrateAiDebugRunSnapshot(data: {
   ))) {
     if (event.cursor <= currentCursor) continue;
     if (event.chunk) {
-      recordAiDebugRunContinuation(runId, event.chunk as AiDebugChunk);
+      recordAiDebugRunEvent(runId, event.chunk as AiDebugChunk);
     }
     nextCursor = Math.max(nextCursor, event.cursor);
   }
@@ -925,7 +884,7 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,
-      childRuns: updateChildRuns(run, chunk, now),
+      delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
       error: chunk.error || chunk.errorReport?.errorMessage || run.error,
       errorReport: chunk.errorReport ?? run.errorReport,
@@ -963,11 +922,9 @@ export function recordScreenplayAiDebugChunk(data: {
 }
 
 /**
- * Attach durable child-Run activity to the debug entry that dispatched it.
- * The root Run remains the report identity while model/tool evidence comes
- * from the workflow's real execution Runs.
+ * Attach a durable same-Run event to its owning diagnostic entry.
  */
-export function recordAiDebugRunContinuation(
+export function recordAiDebugRunEvent(
   rootAgentRunId: string,
   chunk: AiDebugChunk,
 ): void {
@@ -1019,7 +976,7 @@ export function recordAiDebugRunContinuation(
       contextCompaction: runtimeData?.eventType.startsWith("conversation.compaction.")
         ? runtimeData.data
         : run.contextCompaction,
-      // Never replace the orchestration root with the current child Run id.
+      // Canonical events never replace the owning Run identity.
       agentRunId: rootAgentRunId,
       agentPlan: runtimeData?.eventType.startsWith("run.todo")
         ? runtimeData.data
@@ -1027,7 +984,7 @@ export function recordAiDebugRunContinuation(
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,
-      childRuns: updateChildRuns(run, chunk, now),
+      delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
       error: chunk.error || chunk.errorReport?.errorMessage || run.error,
       errorReport: chunk.errorReport ?? run.errorReport,

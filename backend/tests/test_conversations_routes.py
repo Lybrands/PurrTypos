@@ -704,17 +704,9 @@ async def test_history_projects_durable_task_only_onto_its_originating_session(
     temp_db: DatabaseConnection,
 ):
     from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
-    from purra.work_items import (
-        WorkItemCreateCommand,
-        WorkItemRunLinkCommand,
-        WorkItemRunRelation,
-    )
     from infrastructure.persistence.run_store import complete_run, create_run
     from infrastructure.persistence.sqlite_long_task_repository import (
         SqliteLongTaskRepository,
-    )
-    from infrastructure.persistence.sqlite_work_item_repository import (
-        SqliteWorkItemRepository,
     )
 
     await temp_db.execute(
@@ -737,23 +729,12 @@ async def test_history_projects_durable_task_only_onto_its_originating_session(
         response="任务已开始，进度将在本轮持续更新。",
         agentRunId=run_id,
     ))
-    work_items = SqliteWorkItemRepository(temp_db)
-    work_item = await work_items.create(
-        "work-1",
-        WorkItemCreateCommand(
-            namespace="purrtypos.screenplay",
-            kind="screenplay_draft_generation",
-            owner_id="project-1",
-            created_by_run_id=run_id,
-        ),
-    )
     await SqliteLongTaskRepository(temp_db).create(
         "task-1",
         LongTaskCreateCommand(
             namespace="purrtypos.screenplay",
             kind="screenplay_draft_generation",
             owner_id="project-1",
-            work_item_id=work_item.id,
             created_by_run_id=run_id,
             units=(LongTaskUnitSpec(id="batch-1", position=0),),
         ),
@@ -773,12 +754,6 @@ async def test_history_projects_durable_task_only_onto_its_originating_session(
         mode="agent",
     )
     await complete_run(temp_db, continuation_run_id, final_response="")
-    await work_items.link_run(WorkItemRunLinkCommand(
-        work_item_id=work_item.id,
-        run_id=continuation_run_id,
-        relation=WorkItemRunRelation.REFERENCE,
-        expected_revision=work_item.revision,
-    ))
     await save_conversation(SaveConversationRequest(
         sessionId=16,
         prompt="在新对话继续同一任务",
