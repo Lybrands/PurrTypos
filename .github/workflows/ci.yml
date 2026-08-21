@@ -37,3 +37,46 @@ jobs:
       - name: Verify external PurrA dependency
         run: python -c 'import pathlib, purra; assert "/packages/purra/src/" not in pathlib.Path(purra.__file__).as_posix()'
       - run: python -m pytest backend/tests
+
+  windows-backend-package:
+    name: Windows backend package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-purra.txt
+      - name: Build frozen backend
+        run: |
+          python -m pip install -r backend/requirements.txt pyinstaller
+          python -m PyInstaller --clean --noconfirm --distpath backend/dist --workpath backend/build backend/purrtypos-backend.spec
+      - name: Verify frozen backend
+        shell: pwsh
+        run: |
+          $env:PURRTYPOS_DATA_DIR = Join-Path $env:RUNNER_TEMP "purrtypos-data"
+          $process = Start-Process -FilePath "backend/dist/purrtypos-backend/purrtypos-backend.exe" -ArgumentList "8765" -PassThru
+          try {
+            $health = $null
+            foreach ($attempt in 1..60) {
+              if ($process.HasExited) {
+                throw "Frozen backend exited before becoming healthy with code $($process.ExitCode)"
+              }
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/health" -TimeoutSec 2
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if ($null -eq $health -or $health.status -ne "ok") {
+              throw "Frozen backend did not become healthy"
+            }
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
