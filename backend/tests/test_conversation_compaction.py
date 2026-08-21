@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from purra.context_orchestration.compaction import (
+from purra.context_orchestration import (
     ContextCompressionCoordinator,
 )
 from purra.context_orchestration.contracts import (

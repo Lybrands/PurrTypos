@@ -7,8 +7,7 @@ from typing import Any, Protocol
 
 from purra.contracts import AgentDelegation, DelegationAggregation
 from purra.json_values import thaw_json_mapping
-from purra.output import OutputVisibility
-from purra.output.ports import AgentOutputRepository
+from purra.output import AgentOutputRepository, OutputVisibility
 from application.sse_mapping import canonical_output_to_sse_chunk
 
 

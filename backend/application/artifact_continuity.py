@@ -17,10 +17,10 @@ from purra.artifacts import (
     ArtifactResumeCandidate,
     ArtifactStatus,
 )
-from purra.artifacts.continuity import ArtifactWriteClaim
-from purra.artifacts.ports import (
+from purra.artifacts import (
     ArtifactAccessAuthorizer,
     ArtifactClaimRepository,
+    ArtifactWriteClaim,
 )
 from purra.errors import AgentCoreError
 

@@ -4,7 +4,6 @@ const path = require('node:path')
 const { spawn, spawnSync } = require('node:child_process')
 
 const projectRoot = path.resolve(__dirname, '..')
-const purraSrc = path.join(projectRoot, 'packages', 'purra', 'src')
 const explicitPython = process.env.PURRTYPOS_PYTHON?.trim()
 const candidates = [
   ...(explicitPython ? [{ command: explicitPython, prefix: [] }] : []),
@@ -19,7 +18,7 @@ function supportsBackend(candidate) {
   if (candidate.local && !fs.existsSync(candidate.command)) return false
   const probe = spawnSync(
     candidate.command,
-    [...candidate.prefix, '-c', 'import fastapi, uvicorn'],
+    [...candidate.prefix, '-c', 'import fastapi, purra, uvicorn'],
     { cwd: projectRoot, stdio: 'ignore' },
   )
   return probe.status === 0
@@ -37,7 +36,7 @@ function userDataDir() {
 
 const python = candidates.find(supportsBackend)
 if (!python) {
-  console.error('No Python interpreter with backend dependencies was found.')
+  console.error('No Python interpreter with backend dependencies and PurrA was found.')
   process.exit(1)
 }
 
@@ -51,7 +50,6 @@ const child = spawn(
       PURRTYPOS_DATA_DIR: process.env.PURRTYPOS_DATA_DIR || userDataDir(),
       PURRTYPOS_SKILLS_DIR: path.join(projectRoot, 'backend', 'skills'),
       PURRTYPOS_PORT: process.env.PURRTYPOS_PORT || '18321',
-      PYTHONPATH: [purraSrc, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     },
     stdio: 'inherit',
   },
