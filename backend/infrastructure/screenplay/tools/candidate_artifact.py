@@ -19,7 +19,7 @@ from purra.artifacts import (
     ArtifactStatus,
     ArtifactValidationResult,
 )
-from purra.artifacts.continuity import ArtifactWriteClaimCommand
+from purra.artifacts import ArtifactWriteClaimCommand
 from purra.contracts import ExecutionState
 from purra.json_values import thaw_json_mapping
 

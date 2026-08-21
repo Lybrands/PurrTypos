@@ -1,30 +1,53 @@
-"""Host-side ratchets for the independently packaged PurrA framework."""
+"""Host-side ratchets for the external PurrA dependency."""
 
 from __future__ import annotations
 
 import ast
-import tomllib
+from importlib import metadata
 from pathlib import Path
+
+import purra
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PACKAGE_DIR = ROOT_DIR / "packages" / "purra"
-PORTABLE_CONFORMANCE = (
-    PACKAGE_DIR / "tests" / "test_standalone_agent_conformance.py"
+PINNED_PURRA_COMMIT = "fdbada4f38b55aacbd66a57e5ba6f3cc7a3c2569"
+PURRA_REQUIREMENT = (
+    "purra @ https://github.com/Lybrands/purra/archive/"
+    f"{PINNED_PURRA_COMMIT}.zip"
 )
-SECOND_HOST_CONFORMANCE = (
-    PACKAGE_DIR / "tests" / "test_second_host_conformance.py"
-)
-HOST_ADAPTER_CONFORMANCE = PACKAGE_DIR / "src" / "purra" / "testing.py"
-PACKAGE_READMES = (
-    PACKAGE_DIR / "README.md",
-    PACKAGE_DIR / "README.zh-CN.md",
-)
-
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
 }
+PUBLIC_PURRA_HOST_MODULES = frozenset({
+    "purra.api",
+    "purra.artifacts",
+    "purra.cancellation",
+    "purra.context_budget",
+    "purra.context_orchestration",
+    "purra.context_strategies",
+    "purra.contracts",
+    "purra.errors",
+    "purra.evaluation",
+    "purra.events",
+    "purra.evidence",
+    "purra.json_values",
+    "purra.long_tasks",
+    "purra.model_call_parameters",
+    "purra.model_invocation",
+    "purra.model_protocol",
+    "purra.normalization",
+    "purra.observability",
+    "purra.orphan_recovery",
+    "purra.output",
+    "purra.ports",
+    "purra.recovery",
+    "purra.run_control",
+    "purra.stream_ownership",
+    "purra.structured_output",
+    "purra.task_admission",
+    "purra.tools",
+})
 
 
 def _imports(path: Path) -> tuple[str, ...]:
@@ -47,99 +70,45 @@ def _application_python_files() -> tuple[Path, ...]:
     return tuple(path for root in roots for path in sorted(root.rglob("*.py")))
 
 
+def _production_python_files() -> tuple[Path, ...]:
+    roots = (
+        BACKEND_DIR / "application",
+        BACKEND_DIR / "domains",
+        BACKEND_DIR / "infrastructure",
+        BACKEND_DIR / "routers",
+    )
+    return tuple(path for root in roots for path in sorted(root.rglob("*.py")))
+
+
 def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
-def test_purra_is_an_independent_dependency_free_distribution():
-    assert not (BACKEND_DIR / "purra").exists()
-    metadata = tomllib.loads(
-        (PACKAGE_DIR / "pyproject.toml").read_text(encoding="utf-8")
-    )
-    project = metadata["project"]
-    assert project["name"] == "purra"
-    assert project.get("dependencies") == []
-    assert (PACKAGE_DIR / "src" / "purra" / "api" / "__init__.py").is_file()
-    assert not (BACKEND_DIR / "application" / "screenplay_model_run.py").exists()
+def test_purra_is_pinned_and_loaded_as_an_external_distribution():
+    requirement = (BACKEND_DIR / "requirements-purra.txt").read_text(
+        encoding="utf-8"
+    ).strip()
+    package_path = Path(purra.__file__).resolve().as_posix()
+
+    assert requirement == PURRA_REQUIREMENT
+    assert metadata.version("purra") == "0.1.0"
+    assert "/packages/purra/src/" not in package_path
+    assert not (ROOT_DIR / "packages" / "purra").exists()
 
 
-def test_public_purra_readmes_do_not_bind_the_framework_to_a_product():
-    forbidden = ("purrtypos", "screenplay", "writing-owned", "剧本", "写作领域")
+def test_product_code_imports_only_supported_purra_module_roots():
     violations = [
-        f"{path.name} contains {term!r}"
-        for path in PACKAGE_READMES
-        for term in forbidden
-        if term in path.read_text(encoding="utf-8").casefold()
+        f"{_relative(path)} imports unsupported {module}"
+        for path in _production_python_files()
+        for module in _imports(path)
+        if module == "purra" or (
+            module.startswith("purra.")
+            and module not in PUBLIC_PURRA_HOST_MODULES
+        )
     ]
-    assert not violations, "PurrA public docs contain product semantics:\n" + "\n".join(
+    assert not violations, "Private PurrA imports from product code:\n" + "\n".join(
         violations
     )
-
-
-def test_portable_agent_conformance_uses_only_public_purra_boundaries():
-    source = PORTABLE_CONFORMANCE.read_text(encoding="utf-8")
-    imported_roots = {
-        name.split(".", 1)[0]
-        for name in _imports(PORTABLE_CONFORMANCE)
-    }
-
-    assert imported_roots <= {
-        "__future__",
-        "asyncio",
-        "dataclasses",
-        "datetime",
-        "pytest",
-        "purra",
-    }
-    assert "_execute_run" not in source
-    assert "core.submit(" in source
-    assert "backend" not in imported_roots
-
-
-def test_host_adapter_conformance_has_no_test_framework_or_host_dependency():
-    imported_roots = {
-        name.split(".", 1)[0]
-        for name in _imports(HOST_ADAPTER_CONFORMANCE)
-    }
-
-    assert imported_roots <= {
-        "__future__",
-        "asyncio",
-        "collections",
-        "dataclasses",
-        "datetime",
-        "json",
-        "purra",
-        "uuid",
-    }
-    assert "pytest" not in imported_roots
-    assert "backend" not in imported_roots
-
-
-def test_second_host_uses_public_composition_and_keeps_its_style_out_of_core():
-    source = SECOND_HOST_CONFORMANCE.read_text(encoding="utf-8")
-    imported_roots = {
-        name.split(".", 1)[0]
-        for name in _imports(SECOND_HOST_CONFORMANCE)
-    }
-    core_source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in sorted((PACKAGE_DIR / "src" / "purra").rglob("*.py"))
-    )
-
-    assert imported_roots <= {
-        "__future__",
-        "dataclasses",
-        "json",
-        "pytest",
-        "purra",
-    }
-    assert "core.submit(" in source
-    assert "MessageOrigin.HOST_CONTEXT" in source
-    assert "_execute_run" not in source
-    assert "backend" not in imported_roots
-    assert "operations.incident" not in core_source
-    assert "readServiceStatus" not in core_source
 
 
 def test_complete_agent_execution_uses_the_public_api():

@@ -27,7 +27,7 @@
 # 1. 安装前端依赖
 npm install
 
-# 2. 安装后端依赖（路径相对仓库根目录）
+# 2. 安装后端依赖（包含固定版本的 PurrA）
 pip install -r backend/requirements.txt
 ```
 

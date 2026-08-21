@@ -8,7 +8,7 @@ from collections.abc import Callable
 from time import time
 from typing import Any
 
-from purra.artifacts.contracts import (
+from purra.artifacts import (
     ArtifactAppendCommand,
     ArtifactBatch,
     ArtifactBatchReceipt,
@@ -18,12 +18,12 @@ from purra.artifacts.contracts import (
     ArtifactRecord,
     ArtifactStatus,
 )
-from purra.artifacts.errors import (
+from purra.artifacts import (
     ArtifactConflictError,
     ArtifactNotFoundError,
     ArtifactStateError,
 )
-from purra.artifacts.ownership import ArtifactOwnerRef
+from purra.artifacts import ArtifactOwnerRef
 from purra.json_values import thaw_json_mapping
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from time import time
 
-from purra.artifacts.maintenance import (
+from purra.artifacts import (
     ArtifactMaintenancePolicy,
     ArtifactMaintenanceReport,
     ArtifactMaintenanceSnapshot,
