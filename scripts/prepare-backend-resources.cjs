@@ -5,11 +5,12 @@
  */
 const fs = require('fs')
 const path = require('path')
+const { spawnSync } = require('child_process')
 
 const root = path.join(__dirname, '..')
 const outDir = path.join(root, 'build-resources', 'backend')
 const backendSrc = path.join(root, 'backend')
-const purraSrc = path.join(root, 'packages', 'purra', 'src', 'purra')
+const purraRequirements = path.join(backendSrc, 'requirements-purra.txt')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
 
@@ -37,6 +38,52 @@ function copyDirFiltered(src, dest) {
   }
 }
 
+function pythonCandidates() {
+  const explicit = process.env.PURRTYPOS_PYTHON?.trim()
+  return [
+    ...(explicit ? [{ command: explicit, prefix: [] }] : []),
+    { command: path.join(root, '.venv', 'Scripts', 'python.exe'), prefix: [], local: true },
+    { command: path.join(root, '.venv', 'bin', 'python'), prefix: [], local: true },
+    { command: 'python3', prefix: [] },
+    { command: 'python', prefix: [] },
+    { command: 'py', prefix: ['-3'] },
+  ]
+}
+
+function findPackagingPython() {
+  return pythonCandidates().find((candidate) => {
+    if (candidate.local && !fs.existsSync(candidate.command)) return false
+    return spawnSync(
+      candidate.command,
+      [
+        ...candidate.prefix,
+        '-c',
+        'import pip',
+      ],
+      { cwd: root, stdio: 'ignore' },
+    ).status === 0
+  })
+}
+
+function vendorPurra(dest) {
+  const python = findPackagingPython()
+  if (!python) {
+    throw new Error('Python with pip is required to install PurrA')
+  }
+  const result = spawnSync(
+    python.command,
+    [
+      ...python.prefix,
+      '-m', 'pip', 'install', '--no-deps', '--target', dest,
+      '-r', purraRequirements,
+    ],
+    { cwd: root, stdio: 'inherit' },
+  )
+  if (result.status !== 0) {
+    throw new Error('Failed to install the pinned PurrA dependency')
+  }
+}
+
 fs.rmSync(outDir, { recursive: true, force: true })
 fs.mkdirSync(path.dirname(outDir), { recursive: true })
 
@@ -51,6 +98,6 @@ if (process.platform === 'win32' && fs.existsSync(frozenExe)) {
     )
   }
   copyDirFiltered(backendSrc, outDir)
-  copyDirFiltered(purraSrc, path.join(outDir, 'purra'))
-  console.log('[prepare-backend-resources] Copied source backend →', outDir)
+  vendorPurra(outDir)
+  console.log('[prepare-backend-resources] Copied backend and installed pinned PurrA →', outDir)
 }

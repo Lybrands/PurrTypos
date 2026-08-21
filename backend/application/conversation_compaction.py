@@ -14,7 +14,7 @@ from purra.context_budget import (
     estimate_json_tokens,
     trim_agent_messages_by_turn,
 )
-from purra.context_orchestration.contracts import (
+from purra.context_orchestration import (
     ContextCompressionRequest,
     ConversationCompactionResult,
 )

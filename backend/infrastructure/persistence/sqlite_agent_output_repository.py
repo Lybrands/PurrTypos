@@ -34,7 +34,7 @@ from purra.output import (
     TERMINAL_STREAM_ABORT_ERROR_CODE,
 )
 from purra.ports import RunBeginResult, RunCommit
-from purra.ports.projection import RunBeginProjector, RunCommitProjector
+from purra.ports import RunBeginProjector, RunCommitProjector
 
 
 _VALIDATED_RESULT_SCHEMA = "purra.run-validated-result/v1"

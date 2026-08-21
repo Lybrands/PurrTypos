@@ -15,12 +15,6 @@ import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-# The Agent framework is an independent monorepo package. Source deployments
-# install it or vendor it beside this backend; repository runs use its src root.
-_purra_src = Path(__file__).resolve().parent.parent / "packages" / "purra" / "src"
-if _purra_src.is_dir() and str(_purra_src) not in sys.path:
-    sys.path.insert(0, str(_purra_src))
-
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

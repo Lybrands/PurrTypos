@@ -6,12 +6,12 @@ from collections.abc import Callable
 from time import time
 from uuid import uuid4
 
-from purra.artifacts.continuity import (
+from purra.artifacts import (
     ArtifactClaimLeaseCommand,
     ArtifactWriteClaim,
     ArtifactWriteClaimCommand,
 )
-from purra.artifacts.errors import (
+from purra.artifacts import (
     ArtifactConflictError,
     ArtifactNotFoundError,
     ArtifactStateError,
