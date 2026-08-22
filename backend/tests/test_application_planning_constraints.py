@@ -11,13 +11,19 @@ from purra.contracts import (
     PlannerLimits,
     PlanningCapabilities,
     PlanningConstraints,
+    PlanningResult,
+    StepExecutor,
+    StepType,
     TaskSpec,
+    WorkPlan,
+    WorkStep,
 )
 from purra.planner import build_planner_messages
 from application.planning_constraints import RequiredToolPlanningPolicy
 from domains.screenplay_agent.adapter import (
     ScreenplayHostContextProvider,
     ScreenplayToolLoopPolicy,
+    validate_screenplay_planning_result,
 )
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.contracts import ScreenplayStageCommand
@@ -116,6 +122,237 @@ def test_screenplay_planning_policy_plans_only_non_empty_root_turns():
     assert policy.should_plan(
         _screenplay_request(child, "生成素材分析"), capabilities
     ) is False
+    assert policy.planning_constraints(
+        _screenplay_request(root, "分析原作范围"), capabilities
+    ).allow_model_only_fallback is False
+
+
+def test_screenplay_planning_result_rejects_invalid_domain_task_spec_for_repair():
+    request = _screenplay_request(
+        ScreenplayAgentDomainContext(
+            project_id="project-1",
+            turn_id="turn-1",
+        ),
+        "说明核心冲突",
+    )
+    step = WorkStep(
+        id="answer",
+        title="回答",
+        type=StepType.REVIEW,
+        executor=StepExecutor.MODEL,
+    )
+
+    reason = validate_screenplay_planning_result(
+        request,
+        PlanningResult(
+            kind="planned",
+            work_plan=WorkPlan(
+                title="回答",
+                steps=(step,),
+                task_spec=TaskSpec(
+                    goal="回答核心冲突",
+                    operation="answer",
+                    deliverable="creativeBrief",
+                    target={"screenplay": {
+                        "version": 1,
+                        "scope": {"kind": "current_stage"},
+                        "stepBindings": [{
+                            "stepId": "answer",
+                            "phase": "evidence",
+                        }],
+                    }},
+                ),
+            ),
+        ),
+    )
+
+    assert reason is not None
+    assert reason.startswith("answer TaskSpec cannot declare a deliverable")
+    assert '"scope":{"kind":"current_stage"}' in reason
+    assert '"stepBindings":[{"stepId":"answer","phase":"evidence"}]' in reason
+    assert "deliverable must be omitted or empty" in reason
+
+
+def test_screenplay_repair_guidance_replaces_invalid_stage_phases():
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "creativeBrief",
+        "scope": {"kind": "current_stage"},
+    })
+    request = _screenplay_request(
+        ScreenplayAgentDomainContext(
+            project_id="project-1",
+            turn_id="turn-1",
+            stage_command=command,
+        ),
+        "创建创意简报",
+    )
+    steps = (
+        WorkStep(
+            id="evidence",
+            title="梳理证据",
+            type=StepType.ANALYZE,
+            executor=StepExecutor.MODEL,
+        ),
+        WorkStep(
+            id="draft",
+            title="创作",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+            depends_on=("evidence",),
+        ),
+        WorkStep(
+            id="deliver",
+            title="交付",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+            depends_on=("draft",),
+        ),
+    )
+    reason = validate_screenplay_planning_result(
+        request,
+        PlanningResult(
+            kind="planned",
+            work_plan=WorkPlan(
+                title="创建",
+                steps=steps,
+                task_spec=TaskSpec(
+                    goal="创建创意简报",
+                    operation="create",
+                    deliverable="creativeBrief",
+                    target={"screenplay": {
+                        "version": 1,
+                        "scope": {"kind": "current_stage"},
+                        "stepBindings": [
+                            {"stepId": "evidence", "phase": "evidence"},
+                            {"stepId": "draft", "phase": "review"},
+                            {"stepId": "deliver", "phase": "delivery"},
+                        ],
+                    }},
+                ),
+            ),
+        ),
+    )
+
+    assert reason is not None
+    assert reason.startswith("creativeBrief plan phases must be")
+    assert '"stepBindings":[{"stepId":"evidence","phase":"evidence"},' in reason
+    assert '{"stepId":"draft","phase":"creation"},' in reason
+    assert '{"stepId":"deliver","phase":"delivery"}]' in reason
+    assert "stageCommand: create, creativeBrief" in reason
+
+
+def test_screenplay_repair_guidance_adds_missing_formal_phase_todo():
+    command = ScreenplayStageCommand.from_mapping({
+        "kind": "stage_action",
+        "action": "create",
+        "targetRole": "creativeBrief",
+        "scope": {"kind": "current_stage"},
+    })
+    request = _screenplay_request(
+        ScreenplayAgentDomainContext(
+            project_id="project-1",
+            turn_id="turn-1",
+            stage_command=command,
+        ),
+        "创建创意简报",
+    )
+    steps = (
+        WorkStep(
+            id="s1",
+            title="创作",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+        ),
+        WorkStep(
+            id="s2",
+            title="交付",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+            depends_on=("s1",),
+        ),
+    )
+
+    reason = validate_screenplay_planning_result(
+        request,
+        PlanningResult(
+            kind="planned",
+            work_plan=WorkPlan(
+                title="创建",
+                steps=steps,
+                task_spec=TaskSpec(
+                    goal="创建创意简报",
+                    operation="create",
+                    deliverable="creativeBrief",
+                    target={"screenplay": {
+                        "version": 1,
+                        "scope": {"kind": "current_stage"},
+                        "stepBindings": [
+                            {"stepId": "s1", "phase": "creation"},
+                            {"stepId": "s2", "phase": "delivery"},
+                        ],
+                    }},
+                ),
+            ),
+        ),
+    )
+
+    assert reason is not None
+    assert (
+        '"stepBindings":[{"stepId":"s1","phase":"evidence"},'
+        '{"stepId":"stage-work","phase":"creation"},'
+        '{"stepId":"s2","phase":"delivery"}]'
+    ) in reason
+    assert (
+        'Replace the todos too; their ids in order must equal exactly '
+        '["s1","stage-work","s2"]'
+    ) in reason
+
+    repaired_steps = (
+        WorkStep(
+            id="s1",
+            title="梳理证据",
+            type=StepType.ANALYZE,
+            executor=StepExecutor.MODEL,
+        ),
+        WorkStep(
+            id="stage-work",
+            title="创作",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+            depends_on=("s1",),
+        ),
+        WorkStep(
+            id="s2",
+            title="交付",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+            depends_on=("stage-work",),
+        ),
+    )
+    repaired = PlanningResult(
+        kind="planned",
+        work_plan=WorkPlan(
+            title="创建",
+            steps=repaired_steps,
+            task_spec=TaskSpec(
+                goal="创建创意简报",
+                operation="create",
+                deliverable="creativeBrief",
+                target={"screenplay": {
+                    "version": 1,
+                    "scope": {"kind": "current_stage"},
+                    "stepBindings": [
+                        {"stepId": "s1", "phase": "evidence"},
+                        {"stepId": "stage-work", "phase": "creation"},
+                        {"stepId": "s2", "phase": "delivery"},
+                    ],
+                }},
+            ),
+        ),
+    )
+    assert validate_screenplay_planning_result(request, repaired) is None
 
 
 @pytest.mark.asyncio
