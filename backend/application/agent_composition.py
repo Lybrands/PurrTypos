@@ -12,6 +12,7 @@ from purra.contracts import (
     ApprovalDecision,
     ApprovalStatus,
     ContextBudgetClaim,
+    PlannerLimits,
     ToolExecutionLimits,
     ToolExecutionMode,
 )
@@ -423,7 +424,17 @@ class AgentComposition:
                 if isinstance(resolved_planning_policy, ReactivePlanningPolicy)
                 else AgentPlanner(
                     model_gateway,
+                    limits=getattr(
+                        adapter,
+                        "planner_limits",
+                        PlannerLimits(),
+                    ),
                     output_observer=self._output_processor,
+                    result_validator=getattr(
+                        adapter,
+                        "planning_result_validator",
+                        None,
+                    ),
                 )
             ),
             planning_policy=resolved_planning_policy,
