@@ -905,6 +905,7 @@ class SqliteScreenplayCheckpointRepository:
         )
         found: str | None = None
         matching_event_count = 0
+        authority_steps: dict[str, Mapping[str, Any]] | None = None
         for row in rows:
             try:
                 payload = json.loads(str(row.get("payload_json") or "{}"))
@@ -938,6 +939,38 @@ class SqliteScreenplayCheckpointRepository:
                 raise ScreenplayCheckpointStateError(
                     "checkpoint Root revision event is incomplete"
                 )
+            if any(
+                "suggested_tools" not in step
+                and "suggestedTools" not in step
+                for step in steps
+            ):
+                if authority_steps is None:
+                    authority_steps = {
+                        str(step.get("id") or ""): step
+                        for step in await get_run_todos(self._db, root_run_id)
+                    }
+                if any(
+                    str(step.get("id") or "") not in authority_steps
+                    for step in steps
+                ):
+                    raise ScreenplayCheckpointStateError(
+                        "checkpoint Root revision authority is incomplete"
+                    )
+                steps = [
+                    {
+                        **dict(step),
+                        "suggestedTools": authority_steps[
+                            str(step.get("id") or "")
+                        ].get("suggestedTools", ()),
+                        "protocolPrivate": authority_steps[
+                            str(step.get("id") or "")
+                        ].get("protocolPrivate", False),
+                        "planningCapability": authority_steps[
+                            str(step.get("id") or "")
+                        ].get("planningCapability"),
+                    }
+                    for step in steps
+                ]
             try:
                 event_plan = parse_persisted_plan({
                     "title": payload["title"],
