@@ -34,6 +34,7 @@ from purra.contracts import (
     ExecutionPlan,
     TaskSpec,
     TaskStep,
+    ToolRiskLevel,
 )
 from purra.api import AgentCore
 from purra.events import AgentEvent, CoreEventType
@@ -67,6 +68,7 @@ from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
+    _document_section_tool_instruction,
     _requires_run,
     _unit_result,
     normalize_screenplay_candidate,
@@ -162,6 +164,17 @@ from purra.testing import assert_task_orchestration_conforms
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_creative_brief_section_instructions_match_document_validator_fields():
+    positioning = _document_section_tool_instruction(
+        "creativeBrief",
+        "positioning",
+    )
+    premise = _document_section_tool_instruction("creativeBrief", "premise")
+
+    assert '"contentJson":{"fields":{"approach":' in positioning
+    assert '"contentJson":{"fields":{"premise":' in premise
 
 
 def _checkpoint_unit(
@@ -1226,6 +1239,64 @@ async def test_checkpoint_root_reconcile_requires_complete_matching_plan(
             "episode:4",
             expected_digest=digest,
         )
+
+
+async def test_checkpoint_root_digest_hydrates_hidden_tool_authority(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = _canonical_root_plan(ExecutionPlan(
+        title="创作",
+        task_spec=TaskSpec(goal="创作", operation="create"),
+        steps=(TaskStep(
+            id="create",
+            title="创建候选稿",
+            type=StepType.WRITE,
+            executor=StepExecutor.TOOL,
+            risk_level=ToolRiskLevel.WRITE,
+            suggested_tools=("delegateToAgents",),
+        ),),
+    ))
+    digest = plan_digest(plan)
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, status, prompt) "
+        "VALUES (?, 'running', ?)",
+        ["root-hidden-authority", "创作"],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_todos "
+        "(run_id, step_id, title, status, executor, step_type, risk_level, "
+        "expected_tools, depends_on_json, sort) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', 0)",
+        [
+            "root-hidden-authority",
+            "create",
+            "创建候选稿",
+            "running",
+            "tool",
+            "write",
+            "write",
+            '["delegateToAgents"]',
+        ],
+    )
+    payload = _root_revision_payload(
+        plan,
+        identity="document:sections",
+        digest=digest,
+    )
+    payload["steps"][0].pop("suggested_tools")
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json) "
+        "VALUES (?, 'run.todos_updated', ?)",
+        ["root-hidden-authority", json.dumps(payload)],
+    )
+
+    assert await repository.root_revision_digest(
+        "root-hidden-authority",
+        "document:sections",
+        expected_digest=digest,
+    ) == digest
 
 
 async def test_duplicate_root_revision_event_pauses_ready_receipt(
@@ -3564,6 +3635,34 @@ async def test_screenplay_task_preserves_managed_model_failure_code():
     assert code == "model_output_truncated"
     assert "未形成完整候选稿" in message
     assert "不完整结果未被保存" in message
+
+
+async def test_resumed_task_view_uses_the_active_continuation_root():
+    class _Parts:
+        async def list_task_outputs(self, task_id):
+            assert task_id == "task-resumed"
+            return {}
+
+    executor = object.__new__(ScreenplayTaskUnitExecutor)
+    executor._parts = _Parts()
+    context = SimpleNamespace(
+        run_id="run-continuation",
+        task=SimpleNamespace(
+            id="task-resumed",
+            created_by_run_id="run-canceled-source",
+            metadata={
+                "projectId": "project-1",
+                "sessionId": 1,
+                "turnId": "turn-1",
+                "targetRole": "creativeBrief",
+                "recipe": {"steps": []},
+            },
+        ),
+    )
+
+    task = await executor._task_view(context)
+
+    assert task["rootRunId"] == "run-continuation"
 
 
 @pytest.mark.parametrize(("code", "retryable", "expected_category"), (
