@@ -349,6 +349,9 @@ async def test_product_composition_registers_writing_and_screenplay_profiles(
     composition = create_agent_composition(temp_db)
     try:
         assert composition.agent_profile_ids == ("writing", "screenplay")
+        core = composition.create_core("key", agent_profile="screenplay")
+        assert core._planner._result_validator is not None
+        assert core._planner._limits.max_repair_attempts == 3
     finally:
         await composition.shutdown()
 

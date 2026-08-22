@@ -84,7 +84,7 @@ async def test_lifespan_execution_heartbeat_is_not_blocked_by_primary_connection
     async with main.lifespan(_RecordingApplication()):
         composition = get_agent_composition()
         repository = composition._repository
-        repository._lease_duration_ms = 120
+        repository._lease_duration_ms = 3_000
         run_id = await repository.create(RunCreateParams(
             session_id=None,
             prompt="keep the active run alive",
@@ -103,7 +103,7 @@ async def test_lifespan_execution_heartbeat_is_not_blocked_by_primary_connection
         await session.bind(run_id)
         await created[0]._connection_lock.acquire()
         try:
-            await asyncio.sleep(0.22)
+            await asyncio.sleep(1.2)
         finally:
             created[0]._connection_lock.release()
 
