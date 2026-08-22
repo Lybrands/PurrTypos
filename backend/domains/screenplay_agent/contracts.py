@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Mapping
 
-from purra.contracts import TaskSpec, TaskStep
+from purra.contracts import TaskSpec, TaskStep, WorkStep
 from purra.json_values import thaw_json_mapping
 
 
@@ -245,12 +245,14 @@ class ScreenplayIntent:
     def from_task_spec(
         cls,
         task_spec: TaskSpec,
-        plan_steps: Sequence[TaskStep],
+        plan_steps: Sequence[TaskStep | WorkStep],
     ) -> "ScreenplayIntent":
         if not isinstance(task_spec, TaskSpec):
             raise TypeError("screenplay intent requires a TaskSpec")
         steps = tuple(plan_steps)
-        if not steps or any(not isinstance(step, TaskStep) for step in steps):
+        if not steps or any(
+            not isinstance(step, (TaskStep, WorkStep)) for step in steps
+        ):
             raise TypeError("screenplay intent requires WorkPlan steps")
         step_ids = tuple(step.id for step in steps)
         if len(step_ids) != len(set(step_ids)):

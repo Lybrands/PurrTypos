@@ -11,7 +11,7 @@ import purra
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PINNED_PURRA_COMMIT = "fdbada4f38b55aacbd66a57e5ba6f3cc7a3c2569"
+PINNED_PURRA_COMMIT = "cdee52008cc8a8835ce1be9b3bb088cdd5b34b09"
 PURRA_REQUIREMENT = (
     "purra @ https://github.com/Lybrands/purra/archive/"
     f"{PINNED_PURRA_COMMIT}.zip"
@@ -91,7 +91,7 @@ def test_purra_is_pinned_and_loaded_as_an_external_distribution():
     package_path = Path(purra.__file__).resolve().as_posix()
 
     assert requirement == PURRA_REQUIREMENT
-    assert metadata.version("purra") == "0.1.0"
+    assert metadata.version("purra") == "0.1.1"
     assert "/packages/purra/src/" not in package_path
     assert not (ROOT_DIR / "packages" / "purra").exists()
 

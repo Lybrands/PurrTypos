@@ -782,7 +782,7 @@ class ScreenplayTaskUnitExecutor:
             "projectId": str(metadata["projectId"]),
             "sessionId": int(metadata["sessionId"]),
             "turnId": str(metadata["turnId"]),
-            "rootRunId": context.task.created_by_run_id,
+            "rootRunId": context.run_id,
             "targetRole": str(metadata["targetRole"]),
             "sourceRevisionRefs": list(metadata.get("sourceRevisionRefs") or ()),
             "units": units,
@@ -1080,9 +1080,14 @@ def _validate_review_dimension_candidate(
 
 
 def _document_section_tool_instruction(role: str, section_key: str) -> str:
+    content_json = '{"当前章节对应的结构化字段":"值"}'
+    if role == "creativeBrief" and section_key == "positioning":
+        content_json = '{"fields":{"approach":"人物驱动的创作方法"}}'
+    elif role == "creativeBrief" and section_key == "premise":
+        content_json = '{"fields":{"premise":"一句完整的核心前提"}}'
     return f"""你只生成 {role} 文档中的 {section_key} 章节。
 宿主已提供本章节需要的项目证据。只返回一个 JSON 对象，结构必须为：
-{{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{{"当前章节对应的结构化字段":"值"}}}}
+{{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{content_json}}}
 contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。"""
 
 
