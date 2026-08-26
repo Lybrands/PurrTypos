@@ -84,6 +84,15 @@ class ScreenplayCandidateCompletionProjector:
             ):
                 raise ValueError("candidate projection contract is invalid")
             await self._validate_started_event(run_id, turn_id)
+            await self._validate_dependency_read(run_id, scope)
+            if (
+                str(scope.get("toolAccess") or "") == "draft_scene"
+                and not await self._has_successful_tool_read(
+                    run_id,
+                    "getScreenplayEpisodeContext",
+                )
+            ):
+                raise ValueError("draft scene episode context was not read")
             host_capture = projection.get("hostCapture")
             if isinstance(host_capture, Mapping):
                 candidate = _host_candidate(
@@ -131,6 +140,53 @@ class ScreenplayCandidateCompletionProjector:
             or {key: rows[0].get(key) for key in expected} != expected
         ):
             raise ValueError("candidate projection turn identity is invalid")
+
+    async def _validate_dependency_read(
+        self,
+        run_id: str,
+        scope: Mapping[str, object],
+    ) -> None:
+        dependency_part_keys = scope.get("dependencyPartKeys", [])
+        if (
+            not isinstance(dependency_part_keys, list)
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in dependency_part_keys
+            )
+            or len(dependency_part_keys) != len(set(dependency_part_keys))
+        ):
+            raise ValueError("candidate dependency scope is invalid")
+        if not dependency_part_keys:
+            return
+        if not await self._has_successful_tool_read(
+            run_id,
+            "readScreenplayTaskDependencies",
+        ):
+            raise ValueError("candidate dependencies were not read")
+
+    async def _has_successful_tool_read(
+        self,
+        run_id: str,
+        tool_name: str,
+    ) -> bool:
+        row = await self._db.fetch_one(
+            "SELECT 1 AS present FROM ai_agent_run_events AS started "
+            "JOIN ai_agent_run_events AS finished "
+            "ON finished.run_id = started.run_id "
+            "AND finished.event_type = 'operation.finished' "
+            "AND json_extract(finished.payload_json, '$.operationId') = "
+            "json_extract(started.payload_json, '$.operationId') "
+            "WHERE started.run_id = ? "
+            "AND started.event_type = 'operation.started' "
+            "AND json_extract(started.payload_json, '$.kind') = 'tool' "
+            "AND json_extract("
+            "started.payload_json, '$.display.labelParams.toolName'"
+            ") = ? "
+            "AND json_extract(finished.payload_json, '$.status') = 'succeeded' "
+            "LIMIT 1",
+            [run_id, tool_name],
+        )
+        return row is not None
 
 
 def _json_mapping(value: object) -> dict[str, object]:

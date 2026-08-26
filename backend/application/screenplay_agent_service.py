@@ -58,7 +58,6 @@ from application.screenplay_agent_task_executor import ScreenplayTaskUnitExecuto
 from application.screenplay_checkpoint_planning import (
     SqliteScreenplayCheckpointRepository,
 )
-from application.screenplay_candidate_model import ScreenplayCandidateModelService
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
@@ -241,10 +240,6 @@ class ScreenplayAgentService:
             self._db,
             runtime=runtime,
             composition=self._composition,
-            candidate_model_service=ScreenplayCandidateModelService(
-                self._db,
-                composition=self._composition,
-            ),
         )
 
     def dispatch_resumed_operation(

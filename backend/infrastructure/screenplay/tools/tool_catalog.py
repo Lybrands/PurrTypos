@@ -47,6 +47,68 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
     async def write_candidate(state, arguments, signal):
         del signal
         try:
+            dependency_keys = state.domain.get("dependencyPartKeys")
+            evidence_read_operations = (
+                {"readScreenplayDeliverable": read_operations[
+                    "readScreenplayDeliverable"
+                ]}
+                if (
+                    str(state.domain.get("toolAccess") or "")
+                    == "creative_brief_section"
+                    and bool(state.domain.get("deliverableRevisionScope"))
+                )
+                else read_operations
+            )
+            if dependency_keys and not await _has_successful_read_operation(
+                db,
+                str(state.run_id or ""),
+                {"readScreenplayTaskDependencies": None},
+            ):
+                raise ScreenplayToolInputError(
+                    "The candidate cannot be written before its dependencies are read.",
+                    guidance=(
+                        "Call readScreenplayTaskDependencies with the bound Part "
+                        "keys, wait for success, then retry the candidate write."
+                    ),
+                )
+            if (
+                str(state.domain.get("toolAccess") or "")
+                in {
+                    "all",
+                    "review_dimension",
+                    "source_chapter_digest",
+                    "source_digest_reduction",
+                    "source_analysis_section",
+                    "creative_brief_section",
+                    "series_arc_index",
+                    "series_arc_phase",
+                    "episode_plan_index",
+                    "episode_plan_fragment",
+                    "character_arcs_index",
+                    "character_arc_fragment",
+                    "scene_list_episode",
+                }
+                and str(state.domain.get("expectedPartType") or "")
+                in {"document_section", "review_dimension"}
+                and (
+                    str(state.domain.get("toolAccess") or "")
+                    != "creative_brief_section"
+                    or "deliverableRevisionScope" not in state.domain
+                    or bool(state.domain.get("deliverableRevisionScope"))
+                )
+                and not await _has_successful_read_operation(
+                    db,
+                    str(state.run_id or ""),
+                    evidence_read_operations,
+                )
+            ):
+                raise ScreenplayToolInputError(
+                    "The candidate cannot be written before its evidence is read.",
+                    guidance=(
+                        "Call one available screenplay read tool, wait for its "
+                        "successful result, then retry writeScreenplayCandidatePart."
+                    ),
+                )
             result = await candidates.write(state, arguments)
         except ScreenplayToolInputError as error:
             return _input_error(error)
@@ -71,6 +133,7 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
         return {"content": _encode(await candidates.inspect(state))}
 
     read_operations = {
+        "readScreenplayTaskDependencies": query.task_dependencies,
         "inspectScreenplayProject": query.inspect_project,
         "readScreenplayDeliverable": query.read_deliverable,
         "searchScreenplayDeliverables": query.search_deliverables,
@@ -95,6 +158,29 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
         "writeScreenplayCandidatePart": write_candidate,
         "inspectScreenplayCandidate": inspect_candidate,
     })
+
+
+async def _has_successful_read_operation(db, run_id: str, read_operations) -> bool:
+    if not run_id:
+        return False
+    placeholders = ",".join("?" for _ in read_operations)
+    row = await db.fetch_one(
+        "SELECT 1 AS present FROM ai_agent_run_events AS started "
+        "JOIN ai_agent_run_events AS finished "
+        "ON finished.run_id = started.run_id "
+        "AND finished.event_type = 'operation.finished' "
+        "AND json_extract(finished.payload_json, '$.operationId') = "
+        "json_extract(started.payload_json, '$.operationId') "
+        "WHERE started.run_id = ? "
+        "AND started.event_type = 'operation.started' "
+        "AND json_extract(started.payload_json, '$.kind') = 'tool' "
+        f"AND json_extract(started.payload_json, '$.display.labelParams.toolName') "
+        f"IN ({placeholders}) "
+        "AND json_extract(finished.payload_json, '$.status') = 'succeeded' "
+        "LIMIT 1",
+        [run_id, *read_operations],
+    )
+    return row is not None
 
 
 def _encode(value) -> str:

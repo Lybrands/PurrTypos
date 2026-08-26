@@ -60,7 +60,34 @@ def parse_candidate_validation_contract(
             "reviewedContentDigest",
         },
         "document_section": {"protocol", "kind", "sectionKey"},
+        "creative_brief_section": {"protocol", "kind", "sectionKey"},
+        "source_chapter_digest": {"protocol", "kind", "chapterId"},
+        "source_digest_reduction": {"protocol", "kind", "digestId"},
+        "source_analysis_section": {"protocol", "kind", "sectionKey"},
         "scene_list_fragment": {"protocol", "kind", "episodeNumber"},
+        "structure_episode_plan_index": {"protocol", "kind"},
+        "structure_series_arc_index": {"protocol", "kind"},
+        "structure_series_arc_phase": {
+            "protocol",
+            "kind",
+            "phaseKey",
+            "phaseTitle",
+            "phaseObjective",
+        },
+        "structure_episode_plan_fragment": {
+            "protocol",
+            "kind",
+            "episodeNumber",
+            "episodeId",
+            "episodeTitle",
+        },
+        "structure_character_arcs_index": {"protocol", "kind"},
+        "structure_character_arc_fragment": {
+            "protocol",
+            "kind",
+            "characterKey",
+            "characterName",
+        },
     }.get(kind)
     if expected_keys is None:
         raise ValueError("candidate validation kind is unsupported")
@@ -78,6 +105,38 @@ def parse_candidate_validation_contract(
         )
     elif kind in {"episode_metadata", "scene_list_fragment"}:
         result["episodeNumber"] = _episode_number(value["episodeNumber"])
+    elif kind == "structure_episode_plan_fragment":
+        result.update({
+            "episodeNumber": _episode_number(value["episodeNumber"]),
+            "episodeId": _contract_id(value["episodeId"], "structure episode id"),
+            "episodeTitle": _contract_id(
+                value["episodeTitle"],
+                "structure episode title",
+            ),
+        })
+    elif kind == "structure_series_arc_phase":
+        result.update({
+            "phaseKey": _contract_id(value["phaseKey"], "structure phase key"),
+            "phaseTitle": _contract_id(
+                value["phaseTitle"],
+                "structure phase title",
+            ),
+            "phaseObjective": _contract_id(
+                value["phaseObjective"],
+                "structure phase objective",
+            ),
+        })
+    elif kind == "structure_character_arc_fragment":
+        result.update({
+            "characterKey": _contract_id(
+                value["characterKey"],
+                "structure character key",
+            ),
+            "characterName": _contract_id(
+                value["characterName"],
+                "structure character name",
+            ),
+        })
     elif kind == "review_dimension":
         result["episodeNumber"] = _episode_number(value["episodeNumber"])
         dimension = value["dimension"]
@@ -108,10 +167,24 @@ def parse_candidate_validation_contract(
             ),
             "reviewedContentDigest": digest.lower(),
         })
-    elif kind == "document_section":
+    elif kind in {
+        "document_section",
+        "creative_brief_section",
+        "source_analysis_section",
+    }:
         result["sectionKey"] = _contract_id(
             value["sectionKey"],
             "document section key",
+        )
+    elif kind == "source_chapter_digest":
+        result["chapterId"] = _contract_id(
+            value["chapterId"],
+            "source chapter id",
+        )
+    elif kind == "source_digest_reduction":
+        result["digestId"] = _contract_id(
+            value["digestId"],
+            "source digest id",
         )
     return result
 

@@ -30,11 +30,24 @@ _ROLES = {
         ],
     },
     "maxItems": 6,
-    "uniqueItems": True,
 }
 
 
 SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "readScreenplayTaskDependencies": _object({
+        "partKeys": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+            },
+            "minItems": 1,
+            "maxItems": 12,
+            "uniqueItems": True,
+            "description": "当前 Unit 的直接依赖 Part key，不得重复。",
+        },
+    }, ("partKeys",)),
     "inspectScreenplayProject": _object({}),
     "readScreenplayDeliverable": _object({
         "role": _ROLES["items"],
@@ -63,6 +76,14 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "screenplayDraft 的 revisionId，不接受其他交付物版本 ID。"
             ),
         },
+        "sceneListRevisionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": (
+                "sceneList 的 revisionId；用于读取任务已锁定的不可变场景表版本。"
+            ),
+        },
     }, ("episodeNumber",)),
     "inspectSourceStructure": _object({"cursor": _CURSOR, "limit": _LIMIT}),
     "readSourceChapters": _object({
@@ -79,7 +100,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "minItems": 1,
             "maxItems": 12,
-            "uniqueItems": True,
         },
     }, ("chapterIds",)),
     "searchSourceText": _object({
@@ -101,7 +121,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "minItems": 1,
             "maxItems": 20,
-            "uniqueItems": True,
         },
     }, ("characterIds",)),
     "listSourceWorldEntities": _object({
@@ -112,7 +131,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "enum": ["location", "faction", "item", "other"],
             },
             "maxItems": 4,
-            "uniqueItems": True,
         },
         "query": {"type": "string", "maxLength": 200},
         "cursor": _CURSOR,
@@ -128,7 +146,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "minItems": 1,
             "maxItems": 20,
-            "uniqueItems": True,
         },
     }, ("entityIds",)),
     "readSourceBackground": _object({}),
@@ -147,7 +164,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 ],
             },
             "maxItems": 5,
-            "uniqueItems": True,
         },
         "limit": _LIMIT,
     }, ("query",)),
@@ -163,7 +179,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 ),
             },
             "maxItems": 12,
-            "uniqueItems": True,
         },
         "cursor": _CURSOR,
         "limit": _LIMIT,
@@ -177,6 +192,10 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 SCREENPLAY_TOOL_DESCRIPTIONS = {
+    "readScreenplayTaskDependencies": (
+        "按 Part key 读取当前任务、当前执行单元已完成的直接依赖；"
+        "每次最多读取 12 项。"
+    ),
     "inspectScreenplayProject": "查看当前剧本项目、阶段和已有交付物的紧凑清单。",
     "readScreenplayDeliverable": "读取当前项目内一个已接受或指定版本的交付物。revisionId 必须属于所选 role。",
     "searchScreenplayDeliverables": "只在当前项目各交付物的已接受版本中检索相关内容，避免旧版本污染上下文。",

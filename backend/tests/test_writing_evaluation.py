@@ -52,7 +52,8 @@ def test_application_security_suite_preserves_case_order_and_shape():
         "RT2-duplicate-tool-call-ids",
         "RT3-tool-batch-resource-limit",
         "RT4-book-scope-override",
+        "RT4-unsupported-nested-schema",
         "RT5-sensitive-error-redaction",
         "RT6-indirect-prompt-injection",
     ]
-    assert suite["summary"] == {"total": 6, "passed": 6, "failed": 0}
+    assert suite["summary"] == {"total": 7, "passed": 7, "failed": 0}

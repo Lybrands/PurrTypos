@@ -61,6 +61,21 @@ _CANDIDATE_TOOLS = frozenset({
     "writeScreenplayCandidatePart",
     "inspectScreenplayCandidate",
 })
+_CANDIDATE_WRITE_TOOL = frozenset({"writeScreenplayCandidatePart"})
+_DEPENDENCY_READ_TOOL = frozenset({"readScreenplayTaskDependencies"})
+_DRAFT_SOURCE_TOOLS = frozenset({
+    "inspectSourceStructure",
+    "readSourceChapters",
+    "searchSourceText",
+    "querySourceStoryFacts",
+    "readSourceStyle",
+})
+_DOCUMENT_SECTION_TOOLS = (
+    _PROJECT_TOOLS
+    | _SOURCE_TOOLS
+    | _DEPENDENCY_READ_TOOL
+    | _CANDIDATE_WRITE_TOOL
+)
 _READ_TOOLS = _PROJECT_TOOLS | _SOURCE_TOOLS | {"getScreenplayEpisodeContext"}
 _HOST_CAPTURED_TEXT_PARTS = frozenset({"scene"})
 _HOST_PREPARED_TOOL_WRITE_PARTS = frozenset({"episode_metadata"})
@@ -77,7 +92,55 @@ _ROLE_TOOLS = {
     ),
     "review": frozenset(SCREENPLAY_TOOL_SCHEMAS),
 }
+_TOOL_PROFILES = {
+    "draft_scene": _DRAFT_SOURCE_TOOLS | _DEPENDENCY_READ_TOOL | {
+        "getScreenplayEpisodeContext",
+    },
+    "episode_metadata": _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL,
+    "review_dimension": frozenset({
+        "getScreenplayEpisodeContext",
+        "writeScreenplayCandidatePart",
+    }),
+    "source_chapter_digest": frozenset({
+        "readSourceChapters",
+        "writeScreenplayCandidatePart",
+    }),
+    "source_digest_reduction": (
+        _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+    ),
+    "source_analysis_section": (
+        _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+    ),
+    "creative_brief_section": frozenset({
+        "readScreenplayDeliverable",
+        "readScreenplayTaskDependencies",
+        "writeScreenplayCandidatePart",
+    }),
+    "series_arc_index": _PROJECT_TOOLS | _CANDIDATE_WRITE_TOOL,
+    "series_arc_phase": (
+        _PROJECT_TOOLS | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+    ),
+    "episode_plan_index": (
+        _PROJECT_TOOLS | {"readSourceOutline"} | _DEPENDENCY_READ_TOOL
+        | _CANDIDATE_WRITE_TOOL
+    ),
+    "episode_plan_fragment": (
+        {"readSourceChapters"} | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+    ),
+    "character_arcs_index": (
+        _PROJECT_TOOLS | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+    ),
+    "character_arc_fragment": (
+        _PROJECT_TOOLS | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+    ),
+    "scene_list_episode": frozenset({
+        "readScreenplayDeliverable",
+        "writeScreenplayCandidatePart",
+    }),
+    "final_response": frozenset(),
+}
 _DISPLAY_NAMES = {
+    "readScreenplayTaskDependencies": "读取任务依赖",
     "inspectScreenplayProject": "查看剧本项目",
     "readScreenplayDeliverable": "读取剧本交付物",
     "searchScreenplayDeliverables": "检索剧本交付物",
@@ -96,6 +159,11 @@ _DISPLAY_NAMES = {
     "writeScreenplayCandidatePart": "写入剧本候选稿",
     "inspectScreenplayCandidate": "检查剧本候选稿",
 }
+
+
+def screenplay_tool_display_names(tool_name: str) -> dict[str, str]:
+    label = _DISPLAY_NAMES.get(str(tool_name or ""))
+    return {"zh-CN": label} if label else {}
 
 
 def build_screenplay_tool_catalog(
@@ -123,7 +191,7 @@ def build_screenplay_tool_catalog(
                 name=name,
                 description=SCREENPLAY_TOOL_DESCRIPTIONS[name],
                 parameters=parameters,
-                display_names={"zh-CN": _DISPLAY_NAMES[name]},
+                display_names=screenplay_tool_display_names(name),
             ),
             handler=_adapt_handler(name, handlers[name]),
             policy=(
@@ -147,6 +215,9 @@ def build_screenplay_tool_catalog(
                     "targetRole",
                     "expectedPartType",
                     "expectedPartKey",
+                    "dependencyPartKeys",
+                    "deliverableRevisionScope",
+                    "boundEpisodeNumber",
                     "sourceBookId",
                     "sourceScope",
                 ),
@@ -210,12 +281,20 @@ def _enabled_tools(request: AgentRunRequest) -> frozenset[str]:
     context = ScreenplayAgentDomainContext.from_core_context(
         request.domain_context
     )
+    if context.is_root:
+        return _scoped_read_tools(context, _READ_TOOLS)
+    if context.tool_access in _TOOL_PROFILES:
+        return _scoped_profile_tools(
+            context,
+            _TOOL_PROFILES[context.tool_access],
+        )
     if context.expected_part_type in _HOST_CAPTURED_TEXT_PARTS:
-        # Long authored text is returned as ordinary model content and bound
-        # to the host-owned scene identity after the Run completes. Never
-        # expose a JSON writer in this phase, even if a caller accidentally
-        # enables tools.
-        return frozenset()
+        # Long text stays ordinary model output, but its dynamic evidence must
+        # still be acquired through recorded read tools.
+        return _scoped_read_tools(
+            context,
+            set(_ROLE_TOOLS.get(context.target_role, ())) & _READ_TOOLS,
+        )
     if context.expected_part_type in _HOST_PREPARED_TOOL_WRITE_PARTS:
         # The application has already assembled the exact metadata context.
         # This phase is a bounded commit, not another research loop.
@@ -223,12 +302,10 @@ def _enabled_tools(request: AgentRunRequest) -> frozenset[str]:
     if context.tool_access == "candidate_write":
         return _CANDIDATE_TOOLS
     if context.tool_access == "evidence_read":
-        enabled = set(_ROLE_TOOLS.get(context.target_role, ())) & _READ_TOOLS
-        if not context.source_book_id:
-            enabled.difference_update(_SOURCE_TOOLS)
-        elif is_restricted_source_scope(context.source_scope or {}):
-            enabled.difference_update(_UNSCOPED_SOURCE_TOOLS)
-        return frozenset(enabled)
+        return _scoped_read_tools(
+            context,
+            set(_ROLE_TOOLS.get(context.target_role, ())) & _READ_TOOLS,
+        )
     enabled = set(_ROLE_TOOLS.get(context.target_role, ()))
     if not context.source_book_id:
         enabled.difference_update(_SOURCE_TOOLS)
@@ -241,6 +318,30 @@ def _enabled_tools(request: AgentRunRequest) -> frozenset[str]:
     return frozenset(enabled)
 
 
+def _scoped_read_tools(
+    context: ScreenplayAgentDomainContext,
+    tools,
+) -> frozenset[str]:
+    enabled = set(tools) & _READ_TOOLS
+    if not context.source_book_id:
+        enabled.difference_update(_SOURCE_TOOLS)
+    elif is_restricted_source_scope(context.source_scope or {}):
+        enabled.difference_update(_UNSCOPED_SOURCE_TOOLS)
+    return frozenset(enabled)
+
+
+def _scoped_profile_tools(
+    context: ScreenplayAgentDomainContext,
+    tools,
+) -> frozenset[str]:
+    enabled = set(tools)
+    if not context.source_book_id:
+        enabled.difference_update(_SOURCE_TOOLS)
+    elif is_restricted_source_scope(context.source_scope or {}):
+        enabled.difference_update(_UNSCOPED_SOURCE_TOOLS)
+    return frozenset(enabled)
+
+
 def _model_paths(schema: Mapping[str, Any]) -> tuple[str, ...]:
     properties = schema.get("properties")
     if not isinstance(properties, Mapping):
@@ -248,4 +349,7 @@ def _model_paths(schema: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(str(name) for name in properties)
 
 
-__all__ = ["build_screenplay_tool_catalog"]
+__all__ = [
+    "build_screenplay_tool_catalog",
+    "screenplay_tool_display_names",
+]

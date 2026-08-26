@@ -21,6 +21,7 @@ from purra.contracts import (
 from purra.planner import build_planner_messages
 from application.planning_constraints import RequiredToolPlanningPolicy
 from domains.screenplay_agent.adapter import (
+    ScreenplayDomainAdapter,
     ScreenplayHostContextProvider,
     ScreenplayToolLoopPolicy,
     validate_screenplay_planning_result,
@@ -48,6 +49,13 @@ class _Policy:
     ):
         del request, task_spec
         return capabilities.constraints
+
+
+def test_screenplay_runtime_allows_long_model_generation_without_removing_bound():
+    limits = ScreenplayDomainAdapter(tool_catalog=object()).runtime_limits
+
+    assert limits.provider_invocation_timeout_ms == 300_000
+    assert limits.root_run_timeout_ms == 900_000
 
 
 def test_required_tool_policy_narrows_request_and_task_constraints():
@@ -405,12 +413,19 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     )
     policy = facts["planningRules"][0]
     planner_payload = json.loads(str(messages[1].content))
-    planning_content = planner_payload["planningContext"][0]["content"]
+    progress_content = planner_payload["planningContext"][0]["content"]
+    planning_content = planner_payload["planningContext"][1]["content"]
     planner_facts = json.loads(planning_content)
 
-    assert len(bundle.blocks) == 1
-    assert bundle.blocks[0].name == "screenplay_planning_facts"
-    assert bundle.blocks[0].untrusted is False
+    assert len(bundle.blocks) == 2
+    assert [block.name for block in bundle.blocks] == [
+        "screenplay_public_progress",
+        "screenplay_planning_facts",
+    ]
+    assert all(block.untrusted is False for block in bundle.blocks)
+    assert "面向用户的状态标题" in progress_content
+    assert "不得包含 Run、Task、Turn" in progress_content
+    assert "chain-of-thought" in progress_content
     assert facts["project"]["id"] == "project-1"
     assert facts["stageCommand"] == stage_command
     assert facts["planningRules"] == [policy]
@@ -420,3 +435,16 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     assert "Revision" in policy
     assert '"targetRole":"sourceAnalysis"' in planning_content
     assert '"targetRole":"review"' not in planning_content
+
+    runtime_bundle = await provider.build_context(
+        request,
+        ContextBudget(
+            window_tokens=128_000,
+            output_reserve_tokens=16_000,
+            safety_reserve_tokens=4_000,
+            runtime_reserve_tokens=4_000,
+        ),
+    )
+    assert len(runtime_bundle.blocks) == 1
+    assert runtime_bundle.blocks[0].name == "screenplay_public_progress"
+    assert "不是工具日志或思考过程" in runtime_bundle.blocks[0].content

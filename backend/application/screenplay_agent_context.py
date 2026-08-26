@@ -162,6 +162,64 @@ class ScreenplayAgentContextQuery:
             result.append(revision)
         return result
 
+    async def revision_identities(
+        self,
+        project_id: str,
+        revision_ids: Sequence[str],
+    ) -> dict[str, str]:
+        """Resolve immutable role/id control facts without loading any body."""
+
+        normalized = tuple(dict.fromkeys(
+            str(value).strip() for value in revision_ids if str(value).strip()
+        ))
+        if not normalized:
+            return {}
+        marks = ",".join("?" for _ in normalized)
+        rows = await self._db.fetch_all(
+            "SELECT r.id, d.role FROM screenplay_revisions AS r "
+            "JOIN screenplay_deliverables AS d ON d.id = r.deliverable_id "
+            f"WHERE r.project_id = ? AND r.id IN ({marks})",
+            [project_id, *normalized],
+        )
+        by_id = {str(row["id"]): str(row["role"]) for row in rows}
+        missing = set(normalized) - set(by_id)
+        if missing:
+            raise AppError(
+                "项目文档版本不存在或不属于当前剧本项目",
+                409,
+            )
+        result: dict[str, str] = {}
+        for revision_id in normalized:
+            role = by_id[revision_id]
+            if role in result:
+                raise AppError(f"剧本任务包含多个 {role} 输入版本", 409)
+            result[role] = revision_id
+        return result
+
+    async def revision_episode_numbers(
+        self,
+        revision_id: str,
+    ) -> tuple[int, ...]:
+        return await self._revision_episode_numbers(revision_id)
+
+    async def revision_episode_digest(
+        self,
+        revision_id: str,
+        episode_number: int,
+    ) -> str:
+        row = await self._db.fetch_one(
+            "SELECT content_digest FROM screenplay_revision_parts "
+            "WHERE revision_id = ? AND part_type = 'episode' AND part_key = ?",
+            [revision_id, str(int(episode_number))],
+        )
+        digest = str((row or {}).get("content_digest") or "").strip()
+        if not digest:
+            raise AppError(
+                f"剧本正文版本缺少第 {episode_number} 集内容摘要",
+                409,
+            )
+        return digest.removeprefix("sha256:")
+
     async def episode_context(
         self,
         project_id: str,
@@ -430,6 +488,30 @@ class ScreenplayAgentContextQuery:
             "chapters": selected,
             "truncated": len(selected) < len(chapters),
         }
+
+    async def source_chapter_identities(
+        self,
+        project_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Enumerate authorized leaf identities without loading source prose."""
+
+        project = await self._db.fetch_one(
+            "SELECT source_kind, source_book_id, source_scope_json "
+            "FROM screenplay_projects WHERE id = ?",
+            [project_id],
+        )
+        if project is None:
+            raise NotFoundError("剧本项目不存在")
+        if str(project.get("source_kind") or "original") != "book":
+            raise AppError("原作分析只适用于已绑定来源作品的项目", 409)
+        chapters = await scoped_chapters(self._db, project)
+        if not chapters:
+            raise AppError("当前授权原作范围没有可分析的正文章节", 409)
+        return tuple({
+            "id": str(chapter["id"]),
+            "title": str(chapter.get("title") or ""),
+            "index": int(chapter.get("index") or 0),
+        } for chapter in chapters)
 
     async def _head_episode(
         self,
