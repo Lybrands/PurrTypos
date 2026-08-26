@@ -160,10 +160,50 @@ _DISPLAY_NAMES = {
     "inspectScreenplayCandidate": "检查剧本候选稿",
 }
 
+_EPISODE_DISPLAY_NAMES = {
+    "readScreenplayTaskDependencies": "读取第 {episode} 集任务依赖",
+    "inspectScreenplayProject": "查看第 {episode} 集所属剧本项目",
+    "readScreenplayDeliverable": "读取第 {episode} 集剧本交付物",
+    "searchScreenplayDeliverables": "为第 {episode} 集检索剧本交付物",
+    "getScreenplayEpisodeContext": "读取第 {episode} 集上下文",
+    "inspectSourceStructure": "为第 {episode} 集查看原作结构",
+    "readSourceChapters": "为第 {episode} 集读取原文章节",
+    "searchSourceText": "为第 {episode} 集检索原文",
+    "listSourceCharacters": "为第 {episode} 集查看原作人物",
+    "readSourceCharacters": "为第 {episode} 集读取人物资料",
+    "listSourceWorldEntities": "为第 {episode} 集查看世界设定",
+    "readSourceWorldEntities": "为第 {episode} 集读取世界设定",
+    "readSourceBackground": "为第 {episode} 集读取故事背景",
+    "querySourceStoryFacts": "为第 {episode} 集检索故事事实",
+    "readSourceOutline": "为第 {episode} 集读取原作大纲",
+    "readSourceStyle": "为第 {episode} 集读取原作风格",
+    "writeScreenplayCandidatePart": "写入第 {episode} 集剧本候选稿",
+    "inspectScreenplayCandidate": "检查第 {episode} 集剧本候选稿",
+}
 
-def screenplay_tool_display_names(tool_name: str) -> dict[str, str]:
-    label = _DISPLAY_NAMES.get(str(tool_name or ""))
+
+def screenplay_tool_display_names(
+    tool_name: str,
+    *,
+    episode_number: int | None = None,
+) -> dict[str, str]:
+    normalized_name = str(tool_name or "")
+    label = _DISPLAY_NAMES.get(normalized_name)
+    if episode_number is not None and episode_number > 0:
+        template = _EPISODE_DISPLAY_NAMES.get(normalized_name)
+        if template is not None:
+            label = template.format(episode=episode_number)
     return {"zh-CN": label} if label else {}
+
+
+def _operation_display_params(state, arguments, tool_call) -> dict[str, int]:
+    del tool_call
+    value = arguments.get("episodeNumber")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        value = state.domain.get("boundEpisodeNumber")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return {}
+    return {"episodeNumber": value}
 
 
 def build_screenplay_tool_catalog(
@@ -230,6 +270,7 @@ def build_screenplay_tool_catalog(
             max_argument_chars=(
                 100_000 if name == "writeScreenplayCandidatePart" else 12_000
             ),
+            operation_display_params=_operation_display_params,
         )
         for name, parameters in SCREENPLAY_TOOL_SCHEMAS.items()
     )

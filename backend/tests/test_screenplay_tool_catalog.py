@@ -17,6 +17,10 @@ from application.screenplay_agent_task_executor import (
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from database.connection import DatabaseConnection
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
+from domains.screenplay_agent.tools.catalog import (
+    build_screenplay_tool_catalog as build_domain_catalog,
+)
+from domains.screenplay_agent.tools.schemas import SCREENPLAY_TOOL_SCHEMAS
 from infrastructure.screenplay import (
     ScreenplayCandidateArtifacts,
     build_screenplay_tool_catalog,
@@ -34,6 +38,7 @@ from purra.contracts import (
     ModelStreamChunk,
     ReasoningMode,
     RunStatus,
+    ToolCall,
     ToolCallDelta,
 )
 from purra.errors import ContractViolationError, ModelGatewayError
@@ -87,6 +92,31 @@ async def _seed_running_root(db, root_run_id: str) -> None:
         "VALUES (?, 1, 'running', 'agent', 'fixture root', ?)",
         [root_run_id, root_run_id],
     )
+
+
+def test_screenplay_tool_operations_project_only_the_bound_episode_number():
+    async def handler(state, arguments, signal):
+        del state, arguments, signal
+        return {"content": "{}"}
+
+    catalog = build_domain_catalog(
+        handlers={name: handler for name in SCREENPLAY_TOOL_SCHEMAS}
+    )
+    registration = next(
+        item
+        for item in catalog.registrations()
+        if item.schema.name == "writeScreenplayCandidatePart"
+    )
+    assert registration.operation_display_params is not None
+    assert registration.operation_display_params(
+        ExecutionState(domain={"boundEpisodeNumber": 7}),
+        {"candidate": {"contentText": "不得进入展示元数据"}},
+        ToolCall(
+            id="call-write-episode-7",
+            name="writeScreenplayCandidatePart",
+            arguments_json="{}",
+        ),
+    ) == {"episodeNumber": 7}
 
 
 async def _seed_task_dependency(

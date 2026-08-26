@@ -10,14 +10,33 @@ export function parseAgentMessageTime(value?: string): Date | null {
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-export function formatAgentMessageTime(value?: string): string {
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function localCalendarDay(date: Date): number {
+  return Date.UTC(date.getFullYear(), date.getMonth(), date.getDate())
+}
+
+export function formatAgentMessageTime(
+  value?: string,
+  now: Date = new Date(),
+): string {
   const date = parseAgentMessageTime(value)
   if (!date) return ''
-  return new Intl.DateTimeFormat('zh-CN', {
+  const time = new Intl.DateTimeFormat('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
   }).format(date)
+  const daysAgo = (localCalendarDay(now) - localCalendarDay(date)) / DAY_MS
+
+  if (daysAgo === 0) return time
+  if (daysAgo === 1) return `昨天 ${time}`
+  if (daysAgo === 2) return `前天 ${time}`
+
+  const dateLabel = date.getFullYear() === now.getFullYear()
+    ? `${date.getMonth() + 1}月${date.getDate()}日`
+    : `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`
+  return `${dateLabel} ${time}`
 }
 
 export function buildAgentModelLabels(

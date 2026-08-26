@@ -100,8 +100,14 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   assert.match(markup, /正在恢复对话/)
 })
 
-test('message time always uses local HH:mm without a date', () => {
-  assert.equal(formatAgentMessageTime('2024-01-02T08:43:00'), '08:43')
+test('message time uses local calendar-day labels before falling back to a date', () => {
+  const now = new Date('2026-08-27T00:30:00')
+
+  assert.equal(formatAgentMessageTime('2026-08-27T23:43:00', now), '23:43')
+  assert.equal(formatAgentMessageTime('2026-08-26T23:43:00', now), '昨天 23:43')
+  assert.equal(formatAgentMessageTime('2026-08-25T08:43:00', now), '前天 08:43')
+  assert.equal(formatAgentMessageTime('2026-08-23T08:43:00', now), '8月23日 08:43')
+  assert.equal(formatAgentMessageTime('2025-12-30T08:43:00', now), '2025年12月30日 08:43')
 })
 
 test('active execution log title does not append animated ellipsis', () => {
@@ -117,6 +123,12 @@ test('active execution log title does not append animated ellipsis', () => {
 })
 
 test('assistant footer places actions before hover-only time', () => {
+  const today = new Date()
+  const todayAt0843 = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, '0'),
+    String(today.getDate()).padStart(2, '0'),
+  ].join('-') + 'T08:43:00'
   const model = {
     id: 'model-1',
     name: 'deepseek-v4-flash',
@@ -128,12 +140,12 @@ test('assistant footer places actions before hover-only time', () => {
   }
   const userFooter = React.createElement(AgentMessageFooter, {
     side: 'user',
-    sentAt: '2024-01-02T08:43:00',
+    sentAt: todayAt0843,
     actions: React.createElement('button', { 'aria-label': '复制消息' }, '复制'),
   })
   const assistantFooter = React.createElement(AgentMessageFooter, {
     side: 'assistant',
-    sentAt: '2024-01-02T08:43:00',
+    sentAt: todayAt0843,
     model: 'deepseek-v4-flash',
     modelLabels: buildAgentModelLabels([model]),
     actionsPersistent: true,

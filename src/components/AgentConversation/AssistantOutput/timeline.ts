@@ -38,6 +38,7 @@ export type TimelineCanonicalOperationPart = {
   type: "operation";
   operation: CanonicalOperation;
   label: string;
+  isRetry: boolean;
 };
 
 export type AssistantTimelinePart =
@@ -199,7 +200,7 @@ export function getExecutionPanelPresentation(
   return {
     visible,
     active,
-    autoOpen: visible,
+    autoOpen: active,
     stepCount,
     title: active
       ? "正在进行"
@@ -207,6 +208,41 @@ export function getExecutionPanelPresentation(
         ? `执行了 ${stepCount} 个步骤`
         : "用时",
   };
+}
+
+export function executionPanelHasTerminalError(
+  message: Pick<
+    AgentConversationMessage,
+    "isError" | "error" | "canonicalOutput" | "taskPlan"
+  >,
+): boolean {
+  const runStatus = message.canonicalOutput?.runStatus;
+  const planStatus = message.taskPlan?.status;
+  return Boolean(
+    message.isError
+    || message.error?.trim()
+    || runStatus === "failed"
+    || runStatus === "blocked"
+    || planStatus === "failed"
+    || planStatus === "blocked"
+  );
+}
+
+export function getCanonicalOperationStatusText(
+  operation: CanonicalOperation,
+  label: string,
+  isRetry: boolean,
+): string {
+  if (isRetry) {
+    if (operation.status === "running") return `正在重试 ${label}`;
+    if (operation.status === "failed") return `重试失败 ${label}`;
+    if (operation.status === "canceled") return `已取消重试 ${label}`;
+    return `重试成功 ${label}`;
+  }
+  if (operation.status === "running") return `正在执行 ${label}`;
+  if (operation.status === "failed") return `执行失败 ${label}`;
+  if (operation.status === "canceled") return `已取消 ${label}`;
+  return `已完成 ${label}`;
 }
 
 export function getExecutionPanelLogKey(
@@ -317,6 +353,7 @@ export function buildAssistantTimeline(
           type: "operation",
           operation,
           label: canonicalOperationLabel(operation),
+          isRetry: typeof operation.display.labelParams.retryOfToolCallId === "string",
         },
       });
     });

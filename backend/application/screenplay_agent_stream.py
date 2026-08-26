@@ -141,7 +141,17 @@ def _with_screenplay_tool_display_names(
     if not isinstance(label_params, Mapping):
         return chunk
     tool_name = str(label_params.get("toolName") or "").strip()
-    display_names = screenplay_tool_display_names(tool_name)
+    episode_number = label_params.get("episodeNumber")
+    if (
+        isinstance(episode_number, bool)
+        or not isinstance(episode_number, int)
+        or episode_number <= 0
+    ):
+        episode_number = None
+    display_names = screenplay_tool_display_names(
+        tool_name,
+        episode_number=episode_number,
+    )
     if not display_names:
         return chunk
     return {
