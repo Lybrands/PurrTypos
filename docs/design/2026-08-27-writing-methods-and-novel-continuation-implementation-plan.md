@@ -74,6 +74,7 @@ EPUB 导入在 TXT/Markdown 全流程通过后另立任务。原因是当前只�
 ## 4. 保持不变的产品决策
 
 - 书架入口明确区分“原创作品”和“续写作品”。
+- 小说来源库和写作方法库属于书架内的创作资源，不作为产品顶级首页入口。
 - 外部原作是只读来源，不伪装成普通 `book`。
 - 来源原文、可审核分析、不可变正史快照和可编辑续写发展层相互分离。
 - 首版只允许在章末分叉，分叉点后的来源正文默认不可见。
@@ -294,7 +295,7 @@ writingMethodOverrides:
 
 ### 10.1 全局写作方法库
 
-首页增加“写作方法”入口和 `/writing-methods` 路由，提供：
+书架的“创作资源”增加“写作方法库”入口，保留 `/writing-methods` 路由作为页面地址，但不在产品顶级首页单列，提供：
 
 - 方法、方案两个页面；
 - 引导创建和空白 Markdown 创建；
@@ -321,6 +322,8 @@ writingMethodOverrides:
 
 书架页内部显示“原创作品”和“续写作品”两个明确分区/页签：
 
+- 书架工具区提供小说来源库和写作方法库入口，顶级首页不重复展示；
+- 书架、小说来源库、写作方法库和新建续写作品页复用统一的应用页头、页面留白、容器宽度、卡片与响应式视觉规则；
 - 原创入口继续使用现有创建流程；
 - 续写入口进入“选择/导入来源 → 预览章节 → 分析审核 → 选择章末分叉 → 预览正史 → 创建续写”；
 - 续写卡片显示来源和分叉点摘要；
@@ -362,113 +365,220 @@ writingMethodOverrides:
 
 ### Phase 0：基线与保护
 
-- [ ] 记录 `git status --short` 和当前分支，标明本需求外的脏文件并保持不动。
-- [ ] 运行当前 Writing、Story Memory、书架、共享 Agent 组件和架构边界的基线测试。
-- [ ] 确认当前数据库备份/导入仍可用，记录破坏性 `book_style` 删除的验收样本。
-- [ ] 把本文中的文件名与代码再次核对；若已漂移，先更新计划再实现。
+- [x] 记录 `git status --short` 和当前分支，标明本需求外的脏文件并保持不动。
+- [x] 运行当前 Writing、Story Memory、书架、共享 Agent 组件和架构边界的基线测试。
+- [x] 确认当前数据库备份/导入仍可用，记录破坏性 `book_style` 删除的验收样本。
+- [x] 把本文中的文件名与代码再次核对；若已漂移，先更新计划再实现。
+
+2026-08-27 实施审计记录：当前分支为 `feat/0.6`，开始实施时
+`git status --short` 无输出。Writing/Story Memory/Composition focused tests
+171 个、数据库导出导入与数据完整性 10 个、Agent/PurrA 边界 53 个、
+Writing/Screenplay 工具与生命周期 143 个、共享 Composer/发送队列前端测试
+94 个均通过，`npm run typecheck` 通过。数据库破坏性验收沿用
+`test_data_integrity_routes.py` 中的旧 `book_style` 行样本，并以
+`test_database_web_import.py` 覆盖导入后连接恢复。当前实现中
+`RepositoryWritingContextSource` 位于 `backend/domains/writing/context_source.py`；
+共享 Composer 已有渲染插槽但没有结构化命令菜单状态；这些是后续阶段的实际接缝。
 
 门禁：基线失败必须区分“既有失败”和“本需求引入”，不能把既有失败当成本需求通过。
 
 ### Phase 1：写作方法持久化与 API
 
-- [ ] 新建独立 writing-method schema 初始化模块并从 `init_schema()` 调用。
-- [ ] 实现方法/方案 Repository、应用服务和 Pydantic wire contracts。
-- [ ] 实现草稿乐观并发、不可变发布、原子批量发布、复制、归档和删除保护。
-- [ ] 实现已发布方案的规范化有序成员和准确 revision 校验。
-- [ ] 实现作品顶层绑定、排序、解除和手动升级。
-- [ ] 使用确定性 ID `INSERT OR IGNORE` 初始化少量内置方法/方案；升级不能改写已经存在的版本。
+- [x] 新建独立 writing-method schema 初始化模块并从 `init_schema()` 调用。
+- [x] 实现方法/方案 Repository、应用服务和 Pydantic wire contracts。
+- [x] 实现草稿乐观并发、不可变发布、原子批量发布、复制、归档和删除保护。
+- [x] 实现已发布方案的规范化有序成员和准确 revision 校验。
+- [x] 实现作品顶层绑定、排序、解除和手动升级。
+- [x] 使用确定性 ID `INSERT OR IGNORE` 初始化少量内置方法/方案；升级不能改写已经存在的版本。
+
+实施门禁：`test_writing_methods.py` 覆盖幂等 schema、内置只读/复制、
+草稿并发、不可变发布、方案成员冻结、批量发布回滚、引用保护和准确版本绑定；
+连同生命周期、数据库导入导出与边界用例共 55 个通过，Writing/Application
+边界 7 个通过，Python compileall 与 `git diff --check` 通过。首次门禁曾因新增
+router 使生命周期固定计数从 21 变为 22 而失败，更新正式路由断言后重跑通过。
 
 门禁：后端 focused tests 覆盖版本冻结、并发冲突、事务回滚、方案原子性、引用保护和幂等 schema。
 
 ### Phase 2：写作方法界面与旧风格退役
 
-- [ ] 增加全局 `/writing-methods` 页面、首页入口和前端服务类型。
-- [ ] 实现方法/方案草稿、Markdown 编辑、发布和版本查看。
-- [ ] 在作品工作台用方法绑定面板替换风格基调。
-- [ ] 完成第 11 节全部删除接缝；Screenplay 同时删除 `readSourceStyle`。
-- [ ] 最后执行幂等 `DROP TABLE IF EXISTS book_style`，明确验证旧行已不存在。
+- [x] 增加全局 `/writing-methods` 页面、书架内入口和前端服务类型；顶级首页不单列。
+- [x] 实现方法/方案草稿、Markdown 编辑、发布和版本查看。
+- [x] 在作品工作台用方法绑定面板替换风格基调。
+- [x] 完成第 11 节全部删除接缝；Screenplay 同时删除 `readSourceStyle`。
+- [x] 最后执行幂等 `DROP TABLE IF EXISTS book_style`，明确验证旧行已不存在。
+
+实施门禁：运行时代码反向搜索不再包含旧表/API/工具/界面名称；
+破坏性迁移测试用旧表和旧行启动数据库，确认升级后表与数据均不存在且未迁移。
+Writing/Screenplay/生命周期 focused 后端 149 个通过，Screenplay 完整相关组
+291 个通过，`npm run typecheck` 通过，`npm run test:unit` 397 个通过，
+`git diff --check` 通过。首次退役门禁发现工具数量和重规划用例仍有旧硬编码，
+已改为 35 个现行 Writing 工具和故事背景证据后重跑通过；Memory Center 的通用
+`style` 记忆类型未改动。
 
 门禁：`rg` 不再发现运行时 `book_style`、`getBookStyle`、`saveBookStyle`、`readSourceStyle` 或“风格基调”；允许历史文档出现。前端 typecheck、相关单测和后端完整旧风格退役测试通过。
 
 ### Phase 3：方法运行时与不可变 Run 绑定
 
-- [ ] 在请求、队列、重发和 request digest 中加入本轮方法 overrides。
-- [ ] 在 Writing Profile 准备阶段由服务器解析作品方法栈。
-- [ ] 在 Writing ContextProvider 增加方法策略和正文上下文块、预算与冲突失败。
-- [ ] 增加 Profile 提供 binding attributes 的产品中立宿主钩子。
-- [ ] 从 Run binding 读取可用版本栈，从 durable Context Evidence Receipt 读取历史实际方法版本；不创建平行 receipt 表。
+- [x] 在请求、队列、重发和 request digest 中加入本轮方法 overrides。
+- [x] 在 Writing Profile 准备阶段由服务器解析作品方法栈。
+- [x] 在 Writing ContextProvider 增加方法策略和正文上下文块、预算与冲突失败。
+- [x] 增加 Profile 提供 binding attributes 的产品中立宿主钩子。
+- [x] 从 Run binding 读取可用版本栈，从 durable Context Evidence Receipt 读取历史实际方法版本；不创建平行 receipt 表。
+
+实施门禁：新增确定性方法栈解析、同一方法多版本冲突、未绑定 override、
+强制方法预算不足、TaskSpec 技法选择、request digest、队列冻结、Run binding
+版本摘要和 PurrA typed checkpoint receipt 还原测试。方法运行时 6 个、写作方法
+领域/API 8 个、Writing/Application/Agent 边界 41 个、相关 Agent/上下文/请求组
+131 个、共享 Composer 行为 18 个均通过；`npm run typecheck` 通过。方法正文
+仅进入不可信 ContextBlock，Run binding 不保存正文，未新增 receipt 表，也未修改
+通用 PurrA 业务依赖。
 
 门禁：同一 binding snapshot + TaskSpec 得到相同 resolution digest；未绑定 revision、冲突版本和超限 primary 必须在模型调用前失败；每个实际注入 revision 都有 durable context receipt；发布新版不改变旧 Run 或旧作品绑定。
 
 ### Phase 4：`/` 选择器与按需推荐
 
-- [ ] 给共享 Composer 增加最小通用命令菜单扩展点。
-- [ ] 实现作品级 `/` 菜单、强制/排除状态和发送队列冻结。
-- [ ] 增加只读方法目录检索能力，仅在明确点击“推荐”或结构化 recommendation 请求时开放。
-- [ ] Agent 返回建议和理由；绑定仍由用户确认后的普通 API 命令完成。
+- [x] 给共享 Composer 增加最小通用命令菜单扩展点。
+- [x] 实现作品级 `/` 菜单、强制/排除状态和发送队列冻结。
+- [x] 增加只读方法目录检索能力，仅在明确点击“推荐”或结构化 recommendation 请求时开放。
+- [x] Agent 返回建议和理由；绑定仍由用户确认后的普通 API 命令完成。
+
+实施门禁：共享 Composer 只接收产品中立 command item；Writing 扩展只从当前
+作品顶层绑定展开准确 method revision，状态按“自动选择 → 本轮强制 → 本轮排除”
+循环并在发送后清空，队列和重发继续使用冻结 envelope。只读
+`searchWritingMethods` 仅在服务端识别到 `[写作方法推荐]` 结构化请求时进入本轮
+enabled tool 集，返回目录元数据而不返回 Markdown，也没有任何绑定写工具。
+相关后端 165 个、Composer/队列行为 19 个、override 纯逻辑 2 个通过，
+`npm run typecheck` 通过。
 
 门禁：未绑定方法绝不出现在 `/` 菜单或本轮请求中；普通写作不自动触发推荐；Agent 无写绑定工具。
 
 ### Phase 5：只读来源与冻结 revision
 
-- [ ] 新建 continuation/source schema 初始化模块及 Repository。
-- [ ] 实现 TXT/Markdown platform picker、导入限制、章节解析预览和确认。
-- [ ] 在确认页显示来源大小、数据发送边界和使用权提示；不默认创建后续 revision。
-- [ ] 实现从现有作品的事务内冻结。
-- [ ] 实现来源列表、revision/section 只读 API、FTS 搜索和 LIKE fallback。
-- [ ] 增加来源归档和删除保护；已有 continuation binding 引用的 revision 不可删除。
+- [x] 新建 continuation/source schema 初始化模块及 Repository。
+- [x] 实现 TXT/Markdown platform picker、导入限制、章节解析预览和确认。
+- [x] 在确认页显示来源大小、数据发送边界和使用权提示；不默认创建后续 revision。
+- [x] 实现从现有作品的事务内冻结。
+- [x] 实现来源列表、revision/section 只读 API、FTS 搜索和 LIKE fallback。
+- [x] 增加来源归档和删除保护；已有 continuation binding 引用的 revision 不可删除。
+
+实施门禁：新增独立 continuation/source schema，历史书籍幂等回填
+`creation_mode='original'`；确定性标题解析保留单节人工确认回退。预览只计算
+体积、digest 和章节，不写数据库；确认导入和作品冻结才在 cancellation-linearizable
+事务中写不可变 revision/sections。Electron 独立 picker 返回文件身份、扩展名、
+字节数和 UTF-8 正文，未改变旧 `openAndReadTextFile`。来源相关及数据库/生命周期/
+边界测试 63 个、Electron picker 2 个通过，`npm run typecheck` 和
+`git diff --check` 通过；未加入 EPUB、Obsidian 或向量库。
 
 门禁：重复导入幂等策略明确；来源 section 不可经任何 Writing API 修改；删除原始书不影响已冻结来源；未确认前不向模型发送来源正文。
 
 ### Phase 6：证据化来源分析
 
-- [ ] 注册只服务于分析的 `NovelAnalysisAgentProfile`。
-- [ ] 定义 Recipe、Unit、Artifact schema、来源只读工具和证据回执。
-- [ ] 实现逐章提取、跨章归一、聚合、证据存在性校验和覆盖率报告。
-- [ ] 实现审核/纠正工作流和正式分析 revision 原子发布。
-- [ ] 验证暂停、恢复、取消、重试和应用重启后的任务一致性。
+- [x] 注册只服务于分析的 `NovelAnalysisAgentProfile`。
+- [x] 定义 Recipe、Unit、Artifact schema、来源只读工具和证据回执。
+- [x] 实现逐章提取、跨章归一、聚合、证据存在性校验和覆盖率报告。
+- [x] 实现审核/纠正工作流和正式分析 revision 原子发布。
+- [x] 验证暂停、恢复、取消、重试和应用重启后的任务一致性。
+
+实施门禁：独立 `novel_analysis` Profile 已注册到现有 Composition，仅暴露
+空的 Core 工具目录；实际来源读取通过宿主绑定的只读 section reader 完成，
+每次读取生成 revision/section/scope digest 回执，正文中的提示注入不会改变
+Recipe 或范围。宿主按 section 编译 extract → normalize → aggregate → validate →
+coverage → review Artifact DAG，沿用 `ai_agent_runs`、LongTask Unit 和正式
+Artifact，未增加分析运行表。未完成 LongTask 的 Artifact 发布会失败，审核修订
+生成新 Artifact；正式发布事务再次逐字校验 excerpt，并把 facts、craft cards 和
+evidence 原子写成不可变 analysis revision。Phase 6/来源/Profile/数据库/生命周期/
+架构边界 focused 后端 109 个通过，`npm run test:unit` 399 个、
+`npm run check:agent-refactor-boundaries` 53 个、`npm run typecheck` 通过，
+暂停、重启恢复、取消和失败重试均有持久化用例，`git diff --check` 通过。
 
 门禁：未完成 Artifact 不能发布；每个正式 fact/craft card 至少有一个合法来源证据；越界 section 和提示注入测试 fail closed。
 
 ### Phase 7：正史快照、续写创建与双书架
 
-- [ ] 增加 `books.creation_mode` 和历史书籍幂等回填。
-- [ ] 实现分叉 section 选择、分叉范围过滤和正史预览。
-- [ ] 实现 cancellation-linearizable 原子创建续写。
-- [ ] 改造书架为原创/续写双入口，并增加向导和续写卡片摘要。
-- [ ] 更新书籍删除逻辑：删除续写要清理其绑定、快照和方法绑定；删除来源 origin book 不删除冻结 revision。
+- [x] 增加 `books.creation_mode` 和历史书籍幂等回填。
+- [x] 实现分叉 section 选择、分叉范围过滤和正史预览。
+- [x] 实现 cancellation-linearizable 原子创建续写。
+- [x] 改造书架为原创/续写双入口，并增加向导和续写卡片摘要。
+- [x] 更新书籍删除逻辑：删除续写要清理其绑定、快照和方法绑定；删除来源 origin book 不删除冻结 revision。
+
+实施门禁：历史书在 continuation schema 初始化时幂等回填为 `original`；正史
+预览只接受来源 revision 中完整 section 的章末，并过滤掉分叉点后的 fact、技法
+类型和缺少分叉前证据的记录。创建命令在一个 cancellation-linearizable 事务内
+重新计算 snapshot digest，再写不可变 snapshot/records、`creation_mode=continuation`
+的独立书籍、写作目录、continuation binding 和可选准确方法版本绑定；方法校验失败
+会连同 book、outline 和 snapshot 全部回滚。来源新增 revision 不会改变既有绑定。
+书架已拆成“原创作品/续写作品”，向导串联来源版本、正式分析、章末分叉、正史预览
+和原子创建，续写卡显示来源与分叉摘要。删除续写会清理 binding、snapshot records、
+snapshot 和方法绑定，但保留来源 revision。Phase 7/来源/数据库/生命周期 focused
+后端 37 个、`npm run test:unit` 399 个、边界 53 个通过；
+`npm run typecheck` 与 `git diff --check` 通过。
 
 门禁：只能章末分叉；任何分叉点后证据进入快照都必须失败；创建失败无孤立 `book`；历史原创书行为不变。
 
 ### Phase 8：续写 Writing 运行时与组合 Story Memory
 
-- [ ] Writing Profile 权威 hydrate continuation context，不新增续写 Profile。
-- [ ] 增加继承正史 provider、组合优先级、冲突诊断和证据回执。
-- [ ] 增加只在有效 continuation binding 下启用的受限来源读取工具。
-- [ ] 让章节 Story Memory 分析读取组合基线，但只写目标书 delta。
-- [ ] 在工作台显示继承正史只读视图和当前来源/分叉身份。
+- [x] Writing Profile 权威 hydrate continuation context，不新增续写 Profile。
+- [x] 增加继承正史 provider、组合优先级、冲突诊断和证据回执。
+- [x] 增加只在有效 continuation binding 下启用的受限来源读取工具。
+- [x] 让章节 Story Memory 分析读取组合基线，但只写目标书 delta。
+- [x] 在工作台显示继承正史只读视图和当前来源/分叉身份。
+
+实施门禁：Writing Profile 先只读 `books.creation_mode`，原创路径经查询追踪证明不访问
+continuation 表；续写路径再加载冻结 binding、canon records 和 digest，并把精确身份冻结到
+Run binding。继承正史以独立宿主上下文块注入，带 Context Evidence Receipt、预算截断和
+`inherited_canon_over_target_story_memory` 优先级/冲突诊断。只读来源工具只接收模型提供的
+section id，book、准确 revision 和 fork ordinal 均由宿主绑定，分叉后章节 fail-closed。
+Story Memory 分析提示组合继承正史与目标书当前状态，但 delta 仍沿既有 target book ledger
+写入；所有 Writing 写工具继续由 host-bound bookId 限域。工作台仅对续写显示“继承正史”
+入口、来源/分叉身份和只读事实。Phase 8 focused 后端 98 个、前端 unit 399 个、Agent/PurrA
+边界 53 个与 `npm run typecheck` 通过；首次 focused 命令引用了不存在的旧测试文件名，
+该命令未执行测试，已用实际 `test_story_memory_analysis.py` 重跑通过。
 
 门禁：原创请求不查询 continuation 表；续写读不到分叉点后来源；所有写工具只能写目标书；正史快照永不被修改。
 
 ### Phase 9：来源技法到候选方法的桥接
 
-- [ ] 从已发布 craft cards 生成候选方法草稿和候选方案草稿。
-- [ ] 保留稳定 analysis/craft-card 引用，不复制原文证据到方法 Markdown。
-- [ ] 实现逐项编辑、删除和一次确认后的原子发布。
-- [ ] 发布完成后不自动绑定任何作品；续写创建或作品面板由用户明确绑定。
+- [x] 从已发布 craft cards 生成候选方法草稿和候选方案草稿。
+- [x] 保留稳定 analysis/craft-card 引用，不复制原文证据到方法 Markdown。
+- [x] 实现逐项编辑、删除和一次确认后的原子发布。
+- [x] 发布完成后不自动绑定任何作品；续写创建或作品面板由用户明确绑定。
+
+实施门禁：桥接服务只接受正式分析中的 `verified` craft cards，在一个事务中生成普通
+可编辑方法草稿和候选方案草稿；method/scheme 的 source ref 同时冻结 analysis id/version/
+digest、source revision 与 craft-card id/digest。技法卡的 evidence excerpt 不进入方法正文，
+若正文误含同一逐字摘录则替换为档案引用提示；证据表仍是唯一原文证据档案。方法库支持
+逐项编辑、删除、勾选保留项和一次确认，发布命令在 cancellation-linearizable 事务内先生成
+全部方法 revision、再更新并发布完整方案；方案失败会回滚所有方法 revision。返回值明确
+`bindingChanged=false`，不会自动绑定任何作品。分析后续更新不改写已发布 revision，删除候选
+不删除分析证据。Phase 9 focused 后端 25 个、前端 unit 399 个、Agent/PurrA 边界 53 个、
+`npm run typecheck` 和 `git diff --check` 通过。
 
 门禁：方法删除不影响分析证据；分析更新不改写已发布方法；候选发布失败不产生部分方案。
 
 ### Phase 10：完整验收
 
-- [ ] 后端 focused tests。
-- [ ] 前端 unit tests 与 typecheck。
-- [ ] 后端完整 pytest。
-- [ ] Agent/PurrA 应用边界和持久化边界门禁。
-- [ ] Web 实机：创建方法、发布方案、绑定、`/`、历史回放、来源导入、分析、快照、续写、重启恢复。
-- [ ] Electron 实机：TXT/Markdown 选择与同一业务 API 闭环。
-- [ ] 导出/导入数据库后验证方法版本、来源 revision、快照和 Run binding 仍一致。
-- [ ] 停止所有测试启动的后端、Vite 和 Electron 进程，并确认相关端口无监听。
+- [x] 后端 focused tests。
+- [x] 前端 unit tests 与 typecheck。
+- [x] 后端完整 pytest。
+- [x] Agent/PurrA 应用边界和持久化边界门禁。
+- [ ] Web 实机：创建方法、发布方案、绑定、`/`、历史回放、来源导入、分析、快照、续写、重启恢复。（方法/方案/绑定/`/`/书架分区/重启已实机；外部模型分析后的链路因无配置模型与 Provider 凭据阻塞。）
+- [x] Electron 实机：TXT/Markdown 选择与同一业务 API 闭环。
+- [x] 导出/导入数据库后验证方法版本、来源 revision、快照和 Run binding 仍一致。
+- [x] 停止所有测试启动的后端、Vite 和 Electron 进程，并确认相关端口无监听。
+
+实施门禁：最终 focused 后端 219 个、前端 unit 399 个、Agent/PurrA 边界 53 个、
+完整后端 1687 个、`npm run typecheck`、Purr Components 边界、`npm run check` 和
+`git diff --check` 均通过。
+Web 隔离实机完成方法草稿自动保存、方法 v1 发布、方案对准确方法 revision 的组合发布、
+作品对准确方案 revision 的绑定，以及 `/` 仅展示本书已绑定方法；原创/续写书架分区也已验证。
+Electron 原生选择 Markdown 后展示 256 字节、94 字符、3 节的导入确认页，要求权利与模型
+发送边界双确认，最终通过同一 API 创建一个不可变来源 revision；TXT 与扩展名拒绝由 IPC
+自动化测试覆盖。隔离数据库重启后，方法、方案、作品绑定和来源 revision 身份保持一致；
+导出/导入自动化另验证方法 revision、来源 revision、canon snapshot 与 Run binding digest。
+隔离环境没有配置分析模型和真实 Provider 凭据，因此 Web 的分析、快照、续写和历史运行
+实机没有执行，未写成通过；对应持久化、暂停/恢复/取消/重复请求和分叉边界已有 focused
+测试通过。测试启动的 18322、18323 与 IPv4 5174 均已关闭；用户原有 18321 和 IPv6 5174
+监听保持未动。
 
 ## 13. 主要文件落点
 

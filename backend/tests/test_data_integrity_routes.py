@@ -261,10 +261,6 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         ["book1", "Hero"],
     )
     await temp_db.execute(
-        "INSERT INTO book_style (book_id, pov) VALUES (?, ?)",
-        ["book1", "third"],
-    )
-    await temp_db.execute(
         "INSERT INTO chapter_canvas (chapter_id, content) VALUES (?, ?)",
         ["chapter1", "draft"],
     )
@@ -307,7 +303,6 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "story_background",
         "story_background_attachments",
         "characters",
-        "book_style",
         "chapter_canvas",
         "outline_history",
         "chapter_diff_history",

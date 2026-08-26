@@ -39,4 +39,6 @@ class WritingExecutionStateFactory:
                 context.context_window_label
                 or _WINDOW_LABELS.get(request.context_window or 0)
             ),
+            "creationMode": context.creation_mode,
+            "continuationBinding": deepcopy(dict(context.continuation_binding or {})),
         })

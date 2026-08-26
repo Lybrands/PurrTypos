@@ -25,7 +25,6 @@ WRITING_TOOL_DISPLAY_NAMES: Mapping[str, Mapping[str, str]] = {
     "editGlobalOutline": _names("编辑总纲", "Edit Master Outline"),
     "editStoryBackground": _names("编辑小说背景", "Edit Story Background"),
     "getBookCharacters": _names("查看人物信息", "Read Character Profiles"),
-    "getBookStyle": _names("查看风格基调", "Read Writing Style"),
     "getChapterContent": _names("查看章节内容", "Read Chapter Content"),
     "getGlobalOutline": _names("查看总纲", "Read Master Outline"),
     "getSettingEntities": _names("查看世界设定详情", "Read World Settings"),
@@ -45,6 +44,10 @@ WRITING_TOOL_DISPLAY_NAMES: Mapping[str, Mapping[str, str]] = {
     "resolveForeshadowing": _names("回收伏笔", "Resolve Foreshadowing"),
     "searchMemories": _names("检索长期记忆", "Search Long-term Memory"),
     "searchSparkIdeas": _names("检索设定", "Search Story Notes"),
+    "searchWritingMethods": _names("检索写作方法目录", "Search Writing Methods"),
+    "readContinuationSourceSection": _names(
+        "读取冻结来源章节", "Read Frozen Source Chapter"
+    ),
     "updateCharacter": _names("更新人物设定", "Update Character"),
     "updateMemory": _names("更新长期记忆", "Update Long-term Memory"),
     "updateOutline": _names("更新大纲", "Update Outline"),

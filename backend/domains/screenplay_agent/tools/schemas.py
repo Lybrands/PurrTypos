@@ -183,7 +183,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "cursor": _CURSOR,
         "limit": _LIMIT,
     }),
-    "readSourceStyle": _object({}),
     "writeScreenplayCandidatePart": _object({
         "candidate": {"type": "object"},
     }, ("candidate",)),
@@ -210,7 +209,6 @@ SCREENPLAY_TOOL_DESCRIPTIONS = {
     "readSourceBackground": "读取来源作品的故事背景。",
     "querySourceStoryFacts": "检索带章节证据的当前故事事实、事件和伏笔线索。",
     "readSourceOutline": "分页或按 outlineId 读取原作大纲；有对应正文时另行返回可供 readSourceChapters 使用的 chapterId。",
-    "readSourceStyle": "读取来源作品的写作风格约束。",
     "writeScreenplayCandidatePart": "写入本次 Run 唯一且有界的剧本候选部件。",
     "inspectScreenplayCandidate": "检查本次 Run 已写入候选部件的状态和摘要。",
 }

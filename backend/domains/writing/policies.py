@@ -19,7 +19,6 @@ from purra.contracts import (
 
 WRITING_TOOL_POLICIES: dict[str, ToolPolicy] = {
     # Read-only tools.
-    "getBookStyle": ToolPolicy(ToolExecutionMode.READ, "读取写作风格"),
     "getChapterContent": ToolPolicy(ToolExecutionMode.READ, "读取章节正文"),
     "listWritingChapters": ToolPolicy(ToolExecutionMode.READ, "查看写作章节"),
     "batchGetChapterContents": ToolPolicy(ToolExecutionMode.READ, "批量读取章节"),
@@ -35,6 +34,10 @@ WRITING_TOOL_POLICIES: dict[str, ToolPolicy] = {
     "listSettingEntities": ToolPolicy(ToolExecutionMode.READ, "查看世界设定列表"),
     "getSettingEntities": ToolPolicy(ToolExecutionMode.READ, "读取世界设定"),
     "getStoryBackground": ToolPolicy(ToolExecutionMode.READ, "读取故事背景"),
+    "searchWritingMethods": ToolPolicy(ToolExecutionMode.READ, "检索写作方法目录"),
+    "readContinuationSourceSection": ToolPolicy(
+        ToolExecutionMode.READ, "读取冻结来源章节"
+    ),
 
     # These handlers emit a reviewable diff and do not persist it.
     "editChapterContent": ToolPolicy(

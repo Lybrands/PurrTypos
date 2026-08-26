@@ -261,6 +261,7 @@ export default function AgentConversationPanel({
             <TaskProgress plan={controller.composer.taskPlan} placement="topLeft" />
           ) : null}
           supplementaryContent={<QueuedSubmissions controller={controller} />}
+          commands={extensions?.composerCommands}
           footer={(
             <ComposerFooter
               controller={controller}

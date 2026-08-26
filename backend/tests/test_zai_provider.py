@@ -59,7 +59,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
     from infrastructure.models import zai_chat
 
     client = _FakeClient(_Dumpable({
-        "model": "glm-5.2",
+        "model": "glm-5.3-flash",
         "choices": [{
             "message": {
                 "role": "assistant",
@@ -84,8 +84,8 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
         "secret",
         [{"role": "user", "content": "继续"}],
         {
-            "model": "glm-5.2",
-            "model_profile": "zai:glm-5.2",
+            "model": "glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash",
             "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
             "thinking": {"type": "enabled"},
             "temperature": 1.0,
@@ -97,7 +97,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
     )
 
     assert client.create_calls == [{
-        "model": "glm-5.2",
+        "model": "glm-5.3-flash",
         "messages": [{"role": "user", "content": "继续"}],
         "stream": False,
         "thinking": {"type": "enabled"},
@@ -118,7 +118,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
                 "function": {"name": "read", "arguments": "{}"},
             }],
         },
-        "model": "glm-5.2",
+        "model": "glm-5.3-flash",
         "finish_reason": None,
         "usage": {
             "prompt_tokens": 12,
@@ -137,7 +137,7 @@ async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
 
     raw_stream = _SyncStream([
         _Dumpable({
-            "model": "glm-5.2",
+            "model": "glm-5.3-flash",
             "choices": [{
                 "delta": {
                     "reasoning_content": "分析",
@@ -153,7 +153,7 @@ async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
             }],
         }),
         _Dumpable({
-            "model": "glm-5.2",
+            "model": "glm-5.3-flash",
             "choices": [{
                 "delta": {
                     "tool_calls": [{
@@ -177,7 +177,7 @@ async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
         "secret",
         [{"role": "user", "content": "读取"}],
         {
-            "model": "glm-5.2",
+            "model": "glm-5.3-flash",
             "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
             "thinking": {"type": "disabled"},
         },
@@ -185,10 +185,10 @@ async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
     chunks = [chunk async for chunk in result["stream"]]
 
     assert client.create_calls == [{
-        "model": "glm-5.2",
+        "model": "glm-5.3-flash",
         "messages": [{"role": "user", "content": "读取"}],
         "stream": True,
-        "thinking": {"type": "disabled"},
+        "thinking": {"type": "enabled"},
     }]
     assert chunks[0]["choices"][0]["delta"]["reasoning_content"] == "分析"
     assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"] == {
@@ -216,7 +216,7 @@ async def test_zai_stream_honors_pre_start_cancellation_and_closes_resources(
     result = await zai_chat.chat_stream(
         "secret",
         [{"role": "user", "content": "取消"}],
-        {"model": "glm-5.2", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
+        {"model": "glm-5.3-flash", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
         signal,
     )
     assert [chunk async for chunk in result["stream"]] == []
@@ -229,17 +229,17 @@ async def test_zai_title_and_model_listing_use_the_sdk(monkeypatch: pytest.Monke
     from infrastructure.models import zai_chat
 
     title_client = _FakeClient(_Dumpable({
-        "model": "glm-5.2",
+        "model": "glm-5.3-flash",
         "choices": [{"message": {"role": "assistant", "content": "「春日写作」"}}],
     }))
     monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: title_client)
     title = await zai_chat.generate_title(
         "secret",
         "写一段春天的故事",
-        {"model": "glm-5.2", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
+        {"model": "glm-5.3-flash", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
     )
     assert title == "春日写作"
-    assert title_client.create_calls[0]["thinking"] == {"type": "disabled"}
+    assert title_client.create_calls[0]["thinking"] == {"type": "enabled"}
     assert title_client.close_calls == 1
 
     models_client = _FakeClient(None)
@@ -247,7 +247,7 @@ async def test_zai_title_and_model_listing_use_the_sdk(monkeypatch: pytest.Monke
     assert await zai_chat.list_models(
         "secret",
         "https://open.bigmodel.cn/api/paas/v4/",
-    ) == ["glm-5.2"]
+    ) == ["glm-5.3-flash"]
     assert models_client.close_calls == 1
 
 
@@ -256,19 +256,19 @@ async def test_provider_router_selects_zai_adapter(monkeypatch: pytest.MonkeyPat
     from infrastructure.models import provider_router, zai_chat
 
     async def fake_stream(*_args):
-        return {"stream": "zai-stream", "model": "glm-5.2"}
+        return {"stream": "zai-stream", "model": "glm-5.3-flash"}
 
     async def fake_complete(*_args):
-        return {"message": {"content": "zai"}, "model": "glm-5.2"}
+        return {"message": {"content": "zai"}, "model": "glm-5.3-flash"}
 
     monkeypatch.setattr(zai_chat, "chat_stream", fake_stream)
     monkeypatch.setattr(zai_chat, "chat_no_stream", fake_complete)
 
     assert (await provider_router.create_chat_stream(
-        "secret", [], {"model": "glm-5.2"}, "zai",
+        "secret", [], {"model": "glm-5.3-flash"}, "zai",
     ))["stream"] == "zai-stream"
     assert (await provider_router.create_chat_no_stream(
-        "secret", [], {"model": "glm-5.2"}, "zai",
+        "secret", [], {"model": "glm-5.3-flash"}, "zai",
     ))["message"]["content"] == "zai"
 
 
@@ -280,12 +280,12 @@ async def test_ai_routes_select_zai_for_models_and_titles(monkeypatch: pytest.Mo
     async def fake_models(api_key, base_url):
         assert api_key == "secret"
         assert base_url == "https://open.bigmodel.cn/api/paas/v4"
-        return ["glm-5.2"]
+        return ["glm-5.3-flash"]
 
     async def fake_title(api_key, prompt, options):
         assert api_key == "secret"
         assert prompt == "春天"
-        assert options["model"] == "glm-5.2"
+        assert options["model"] == "glm-5.3-flash"
         return "春日"
 
     monkeypatch.setattr(zai_chat, "list_models", fake_models)
@@ -296,13 +296,13 @@ async def test_ai_routes_select_zai_for_models_and_titles(monkeypatch: pytest.Mo
         baseURL="https://open.bigmodel.cn/api/paas/v4/",
         apiProvider="zai",
     ))
-    assert models_response == {"success": True, "data": ["glm-5.2"]}
+    assert models_response == {"success": True, "data": ["glm-5.3-flash"]}
 
     title_response = await generate_title(GenerateTitleRequest(
         apiKey="secret",
         baseURL="https://open.bigmodel.cn/api/paas/v4/",
         apiProvider="zai",
-        model="glm-5.2",
+        model="glm-5.3-flash",
         prompt="春天",
     ))
     assert title_response == {"success": True, "data": "春日"}

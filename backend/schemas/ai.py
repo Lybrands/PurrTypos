@@ -7,6 +7,21 @@ from pydantic import BaseModel, Field, field_validator
 from schemas.common import normalize_locale_tag
 
 
+class WritingMethodOverrides(BaseModel):
+    forceRevisionIds: List[str] = Field(default_factory=list, max_length=64)
+    excludeRevisionIds: List[str] = Field(default_factory=list, max_length=64)
+
+    @field_validator("forceRevisionIds", "excludeRevisionIds")
+    @classmethod
+    def normalize_revision_ids(cls, values: List[str]) -> List[str]:
+        normalized = [str(value or "").strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("writing method revision id must not be empty")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("writing method revision ids must be unique")
+        return normalized
+
+
 class ChatStreamRequest(BaseModel):
     # Renderer request identity; Writing binds it opaquely for recovery.
     streamId: Optional[str] = Field(default=None, max_length=200)
@@ -35,6 +50,7 @@ class ChatStreamRequest(BaseModel):
     # 前端不再自行拼接记忆文案。
     selectedMemoryIds: Optional[List[Any]] = None
     selectedForeshadowingIds: Optional[List[Any]] = None
+    writingMethodOverrides: Optional[WritingMethodOverrides] = None
     chatAgentMode: Optional[str] = None
     contextWindow: Optional[str] = None
     # Enhanced renderer history fence. These immutable IDs are part of the

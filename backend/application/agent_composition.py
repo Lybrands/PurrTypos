@@ -519,20 +519,32 @@ class AgentComposition:
         """Persist the selected product profile through the existing Run binding."""
 
         binding = options.binding
-        if binding is None:
-            return options
         profile = self._profile_registry.for_request(request)
+        claims = tuple(options.context_claims)
+        claims_hook = getattr(profile, "context_budget_claims", None)
+        if callable(claims_hook):
+            replacements = tuple(claims_hook(request))
+            replacement_names = {claim.name for claim in replacements}
+            claims = tuple(
+                claim for claim in claims if claim.name not in replacement_names
+            ) + replacements
+        if binding is None:
+            return replace(options, context_claims=claims)
         attributes = thaw_json_mapping(binding.attributes)
         expected = {
             "agentProfile": profile.id,
             "domainNamespace": profile.domain_namespace,
         }
+        attribute_hook = getattr(profile, "run_binding_attributes", None)
+        if callable(attribute_hook):
+            expected.update(dict(attribute_hook(request)))
         for name, value in expected.items():
-            current = str(attributes.get(name) or "").strip()
-            if current and current != value:
+            current = attributes.get(name)
+            if current not in (None, "") and current != value:
                 raise ValueError(f"Run binding {name} conflicts with Agent profile")
         return replace(
             options,
+            context_claims=claims,
             binding=replace(binding, attributes={**attributes, **expected}),
         )
 

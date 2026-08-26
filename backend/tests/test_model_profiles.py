@@ -14,17 +14,20 @@ from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 
 def test_registry_resolves_each_builtin_profile_and_generic_fallback():
     glm = resolve_model_profile(
-        "zai:glm-5.2",
-        "glm-5.2",
+        "zai:glm-5.3-flash",
+        "glm-5.3-flash",
         "https://open.bigmodel.cn/api/paas/v4/",
     )
-    assert glm.profile_id == "zai:glm-5.2"
+    assert glm.profile_id == "zai:glm-5.3-flash"
     assert glm.build_openai_extra_body(True) == {
         "thinking": {"type": "enabled"},
     }
     assert glm.build_openai_extra_body(False) == {
-        "thinking": {"type": "disabled"},
+        "thinking": {"type": "enabled"},
     }
+    assert glm.protocol_capabilities().reasoning_control is (
+        ReasoningControl.ALWAYS_ENABLED
+    )
     assert glm.output_capabilities().max_output_tokens == 131_072
     deepseek_pro = resolve_model_profile(
         "deepseek:deepseek-v4-pro",
@@ -162,7 +165,7 @@ def test_builtin_profiles_publish_stable_versioned_capability_snapshots():
     [
         ("deepseek:deepseek-v4-pro", 393_216),
         ("deepseek:deepseek-v4-flash", 393_216),
-        ("zai:glm-5.2", 131_072),
+        ("zai:glm-5.3-flash", 131_072),
         ("mimo:mimo-v2.5-pro", 131_072),
     ],
 )

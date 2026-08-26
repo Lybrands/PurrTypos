@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('purrDesktop', {
   importDatabase: () => ipcRenderer.invoke('import-database'),
   openDatabaseDirectory: () => ipcRenderer.invoke('open-database-directory'),
   openAndReadTextFile: () => ipcRenderer.invoke('open-and-read-text-file'),
+  pickNovelSourceTextFile: () => ipcRenderer.invoke('pick-novel-source-text-file'),
   pickStoryBackgroundAttachments: (data) =>
     ipcRenderer.invoke('story-background-pick-attachments', data),
   openStoryBackgroundAttachment: (data) =>
