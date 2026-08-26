@@ -107,6 +107,7 @@ export interface AiDebugDelegationActivity {
 export interface AiDebugRun {
   id: string;
   turnId?: string;
+  conversationRootRunId?: string;
   sessionId?: number;
   conversationId?: number;
   source: string;
@@ -155,16 +156,17 @@ export interface AiDebugTurnGroup {
   prompt: string;
 }
 
+export interface AiDebugConversationLifecycle {
+  status: AiDebugRunStatus;
+  ended: boolean;
+  endReason: string;
+  authoritativeRunId?: string;
+}
+
 const MAX_TURNS = 20;
 const MAX_EVENTS_PER_RUN = 200;
 const SENSITIVE_KEY =
   /^(api[-_]?key|authorization|password|passwd|secret|access[-_]?token|refresh[-_]?token|token)$/i;
-const TERMINAL_STATUSES = new Set<AiDebugRunStatus>([
-  "dispatched",
-  "completed",
-  "aborted",
-  "failed",
-]);
 const FINAL_STATUSES = new Set<AiDebugRunStatus>([
   "completed",
   "aborted",
@@ -224,6 +226,56 @@ export function groupAiDebugRunsByTurn(runs: AiDebugRun[]): AiDebugTurnGroup[] {
       runs: [...group.runs].sort((left, right) => right.startedAt - left.startedAt),
     }))
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function isFinalRun(run: AiDebugRun): boolean {
+  return FINAL_STATUSES.has(run.status);
+}
+
+/** Project one user turn from its authoritative root Run, not a child model Run. */
+export function aiDebugConversationLifecycle(
+  group: AiDebugTurnGroup,
+): AiDebugConversationLifecycle {
+  const declaredRootRunId = group.runs.find(
+    (run) => run.conversationRootRunId,
+  )?.conversationRootRunId;
+  const explicitRoot = group.runs.find((run) => (
+    Boolean(run.conversationRootRunId)
+    && run.agentRunId === run.conversationRootRunId
+  ));
+  if (declaredRootRunId && !explicitRoot) {
+    const activeRun = group.runs.find((run) => !isFinalRun(run));
+    return {
+      status: activeRun?.status ?? "preparing",
+      ended: false,
+      endReason: "尚未结束",
+      authoritativeRunId: declaredRootRunId,
+    };
+  }
+  const authoritative = explicitRoot
+    ?? group.runs.find((run) => !isFinalRun(run))
+    ?? group.runs.find((run) => run.status === "failed")
+    ?? group.runs.find((run) => run.status === "aborted")
+    ?? group.runs[0];
+  if (!authoritative) {
+    return { status: "starting", ended: false, endReason: "尚未结束" };
+  }
+  if (!isFinalRun(authoritative)) {
+    return {
+      status: authoritative.status,
+      ended: false,
+      endReason: "尚未结束",
+      authoritativeRunId: authoritative.agentRunId || authoritative.id,
+    };
+  }
+  return {
+    status: authoritative.status,
+    ended: true,
+    endReason: authoritative.status === "completed"
+      ? "正常完成"
+      : authoritative.error || (authoritative.status === "aborted" ? "已中止" : "执行失败"),
+    authoritativeRunId: authoritative.agentRunId || authoritative.id,
+  };
 }
 
 function retainRecentTurns(runs: AiDebugRun[]): AiDebugRun[] {
@@ -394,6 +446,10 @@ function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
 
 function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
   if (FINAL_STATUSES.has(run.status)) return run.status;
+  const resultStatus = String(chunk.runResult?.status || "");
+  if (resultStatus === "done") return "completed";
+  if (resultStatus === "failed" || resultStatus === "blocked") return "failed";
+  if (resultStatus === "canceled") return "aborted";
   if (isCanonicalOutputEvent(chunk)) {
     if (chunk.kind === "run.lifecycle") {
       const status = String(chunk.payload.status || "");
@@ -423,6 +479,24 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
       : "completed";
   }
   return run.status;
+}
+
+function runTerminalError(chunk: AiDebugChunk): string | undefined {
+  const runResultStatus = String(chunk.runResult?.status || "");
+  if (["failed", "blocked", "canceled"].includes(runResultStatus)) {
+    const errorCode = String(chunk.runResult?.errorCode || "").trim();
+    if (errorCode) return errorCode;
+  }
+  if (isCanonicalOutputEvent(chunk) && chunk.kind === "run.lifecycle") {
+    const status = String(chunk.payload.status || "");
+    if (["failed", "blocked", "canceled"].includes(status)) {
+      const errorCode = String(
+        chunk.payload.errorCode || chunk.payload.reasonCode || chunk.payload.error || "",
+      ).trim();
+      if (errorCode) return errorCode;
+    }
+  }
+  return chunk.error || chunk.errorReport?.errorMessage || undefined;
 }
 
 function appendEvent(run: AiDebugRun, chunk: AiDebugChunk, now: number): AiDebugEvent[] {
@@ -616,7 +690,7 @@ function updateDelegationActivities(
   next = {
     ...next,
     status,
-    finishedAt: TERMINAL_STATUSES.has(status)
+    finishedAt: FINAL_STATUSES.has(status)
       ? next.finishedAt ?? now
       : next.finishedAt,
     error: metadata.error || next.error,
@@ -667,7 +741,11 @@ function canonicalModel(event: CanonicalOutputEvent | null): string | undefined 
 export function startAiDebugRun(
   streamId: string,
   request: AiStreamRequest,
-  context: { turnId?: string; conversationId?: number } = {},
+  context: {
+    turnId?: string;
+    conversationId?: number;
+    conversationRootRunId?: string;
+  } = {},
 ): void {
   if (!DEBUG_STORE_ENABLED) return;
   const now = Date.now();
@@ -679,6 +757,7 @@ export function startAiDebugRun(
   const run: AiDebugRun = {
     id: streamId,
     turnId: context.turnId,
+    conversationRootRunId: context.conversationRootRunId,
     sessionId: request.sessionId,
     conversationId: context.conversationId,
     source: sourceLabel(streamId),
@@ -739,6 +818,7 @@ export function hydrateAiDebugRunSnapshot(data: {
   prompt: string;
   source?: string;
   turnId?: string;
+  conversationRootRunId?: string;
 }): void {
   if (!DEBUG_STORE_ENABLED) return;
   const { snapshot } = data;
@@ -756,6 +836,7 @@ export function hydrateAiDebugRunSnapshot(data: {
     const run: AiDebugRun = {
       id: debugRunId,
       turnId: data.turnId,
+      conversationRootRunId: data.conversationRootRunId,
       sessionId: snapshot.run.sessionId ?? undefined,
       conversationId: snapshot.run.conversationId ?? undefined,
       source,
@@ -825,6 +906,7 @@ export function hydrateAiDebugRunSnapshot(data: {
     return {
       ...run,
       turnId: data.turnId ?? run.turnId,
+      conversationRootRunId: data.conversationRootRunId ?? run.conversationRootRunId,
       sessionId: snapshot.run.sessionId ?? run.sessionId,
       conversationId: snapshot.run.conversationId ?? run.conversationId,
       model: snapshot.run.provenance.modelName ?? run.model,
@@ -843,7 +925,7 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
   const now = Date.now();
   replaceRun(streamId, (run) => {
     const status = nextStatus(run, chunk);
-    const terminal = TERMINAL_STATUSES.has(status);
+    const terminal = FINAL_STATUSES.has(status);
     const runId = getAgentRunId(chunk);
     const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
     const delta = canonicalEvent?.kind === "provider.content_delta"
@@ -886,7 +968,7 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
         : run.delegations,
       delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: chunk.error || chunk.errorReport?.errorMessage || run.error,
+      error: runTerminalError(chunk) || run.error,
       errorReport: chunk.errorReport ?? run.errorReport,
     };
   });
@@ -896,6 +978,7 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
 export function recordScreenplayAiDebugChunk(data: {
   runId: string;
   turnId: string;
+  conversationRootRunId?: string;
   sessionId: number;
   prompt: string;
   model?: string;
@@ -916,7 +999,16 @@ export function recordScreenplayAiDebugChunk(data: {
       chatAgentMode: "agent",
     }, {
       turnId: data.turnId,
+      conversationRootRunId: data.conversationRootRunId,
     });
+  } else if (
+    data.conversationRootRunId
+    && existing.conversationRootRunId !== data.conversationRootRunId
+  ) {
+    replaceRun(streamId, (run) => ({
+      ...run,
+      conversationRootRunId: data.conversationRootRunId,
+    }));
   }
   recordAiDebugChunk(streamId, data.chunk);
 }
@@ -931,19 +1023,21 @@ export function recordAiDebugRunEvent(
   if (!DEBUG_STORE_ENABLED || !rootAgentRunId) return;
   const now = Date.now();
   replaceRunByAgentRunId(rootAgentRunId, (run) => {
+    const observedRun = run.status === "dispatched"
+      ? { ...run, status: "preparing" as AiDebugRunStatus }
+      : run;
     const status = FINAL_STATUSES.has(run.status)
       ? run.status
-      : chunk.aborted
-        ? "aborted"
-        : chunk.error
-          ? "failed"
-          : chunk.done
-            ? "completed"
-            : nextStatus(
-                run.status === "dispatched" ? { ...run, status: "preparing" } : run,
-                chunk,
-              );
-    const terminal = TERMINAL_STATUSES.has(status);
+      : chunk.runResult
+        ? nextStatus(observedRun, chunk)
+        : chunk.aborted
+          ? "aborted"
+          : chunk.error || (chunk.done && chunk.errorReport)
+            ? "failed"
+            : chunk.done
+              ? "completed"
+              : nextStatus(observedRun, chunk);
+    const terminal = FINAL_STATUSES.has(status);
     const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
     const delta = canonicalEvent?.kind === "provider.content_delta"
       ? String(canonicalEvent.payload.delta || "")
@@ -986,7 +1080,7 @@ export function recordAiDebugRunEvent(
         : run.delegations,
       delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: chunk.error || chunk.errorReport?.errorMessage || run.error,
+      error: runTerminalError(chunk) || run.error,
       errorReport: chunk.errorReport ?? run.errorReport,
     };
   });

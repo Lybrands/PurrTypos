@@ -522,6 +522,7 @@ export interface ScreenplayAgentChunkEvent {
   turnId: string;
   taskId: string | null;
   runId: string | null;
+  runRole: 'root' | 'unit' | 'final_response' | 'related';
   userContent: string;
   model: string | null;
   turnCreatedAt?: string | null;

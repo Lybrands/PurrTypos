@@ -13,6 +13,9 @@ export interface AgentChunkTurnSeed {
   turnId: string
   /** Root identity from a persisted Run snapshot, never from an event envelope. */
   rootRunId?: string
+  /** Server-authorized Run identity carried by this event envelope. */
+  eventRunId?: string
+  runRole?: 'root' | 'unit' | 'final_response' | 'related'
   sessionId: number
   userContent: string
   model?: string
@@ -50,6 +53,19 @@ export class AgentChunkReplay {
       })
     const rootRunId = String(seed.rootRunId || '').trim()
     if (rootRunId) acc.conversationRunId = rootRunId
+    const eventRunId = String(seed.eventRunId || '').trim()
+    if (
+      eventRunId
+      && (seed.runRole === 'unit' || seed.runRole === 'final_response')
+    ) {
+      acc.relatedRunIds = Array.from(new Set([
+        ...(acc.relatedRunIds ?? []),
+        eventRunId,
+      ]))
+      if (seed.runRole === 'final_response') {
+        acc.finalResponseRunId = eventRunId
+      }
+    }
     this.accumulators.set(seed.turnId, acc)
 
     let messages: AgentConversationMessage[] = [

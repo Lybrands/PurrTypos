@@ -6,6 +6,7 @@ import {
   initialCanonicalOutputState,
   isCanonicalOutputEvent,
   reduceCanonicalOutput,
+  type CanonicalOutputEvent,
 } from '../canonicalOutput.ts'
 import { projectContextBudget } from '../contextBudgetProjection.ts'
 import type {
@@ -23,14 +24,21 @@ export function handleCanonicalOutput(
   const transportStreamId = chunk.streamId
   if (!isCanonicalOutputEvent(chunk)) return false
 
-  const currentState = ctx.acc.canonicalOutput ?? initialCanonicalOutputState()
+  const authoritativeRootRunId = ctx.acc.conversationRunId
+  const baseState = ctx.acc.canonicalOutput ?? initialCanonicalOutputState()
+  const currentState = authoritativeRootRunId && !baseState.runId
+    ? { ...baseState, runId: authoritativeRootRunId }
+    : baseState
   const acceptedCanonicalEvent = chunk.sequence
     > (currentState.lastSequenceByRun[chunk.runId] ?? 0)
   const currentRunId = currentState.runId ?? ctx.acc.agentRunId
   const foreignRun = Boolean(currentRunId && chunk.runId !== currentRunId)
-  const authoritativeRootRunId = ctx.acc.conversationRunId
+  const relatedRun = Boolean(ctx.acc.relatedRunIds?.includes(chunk.runId))
+  const finalResponseRun = ctx.acc.finalResponseRunId === chunk.runId
   const violatesRootBinding = Boolean(
-    authoritativeRootRunId && chunk.runId !== authoritativeRootRunId
+    authoritativeRootRunId
+      && chunk.runId !== authoritativeRootRunId
+      && !relatedRun
   )
   const terminalSettlement = ctx.acc.terminalSettlement
   const resumesPausedRun = Boolean(
@@ -48,13 +56,16 @@ export function handleCanonicalOutput(
   if (
     (ctx.turnId && transportStreamId && transportStreamId !== ctx.turnId)
     || violatesRootBinding
-    || (foreignRun && !resumesPausedRun)
+    || (foreignRun && !resumesPausedRun && !relatedRun)
   ) return true
   if (resumesPausedRun) {
     ctx.acc.terminalSettlement = undefined
     ctx.acc.taskPlan = undefined
   }
 
+  const projectedChunk = relatedRun
+    ? projectRelatedRunEvent(chunk, finalResponseRun)
+    : chunk
   const state = reduceCanonicalOutput(
     resumesPausedRun
       ? {
@@ -64,7 +75,7 @@ export function handleCanonicalOutput(
           runTerminal: false,
         }
       : currentState,
-    chunk,
+    projectedChunk,
   )
 
   ctx.acc.canonicalOutput = state
@@ -76,7 +87,11 @@ export function handleCanonicalOutput(
     .map((block) => block.text.trim())
     .filter(Boolean)
   ctx.acc.commentaryDurationsMs = undefined
-  if (acceptedCanonicalEvent && chunk.visibility === 'public') {
+  if (
+    acceptedCanonicalEvent
+    && projectedChunk.visibility === 'public'
+    && !relatedRun
+  ) {
     if (chunk.kind === 'runtime.event') {
       applyCanonicalRuntimeView(ctx, state.latestRuntimeEvent, chunk.runId)
     } else if (chunk.kind === 'run.lifecycle') {
@@ -131,6 +146,39 @@ export function handleCanonicalOutput(
     })
   }
   return true
+}
+
+function projectRelatedRunEvent(
+  event: CanonicalOutputEvent,
+  finalResponseRun: boolean,
+): CanonicalOutputEvent {
+  const eventType = event.kind === 'runtime.event'
+    ? String(event.payload.eventType || '')
+    : ''
+  const visible = event.visibility === 'public' && (
+    event.channel === 'operation'
+    || (
+      event.source === 'provider'
+      && event.channel === 'commentary'
+    )
+    || (
+      (event.kind === 'stream.committed' || event.kind === 'stream.aborted')
+      && event.channel === 'commentary'
+    )
+    || eventType === 'approval.requested'
+    || eventType === 'approval.resolved'
+    || (
+      finalResponseRun
+      && event.channel === 'final'
+      && (
+        event.kind === 'provider.content_delta'
+        || event.kind === 'provider.delta_batch'
+        || event.kind === 'stream.committed'
+        || event.kind === 'stream.aborted'
+      )
+    )
+  )
+  return visible ? event : { ...event, visibility: 'private' }
 }
 
 function applyCanonicalRuntimeView(

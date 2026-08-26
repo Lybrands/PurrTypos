@@ -9,7 +9,7 @@ import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput"
 import Markdown from "../../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import ToolApproval from "../ToolApproval";
-import ExecutionLog from "../ExecutionLog";
+import ExecutionLog, { ExecutionLogStepGroup } from "../ExecutionLog";
 import DelegationStatus from "../DelegationStatus";
 import StructuredQuestion from "../StructuredQuestion";
 import ErrorReportNotice from "../ErrorReportNotice";
@@ -20,6 +20,7 @@ import {
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
+  getOperationGroupProgress,
   groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
   type TimelineOperationPart,
@@ -120,6 +121,40 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
         !part.segment.cachedFlags?.[labelIndex],
     );
   });
+}
+
+function operationPartIsActive(part: TimelineOperationPart): boolean {
+  if (part.type === "operation") return part.operation.status === "running";
+  if (part.type === "tools") return Boolean(part.isLive);
+  if (part.type === "contextCompaction") {
+    return part.state.status === "running";
+  }
+  return part.items.some((item) =>
+    ["queued", "claimed", "running"].includes(item.status)
+  );
+}
+
+function operationPartCompletedDuration(part: TimelineOperationPart): number {
+  if (part.type === "operation") {
+    return part.operation.status === "running"
+      ? 0
+      : Math.max(0, part.operation.durationMs ?? 0);
+  }
+  if (part.type !== "tools") return 0;
+  if (part.segment.itemDurationsMs) {
+    return part.segment.itemDurationsMs.reduce<number>(
+      (total, duration) => total + Math.max(0, duration ?? 0),
+      0,
+    );
+  }
+  return part.isLive ? 0 : Math.max(0, part.segment.durationMs ?? 0);
+}
+
+function operationPartActiveStartedAt(
+  part: TimelineOperationPart,
+): number | undefined {
+  if (part.type !== "tools" || !part.isLive) return undefined;
+  return part.segment.activeItemStartedAt ?? part.segment.startedAt;
 }
 
 function CanonicalOperationRow({
@@ -327,6 +362,30 @@ function AssistantOutputInner({
     part: ReturnType<typeof groupConsecutiveWorkSteps>[number],
     partIndex: number,
   ) => {
+    if (part.type === "stepGroup") {
+      const progress = getOperationGroupProgress(part.parts);
+      return (
+        <ExecutionLogStepGroup
+          key={part.groupKey}
+          groupKey={part.groupKey}
+          stepCount={progress.total}
+          completedDurationMs={part.parts.reduce(
+            (total, item) => total + operationPartCompletedDuration(item),
+            0,
+          )}
+          activeStartedAt={part.parts
+            .map(operationPartActiveStartedAt)
+            .find((startedAt) => startedAt != null)}
+          active={part.parts.some(operationPartIsActive)}
+          hasError={workLogHasError(part.parts)}
+        >
+          {part.parts.map((item, itemIndex) => renderOperationPart(
+            item,
+            `${part.groupKey}-${item.type}-${itemIndex}`,
+          ))}
+        </ExecutionLogStepGroup>
+      );
+    }
     if (part.type === "commentary") return renderStepPart(part);
     if (
       part.type === "tools" ||

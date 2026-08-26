@@ -3,7 +3,10 @@ import type {
   ToolCallSegment,
 } from "../../../agent-runtime/contracts";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
-import { toolCallDisplayRow } from "../toolCallLabels.ts";
+import {
+  resolveLocalizedToolDisplayName,
+  toolCallDisplayRow,
+} from "../toolCallLabels.ts";
 export { groupConsecutiveWorkSteps } from "../ExecutionLog/grouping.ts";
 export type { ExecutionLogTimelineItem } from "../ExecutionLog/grouping.ts";
 
@@ -69,10 +72,46 @@ export interface BuildAssistantTimelineOptions {
   allowStreamingText?: boolean;
 }
 
+const INTERNAL_PROGRESS_TOKEN = /(?:\b(?:run|task|longtask|spaturn|turn|operation|invocation|output|artifact|revision|project|session|scene)[_-][a-z0-9-]+\b|\b(?:run|task|turn|operation|artifact|revision|project|session|scene)?ids?\b|\b[a-z]+(?:[A-Z][A-Za-z0-9]*)+\b|\b(?=[a-z0-9_-]{8,}\b)(?=[a-z0-9_-]*\d)[a-z0-9_-]+\b|\b[0-9a-f]{8}-[0-9a-f-]{27,}\b)/i;
+const PROTOCOL_PROGRESS_CONTENT = /(?:```|[{}\[\]]|https?:\/\/|file:\/\/|\/Users\/|Traceback|stack trace)/i;
+
+function publicProgressNarration(value: unknown): string {
+  const raw = typeof value === "string" ? value.trim() : "";
+  const text = /^\*\*[^*]+\*\*$/.test(raw)
+    ? raw.slice(2, -2).trim()
+    : raw;
+  if (
+    !text
+    || text.length > 60
+    || text.includes("\n")
+    || /^(?:[#>-]|\d+[.)])\s/.test(text)
+    || INTERNAL_PROGRESS_TOKEN.test(text)
+    || PROTOCOL_PROGRESS_CONTENT.test(text)
+  ) {
+    return "";
+  }
+  return text;
+}
+
 export function getAssistantProcessingLabel(
-  _message: AgentConversationMessage,
+  message: AgentConversationMessage,
 ): string {
-  return "";
+  const canonical = message.canonicalOutput;
+  if (canonical) {
+    const activeOperation = [...canonical.operationOrder]
+      .reverse()
+      .map((operationId) => canonical.operations[operationId])
+      .find((operation) => operation?.status === "running");
+    const invocationId = activeOperation?.invocationId;
+    if (invocationId) {
+      const modelTitle = [...canonical.commentaryBlocks]
+        .reverse()
+        .find((block) => !block.aborted && block.invocationId === invocationId);
+      const title = publicProgressNarration(modelTitle?.text);
+      if (title) return title;
+    }
+  }
+  return "正在思考";
 }
 
 export function getOperationGroupProgress(
@@ -247,13 +286,15 @@ export function buildAssistantTimeline(
       });
     }
     canonicalOutput.commentaryBlocks
-      .filter((block) => !block.aborted && block.text.trim())
+      .filter((block) => !block.aborted)
       .forEach((block) => {
+        const narration = publicProgressNarration(block.text);
+        if (!narration) return;
         canonicalParts.push({
           sequence: block.firstSequence,
           part: {
             type: "commentary",
-            md: block.text.trim(),
+            md: narration,
             startedAt: Date.parse(block.startedAt),
             regionKey: `${messageIndex}-canonical-commentary-${block.outputStreamId}`,
           },
@@ -297,7 +338,7 @@ export function buildAssistantTimeline(
     region: string,
   ) => {
     if (typeof blockIndex !== "number" || emittedBlocks.has(blockIndex)) return;
-    const md = blocks[blockIndex]?.trim();
+    const md = publicProgressNarration(blocks[blockIndex]);
     if (!md) return;
     emittedBlocks.add(blockIndex);
     parts.push({
@@ -353,12 +394,15 @@ export function buildAssistantTimeline(
   }
 
   if (isStreaming && message.commentary?.trim()) {
-    parts.push({
-      type: "commentary",
-      md: message.commentary.trim(),
-      startedAt: message.commentaryStartedAt,
-      regionKey: `${messageIndex}-stream-${blocks.length}`,
-    });
+    const narration = publicProgressNarration(message.commentary);
+    if (narration) {
+      parts.push({
+        type: "commentary",
+        md: narration,
+        startedAt: message.commentaryStartedAt,
+        regionKey: `${messageIndex}-stream-${blocks.length}`,
+      });
+    }
   }
 
   return parts;
@@ -370,7 +414,14 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
     ? params.toolName
     : operation.toolName;
   if (operation.kind === "tool" && toolName) {
-    return toolCallDisplayRow(toolName, {}, [], []).label;
+    const displayNames = localizedDisplayNames(params.displayNames);
+    return toolCallDisplayRow(
+      toolName,
+      {},
+      [],
+      [],
+      resolveLocalizedToolDisplayName(displayNames),
+    ).label;
   }
   const labels: Record<string, string> = {
     validation: "校验输出",
@@ -379,4 +430,16 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
     tool: "执行工具",
   };
   return labels[operation.kind] || "执行操作";
+}
+
+function localizedDisplayNames(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string",
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
