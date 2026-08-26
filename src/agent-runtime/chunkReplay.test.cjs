@@ -846,6 +846,123 @@ test('replay keeps the owning Run public plan isolated from foreign Run events',
   assert.equal(plan?.status, 'done')
 })
 
+test('screenplay replay projects authorized unit work and final-response text under the Root', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-screenplay-related-runs',
+    rootRunId: 'root-screenplay',
+    sessionId: 537,
+    userContent: '完成下一集',
+    model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+
+  replay.dispatch({
+    ...seed,
+    eventRunId: 'root-screenplay',
+    runRole: 'root',
+  }, canonical('root-screenplay', 1, {
+    kind: 'run.lifecycle',
+    payload: { status: 'running' },
+  }), dependencies)
+  const unitSeed = {
+    ...seed,
+    eventRunId: 'unit-screenplay',
+    runRole: 'unit',
+  }
+  replay.dispatch(unitSeed, canonical('unit-screenplay', 1, {
+    outputStreamId: 'unit-commentary',
+    invocationId: 'unit-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'commentary',
+    payload: { delta: '我先读取项目和分集上下文。' },
+  }), dependencies)
+  replay.dispatch(unitSeed, canonical('unit-screenplay', 2, {
+    kind: 'operation.started',
+    channel: 'operation',
+    payload: {
+      operationId: 'read-project',
+      kind: 'tool',
+      startedAt: '2026-08-12T08:00:02+00:00',
+      display: {
+        labelKey: 'agent.operation.tool',
+        labelParams: { toolName: 'inspectScreenplayProject' },
+      },
+    },
+  }), dependencies)
+  replay.dispatch(unitSeed, canonical('unit-screenplay', 3, {
+    kind: 'operation.finished',
+    channel: 'operation',
+    payload: {
+      operationId: 'read-project',
+      status: 'succeeded',
+      finishedAt: '2026-08-12T08:00:03+00:00',
+      durationMs: 15,
+    },
+  }), dependencies)
+  replay.dispatch(unitSeed, canonical('unit-screenplay', 4, {
+    outputStreamId: 'unit-private-final',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '不应成为对话最终回答的单元结果。' },
+  }), dependencies)
+  replay.dispatch(unitSeed, canonical('unit-screenplay', 5, {
+    kind: 'run.lifecycle',
+    payload: { status: 'done', finalResponse: '不应覆盖 Root。' },
+  }), dependencies)
+  replay.dispatch({
+    ...seed,
+    eventRunId: 'unbound-related-run',
+    runRole: 'related',
+  }, canonical('unbound-related-run', 1, {
+    outputStreamId: 'unbound-commentary',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'commentary',
+    payload: { delta: '未绑定的相关 Run 不应获得投影权限。' },
+  }), dependencies)
+
+  const finalSeed = {
+    ...seed,
+    eventRunId: 'final-screenplay',
+    runRole: 'final_response',
+  }
+  replay.dispatch(finalSeed, canonical('final-screenplay', 1, {
+    outputStreamId: 'final-response-stream',
+    invocationId: 'final-response-invocation',
+    source: 'provider',
+    kind: 'provider.content_delta',
+    channel: 'final',
+    payload: { delta: '第 4 集候选稿已经完成。' },
+  }), dependencies)
+  replay.dispatch(finalSeed, canonical('final-screenplay', 2, {
+    outputStreamId: 'final-response-stream',
+    invocationId: 'final-response-invocation',
+    kind: 'stream.committed',
+    channel: 'final',
+    payload: {},
+  }), dependencies)
+
+  const assistant = replay.assistant(seed.turnId)
+  assert.equal(assistant?.agentRunId, 'root-screenplay')
+  assert.equal(assistant?.canonicalOutput?.runId, 'root-screenplay')
+  assert.equal(assistant?.canonicalOutput?.runStatus, 'running')
+  assert.equal(assistant?.content, '第 4 集候选稿已经完成。')
+  assert.equal(assistant?.canonicalOutput?.finalText, '第 4 集候选稿已经完成。')
+  assert.deepEqual(assistant?.commentaryBlocks, ['我先读取项目和分集上下文。'])
+  assert.equal(
+    assistant?.canonicalOutput?.operations['read-project']?.runId,
+    'unit-screenplay',
+  )
+  assert.equal(
+    assistant?.canonicalOutput?.operations['read-project']?.status,
+    'succeeded',
+  )
+})
+
 test('raw Provider events are visible before transport completion', () => {
   const replay = new AgentChunkReplay()
   const seed = {

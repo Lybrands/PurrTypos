@@ -73,6 +73,10 @@ const events: CanonicalOutputEvent[] = [
 test('real-time reduction equals zero-based replay', () => {
   const live = events.reduce(reduceCanonicalOutput, initialCanonicalOutputState())
   assert.deepEqual(replayCanonicalOutput(events), live)
+  assert.equal(
+    live.commentaryBlocks[0]?.invocationId,
+    'invocation-commentary',
+  )
 })
 
 test('runtime event text does not impersonate Provider deltas', () => {
@@ -94,6 +98,38 @@ test('runtime event text does not impersonate Provider deltas', () => {
   ])
 
   assert.equal(state.finalText, 'Provider text')
+})
+
+test('Provider delta batches replay as ordered public text', () => {
+  const state = replayCanonicalOutput([
+    event(1, {
+      source: 'provider',
+      kind: 'provider.delta_batch',
+      channel: 'final',
+      outputStreamId: 'stream-final',
+      invocationId: 'invocation-final',
+      payload: {
+        schemaVersion: 'purra.provider-delta-batch/v1',
+        entries: [
+          {
+            sourceChunkIndex: 1,
+            sourcePartIndex: 0,
+            kind: 'provider.content_delta',
+            payload: { delta: '批量' },
+          },
+          {
+            sourceChunkIndex: 2,
+            sourcePartIndex: 0,
+            kind: 'provider.content_delta',
+            payload: { delta: '输出' },
+          },
+        ],
+      },
+    }),
+  ])
+
+  assert.equal(state.finalText, '批量输出')
+  assert.equal(state.finalStreamStatus, 'open')
 })
 
 test('terminal Root lifecycle restores its authoritative final response', () => {

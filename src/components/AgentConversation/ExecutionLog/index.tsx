@@ -22,6 +22,7 @@ export interface ExecutionLogProps {
 }
 
 const openStateStore = new Map<string, ExecutionLogOpenState>();
+const stepGroupOpenStateStore = new Map<string, boolean>();
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`;
@@ -141,5 +142,79 @@ export default function ExecutionLog({
         </div>
       ) : null}
     </section>
+  );
+}
+
+export interface ExecutionLogStepGroupProps {
+  groupKey: string;
+  stepCount: number;
+  completedDurationMs: number;
+  activeStartedAt?: number;
+  active?: boolean;
+  hasError?: boolean;
+  children: React.ReactNode;
+}
+
+export function ExecutionLogStepGroup({
+  groupKey,
+  stepCount,
+  completedDurationMs,
+  activeStartedAt,
+  active = false,
+  hasError = false,
+  children,
+}: ExecutionLogStepGroupProps) {
+  const [open, setOpen] = React.useState(
+    () => stepGroupOpenStateStore.get(groupKey) ?? false,
+  );
+  const contentId = React.useId();
+  const now = useTicker(active && activeStartedAt != null);
+
+  React.useEffect(() => {
+    setOpen(stepGroupOpenStateStore.get(groupKey) ?? false);
+  }, [groupKey]);
+
+  const toggleOpen = () => {
+    const nextOpen = !open;
+    stepGroupOpenStateStore.set(groupKey, nextOpen);
+    setOpen(nextOpen);
+  };
+  const activeElapsedMs = active && activeStartedAt != null
+    ? Math.max(0, now - activeStartedAt)
+    : 0;
+  const totalDurationMs = completedDurationMs + activeElapsedMs;
+
+  return (
+    <div
+      className={`work-log-step-group ${open ? "work-log-step-group--open" : ""} ${active ? "work-log-step-group--active" : ""}`}
+    >
+      <button
+        type="button"
+        className="work-log-step-group__toggle"
+        onClick={toggleOpen}
+        aria-expanded={open}
+        aria-controls={contentId}
+      >
+        <ChevronRightIcon className="work-log-step-group__chevron" />
+        {hasError ? (
+          <AlertCircleIcon className="work-log-step-group__error-icon" />
+        ) : null}
+        <span>{active ? "正在执行" : "执行了"}</span>
+        <span className="work-log-step-group__count">{stepCount} 个步骤</span>
+        {totalDurationMs > 0 ? (
+          <span className="work-log-step-group__duration">
+            · {formatDuration(totalDurationMs)}
+          </span>
+        ) : null}
+        {active ? <span className="a-blink-dots">...</span> : null}
+      </button>
+      <div
+        id={contentId}
+        className="work-log-step-group__collapsible"
+        hidden={!open}
+      >
+        <div className="work-log-step-group__body">{children}</div>
+      </div>
+    </div>
   );
 }

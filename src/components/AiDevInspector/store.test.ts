@@ -3,6 +3,7 @@ import test from "node:test";
 import type { AiAgentRunSnapshot } from "../../types.ts";
 import type { CanonicalOutputEvent } from "../../agent-runtime/canonicalOutput.ts";
 import {
+  aiDebugConversationLifecycle,
   clearAiDebugRuns,
   getAiDebugSnapshot,
   groupAiDebugRunsByTurn,
@@ -95,6 +96,142 @@ test('diagnostics group multiple Runs under their conversation turn', () => {
     turns.find((turn) => turn.prompt === '继续创作三集')?.runs.map((run) => run.id),
     ['turn-1-writer', 'turn-1-planner'],
   );
+});
+
+test('conversation lifecycle follows the root Run instead of a child model finish', () => {
+  clearAiDebugRuns();
+  const input = {
+    turnId: 'turn-root-authority',
+    conversationRootRunId: 'run-root-authority',
+    sessionId: 7,
+    prompt: '继续创作三集',
+    model: 'model',
+  };
+  recordScreenplayAiDebugChunk({
+    ...input,
+    runId: 'run-root-authority',
+    chunk: canonicalEvent(1, {
+      runId: 'run-root-authority',
+      kind: 'run.lifecycle',
+      payload: { status: 'running' },
+    }),
+  });
+  recordScreenplayAiDebugChunk({
+    ...input,
+    runId: 'run-child-model',
+    chunk: canonicalEvent(2, {
+      runId: 'run-child-model',
+      kind: 'runtime.event',
+      payload: {
+        eventType: 'context.usage_recorded',
+        data: { finishReason: 'tool_calls' },
+      },
+    }),
+  });
+  recordScreenplayAiDebugChunk({
+    ...input,
+    runId: 'run-child-model',
+    chunk: canonicalEvent(3, {
+      runId: 'run-child-model',
+      kind: 'run.lifecycle',
+      payload: { status: 'failed', errorCode: 'child_model_failed' },
+    }),
+  });
+
+  let turn = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs)[0];
+  let lifecycle = aiDebugConversationLifecycle(turn);
+  assert.equal(lifecycle.ended, false);
+  assert.equal(lifecycle.endReason, '尚未结束');
+  assert.equal(lifecycle.authoritativeRunId, 'run-root-authority');
+
+  recordScreenplayAiDebugChunk({
+    ...input,
+    runId: 'run-root-authority',
+    chunk: canonicalEvent(4, {
+      runId: 'run-root-authority',
+      kind: 'run.lifecycle',
+      payload: { status: 'done', finalResponse: '任务完成' },
+    }),
+  });
+  turn = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs)[0];
+  lifecycle = aiDebugConversationLifecycle(turn);
+  assert.equal(lifecycle.status, 'completed');
+  assert.equal(lifecycle.ended, true);
+  assert.equal(lifecycle.endReason, '正常完成');
+});
+
+test('conversation lifecycle preserves the root terminal error code', () => {
+  clearAiDebugRuns();
+  recordScreenplayAiDebugChunk({
+    runId: 'run-root-failed',
+    turnId: 'turn-root-failed',
+    conversationRootRunId: 'run-root-failed',
+    sessionId: 7,
+    prompt: '继续创作三集',
+    model: 'model',
+    chunk: canonicalEvent(1, {
+      runId: 'run-root-failed',
+      kind: 'run.lifecycle',
+      payload: {
+        status: 'failed',
+        errorCode: 'model_invocation_deadline_exceeded',
+      },
+    }),
+  });
+
+  const run = getAiDebugSnapshot().runs[0];
+  const lifecycle = aiDebugConversationLifecycle(
+    groupAiDebugRunsByTurn([run])[0],
+  );
+  assert.equal(run.status, 'failed');
+  assert.equal(run.error, 'model_invocation_deadline_exceeded');
+  assert.equal(lifecycle.ended, true);
+  assert.equal(lifecycle.endReason, 'model_invocation_deadline_exceeded');
+});
+
+test('conversation stays open until its declared root Run is observed', () => {
+  clearAiDebugRuns();
+  recordScreenplayAiDebugChunk({
+    runId: 'run-child-first',
+    turnId: 'turn-child-first',
+    conversationRootRunId: 'run-root-later',
+    sessionId: 7,
+    prompt: '继续创作三集',
+    model: 'model',
+    chunk: canonicalEvent(1, {
+      runId: 'run-child-first',
+      kind: 'run.lifecycle',
+      payload: { status: 'failed', errorCode: 'child_failed' },
+    }),
+  });
+
+  const lifecycle = aiDebugConversationLifecycle(
+    groupAiDebugRunsByTurn(getAiDebugSnapshot().runs)[0],
+  );
+  assert.equal(lifecycle.ended, false);
+  assert.equal(lifecycle.endReason, '尚未结束');
+  assert.equal(lifecycle.authoritativeRunId, 'run-root-later');
+});
+
+test('transport runResult controls the diagnostic terminal status', () => {
+  clearAiDebugRuns();
+  startAiDebugRun('transport-terminal', {
+    apiKey: 'key',
+    messages: [{ role: 'user', content: '继续创作三集' }],
+    options: { model: 'model' },
+  });
+  recordAiDebugChunk('transport-terminal', {
+    done: true,
+    runResult: {
+      runId: 'run-transport-terminal',
+      status: 'failed',
+      errorCode: 'provider_unavailable',
+    },
+  });
+
+  const run = getAiDebugSnapshot().runs[0];
+  assert.equal(run.status, 'failed');
+  assert.equal(run.error, 'provider_unavailable');
 });
 
 function persistedSnapshot(
@@ -227,6 +364,7 @@ test('persisted recovery restores Planner calls without duplicating cursors', ()
 
   run = getAiDebugSnapshot().runs[0];
   assert.equal(run.status, 'dispatched');
+  assert.equal(run.finishedAt, undefined);
   assert.equal(run.taskType, '持久化长任务 · 剧本正文分批创作');
   assert.equal(run.modelCalls.length, 2);
 });
@@ -432,6 +570,7 @@ test("debug store identifies a durable screenplay chunk", () => {
 
   recordAiDebugChunk("screenplay-long-task", { done: true });
   assert.equal(getAiDebugSnapshot().runs[0].status, "dispatched");
+  assert.equal(getAiDebugSnapshot().runs[0].finishedAt, undefined);
 });
 
 test("screenplay persisted SSE creates a live diagnostic Run", () => {

@@ -91,6 +91,23 @@ def _project_event(event: Mapping[str, Any]) -> dict[str, Any] | None:
             return {"commentaryDelta": delta}
         return None
 
+    if source == "provider" and kind == "provider.delta_batch":
+        entries = payload.get("entries")
+        delta = "".join(
+            str((entry.get("payload") or {}).get("delta") or "")
+            for entry in (entries if isinstance(entries, list) else [])
+            if isinstance(entry, Mapping)
+            and entry.get("kind") == "provider.content_delta"
+            and isinstance(entry.get("payload"), Mapping)
+        )
+        if not delta:
+            return None
+        if channel == "final":
+            return {"delta": delta}
+        if channel == "commentary":
+            return {"commentaryDelta": delta}
+        return None
+
     if kind == "runtime.event":
         event_type = str(payload.get("eventType") or "")
         data = payload.get("data")

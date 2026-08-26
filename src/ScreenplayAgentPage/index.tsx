@@ -868,6 +868,7 @@ export default function ScreenplayAgentPage({
     runId: string
     turnId: string
     prompt: string
+    conversationRootRunId?: string
   }) => {
     if (
       !import.meta.env.DEV
@@ -895,6 +896,7 @@ export default function ScreenplayAgentPage({
         hydrateAiDebugRunSnapshot({
           snapshot: result.data,
           turnId: input.turnId,
+          conversationRootRunId: input.conversationRootRunId,
           prompt: input.prompt,
           source: '剧本 Agent 对话',
         })
@@ -930,6 +932,7 @@ export default function ScreenplayAgentPage({
         monitorDiagnosticRun({
           runId,
           turnId: turn.id,
+          conversationRootRunId: turn.rootRunId || undefined,
           prompt: turn.userContent,
         })
       }
@@ -1954,6 +1957,8 @@ export default function ScreenplayAgentPage({
                 agentChunkReplayRef.current.dispatch({
                   turnId: event.turnId,
                   rootRunId: turn?.rootRunId || undefined,
+                  eventRunId: event.runId || undefined,
+                  runRole: event.runRole,
                   sessionId: agentSessionId,
                   userContent: event.userContent || turn?.userContent || '',
                   model: modelName || undefined,
@@ -1971,6 +1976,7 @@ export default function ScreenplayAgentPage({
                   recordScreenplayAiDebugChunk({
                     runId: event.runId,
                     turnId: event.turnId,
+                    conversationRootRunId: turn?.rootRunId || undefined,
                     sessionId: agentSessionId,
                     prompt: event.userContent || turn?.userContent || '',
                     model: modelName || undefined,
@@ -1979,6 +1985,7 @@ export default function ScreenplayAgentPage({
                   monitorDiagnosticRun({
                     runId: event.runId,
                     turnId: event.turnId,
+                    conversationRootRunId: turn?.rootRunId || undefined,
                     prompt: event.userContent || turn?.userContent || '',
                   })
                 }

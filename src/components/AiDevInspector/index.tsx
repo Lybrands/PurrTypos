@@ -6,6 +6,7 @@ import type {
 } from "../../types";
 import {
   clearAiDebugRuns,
+  aiDebugConversationLifecycle,
   aiDebugTurnKey,
   getAiDebugSnapshot,
   groupAiDebugRunsByTurn,
@@ -13,6 +14,7 @@ import {
   selectAiDebugRun,
   subscribeAiDebugStore,
   type AiDebugRun,
+  type AiDebugTurnGroup,
   type AiDebugDelegationActivity,
   type AiDebugRunStatus,
   type AiDebugModelCall,
@@ -48,7 +50,7 @@ const STATUS_LABELS: Record<AiDebugRunStatus, string> = {
   tool: "调用工具",
   awaiting_approval: "等待审批",
   responding: "生成回答",
-  dispatched: "任务已启动",
+  dispatched: "后台执行中",
   completed: "已完成",
   aborted: "已中止",
   failed: "失败",
@@ -127,7 +129,6 @@ function formatTokens(value: unknown): string {
 function isRunActive(run: AiDebugRun | undefined): boolean {
   return Boolean(
     run &&
-      run.status !== "dispatched" &&
       run.status !== "completed" &&
       run.status !== "aborted" &&
       run.status !== "failed",
@@ -936,8 +937,17 @@ function DelegationActivityList({
   );
 }
 
-function Overview({ run, now }: { run: AiDebugRun; now: number }) {
+function Overview({
+  run,
+  turn,
+  now,
+}: {
+  run: AiDebugRun;
+  turn: AiDebugTurnGroup;
+  now: number;
+}) {
   const elapsed = (run.finishedAt ?? now) - run.startedAt;
+  const conversation = aiDebugConversationLifecycle(turn);
   const rootModelCallCount = run.modelCalls.reduce(
     (sum, call) => sum + call.count,
     0,
@@ -978,7 +988,8 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
   return (
     <div className="ai-dev-inspector__section">
       <div className="ai-dev-inspector__metrics">
-        <div><span>状态</span><strong>{STATUS_LABELS[run.status]}</strong></div>
+        <div><span>对话状态</span><strong>{STATUS_LABELS[conversation.status]}</strong></div>
+        <div><span>当前 Run</span><strong>{STATUS_LABELS[run.status]}</strong></div>
         <div><span>任务类型</span><strong title={run.taskType}>{run.taskType}</strong></div>
         <div><span>耗时</span><strong>{formatDuration(elapsed)}</strong></div>
         <div><span>模型</span><strong title={run.model}>{run.model || "待返回"}</strong></div>
@@ -992,8 +1003,12 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
           <strong>{formatTokens(resolvedOutputBudget?.modelMaxOutputTokens)}</strong>
         </div>
         <div>
-          <span>结束原因</span>
-          <strong>{MODEL_FINISH_REASON_LABELS[finishReason] ?? (finishReason || "—")}</strong>
+          <span>对话结束原因</span>
+          <strong title={conversation.endReason}>{conversation.endReason}</strong>
+        </div>
+        <div>
+          <span>最近模型调用</span>
+          <strong>{MODEL_FINISH_REASON_LABELS[finishReason] ?? (finishReason || "尚未返回")}</strong>
         </div>
         <div>
           <span>模型调用</span>
@@ -1468,7 +1483,7 @@ export default function AiDevInspector() {
                 <p>任一 AI 流开始后，这里会自动显示本轮上下文、工具和实时事件。</p>
               </div>
             ) : tab === "overview" ? (
-              <Overview run={selectedRun} now={now} />
+              <Overview run={selectedRun} turn={selectedTurn} now={now} />
             ) : tab === "context" ? (
               <ContextView run={selectedRun} />
             ) : (

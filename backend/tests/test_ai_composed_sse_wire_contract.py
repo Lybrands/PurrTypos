@@ -786,7 +786,12 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
     assert delegated_outputs
     assert all(item.run_id == run_id for item in delegated_outputs)
     assert any(
-        item.kind is OutputEventKind.PROVIDER_CONTENT_DELTA
+        item.kind is OutputEventKind.PROVIDER_DELTA_BATCH
+        and any(
+            entry.get("kind")
+            == OutputEventKind.PROVIDER_CONTENT_DELTA.value
+            for entry in item.payload.get("entries", ())
+        )
         for item in delegated_outputs
     )
 

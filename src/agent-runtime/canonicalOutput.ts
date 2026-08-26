@@ -53,6 +53,7 @@ export type CanonicalOperation = {
 
 export type CanonicalCommentaryBlock = {
   outputStreamId: string
+  invocationId?: string | null
   text: string
   firstSequence: number
   lastSequence: number
@@ -177,9 +178,12 @@ export function reduceCanonicalOutput(
 
   if (
     event.source === 'provider'
-    && event.kind === 'provider.content_delta'
+    && (
+      event.kind === 'provider.content_delta'
+      || event.kind === 'provider.delta_batch'
+    )
   ) {
-    const delta = stringValue(event.payload.delta)
+    const delta = providerTextDelta(event)
     if (!delta) return next
     if (event.channel === 'final') {
       return {
@@ -214,6 +218,22 @@ export function reduceCanonicalOutput(
   return next
 }
 
+function providerTextDelta(event: CanonicalOutputEvent): string {
+  if (event.kind === 'provider.content_delta') {
+    return stringValue(event.payload.delta)
+  }
+  if (event.kind !== 'provider.delta_batch') return ''
+  const entries = event.payload.entries
+  if (!Array.isArray(entries)) return ''
+  return entries
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    .filter((entry) => entry.kind === 'provider.content_delta')
+    .map((entry) => isRecord(entry.payload)
+      ? stringValue(entry.payload.delta)
+      : '')
+    .join('')
+}
+
 export function replayCanonicalOutput(
   events: readonly CanonicalOutputEvent[],
   afterSequence = 0,
@@ -237,6 +257,7 @@ function appendCommentary(
   if (index < 0) {
     commentaryBlocks.push({
       outputStreamId: streamId,
+      invocationId: event.invocationId,
       text: delta,
       firstSequence: event.sequence,
       lastSequence: event.sequence,
@@ -248,6 +269,7 @@ function appendCommentary(
     const current = commentaryBlocks[index]
     commentaryBlocks[index] = {
       ...current,
+      invocationId: current.invocationId ?? event.invocationId,
       text: current.text + delta,
       lastSequence: event.sequence,
     }
