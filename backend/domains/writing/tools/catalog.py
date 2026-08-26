@@ -37,7 +37,6 @@ WritingCachePredictor = Callable[[dict, dict], bool]
 WRITING_REPLANNING_EVIDENCE_TOOLS = frozenset({
     "batchGetChapterContents",
     "getBookCharacters",
-    "getBookStyle",
     "getChapterContent",
     "getGlobalOutline",
     "getSettingEntities",
@@ -202,7 +201,12 @@ def _enabled_writing_tools(request: AgentRunRequest) -> frozenset[str]:
     context = WritingDomainContext.from_core_context(request.domain_context)
     if not context.book_id:
         return frozenset()
-    return frozenset(WRITING_TOOL_POLICIES)
+    names = set(WRITING_TOOL_POLICIES)
+    if not context.writing_method_recommendation_requested:
+        names.discard("searchWritingMethods")
+    if context.creation_mode != "continuation" or not context.continuation_binding:
+        names.discard("readContinuationSourceSection")
+    return frozenset(names)
 
 
 def _domain_effects(raw: Mapping[str, Any]) -> tuple[DomainEffect, ...]:

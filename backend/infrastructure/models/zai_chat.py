@@ -9,6 +9,8 @@ from typing import Any, AsyncIterator
 
 from infrastructure.models.capabilities import normalize_thinking_enabled
 from infrastructure.models.profiles import resolve_model_profile
+from infrastructure.models.profiles.base import ModelProfile
+from purra.model_protocol import ReasoningControl
 from purra.stream_ownership import OwnedAsyncIterator, openai_chunk_is_terminal
 from utils.session_title import SESSION_TITLE_SYSTEM_PROMPT, normalize_session_title
 from utils.url import normalize_base_url
@@ -44,9 +46,14 @@ def _as_mapping(value: Any) -> dict[str, Any]:
 def _build_chat_params(
     messages: list[dict],
     options: dict[str, Any],
+    profile: ModelProfile,
     *,
     stream: bool,
 ) -> dict[str, Any]:
+    thinking_enabled = (
+        profile.reasoning_control is ReasoningControl.ALWAYS_ENABLED
+        or normalize_thinking_enabled(options)
+    )
     params: dict[str, Any] = {
         "model": str(options.get("model") or ""),
         "messages": messages,
@@ -54,7 +61,7 @@ def _build_chat_params(
         "thinking": {
             "type": (
                 "enabled"
-                if normalize_thinking_enabled(options)
+                if thinking_enabled
                 else "disabled"
             ),
         },
@@ -117,7 +124,7 @@ async def chat_no_stream(
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            **_build_chat_params(messages, opts, stream=False),
+            **_build_chat_params(messages, opts, profile, stream=False),
         )
         payload = _as_mapping(response)
         choices = payload.get("choices")
@@ -159,7 +166,7 @@ async def chat_stream(
     try:
         raw_stream = await asyncio.to_thread(
             client.chat.completions.create,
-            **_build_chat_params(messages, opts, stream=True),
+            **_build_chat_params(messages, opts, profile, stream=True),
         )
     except BaseException:
         await _close_in_thread(client)
@@ -193,6 +200,8 @@ async def generate_title(
 ) -> str:
     opts = options or {}
     model = str(opts.get("model") or "")
+    base_url = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     client = _create_client(api_key, opts.get("baseURL"))
     try:
         response = await asyncio.to_thread(
@@ -202,7 +211,13 @@ async def generate_title(
                 {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
                 {"role": "user", "content": str(text or "").strip()},
             ],
-            thinking={"type": "disabled"},
+            thinking={
+                "type": (
+                    "enabled"
+                    if profile.reasoning_control is ReasoningControl.ALWAYS_ENABLED
+                    else "disabled"
+                ),
+            },
             max_tokens=32,
             stream=False,
         )
@@ -222,7 +237,7 @@ async def list_models(api_key: str, base_url: str | None) -> list[str]:
         # zai-sdk 0.2.3 does not expose a models collection. Return the
         # application's supported built-in catalog without falling back to a
         # different provider SDK.
-        return ["glm-5.2"]
+        return ["glm-5.3-flash"]
     finally:
         await _close_in_thread(client)
 

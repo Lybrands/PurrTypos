@@ -31,7 +31,6 @@ export const KNOWN_TOOL_CALL_LABELS = {
   finalizeScreenplayStructureProposal: "完成剧本结构提案",
   finalizeScreenplayRevisionProposal: "完成剧本修订提案",
   getBookCharacters: "查看人物信息",
-  getBookStyle: "查看风格基调",
   getChapterContent: "查看章节内容",
   getGlobalOutline: "查看总纲",
   getScreenplayDocument: "读取剧本文档",
@@ -84,7 +83,6 @@ export const KNOWN_TOOL_CALL_LABELS = {
   readSourceBackground: "读取故事背景",
   querySourceStoryFacts: "检索故事事实",
   readSourceOutline: "读取原作大纲",
-  readSourceStyle: "读取原作风格",
   writeScreenplayCandidatePart: "写入剧本候选稿",
   inspectScreenplayCandidate: "检查剧本候选稿",
   appendSceneListBatch: "追加场景表批次",
@@ -287,8 +285,6 @@ export function toolCallDisplayRow(
       }
       case "deleteSettingEntity":
         return { label: "删除世界设定条目", outcome: "ok" };
-      case "getBookStyle":
-        return { label: "查看风格基调", outcome: "ok" };
       case "getStoryHealthDashboard":
         return { label: "查看故事健康度仪表盘", outcome: "ok" };
       case "getWritingStatsDashboard":

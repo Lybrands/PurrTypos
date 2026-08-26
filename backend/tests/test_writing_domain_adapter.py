@@ -332,8 +332,13 @@ def test_writing_adapter_builds_a_closed_complete_catalog():
     names = {registration.schema.name for registration in registrations}
 
     assert names == set(WRITING_TOOL_POLICIES)
-    assert len(names) == 36
-    assert adapter.tool_catalog.enabled_names(_request()) == names
+    assert len(names) == 37
+    assert adapter.tool_catalog.enabled_names(_request()) == (
+        names - {"searchWritingMethods", "readContinuationSourceSection"}
+    )
+    assert adapter.tool_catalog.enabled_names(_request(
+        writing_method_recommendation_requested=True,
+    )) == names - {"readContinuationSourceSection"}
     assert len({id(registration.handler) for registration in registrations}) == len(names)
 
 

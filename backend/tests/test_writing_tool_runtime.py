@@ -41,7 +41,6 @@ SKILL_ITEMS = tuple(
 REPLANNING_EVIDENCE_TOOL_NAMES = frozenset({
     "batchGetChapterContents",
     "getBookCharacters",
-    "getBookStyle",
     "getChapterContent",
     "getGlobalOutline",
     "getSettingEntities",
@@ -193,11 +192,11 @@ async def test_failed_evidence_read_keeps_the_current_plan():
             object(),  # type: ignore[arg-type]
         ),
         skill_items=SKILL_ITEMS,
-        handler_overrides={"getBookStyle": _failed},
+        handler_overrides={"getStoryBackground": _failed},
     )
     registration = next(
         item for item in catalog.registrations()
-        if item.schema.name == "getBookStyle"
+        if item.schema.name == "getStoryBackground"
     )
 
     result = await registration.handler(
@@ -213,7 +212,7 @@ async def test_failed_evidence_read_keeps_the_current_plan():
 async def test_two_catalogs_keep_explicit_db_dependencies_isolated(
     monkeypatch,
 ):
-    from infrastructure.writing.tools.handlers import book_style_tools
+    from infrastructure.writing.tools.handlers import story_background_tools
 
     global_db = object()
     first_db = object()
@@ -221,14 +220,16 @@ async def test_two_catalogs_keep_explicit_db_dependencies_isolated(
     monkeypatch.setattr(dependencies, "_db_instance", global_db)
     observed: list[tuple[object, str]] = []
 
-    async def _get_book_style(db, book_id):
+    async def _get_story_background(db, book_id):
         await asyncio.sleep(0)
         observed.append((db, book_id))
         return None
 
-    monkeypatch.setattr(book_style_tools, "get_book_style", _get_book_style)
-    first = _registration(first_db, "getBookStyle")
-    second = _registration(second_db, "getBookStyle")
+    monkeypatch.setattr(
+        story_background_tools, "get_story_background", _get_story_background
+    )
+    first = _registration(first_db, "getStoryBackground")
+    second = _registration(second_db, "getStoryBackground")
 
     await asyncio.gather(
         first.handler(ExecutionState(domain={"bookId": "first"}), {}),
@@ -306,7 +307,7 @@ def test_all_bound_handlers_keep_the_writing_operation_call_signature():
         ),
     )
 
-    assert len(bound) == 36
+    assert len(bound) == 37
     for name, handler in bound.items():
         assert isinstance(handler, partial)
         assert handler.func is WRITING_TOOL_OPERATIONS[name]

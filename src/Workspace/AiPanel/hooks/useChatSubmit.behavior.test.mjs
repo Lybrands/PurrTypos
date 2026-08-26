@@ -72,6 +72,10 @@ function renderHook(overrides = {}) {
     agentEnabled: true,
     selectedMemoryIds: ['memory-a'],
     selectedForeshadowingIds: ['foreshadowing-a'],
+    writingMethodOverrides: {
+      forceRevisionIds: ['method-force-a'],
+      excludeRevisionIds: ['method-exclude-a'],
+    },
     sessionScope: 'chapter',
     ...overrides,
     setConversations,
@@ -470,6 +474,10 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
       agentEnabled: false,
       selectedMemoryIds: ['memory-b'],
       selectedForeshadowingIds: ['foreshadowing-b'],
+      writingMethodOverrides: {
+        forceRevisionIds: ['method-force-b'],
+        excludeRevisionIds: ['method-exclude-b'],
+      },
       sessionScope: 'setting',
     })
     assert.equal(second.result.handleSubmit({
@@ -491,6 +499,10 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   assert.deepEqual(streamRequest.associatedOutlineIds, ['outline-a'])
   assert.deepEqual(streamRequest.selectedMemoryIds, ['memory-a'])
   assert.deepEqual(streamRequest.selectedForeshadowingIds, ['foreshadowing-a'])
+  assert.deepEqual(streamRequest.writingMethodOverrides, {
+    forceRevisionIds: ['method-force-a'],
+    excludeRevisionIds: ['method-exclude-a'],
+  })
   assert.equal(streamRequest.chatAgentMode, 'agent')
   assert.equal(streamRequest.options.model, 'model-a-name')
 })

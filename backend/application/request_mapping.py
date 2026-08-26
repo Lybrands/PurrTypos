@@ -116,6 +116,14 @@ def to_writing_agent_request(
         selected_memory_ids=tuple(body.selectedMemoryIds or ()),
         selected_foreshadowing_ids=tuple(body.selectedForeshadowingIds or ()),
         context_window_label=str(window_label) if window_label else None,
+        writing_method_overrides=(
+            body.writingMethodOverrides.model_dump()
+            if body.writingMethodOverrides is not None
+            else {}
+        ),
+        writing_method_recommendation_requested=(
+            _is_writing_method_recommendation_request(body.messages)
+        ),
     )
     profile = resolve_model_profile(
         profile_id,
@@ -172,6 +180,15 @@ def validate_writing_request_contract(
     """Application facade for product preflight without leaking assembly to HTTP."""
 
     to_writing_agent_request(body, provider_options)
+
+
+def _is_writing_method_recommendation_request(messages: Sequence[Mapping[str, Any]]) -> bool:
+    latest_user = next((
+        str(message.get("content") or "").strip()
+        for message in reversed(messages)
+        if str(message.get("role") or "").strip().lower() == "user"
+    ), "")
+    return latest_user.startswith("[写作方法推荐]")
 
 
 def writing_run_options(

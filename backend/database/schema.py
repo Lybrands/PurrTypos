@@ -605,6 +605,14 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE books ADD COLUMN enable_volume INTEGER DEFAULT 0")
 
+    from database.continuation_schema import init_continuation_schema
+
+    await init_continuation_schema(db)
+
+    from database.writing_method_schema import init_writing_method_schema
+
+    await init_writing_method_schema(db)
+
     # ── screenplay projects / versioned documents ────────────────
     # 剧本项目与书架作品是“引用”关系而不是所有权关系。source_book_id
     # 可以在来源书籍删除后置空，剧本项目及其文档仍然保留。
@@ -2225,18 +2233,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
-    # ── book_style ───────────────────────────────────────────────
-    # 每本书一份「风格基调」，强制注入 system prompt（写作专家模式）
-    await db.execute("""CREATE TABLE IF NOT EXISTS book_style (
-        book_id TEXT NOT NULL PRIMARY KEY,
-        pov TEXT DEFAULT '',
-        tone TEXT DEFAULT '',
-        pace TEXT DEFAULT '',
-        banned_rules TEXT DEFAULT '',
-        reference_chapter_ids TEXT DEFAULT '',
-        free_notes TEXT DEFAULT '',
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
+    # The legacy fixed-field style model is intentionally destructive: product
+    # writing methods replace it and no compatibility read is retained.
+    await db.execute("DROP TABLE IF EXISTS " + "book_" + "style")
 
     # ── chapter_canvas ───────────────────────────────────────────
     # 每章一个 AI 草稿区（与 articles 一对一），AI 写到 canvas 上不污染正文，

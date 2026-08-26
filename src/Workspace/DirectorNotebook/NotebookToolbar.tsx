@@ -9,7 +9,7 @@ import { useWorkspace } from '../WorkspaceContext'
 import {
   GLOBAL_OUTLINE_TAB,
   MEMORY_TAB,
-  STYLE_TAB,
+  WRITING_METHODS_TAB,
   type WorkspaceUtilityTab,
 } from '../utilityPanelTypes'
 import './NotebookToolbar.scss'
@@ -22,7 +22,7 @@ interface ToolDef {
 const TOOLS: ToolDef[] = [
   { tab: GLOBAL_OUTLINE_TAB, icon: <MasterOutlineIcon /> },
   { tab: MEMORY_TAB, icon: <StoryMemoryIcon /> },
-  { tab: STYLE_TAB, icon: <HighlightIcon /> },
+  { tab: WRITING_METHODS_TAB, icon: <HighlightIcon /> },
 ]
 
 /** 工作台顶部的全书级工具入口；内容统一在右侧组合面板中以标签打开。 */

@@ -10,7 +10,13 @@ import {
 import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
 import type { AgentConversationExtensions } from '../../components/AgentConversation/extensions.ts'
 import { getAssistantRenderableMarkdown } from '../../components/AgentConversation/assistantCopy.ts'
-import type { ChatAgentMode, EntityId } from '../../types.ts'
+import type {
+  ChatAgentMode,
+  EntityId,
+  WritingMethodOverrides,
+} from '../../types.ts'
+import type { BoundWritingMethodChoice } from './writingMethodOverrides'
+import { writingMethodOverrideMode } from './writingMethodOverrides'
 import AiContextBar, {
   type AiContextBarBindings,
 } from './components/AiContextBar'
@@ -39,6 +45,10 @@ interface BookConversationExtensionBindings {
   attachments: BookAssistantAttachmentStore
   running: boolean
   onAddFavorite(prompt: string, content: string): void
+  writingMethodChoices: BoundWritingMethodChoice[]
+  writingMethodOverrides: WritingMethodOverrides
+  onCycleWritingMethod(revisionId: string): void
+  onRequestWritingMethodRecommendation(): void
 }
 
 export function useBookConversationExtensions({
@@ -58,8 +68,26 @@ export function useBookConversationExtensions({
   attachments,
   running,
   onAddFavorite,
+  writingMethodChoices,
+  writingMethodOverrides,
+  onCycleWritingMethod,
+  onRequestWritingMethodRecommendation,
 }: BookConversationExtensionBindings): AgentConversationExtensions {
   return React.useMemo(() => ({
+    composerCommands: writingMethodChoices.map((method) => {
+      const mode = writingMethodOverrideMode(
+        writingMethodOverrides,
+        method.revisionId,
+      )
+      return {
+        id: `writing-method:${method.revisionId}`,
+        label: method.name,
+        description: `${mode === 'force' ? '本轮强制' : mode === 'exclude' ? '本轮排除' : '按任务自动选择'} · v${method.versionNo} · ${method.source === 'scheme' ? '来自写作方案' : '直接绑定'}`,
+        keywords: [method.methodType === 'primary' ? '主方法' : '专项技法'],
+        active: mode !== 'default',
+        onSelect: () => onCycleWritingMethod(method.revisionId),
+      }
+    }),
     renderSessionContext: () => (
       <>
         <div className="conversation-book-card">
@@ -110,6 +138,21 @@ export function useBookConversationExtensions({
           promptTemplateContext={promptTemplateContext}
           promptTemplateDisabled={false}
         />
+        <PurrButton
+          type="text"
+          size="small"
+          disabled={running}
+          onClick={onRequestWritingMethodRecommendation}
+        >
+          推荐方法
+        </PurrButton>
+        {(writingMethodOverrides.forceRevisionIds.length > 0
+          || writingMethodOverrides.excludeRevisionIds.length > 0) ? (
+          <span className="writing-method-turn-status">
+            本轮方法 · 强制 {writingMethodOverrides.forceRevisionIds.length}
+            {' · '}排除 {writingMethodOverrides.excludeRevisionIds.length}
+          </span>
+        ) : null}
       </>
     ),
     renderAssistantAttachment: (message, index) => {
@@ -159,11 +202,15 @@ export function useBookConversationExtensions({
     messages,
     onAddFavorite,
     onInsertPrompt,
+    onCycleWritingMethod,
+    onRequestWritingMethodRecommendation,
     prompt,
     promptTemplateContext,
     running,
     scope,
     setChatAgentMode,
     setScope,
+    writingMethodChoices,
+    writingMethodOverrides,
   ])
 }

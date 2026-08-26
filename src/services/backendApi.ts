@@ -46,6 +46,7 @@ export type PlatformApiKey =
   | 'importDatabase'
   | 'openDatabaseDirectory'
   | 'openAndReadTextFile'
+  | 'pickNovelSourceTextFile'
   | 'pickStoryBackgroundAttachments'
   | 'openStoryBackgroundAttachment'
 
@@ -423,15 +424,124 @@ export const backendApi: BackendApi = {
   deleteStoryBackgroundAttachment: (data) =>
     apiDelete(`/story-background/attachments/${data.id}`),
 
-  getBookStyle: (data) => apiGet(`/book-style/${data.bookId}`),
-  saveBookStyle: (data) => apiPut(`/book-style/${data.bookId}`, {
-    pov: data.pov || '',
-    tone: data.tone || '',
-    pace: data.pace || '',
-    banned_rules: data.banned_rules || '',
-    reference_chapter_ids: data.reference_chapter_ids || '',
-    free_notes: data.free_notes || '',
+  listWritingMethods: (data = {}) => apiGet(
+    `/writing-methods${data.includeArchived ? '?includeArchived=true' : ''}`,
+  ),
+  getWritingMethod: (data) => apiGet(`/writing-methods/${data.methodId}`),
+  createWritingMethod: (data) => apiPost('/writing-methods', data),
+  updateWritingMethodDraft: (data) => apiPut(
+    `/writing-methods/${data.methodId}/draft`, data,
+  ),
+  publishWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/publish`, {}),
+  copyWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/copy`, {}),
+  setWritingMethodStatus: (data) => apiPut(`/writing-methods/${data.methodId}/status`, {
+    status: data.status,
   }),
+  deleteWritingMethod: (data) => apiDelete(`/writing-methods/${data.methodId}`),
+  createWritingMethodCandidates: (data) => apiPost(
+    `/novel-analyses/${data.analysisId}/writing-method-candidates`,
+    { craftCardIds: data.craftCardIds ?? [] },
+  ),
+  getWritingMethodCandidateBatch: (data) => apiGet(
+    `/writing-method-candidate-batches/${data.schemeId}`,
+  ),
+  publishWritingMethodCandidateBatch: (data) => apiPost(
+    `/writing-method-candidate-batches/${data.schemeId}/publish`,
+    { methodIds: data.methodIds },
+  ),
+  listWritingSchemes: (data = {}) => apiGet(
+    `/writing-schemes${data.includeArchived ? '?includeArchived=true' : ''}`,
+  ),
+  getWritingScheme: (data) => apiGet(`/writing-schemes/${data.schemeId}`),
+  createWritingScheme: (data) => apiPost('/writing-schemes', data),
+  updateWritingSchemeDraft: (data) => apiPut(
+    `/writing-schemes/${data.schemeId}/draft`, data,
+  ),
+  publishWritingScheme: (data) => apiPost(`/writing-schemes/${data.schemeId}/publish`, {}),
+  copyWritingScheme: (data) => apiPost(`/writing-schemes/${data.schemeId}/copy`, {}),
+  setWritingSchemeStatus: (data) => apiPut(`/writing-schemes/${data.schemeId}/status`, {
+    status: data.status,
+  }),
+  deleteWritingScheme: (data) => apiDelete(`/writing-schemes/${data.schemeId}`),
+  listBookWritingMethodBindings: (data) => apiGet(
+    `/books/${data.bookId}/writing-method-bindings`,
+  ),
+  bindBookWritingMethod: (data) => apiPost(
+    `/books/${data.bookId}/writing-method-bindings`,
+    { bindingType: data.bindingType, revisionId: data.revisionId },
+  ),
+  reorderBookWritingMethodBindings: (data) => apiPut(
+    `/books/${data.bookId}/writing-method-bindings/reorder`,
+    { bindingIds: data.bindingIds },
+  ),
+  upgradeBookWritingMethodBinding: (data) => apiPut(
+    `/books/${data.bookId}/writing-method-bindings/${data.bindingId}/upgrade`,
+    { revisionId: data.revisionId },
+  ),
+  unbindBookWritingMethod: (data) => apiDelete(
+    `/books/${data.bookId}/writing-method-bindings/${data.bindingId}`,
+  ),
+  previewNovelSourceImport: (data) => apiPost('/novel-sources/import/preview', data),
+  confirmNovelSourceImport: (data) => apiPost('/novel-sources/import/confirm', data),
+  freezeBookAsNovelSource: (data) => apiPost('/novel-sources/freeze-book', data),
+  listNovelSources: (data = {}) => apiGet(
+    `/novel-sources${data.includeArchived ? '?includeArchived=true' : ''}`,
+  ),
+  getNovelSource: (data) => apiGet(`/novel-sources/${data.workId}`),
+  archiveNovelSource: (data) => apiPut(`/novel-sources/${data.workId}/archive`, {
+    status: 'archived',
+  }),
+  getNovelSourceRevision: (data) => apiGet(
+    `/novel-source-revisions/${data.revisionId}`,
+  ),
+  deleteNovelSourceRevision: (data) => apiDelete(
+    `/novel-source-revisions/${data.revisionId}`,
+  ),
+  getNovelSourceSection: (data) => apiGet(
+    `/novel-source-revisions/${data.revisionId}/sections/${data.sectionId}`,
+  ),
+  searchNovelSourceSections: (data) => apiGet(
+    `/novel-source-revisions/${data.revisionId}/search?q=${encodeURIComponent(data.query)}&limit=${data.limit ?? 12}`,
+  ),
+  startNovelAnalysis: (data) => apiPostIdempotent(
+    `/novel-source-revisions/${data.revisionId}/analyses`,
+    { runtime: data.runtime },
+    data.commandId,
+  ),
+  listNovelAnalysisRuns: (data) => apiGet(
+    `/novel-source-revisions/${data.revisionId}/analysis-runs`,
+  ),
+  pauseNovelAnalysis: (data) => apiPost(
+    `/novel-analysis-tasks/${data.taskId}/pause`,
+    { expectedTaskRevision: data.expectedTaskRevision },
+  ),
+  resumeNovelAnalysis: (data) => apiPostIdempotent(
+    `/novel-analysis-tasks/${data.taskId}/resume`,
+    { runtime: data.runtime, retryFailed: data.retryFailed },
+    data.commandId,
+  ),
+  cancelNovelAnalysis: (data) => apiPost(
+    `/novel-analysis-tasks/${data.taskId}/cancel`,
+    {},
+  ),
+  getNovelAnalysisArtifact: (data) => apiGet(
+    `/novel-analysis-artifacts/${data.artifactId}`,
+  ),
+  reviewNovelAnalysisArtifact: (data) => apiPostIdempotent(
+    `/novel-analysis-artifacts/${data.artifactId}/review`,
+    { facts: data.facts, craftCards: data.craftCards },
+    data.commandId,
+  ),
+  publishNovelAnalysisArtifact: (data) => apiPost(
+    `/novel-analysis-artifacts/${data.artifactId}/publish`,
+    {},
+  ),
+  listPublishedNovelAnalyses: (data) => apiGet(
+    `/novel-source-revisions/${data.revisionId}/analyses`,
+  ),
+  previewContinuationCanon: (data) => apiPost('/continuations/canon-preview', data),
+  createContinuation: (data) => apiPost('/continuations', data),
+  getContinuation: (data) => apiGet(`/continuations/${data.bookId}`),
 
   commitChapterDiff: (data) => apiPost(`/chapter-diff/${data.chapterId}/commit`, {
     content: data.content,

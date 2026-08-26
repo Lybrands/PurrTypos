@@ -1,0 +1,30 @@
+.writing-methods-page { display: flex; width: 100%; height: 100%; flex-direction: column; overflow: hidden; color: var(--text-primary); background: transparent; }
+.writing-methods-main { display: flex; min-height: 0; padding: 28px clamp(24px, 5vw, 64px) 24px; flex: 1; flex-direction: column; overflow: hidden; }
+.writing-methods-toolbar { display: flex; width: 100%; max-width: 1180px; margin: 0 auto 20px; align-items: flex-end; justify-content: space-between; gap: 20px; flex-shrink: 0; }
+.writing-methods-toolbar h1 { margin: 3px 0 5px; font-size: clamp(24px, 3vw, 32px); font-weight: var(--font-weight-semibold); letter-spacing: -0.03em; }
+.writing-methods-toolbar p { margin: 0; color: var(--text-muted); }
+.writing-methods-eyebrow { color: var(--accent); font-size: 10px; font-weight: var(--font-weight-semibold); letter-spacing: 0.18em; }
+.writing-methods-header-actions { display: flex; gap: 8px; }
+.writing-methods-tabs { display: flex; width: 100%; max-width: 1180px; margin: 0 auto; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.writing-methods-tabs button { padding: 10px 18px; color: var(--text-secondary); border: 0; border-bottom: 2px solid transparent; background: transparent; }
+.writing-methods-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.writing-methods-layout { display: grid; width: 100%; min-height: 0; max-width: 1180px; margin: 14px auto 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-elevated); flex: 1; grid-template-columns: 260px minmax(0, 1fr); }
+.writing-methods-list { min-height: 0; padding: 10px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--bg-surface); }
+.writing-methods-list > button { display: flex; width: 100%; padding: 12px; text-align: left; border: 0; border-radius: var(--radius-md); background: transparent; flex-direction: column; gap: 4px; }
+.writing-methods-list > button:hover, .writing-methods-list > button.active { background: var(--accent-light); }
+.writing-methods-list span, .writing-methods-list small { color: var(--text-muted); font-size: 12px; }
+.writing-methods-editor { min-width: 0; min-height: 0; padding: 24px; overflow-y: auto; }
+.writing-method-editor { display: flex; flex-direction: column; gap: 12px; }
+.writing-method-editor-meta { display: flex; gap: 10px; align-items: center; }
+.writing-method-editor-meta input { flex: 1; font-size: 20px; font-weight: 600; }
+.writing-method-editor input, .writing-method-editor select, .writing-method-editor textarea { padding: 9px 11px; color: var(--text-primary); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface); }
+.writing-method-editor textarea { min-height: 310px; resize: vertical; font: 14px/1.7 var(--font-mono, monospace); }
+.writing-method-description { width: 100%; }
+.writing-method-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.writing-method-versions { padding-top: 10px; border-top: 1px solid var(--border); }
+.writing-method-versions h3, .writing-scheme-members h3 { margin: 0 0 8px; font-size: 14px; }
+.writing-method-versions pre { max-height: 180px; overflow: auto; white-space: pre-wrap; }
+.writing-scheme-members { display: flex; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); flex-direction: column; gap: 8px; }
+.writing-scheme-members label { display: flex; gap: 8px; }
+.writing-methods-empty, .writing-methods-loading { display: grid; min-height: 0; color: var(--text-muted); flex: 1; place-items: center; }
+@media (max-width: 800px) { .writing-methods-main { padding: 24px 20px; } .writing-methods-toolbar { align-items: flex-start; flex-direction: column; } .writing-methods-header-actions { flex-wrap: wrap; } .writing-methods-layout { grid-template-columns: 1fr; } .writing-methods-list { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--border); } }

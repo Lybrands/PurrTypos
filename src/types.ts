@@ -17,6 +17,12 @@ export interface Book {
   cover_color?: string | null;
   enable_volume?: number;
   create_time?: string;
+  creation_mode?: 'original' | 'continuation';
+  continuation_source_title?: string | null;
+  continuation_fork_section_title?: string | null;
+  continuation_fork_ordinal?: number | null;
+  continuation_source_revision_id?: string | null;
+  continuation_canon_snapshot_id?: string | null;
 }
 
 export type ScreenplaySourceKind = 'book' | 'original';
@@ -652,19 +658,268 @@ export interface Article {
   update_time?: string;
 }
 
-export interface BookStyle {
-  book_id: EntityId;
-  pov: string;
-  tone: string;
-  pace: string;
-  banned_rules: string;
-  /** JSON 字符串：number[] 或 string[]，参考章节 id */
-  reference_chapter_ids: string;
-  free_notes: string;
-  update_time?: string;
+export type WritingMethodType = 'primary' | 'technique';
+
+export interface WritingMethodOverrides {
+  forceRevisionIds: string[];
+  excludeRevisionIds: string[];
 }
 
-export type SaveBookStylePayload = Omit<BookStyle, 'book_id' | 'update_time'> & { bookId: EntityId };
+export interface NovelSourcePickedFile {
+  fileName: string;
+  extension: '.txt' | '.md' | '.markdown';
+  byteCount: number;
+  content: string;
+}
+
+export interface NovelSourceSection {
+  id: string;
+  revision_id: string;
+  ordinal: number;
+  title: string;
+  content_digest: string;
+  locator: Record<string, unknown>;
+  text_content?: string;
+}
+
+export interface NovelSourceRevision {
+  id: string;
+  work_id: string;
+  version_no: number;
+  content_digest: string;
+  parser_version: number;
+  byte_count: number;
+  character_count: number;
+  source_metadata: Record<string, unknown>;
+  sections?: NovelSourceSection[];
+  create_time: string;
+}
+
+export interface NovelSourceWork {
+  id: string;
+  title: string;
+  source_type: 'external_text' | 'frozen_book';
+  origin_book_id: EntityId | null;
+  status: 'active' | 'archived';
+  metadata: Record<string, unknown>;
+  revision_count?: number;
+  latest_revision_id?: string | null;
+  revisions?: NovelSourceRevision[];
+  create_time: string;
+  update_time: string;
+}
+
+export interface NovelSourceImportPreview {
+  fileName: string;
+  extension: '.txt' | '.md' | '.markdown';
+  byteCount: number;
+  characterCount: number;
+  contentDigest: string;
+  suggestedTitle: string;
+  parserVersion: number;
+  sectionCount: number;
+  requiresSingleSectionConfirmation: boolean;
+  estimatedAdditionalStorageBytes: number;
+  rightsNotice: string;
+  modelDataBoundaryNotice: string;
+  sections: Array<{
+    ordinal: number;
+    title: string;
+    characterCount: number;
+    preview: string;
+  }>;
+}
+
+export interface NovelAnalysisEvidence {
+  sectionId: string;
+  excerpt: string;
+  sectionOrdinal?: number;
+  locator?: { start: number; end: number };
+  excerptDigest?: string;
+}
+
+export interface NovelAnalysisFact {
+  id?: string;
+  factKind: string;
+  subjectKey: string;
+  predicate: string;
+  value: unknown;
+  lifecycleStatus: string;
+  evidence: NovelAnalysisEvidence[];
+}
+
+export interface NovelAnalysisCraftCard {
+  id?: string;
+  cardKind: string;
+  title: string;
+  bodyMarkdown: string;
+  evidence: NovelAnalysisEvidence[];
+}
+
+export interface NovelAnalysisArtifact {
+  artifactId: string;
+  artifactKind: string;
+  sourceRevisionId: string;
+  sectionIds: string[];
+  facts: NovelAnalysisFact[];
+  craftCards: NovelAnalysisCraftCard[];
+  coverage: Record<string, unknown>;
+  conflicts: unknown[];
+  reviewStatus: 'pending' | 'reviewed';
+}
+
+export interface NovelAnalysisRun {
+  runId: string;
+  runStatus: string;
+  commandId: string;
+  taskId: string | null;
+  taskStatus: string | null;
+  taskRevision: number | null;
+  totalUnits: number;
+  completedUnits: number;
+  failedUnits: number;
+  error?: string | null;
+  artifactRef?: string | null;
+}
+
+export interface PublishedNovelAnalysis {
+  id: string;
+  sourceRevisionId: string;
+  versionNo: number;
+  coverageEndOrdinal: number;
+  schemaVersion: number;
+  contentDigest: string;
+  facts: NovelAnalysisFact[];
+  craftCards: NovelAnalysisCraftCard[];
+  summary: Record<string, unknown>;
+  createTime: string;
+}
+
+export interface ContinuationCanonPreview {
+  sourceRevisionId: string;
+  sourceAnalysisId: string;
+  forkSectionId: string;
+  forkOrdinal: number;
+  sourceWorkId: string;
+  sourceTitle: string;
+  sourceVersionNo: number;
+  forkSectionTitle: string;
+  snapshotDigest: string;
+  records: Array<{
+    sourceFactId: string;
+    factKind: string;
+    subjectKey: string;
+    predicate: string;
+    value: unknown;
+    contentDigest: string;
+  }>;
+}
+
+export interface ContinuationWorkspace {
+  book: Book;
+  binding: {
+    id: string;
+    sourceWorkId: string;
+    sourceRevisionId: string;
+    sourceAnalysisId: string;
+    sourceTitle: string;
+    forkSectionId: string;
+    forkSectionTitle: string;
+    forkOrdinal: number;
+    canonSnapshotId: string;
+    canonSnapshotDigest: string;
+    bindingDigest: string;
+  };
+  canonRecords: ContinuationCanonPreview['records'];
+}
+
+export interface WritingMethodRevision {
+  id: string;
+  method_id: string;
+  version_no: number;
+  name: string;
+  description: string;
+  method_type: WritingMethodType;
+  tags: string[];
+  markdown_body: string;
+  metadata: Record<string, unknown>;
+  content_digest: string;
+  published_at: string;
+}
+
+export interface WritingMethod {
+  id: string;
+  name: string;
+  description: string;
+  method_type: WritingMethodType;
+  tags: string[];
+  source_type: string;
+  source_ref: Record<string, unknown>;
+  is_builtin: number;
+  status: 'active' | 'archived' | 'disabled';
+  draft_markdown: string;
+  draft_metadata: Record<string, unknown>;
+  draft_revision: number;
+  current_published_revision_id: string | null;
+  revisions?: WritingMethodRevision[];
+  create_time: string;
+  update_time: string;
+}
+
+export interface WritingSchemeRevisionMember {
+  ordinal: number;
+  method_revision_id: string;
+  method_id: string;
+  name: string;
+  method_type: WritingMethodType;
+  version_no: number;
+  content_digest: string;
+}
+
+export interface WritingSchemeRevision {
+  id: string;
+  scheme_id: string;
+  version_no: number;
+  name: string;
+  description: string;
+  members_digest: string;
+  members: WritingSchemeRevisionMember[];
+  published_at: string;
+}
+
+export interface WritingScheme {
+  id: string;
+  name: string;
+  description: string;
+  draft_member_revision_ids: string[];
+  draft_revision: number;
+  source_type: string;
+  source_ref: Record<string, unknown>;
+  is_builtin: number;
+  status: 'active' | 'archived' | 'disabled';
+  current_published_revision_id: string | null;
+  revisions?: WritingSchemeRevision[];
+  create_time: string;
+  update_time: string;
+}
+
+export interface WritingMethodCandidateBatch {
+  analysisId: string;
+  scheme: WritingScheme;
+  methods: WritingMethod[];
+  bindingChanged: false;
+}
+
+export interface BookWritingMethodBinding {
+  id: string;
+  book_id: EntityId;
+  binding_type: 'method' | 'scheme';
+  method_revision_id: string | null;
+  scheme_revision_id: string | null;
+  priority: number;
+  source: string;
+  revision: WritingMethodRevision | WritingSchemeRevision;
+}
 
 export interface ChapterDiffHistory {
   id: number;
@@ -1944,13 +2199,64 @@ export interface ElectronAPI {
   getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string } | null>>;
   saveStoryBackground: (data: { bookId: EntityId; content: string }) => Promise<ApiResult<void>>;
   openAndReadTextFile: () => Promise<ApiResult<string>>;
+  pickNovelSourceTextFile: () => Promise<ApiResult<NovelSourcePickedFile>>;
   pickStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
   openStoryBackgroundAttachment: (data: { storedPath: string }) => Promise<string>;
-  // Book style
-  getBookStyle: (data: { bookId: EntityId }) => Promise<ApiResult<BookStyle | null>>;
-  saveBookStyle: (data: SaveBookStylePayload) => Promise<ApiResult<void>>;
+  listWritingMethods: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingMethod[]>>;
+  getWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
+  createWritingMethod: (data: { name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
+  updateWritingMethodDraft: (data: { methodId: string; expectedDraftRevision: number; name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
+  publishWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethodRevision>>;
+  copyWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
+  setWritingMethodStatus: (data: { methodId: string; status: 'active' | 'archived' }) => Promise<ApiResult<WritingMethod>>;
+  deleteWritingMethod: (data: { methodId: string }) => Promise<ApiResult<void>>;
+  listWritingSchemes: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingScheme[]>>;
+  getWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
+  createWritingScheme: (data: { name: string; description?: string; memberRevisionIds?: string[] }) => Promise<ApiResult<WritingScheme>>;
+  updateWritingSchemeDraft: (data: { schemeId: string; expectedDraftRevision: number; name: string; description?: string; memberRevisionIds: string[] }) => Promise<ApiResult<WritingScheme>>;
+  publishWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingSchemeRevision>>;
+  copyWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
+  setWritingSchemeStatus: (data: { schemeId: string; status: 'active' | 'archived' }) => Promise<ApiResult<WritingScheme>>;
+  deleteWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<void>>;
+  listBookWritingMethodBindings: (data: { bookId: EntityId }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
+  bindBookWritingMethod: (data: { bookId: EntityId; bindingType: 'method' | 'scheme'; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
+  reorderBookWritingMethodBindings: (data: { bookId: EntityId; bindingIds: string[] }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
+  upgradeBookWritingMethodBinding: (data: { bookId: EntityId; bindingId: string; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
+  unbindBookWritingMethod: (data: { bookId: EntityId; bindingId: string }) => Promise<ApiResult<void>>;
+  createWritingMethodCandidates: (data: { analysisId: string; craftCardIds?: string[] }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
+  getWritingMethodCandidateBatch: (data: { schemeId: string }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
+  publishWritingMethodCandidateBatch: (data: { schemeId: string; methodIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevision: WritingSchemeRevision; bindingChanged: false }>>;
+  previewNovelSourceImport: (data: NovelSourcePickedFile) => Promise<ApiResult<NovelSourceImportPreview>>;
+  confirmNovelSourceImport: (data: NovelSourcePickedFile & {
+    title: string;
+    workId?: string;
+    expectedContentDigest: string;
+    confirmSingleSection: boolean;
+    rightsConfirmed: boolean;
+    modelDataBoundaryConfirmed: boolean;
+  }) => Promise<ApiResult<NovelSourceRevision>>;
+  freezeBookAsNovelSource: (data: { bookId: EntityId }) => Promise<ApiResult<NovelSourceRevision>>;
+  listNovelSources: (data?: { includeArchived?: boolean }) => Promise<ApiResult<NovelSourceWork[]>>;
+  getNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
+  archiveNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
+  getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
+  deleteNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<void>>;
+  getNovelSourceSection: (data: { revisionId: string; sectionId: string }) => Promise<ApiResult<NovelSourceSection>>;
+  searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<Array<{ id: string; ordinal: number; title: string; excerpt: string }>>>;
+  startNovelAnalysis: (data: { commandId: string; revisionId: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
+  listNovelAnalysisRuns: (data: { revisionId: string }) => Promise<ApiResult<NovelAnalysisRun[]>>;
+  pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisRun>>;
+  resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; taskId: string; commandId: string }>>;
+  cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisRun>>;
+  getNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[] }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
+  listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
+  previewContinuationCanon: (data: { sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string }) => Promise<ApiResult<ContinuationCanonPreview>>;
+  createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; enableVolume?: boolean; writingMethodBindings?: Array<{ bindingType: 'method' | 'scheme'; revisionId: string }> }) => Promise<ApiResult<ContinuationWorkspace>>;
+  getContinuation: (data: { bookId: string }) => Promise<ApiResult<ContinuationWorkspace>>;
   // Chapter diff history
   commitChapterDiff: (data: {
     chapterId: EntityId;
@@ -2272,6 +2578,7 @@ export interface ElectronAPI {
     /** AiContextBar 勾选的设定/伏笔 id，后端前置 fetch 后注入 system */
     selectedMemoryIds?: (number | string)[];
     selectedForeshadowingIds?: (number | string)[];
+    writingMethodOverrides?: WritingMethodOverrides;
     chatAgentMode?: ChatAgentMode;
     contextWindow?: AiContextWindow;
     /** Immutable durable history frontier for request reservation/claim. */

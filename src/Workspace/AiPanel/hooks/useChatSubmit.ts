@@ -43,6 +43,7 @@ import type {
   AiSession,
   EntityId,
   SettingDiffCardState,
+  WritingMethodOverrides,
 } from '../../../types'
 import {
   createDurableBookRunControl,
@@ -75,6 +76,7 @@ export interface UseChatSubmitParams {
   agentEnabled: boolean
   selectedMemoryIds?: (number | string)[]
   selectedForeshadowingIds?: (number | string)[]
+  writingMethodOverrides?: WritingMethodOverrides
   /**
    * 会话作用域：setting = 全局会话（不绑章节），不要求选中章节即可发送；
    * 默认 chapter（必须先选章节）。
@@ -135,6 +137,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     agentEnabled,
     selectedMemoryIds,
     selectedForeshadowingIds,
+    writingMethodOverrides,
     sessionScope = "chapter",
     onAssistantAttachment,
     associateAssistantIdentities,
@@ -394,6 +397,18 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           selectedForeshadowingIds: [
             ...(queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds ?? []),
           ],
+          writingMethodOverrides: {
+            forceRevisionIds: [
+              ...(queuedContext?.writingMethodOverrides?.forceRevisionIds
+                ?? writingMethodOverrides?.forceRevisionIds
+                ?? []),
+            ],
+            excludeRevisionIds: [
+              ...(queuedContext?.writingMethodOverrides?.excludeRevisionIds
+                ?? writingMethodOverrides?.excludeRevisionIds
+                ?? []),
+            ],
+          },
         };
         const nextQueue = [...getChatRuntimeQueue(), queuedItem];
         const queuedCount = countQueuedForSession(nextQueue, sessionId);
@@ -415,6 +430,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.selectedMemoryIds ?? selectedMemoryIds;
       const requestSelectedForeshadowingIds =
         queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds;
+      const requestWritingMethodOverrides =
+        queuedContext?.writingMethodOverrides ?? writingMethodOverrides ?? {
+          forceRevisionIds: [],
+          excludeRevisionIds: [],
+        };
 
     const baseConversations = submitOverride?.resendBaseMessages
       ?? getChatSessionRuntime(sessionId)?.messages
@@ -447,6 +467,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         selectedForeshadowingIds: [
           ...(requestSelectedForeshadowingIds ?? []),
         ],
+        writingMethodOverrides: {
+          forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
+          excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
+        },
       };
       replaceChatRuntimeMessages(sessionId, baseConversations);
       setChatRuntimeLoading(sessionId, true);
@@ -840,6 +864,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         requestSelectedForeshadowingIds.length > 0
           ? requestSelectedForeshadowingIds
           : undefined,
+      writingMethodOverrides: {
+        forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
+        excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
+      },
       chatAgentMode: requestAgentEnabled ? "agent" : "ask",
       contextWindow: streamOptions.context_window,
       expectedConversationIds: requestAgentEnabled
@@ -868,6 +896,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setSessions,
     selectedMemoryIds,
     selectedForeshadowingIds,
+    writingMethodOverrides,
     sessionScope,
     appMessage,
     replaceQueuedSubmissions,

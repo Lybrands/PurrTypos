@@ -134,3 +134,11 @@
   flex-direction: column;
   gap: 8px;
 }
+.writing-method-turn-status {
+  padding: 3px 8px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}

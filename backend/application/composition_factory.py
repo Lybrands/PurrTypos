@@ -5,6 +5,9 @@ from __future__ import annotations
 from functools import partial
 
 from application.agent_composition import AgentComposition
+from application.novel_analysis_agent_profile import (
+    build_novel_analysis_agent_profile,
+)
 from application.screenplay_agent_profile import (
     build_screenplay_agent_profile,
 )
@@ -73,6 +76,7 @@ def create_agent_composition(
         ),
         profile_factories=(
             writing_profile_factory,
+            build_novel_analysis_agent_profile,
             partial(
                 build_screenplay_agent_profile,
                 candidate_normalizer=normalize_screenplay_candidate,

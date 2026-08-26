@@ -9,6 +9,7 @@ const {
 } = require('./backend_process')
 const { createAppProtocolHandler } = require('./app_protocol')
 const { registerDatabaseIpcHandlers } = require('./database_ipc')
+const { registerNovelSourceFileIpc } = require('./source_file_ipc')
 const { configureAppIcon } = require('./app_icon')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
@@ -348,6 +349,12 @@ registerDatabaseIpcHandlers({
   shell,
   app,
   backendProcess,
+  getMainWindow: () => mainWindow,
+})
+
+registerNovelSourceFileIpc({
+  ipcMain,
+  dialog,
   getMainWindow: () => mainWindow,
 })
 

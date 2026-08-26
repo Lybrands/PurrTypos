@@ -43,7 +43,6 @@ _SOURCE_TOOLS = frozenset({
     "readSourceBackground",
     "querySourceStoryFacts",
     "readSourceOutline",
-    "readSourceStyle",
 })
 _UNSCOPED_SOURCE_TOOLS = frozenset({
     "listSourceCharacters",
@@ -68,7 +67,6 @@ _DRAFT_SOURCE_TOOLS = frozenset({
     "readSourceChapters",
     "searchSourceText",
     "querySourceStoryFacts",
-    "readSourceStyle",
 })
 _DOCUMENT_SECTION_TOOLS = (
     _PROJECT_TOOLS
@@ -155,7 +153,6 @@ _DISPLAY_NAMES = {
     "readSourceBackground": "读取故事背景",
     "querySourceStoryFacts": "检索故事事实",
     "readSourceOutline": "读取原作大纲",
-    "readSourceStyle": "读取原作风格",
     "writeScreenplayCandidatePart": "写入剧本候选稿",
     "inspectScreenplayCandidate": "检查剧本候选稿",
 }
@@ -176,7 +173,6 @@ _EPISODE_DISPLAY_NAMES = {
     "readSourceBackground": "为第 {episode} 集读取故事背景",
     "querySourceStoryFacts": "为第 {episode} 集检索故事事实",
     "readSourceOutline": "为第 {episode} 集读取原作大纲",
-    "readSourceStyle": "为第 {episode} 集读取原作风格",
     "writeScreenplayCandidatePart": "写入第 {episode} 集剧本候选稿",
     "inspectScreenplayCandidate": "检查第 {episode} 集剧本候选稿",
 }

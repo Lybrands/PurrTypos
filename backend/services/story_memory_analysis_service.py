@@ -13,6 +13,7 @@ from uuid import uuid4
 from pydantic import TypeAdapter, ValidationError
 
 from application.story_memory_mapping import story_setting_change_from_input
+from application.continuation_context import ContinuationContextService
 from domains.writing.story_memory import StoryMemoryStatus
 from domains.writing.story_memory_analysis import (
     StoryMemoryAnalysisReceipt,
@@ -375,12 +376,31 @@ async def _build_user_prompt(
         }
         for item in current[:_MAX_CONTEXT_RECORDS]
     ]
+    continuation = await ContinuationContextService(db).load_for_writing(book_id)
+    inherited_canon = [
+        {
+            "factKind": item["factKind"],
+            "subjectKey": item["subjectKey"],
+            "predicate": item["predicate"],
+            "value": item["value"],
+            "contentDigest": item["contentDigest"],
+        }
+        for item in continuation.get("canonRecords") or ()
+    ]
     context = {
         "chapterId": chapter_id,
         "chapterTitle": chapter_title,
         "characters": characters,
         "settingEntities": entities,
         "currentStoryMemory": current_payload,
+        "creationMode": continuation["creationMode"],
+        "inheritedCanon": inherited_canon,
+        "baselineRules": {
+            "inheritedCanonIsReadOnly": True,
+            "inheritedCanonWinsConflicts": True,
+            "changesMustTargetBookId": book_id,
+            "neverWriteSourceBook": True,
+        },
     }
     return (
         "以下 JSON 是可信项目目录与当前状态：\n"

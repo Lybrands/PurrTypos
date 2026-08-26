@@ -779,32 +779,6 @@ class ScreenplayToolQuery:
             "hasMore": len(rows) > limit,
         }
 
-    async def read_style(self, scope, _arguments) -> dict[str, Any]:
-        project = await self._source_project(scope)
-        row = await self._db.fetch_one(
-            "SELECT * FROM book_style WHERE book_id = ?",
-            [str(project["source_book_id"])],
-        )
-        allowed_chapter_ids = {
-            str(item["id"])
-            for item in await scoped_chapters(self._db, project)
-        }
-        references = tuple(
-            chapter_id
-            for chapter_id in _json_string_list(
-                (row or {}).get("reference_chapter_ids")
-            )
-            if chapter_id in allowed_chapter_ids
-        )
-        return {"style": {
-            "pov": str((row or {}).get("pov") or ""),
-            "tone": str((row or {}).get("tone") or ""),
-            "pace": str((row or {}).get("pace") or ""),
-            "bannedRules": str((row or {}).get("banned_rules") or ""),
-            "referenceChapterIds": list(references),
-            "freeNotes": str((row or {}).get("free_notes") or ""),
-        }}
-
     @staticmethod
     def source_refs(
         tool_name: str,
@@ -821,7 +795,6 @@ class ScreenplayToolQuery:
             "readSourceBackground": "full",
             "querySourceStoryFacts": "search",
             "readSourceOutline": "referenced",
-            "readSourceStyle": "full",
         }.get(tool_name)
         if coverage is None:
             return ()
@@ -854,16 +827,10 @@ class ScreenplayToolQuery:
                 "outlines", "outline", "outlineId", "content"
             ),
         }.get(tool_name, ("", "", "", ""))
-        if tool_name in {"readSourceBackground", "readSourceStyle"}:
-            value = result.get(
-                "content" if tool_name == "readSourceBackground" else "style"
-            )
+        if tool_name == "readSourceBackground":
+            value = result.get("content")
             return ({
-                "sourceType": (
-                    "story_background"
-                    if tool_name == "readSourceBackground"
-                    else "book_style"
-                ),
+                "sourceType": "story_background",
                 "sourceId": "main",
                 "sourceRevision": _digest(value),
                 "coverageMode": coverage,

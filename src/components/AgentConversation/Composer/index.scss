@@ -77,6 +77,44 @@ textarea.agent-composer__input.purr-input {
   min-width: 0;
 }
 
+.agent-composer__command-menu {
+  position: absolute;
+  z-index: 4;
+  right: 14px;
+  bottom: calc(100% + 8px);
+  left: 14px;
+  display: grid;
+  max-height: 280px;
+  padding: 6px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  box-shadow: 0 14px 36px rgba(42, 30, 24, 0.16);
+
+  button {
+    display: grid;
+    gap: 2px;
+    padding: 8px 10px;
+    text-align: left;
+    color: var(--text-primary);
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+
+    &:hover,
+    &[aria-selected='true'] {
+      background: var(--bg-hover);
+    }
+
+    span {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+  }
+}
+
 .agent-composer__send.purr-button,
 .agent-composer__stop.purr-button {
   display: inline-flex;
