@@ -287,7 +287,7 @@ app = FastAPI(title="PurrTypos Backend", version="0.5.2", lifespan=lifespan)
 
 # CORS：本服务**仅供本机 Electron 渲染进程**调用。
 # - "null" 来自打包后 file:// 加载的页面发起 fetch 时 Origin 为 "null"。
-# - regex 覆盖 Vite dev server (http://localhost:5173) 与本机其他端口。
+# - regex 覆盖 Vite dev server (http://localhost:5174) 与本机其他端口。
 # 之前的 ``allow_origins=["*"]`` 让任何跨域脚本都能命中本机 API，对桌面端
 # 是不必要的攻击面。
 app.add_middleware(
