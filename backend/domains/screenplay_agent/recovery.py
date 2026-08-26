@@ -27,6 +27,7 @@ _MODEL_OUTPUT_CODES = frozenset({
     "model_output_truncated",
     "tool_call_truncated",
     "invalid_tool_arguments_json",
+    "invalid_tool_arguments_schema",
     "invalid_tool_results",
     "max_model_rounds",
     "missing_required_tool_call",

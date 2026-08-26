@@ -50,7 +50,7 @@ def _body(**extra):
     }
 
 
-async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
+async def test_production_unit_executor_uses_the_composed_tool_loop(
     monkeypatch,
 ):
     captured_service = {}
@@ -92,11 +92,6 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayCandidateModelService",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        conversation_routes,
         "ScreenplayTaskUnitExecutor",
         CapturingExecutor,
     )
@@ -108,7 +103,7 @@ async def test_production_unit_executor_has_no_tool_and_tool_model_paths(
     assert "planner" not in captured_service
     assert "resolver" not in captured_service
     assert captured_executor["composition"] is composition
-    assert captured_executor["candidate_model_service"] is not None
+    assert "candidate_model_service" not in captured_executor
 
 
 async def _post(app, body):

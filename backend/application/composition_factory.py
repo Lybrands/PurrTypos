@@ -8,6 +8,9 @@ from application.agent_composition import AgentComposition
 from application.screenplay_agent_profile import (
     build_screenplay_agent_profile,
 )
+from application.screenplay_agent_task_executor import (
+    normalize_screenplay_candidate,
+)
 from application.writing_agent_profile import build_writing_agent_profile
 from infrastructure.screenplay.agent_root_completion_projector import (
     ScreenplayAgentRootCompletionProjector,
@@ -17,6 +20,9 @@ from infrastructure.screenplay.agent_continuation_begin_projector import (
 )
 from infrastructure.screenplay.agent_run_cancellation_projector import (
     ScreenplayRunCancellationProjector,
+)
+from infrastructure.screenplay.candidate_completion_projector import (
+    ScreenplayCandidateCompletionProjector,
 )
 
 
@@ -46,6 +52,10 @@ def create_agent_composition(
         kwargs.pop("run_cancellation_projectors", ())
     )
     screenplay_projectors = (
+        ScreenplayCandidateCompletionProjector(
+            db,
+            candidate_normalizer=normalize_screenplay_candidate,
+        ),
         ScreenplayAgentRootCompletionProjector(db),
     )
     run_commit_projector = (
@@ -65,6 +75,7 @@ def create_agent_composition(
             writing_profile_factory,
             partial(
                 build_screenplay_agent_profile,
+                candidate_normalizer=normalize_screenplay_candidate,
             ),
         ),
         **kwargs,

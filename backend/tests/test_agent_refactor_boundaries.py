@@ -89,6 +89,7 @@ REMOVED_COMPATIBILITY_PATHS = (
     BACKEND_DIR / "schemas" / "screenplay_agent_run.py",
     BACKEND_DIR / "schemas" / "screenplay_conversation.py",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "screenplayConversationRuntime.ts",
+    BACKEND_DIR / "application" / "screenplay_candidate_model.py",
 )
 GENERIC_RUNTIME_PERSISTENCE_FILES = (
     BACKEND_DIR / "infrastructure" / "persistence" / "sqlite_run_repository.py",
@@ -359,6 +360,26 @@ def test_screenplay_conversation_never_invents_assistant_copy():
         BACKEND_DIR / "application" / "screenplay_agent_service.py"
     ).read_text(encoding="utf-8")
     assert "assistant_content=result.final_response" not in service
+
+
+def test_screenplay_model_units_load_business_content_only_through_tools():
+    source = (
+        BACKEND_DIR / "application" / "screenplay_agent_task_executor.py"
+    ).read_text(encoding="utf-8")
+    forbidden = {
+        "_hydrate_evidence(",
+        ".episode_writing_context(",
+        ".source_context(",
+        '"draftContentText"',
+        '"sourceMaterial"',
+    }
+    violations = sorted(token for token in forbidden if token in source)
+    assert not violations, (
+        "Screenplay model units hydrate business content outside tools: "
+        + ", ".join(violations)
+    )
+    assert "ScreenplayToolCallingService" in source
+    assert '"evidenceDescriptor"' in source
 
 
 def test_screenplay_page_projects_durable_content_from_the_canonical_entry():

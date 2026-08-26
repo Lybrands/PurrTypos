@@ -28,7 +28,10 @@ from purra.recovery import RecoveryPolicy
 
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.contracts import ScreenplayIntent
-from domains.screenplay_agent.prompts import build_screenplay_planning_policy
+from domains.screenplay_agent.prompts import (
+    build_screenplay_planning_policy,
+    build_screenplay_public_progress_policy,
+)
 
 
 ScreenplayPlanningContextLoader = Callable[
@@ -36,6 +39,7 @@ ScreenplayPlanningContextLoader = Callable[
 ]
 
 SCREENPLAY_PLANNING_FACTS_CONTEXT = "screenplay_planning_facts"
+SCREENPLAY_PUBLIC_PROGRESS_CONTEXT = "screenplay_public_progress"
 
 
 class ScreenplayExecutionStateFactory:
@@ -45,11 +49,26 @@ class ScreenplayExecutionStateFactory:
         )
         return ExecutionState(domain={
             "projectId": context.project_id,
-            "taskId": context.task_id,
+            "taskId": context.task_id or context.turn_id,
             "unitId": context.unit_id,
             "targetRole": context.target_role,
             "expectedPartType": context.expected_part_type,
             "expectedPartKey": context.expected_part_key,
+            "dependencyPartKeys": list(context.dependency_part_keys),
+            **(
+                {
+                    "deliverableRevisionScope": dict(
+                        context.deliverable_revision_scope
+                    )
+                }
+                if context.deliverable_revision_scope is not None
+                else {}
+            ),
+            **(
+                {"boundEpisodeNumber": context.episode_number}
+                if context.episode_number is not None
+                else {}
+            ),
             "candidateValidation": (
                 dict(context.candidate_validation_contract)
                 if context.candidate_validation_contract is not None
@@ -283,7 +302,16 @@ class ScreenplayHostContextProvider:
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
         del request, budget, signal
-        return ContextBundle(diagnostics={"contextMode": "screenplay-tools"})
+        policy = build_screenplay_public_progress_policy()
+        return ContextBundle(
+            blocks=(ContextBlock(
+                name=SCREENPLAY_PUBLIC_PROGRESS_CONTEXT,
+                content=policy,
+                token_count=estimate_json_tokens(policy),
+                untrusted=False,
+            ),),
+            diagnostics={"contextMode": "screenplay-tools"},
+        )
 
     async def build_planning_context(
         self,
@@ -321,13 +349,22 @@ class ScreenplayHostContextProvider:
             separators=(",", ":"),
             sort_keys=True,
         )
+        progress_policy = build_screenplay_public_progress_policy()
         return ContextBundle(
-            blocks=(ContextBlock(
-                name=SCREENPLAY_PLANNING_FACTS_CONTEXT,
-                content=planning_facts,
-                token_count=estimate_json_tokens(facts),
-                untrusted=False,
-            ),),
+            blocks=(
+                ContextBlock(
+                    name=SCREENPLAY_PUBLIC_PROGRESS_CONTEXT,
+                    content=progress_policy,
+                    token_count=estimate_json_tokens(progress_policy),
+                    untrusted=False,
+                ),
+                ContextBlock(
+                    name=SCREENPLAY_PLANNING_FACTS_CONTEXT,
+                    content=planning_facts,
+                    token_count=estimate_json_tokens(facts),
+                    untrusted=False,
+                ),
+            ),
             diagnostics={
                 "contextMode": "screenplay-root-planning",
                 "hostPlanningFacts": facts,
@@ -363,6 +400,7 @@ class ScreenplayDomainAdapter:
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_model_rounds=8,
         max_progress_rounds=8,
+        provider_invocation_timeout_ms=300_000,
     )
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
 

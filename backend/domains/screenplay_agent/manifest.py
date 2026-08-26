@@ -17,6 +17,8 @@ class ScreenplayPartKind(StrEnum):
     EPISODE_METADATA = "episode_metadata"
     REVIEW_DIMENSION = "review_dimension"
     DOCUMENT_SECTION = "document_section"
+    EXPANSION = "expansion"
+    HOST_PROJECTION = "host_projection"
     VALIDATION = "validation"
     FINAL_RESPONSE = "final_response"
 
