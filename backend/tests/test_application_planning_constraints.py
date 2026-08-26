@@ -431,6 +431,8 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     assert facts["planningRules"] == [policy]
     assert planner_facts["planningRules"] == [policy]
     assert "needsTodos:true" in policy
+    assert "最少且不重复" in policy
+    assert "1 至 8" not in policy
     assert "stepBindings" in policy
     assert "Revision" in policy
     assert '"targetRole":"sourceAnalysis"' in planning_content

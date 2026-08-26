@@ -1,10 +1,10 @@
 # 小说续写能力架构与实施计划
 
-状态：已确认方向，仅记录计划，尚未实施
+状态：历史基线，已由 [`../../design/2026-08-27-writing-methods-and-novel-continuation-implementation-plan.md`](../../design/2026-08-27-writing-methods-and-novel-continuation-implementation-plan.md) 替代；不要按本文文件路径、表结构或 Agent 拓扑直接实施
 
 创建日期：2026-08-10
 
-更新日期：2026-08-12
+更新日期：2026-08-27
 范围：原作导入、蒸馏分析、写作方法提炼、正史快照、续写创作、Continuation Agent 及 Story Memory 组合召回
 
 ## 关联规格与职责

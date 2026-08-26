@@ -5813,6 +5813,22 @@ async def test_screenplay_stream_enriches_tool_operation_display_names():
         "zh-CN": "查看剧本项目",
     }
 
+    episode_chunk = _with_screenplay_tool_display_names({
+        "kind": "operation.started",
+        "payload": {
+            "kind": "tool",
+            "display": {
+                "labelParams": {
+                    "toolName": "writeScreenplayCandidatePart",
+                    "episodeNumber": 7,
+                },
+            },
+        },
+    })
+    assert episode_chunk["payload"]["display"]["labelParams"][
+        "displayNames"
+    ] == {"zh-CN": "写入第 7 集剧本候选稿"}
+
 
 async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay(
     temp_db: DatabaseConnection,

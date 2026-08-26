@@ -4,7 +4,9 @@ import type { AgentConversationMessage } from '../../../agent-runtime/contracts.
 import { initialCanonicalOutputState } from '../../../agent-runtime/canonicalOutput.ts'
 import {
   buildAssistantTimeline,
+  executionPanelHasTerminalError,
   getAssistantProcessingLabel,
+  getCanonicalOperationStatusText,
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getOperationGroupProgress,
@@ -43,6 +45,7 @@ test('canonical timeline filters model operations, localizes tools, and groups c
       display: {
         labelParams: {
           toolName: 'readScreenplayDeliverable',
+          retryOfToolCallId: 'call-read-screenplay-invalid',
           displayNames: { 'zh-CN': '读取剧本交付物' },
         },
       },
@@ -67,6 +70,19 @@ test('canonical timeline filters model operations, localizes tools, and groups c
     '查看剧本项目',
     '读取剧本交付物',
   ])
+  assert.deepEqual(visible.map((part) => part.isRetry), [false, true])
+  assert.equal(
+    getCanonicalOperationStatusText(operations['tool-2'], '读取剧本交付物', true),
+    '正在重试 读取剧本交付物',
+  )
+  assert.equal(
+    getCanonicalOperationStatusText(
+      { ...operations['tool-2'], status: 'succeeded' },
+      '读取剧本交付物',
+      true,
+    ),
+    '重试成功 读取剧本交付物',
+  )
   const grouped = groupConsecutiveWorkSteps(visible, 'turn-1')
   assert.equal(grouped.length, 1)
   assert.equal(grouped[0].type, 'stepGroup')
@@ -441,7 +457,7 @@ test('execution panel covers active empty work and completed visible operations'
     {
       visible: true,
       active: false,
-      autoOpen: true,
+      autoOpen: false,
       stepCount: 1,
       title: '执行了 1 个步骤',
     },
@@ -455,6 +471,92 @@ test('execution panel covers active empty work and completed visible operations'
       stepCount: 0,
       title: '用时',
     },
+  )
+})
+
+test('execution panel marks only terminal failures, not recovered attempts', () => {
+  assert.equal(executionPanelHasTerminalError({
+    canonicalOutput: {
+      ...initialCanonicalOutputState(),
+      runStatus: 'done',
+      runTerminal: true,
+      operations: {
+        failedAttempt: {
+          operationId: 'failedAttempt',
+          runId: 'run-1',
+          invocationId: null,
+          kind: 'tool',
+          firstSequence: 1,
+          status: 'failed',
+          startedAt: '2026-08-26T00:00:00Z',
+          display: { labelParams: {} },
+        },
+      },
+      operationOrder: ['failedAttempt'],
+    },
+  }), false)
+  assert.equal(executionPanelHasTerminalError({
+    canonicalOutput: {
+      ...initialCanonicalOutputState(),
+      runStatus: 'failed',
+      runTerminal: true,
+    },
+  }), true)
+  assert.equal(executionPanelHasTerminalError({
+    taskPlan: {
+      title: '创作剧本',
+      status: 'blocked',
+      steps: [],
+    },
+  }), true)
+})
+
+test('completed canonical runs retain failed tool attempts in execution history', () => {
+  const base = initialCanonicalOutputState()
+  const failedTool = {
+    operationId: 'failed-write',
+    runId: 'run-1',
+    invocationId: 'invocation-1',
+    kind: 'tool',
+    firstSequence: 1,
+    status: 'failed' as const,
+    startedAt: '2026-08-26T00:00:00Z',
+    toolName: 'writeScreenplayCandidatePart',
+    display: { labelParams: { toolName: 'writeScreenplayCandidatePart' } },
+  }
+  const succeededTool = {
+    ...failedTool,
+    operationId: 'succeeded-write',
+    invocationId: 'invocation-2',
+    firstSequence: 2,
+    status: 'succeeded' as const,
+  }
+  const message = (runStatus: 'done' | 'failed'): AgentConversationMessage => ({
+    role: 'assistant',
+    content: runStatus === 'done' ? '已完成' : '',
+    canonicalOutput: {
+      ...base,
+      runStatus,
+      runTerminal: true,
+      operations: {
+        [failedTool.operationId]: failedTool,
+        [succeededTool.operationId]: succeededTool,
+      },
+      operationOrder: [failedTool.operationId, succeededTool.operationId],
+    },
+  })
+
+  assert.deepEqual(
+    buildAssistantTimeline(message('done'), { messageIndex: 0 })
+      .filter((part) => part.type === 'operation')
+      .map((part) => part.operation.status),
+    ['failed', 'succeeded'],
+  )
+  assert.deepEqual(
+    buildAssistantTimeline(message('failed'), { messageIndex: 0 })
+      .filter((part) => part.type === 'operation')
+      .map((part) => part.operation.status),
+    ['failed', 'succeeded'],
   )
 })
 

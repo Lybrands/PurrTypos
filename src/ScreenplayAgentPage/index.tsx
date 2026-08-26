@@ -730,7 +730,11 @@ export default function ScreenplayAgentPage({
         role: entry.role,
         content: entry.content,
         clientTurnId: entry.turnId,
-        sentAt: entry.createdAt || undefined,
+        sentAt: (
+          entry.role === 'assistant'
+            ? entry.updatedAt || entry.createdAt
+            : entry.createdAt
+        ) || undefined,
         agentRunId: entry.runId || undefined,
         model: entry.model || undefined,
         isError: entry.status === 'failed',

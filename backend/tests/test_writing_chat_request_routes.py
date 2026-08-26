@@ -272,7 +272,7 @@ async def test_request_id_replay_cannot_change_api_key_credential(receipt_app):
     assert "different-secret" not in stored["request_digest"]
 
 
-async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
+async def test_replan_repairs_completed_step_rewrites_in_one_root(
     receipt_app,
     monkeypatch,
 ):
@@ -328,8 +328,7 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                     },
                 ],
             }
-        else:
-            assert planner_round == 2
+        elif planner_round == 2:
             execution = payload["executionState"]
             assert execution["completedSteps"][0]["id"] == (
                 "inspect-current-chapter"
@@ -338,9 +337,6 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                 execution["recentToolObservations"],
                 ensure_ascii=False,
             )
-            # Approved contract deviation: Core rejects this completed-id
-            # rewrite by retaining immutable history, without surfacing a
-            # planner validation error to the Writing layer.
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
@@ -363,6 +359,24 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                         "riskLevel": "read",
                     },
                 ],
+            }
+        else:
+            assert planner_round == 3
+            assert "reuses completed step ids: inspect-current-chapter" in (
+                messages[-1]["content"]
+            )
+            content = {
+                "needsTodos": True,
+                "title": "深化弄堂氛围",
+                "goal": "根据新证据调整未完成策略",
+                "todos": [{
+                    "id": "shape-wind-sound-atmosphere",
+                    "title": "围绕风声调整弄堂氛围",
+                    "type": "review",
+                    "executor": "model",
+                    "expectedTools": [],
+                    "riskLevel": "read",
+                }],
             }
         return {
             "message": {
@@ -448,7 +462,7 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
     observed_runs = await db.fetch_all(
         "SELECT id, status, final_response FROM ai_agent_runs"
     )
-    assert planner_round == 2
+    assert planner_round == 3
     assert len(plans) >= 2
     assert [
         (
