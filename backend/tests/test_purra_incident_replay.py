@@ -16,6 +16,12 @@ FIXTURE = (
     / "purra_incidents"
     / "2026-08-10-failure-sequences.json"
 )
+SCREENPLAY_DEADLINE_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "purra_incidents"
+    / "2026-08-25-screenplay-series-arc-deadline.json"
+)
 ALLOWED_FIELDS = frozenset({
     "id",
     "errorCode",
@@ -57,6 +63,85 @@ def _operation_status(disposition: FailureDisposition) -> str:
     if disposition is FailureDisposition.CANCEL:
         return "canceled"
     return "failed"
+
+
+def _screenplay_deadline_fixture() -> dict[str, object]:
+    payload = json.loads(SCREENPLAY_DEADLINE_FIXTURE.read_text(encoding="utf-8"))
+    assert payload["schemaVersion"] == 1
+    return payload
+
+
+def test_series_arc_deadline_fixture_is_sanitized_and_reproducible():
+    payload = _screenplay_deadline_fixture()
+    incident = payload["incident"]
+
+    assert isinstance(incident, dict)
+    assert set(incident).isdisjoint({
+        "runId",
+        "taskId",
+        "invocationId",
+        "prompt",
+        "reasoning",
+        "content",
+        "payload",
+    })
+    assert incident == {
+        "incidentClass": "screenplay_structure_series_arc_deadline",
+        "unitSemanticKey": "section:structure:series_arc",
+        "errorCode": "model_invocation_deadline_exceeded",
+        "initialUnitCount": 8,
+        "completedPartSemanticKeys": ["document:evidence"],
+        "episodeIndexStarted": False,
+        "modelAttemptCount": 4,
+        "reportedUsageAttempts": 3,
+        "inputTokens": 92_285,
+        "outputTokens": 878,
+        "reasoningTokens": 443,
+        "providerOutputEvents": 469,
+        "failedInvocationDeltaBatchEvents": 442,
+        "failedInvocationPayloadChars": 1_513_586,
+        "providerOutputBytes": 1_628_472,
+        "providerInvocationTimeoutMs": 120_000,
+        "elapsedMs": 129_000,
+        "delegationCount": 0,
+        "containsPrivateReasoning": False,
+    }
+
+
+def test_series_arc_deadline_is_not_replayed_as_a_silent_or_retryable_wait():
+    payload = _screenplay_deadline_fixture()
+    incident = payload["incident"]
+    assert isinstance(incident, dict)
+
+    assert int(incident["providerOutputEvents"]) > 0
+    assert int(incident["failedInvocationDeltaBatchEvents"]) > 0
+    assert int(incident["failedInvocationPayloadChars"]) > 0
+    assert incident["episodeIndexStarted"] is False
+    assert incident["completedPartSemanticKeys"] == ["document:evidence"]
+
+    signal = classify_screenplay_run_failure(SimpleNamespace(
+        code=incident["errorCode"],
+        retryable=False,
+    ))
+    decision = decide_failure(signal, attempts_remaining=3)
+    assert signal.category.value == "business_invariant"
+    assert signal.retryable is False
+    assert decision.disposition.value == "fail_permanent"
+
+
+def test_series_arc_overreach_fixture_names_the_phase_three_rejection():
+    payload = _screenplay_deadline_fixture()
+    candidate = payload["invalidSeriesArcCandidate"]
+    expected = payload["expectedValidation"]
+
+    assert isinstance(candidate, dict)
+    assert isinstance(expected, dict)
+    phases = candidate["contentJson"]["seriesArc"]["phases"]
+    assert phases[0]["episodes"] == [{"number": 1, "id": "ep01"}]
+    assert expected == {
+        "outcome": "reject",
+        "reasonCode": "series_arc_contains_episode_expansion",
+    }
 
 
 def test_historical_failure_fixture_is_sanitized_and_complete():

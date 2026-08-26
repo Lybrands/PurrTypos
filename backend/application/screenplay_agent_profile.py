@@ -13,6 +13,10 @@ from uuid import uuid4
 
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_manifest_compiler import compile_screenplay_manifest
+from application.screenplay_part_contracts import (
+    screenplay_max_generated_units,
+    screenplay_task_budget_limits,
+)
 from application.screenplay_task_resolver import (
     ResolvedScreenplayTask,
     SqliteScreenplayTaskResolver,
@@ -181,6 +185,7 @@ class ScreenplayAgentProfile:
             reviewed_draft_id=resolved.reviewed_draft_id,
             base_revision_id=resolved.base_revision_id,
             document_sections=resolved.document_sections,
+            source_chapters=resolved.source_chapters,
             original_request=request.latest_user_text(),
             plan_bindings=intent.plan_bindings,
             plan_steps=plan.steps,
@@ -272,27 +277,37 @@ class _ScreenplayTaskDescriptorResolver:
     async def resolve(self, request, plan, decision):
         del request, plan
         metadata = decision.metadata
+        recipe = decision.execution_recipe
+        if recipe is None:
+            raise ValueError("screenplay durable task requires an execution recipe")
+        max_generated_units = screenplay_max_generated_units(recipe)
+        if len(recipe.steps) > max_generated_units:
+            raise ValueError("screenplay_task_scope_too_large")
         return DurableTaskDescriptor(
             namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
             owner_id=str(metadata["projectId"]),
             idempotency_key=str(metadata["commandId"]),
+            budget_limits=screenplay_task_budget_limits(recipe),
             metadata={
-                key: metadata[key]
-                for key in (
-                    "operationId",
-                    "projectId",
-                    "sessionId",
-                    "turnId",
-                    "targetRole",
-                    "manifestId",
-                    "manifestDigest",
-                    "sourceRevisionRefs",
-                    "baseRevisionId",
-                    "screenplayScope",
-                    "screenplayAction",
-                    "requestedDeliverable",
-                    "originalPlan",
-                )
+                **{
+                    key: metadata[key]
+                    for key in (
+                        "operationId",
+                        "projectId",
+                        "sessionId",
+                        "turnId",
+                        "targetRole",
+                        "manifestId",
+                        "manifestDigest",
+                        "sourceRevisionRefs",
+                        "baseRevisionId",
+                        "screenplayScope",
+                        "screenplayAction",
+                        "requestedDeliverable",
+                        "originalPlan",
+                    )
+                },
+                "maxGeneratedUnits": max_generated_units,
             },
         )
 
@@ -804,6 +819,7 @@ def _checkpoint_input(
             "compose_episode_metadata": "episodeMetadata",
             "generate_review_dimension": "reviewDimension",
             "generate_document_section": "documentSection",
+            "project_structure_hooks": "documentSection",
             "validate_manifest_part": "validation",
         }.get(unit_kind)
         if part_kind is None:
@@ -818,7 +834,19 @@ def _checkpoint_input(
             if artifact_kind in {"draft_episode", "review_episode", "document"}:
                 receipt["artifactKind"] = artifact_kind
         episode = int(unit_input.get("episodeNumber") or 0)
-        section = str(unit_input.get("sectionKey") or "").strip()
+        internal_source_digest = any(
+            unit_input.get(flag) is True
+            for flag in ("sourceChapterDigest", "sourceDigestReduction")
+        )
+        section = (
+            ""
+            if internal_source_digest
+            else str(
+                unit_input.get("documentSectionKey")
+                or unit_input.get("sectionKey")
+                or ""
+            ).strip()
+        )
         if episode:
             receipt["episodeNumber"] = episode
         if section:
@@ -830,8 +858,25 @@ def _checkpoint_input(
             and episode
         ):
             completed_episodes.add(episode)
-        if raw.get("unitKind") == "generate_document_section" and section:
+        if (
+            raw.get("unitKind") in {
+                "generate_document_section",
+                "project_structure_hooks",
+            }
+            and section
+            and not internal_source_digest
+            and not any(
+                unit_input.get(flag) is True
+                for flag in (
+                    "seriesArcIndex",
+                    "episodePlanIndex",
+                    "characterArcsIndex",
+                )
+            )
+        ):
             completed_sections.add(section)
+            if unit_input.get("documentSectionKey") == "episode_plan" and episode:
+                completed_episodes.add(episode)
     scope = dict(metadata.get("screenplayScope") or {})
     episode_numbers = tuple(
         sorted({
@@ -840,9 +885,31 @@ def _checkpoint_input(
         } - {0})
     )
     section_keys = tuple(dict.fromkeys(
-        str((thaw_json_mapping(unit.metadata).get("input") or {}).get("sectionKey") or "")
+        str(
+            (thaw_json_mapping(unit.metadata).get("input") or {}).get(
+                "documentSectionKey"
+            )
+            or (thaw_json_mapping(unit.metadata).get("input") or {}).get(
+                "sectionKey"
+            )
+            or ""
+        )
         for unit in units
-        if str((thaw_json_mapping(unit.metadata).get("input") or {}).get("sectionKey") or "")
+        if getattr(unit, "required", True)
+        and not any(
+            (thaw_json_mapping(unit.metadata).get("input") or {}).get(flag)
+            is True
+            for flag in ("sourceChapterDigest", "sourceDigestReduction")
+        )
+        and str(
+            (thaw_json_mapping(unit.metadata).get("input") or {}).get(
+                "documentSectionKey"
+            )
+            or (thaw_json_mapping(unit.metadata).get("input") or {}).get(
+                "sectionKey"
+            )
+            or ""
+        )
     ))
     remaining = {
         "scope": scope,
@@ -856,7 +923,7 @@ def _checkpoint_input(
     failures = tuple({
         "code": str(unit.error_code),
         "category": str((unit.failure or {}).get("category") or "unit"),
-    } for unit in units if unit.error_code)
+    } for unit in units if unit.error_code and unit.status.value != "expanded")
     return ScreenplayCheckpointInput(
         checkpoint_key=checkpoint_key,
         root_run_id=(

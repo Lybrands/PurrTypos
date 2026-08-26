@@ -734,7 +734,16 @@ class SqliteScreenplayOperationRepository:
     ) -> ScreenplayOperationRecord:
         normalized_id = _required(operation_id, "screenplay Operation id")
         normalized_command = _required(command_id, "screenplay Operation command id")
-        request = {"target": target.value, **dict(values)}
+        # A command id is the idempotency boundary.  The same transition may be
+        # valid again after an intervening resume (for example pause -> resume
+        # -> pause with the same error).  Include the command identity in the
+        # persisted digest so the table's semantic uniqueness constraint does
+        # not collapse two distinct lifecycle occurrences.
+        request = {
+            "commandId": normalized_command,
+            "target": target.value,
+            **dict(values),
+        }
         digest = _digest(request)
         async with self._mutation_transaction():
             receipt = await self._db.fetch_one(

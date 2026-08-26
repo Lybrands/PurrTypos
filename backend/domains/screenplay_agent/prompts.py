@@ -3,6 +3,21 @@
 from __future__ import annotations
 
 
+def build_screenplay_public_progress_policy() -> str:
+    return (
+        "【公开当前步骤标题规则】\n"
+        "- 每次准备调用工具推进任务时，先输出一条简短的当前步骤标题，"
+        "概括此刻正在推进的用户目标；这是面向用户的状态标题，"
+        "不是工具日志或思考过程。\n"
+        "- 只描述可公开的工作方向，不得包含 Run、Task、Turn、Operation、Artifact、"
+        "Revision、项目或场景等内部 ID，不得包含工具协议名、参数、JSON、文件路径、"
+        "链接、错误堆栈、私有 reasoning、chain-of-thought 或隐藏推理。\n"
+        "- 使用一行、一个短语，避免 Markdown、编号、句末标点和技术术语；"
+        "若无法安全概括，"
+        "不要输出进度文字，直接调用工具。"
+    )
+
+
 def build_screenplay_planning_policy() -> str:
     return (
         "【剧本 Agent Root 规划规则】\n"
@@ -23,10 +38,17 @@ def build_screenplay_planning_policy() -> str:
         "约束；taskSpec.operation 必须等于 action，taskSpec.deliverable 必须等于"
         "targetRole，screenplay.scope 必须精确等于 command scope；不得改写、"
         "缩小、扩大或降级为 answer。\n"
+        "- host facts 只包含规划所需的控制性事实，不代表已经读取项目正文。"
+        "凡回答或计划依赖项目交付物、剧本正文、场景表或原作内容，必须先用"
+        "一个简短的公开当前步骤标题概括要核对的内容，再调用可用的读取工具；不得凭"
+        "摘要推断内容，也不得声称未调用工具就已经读过材料。\n"
         "- 只决定用户语义目标与步骤。不得决定 Revision 基线、重试次数、"
         "并行度、幂等键、发布顺序、内部 Recipe/Part 或原子提交；"
         "这些全部由宿主编译和执行。"
     )
 
 
-__all__ = ["build_screenplay_planning_policy"]
+__all__ = [
+    "build_screenplay_planning_policy",
+    "build_screenplay_public_progress_policy",
+]
