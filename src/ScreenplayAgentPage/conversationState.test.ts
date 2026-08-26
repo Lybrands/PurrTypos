@@ -175,7 +175,12 @@ function snapshot(
 }
 
 test('screenplay Agent rebuilds messages from persisted Turn and Task state', () => {
-  const state = stateFromScreenplayConversationSnapshot(snapshot())
+  const state = stateFromScreenplayConversationSnapshot(snapshot(
+    turn({ updatedAt: '2026-08-09T00:00:02Z' }),
+    task({ updatedAt: '2026-08-09T00:00:03Z' }),
+    12,
+    operation({ updatedAt: '2026-08-09T00:00:04Z' }),
+  ))
 
   assert.equal(state.cursor, 12)
   assert.deepEqual(state.messages.map((message) => ({
@@ -184,6 +189,8 @@ test('screenplay Agent rebuilds messages from persisted Turn and Task state', ()
     content: message.content,
     taskId: message.taskId,
     runId: message.runId,
+    createdAt: message.createdAt,
+    updatedAt: message.updatedAt,
   })), [
     {
       id: 'turn-1:user',
@@ -191,6 +198,8 @@ test('screenplay Agent rebuilds messages from persisted Turn and Task state', ()
       content: '创作接下来三集',
       taskId: 'task-1',
       runId: 'run-draft-1',
+      createdAt: '2026-08-09T00:00:00Z',
+      updatedAt: '2026-08-09T00:00:04Z',
     },
     {
       id: 'turn-1:assistant',
@@ -198,6 +207,8 @@ test('screenplay Agent rebuilds messages from persisted Turn and Task state', ()
       content: '',
       taskId: 'task-1',
       runId: 'run-draft-1',
+      createdAt: '2026-08-09T00:00:00Z',
+      updatedAt: '2026-08-09T00:00:04Z',
     },
   ])
 })

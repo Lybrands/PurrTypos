@@ -20,8 +20,10 @@ import {
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getAssistantProcessingLabel,
+  getCanonicalOperationStatusText,
   getOperationGroupProgress,
   groupConsecutiveWorkSteps,
+  executionPanelHasTerminalError,
   type AssistantTimelinePart,
   type TimelineOperationPart,
   type TimelineStepPart,
@@ -160,9 +162,11 @@ function operationPartActiveStartedAt(
 function CanonicalOperationRow({
   operation,
   label,
+  isRetry,
 }: {
   operation: CanonicalOperation;
   label: string;
+  isRetry: boolean;
 }) {
   const running = operation.status === "running";
   const failed = operation.status === "failed";
@@ -179,16 +183,11 @@ function CanonicalOperationRow({
       ? Math.max(0, now - startedAt)
       : undefined
   );
-  const text = running
-    ? `正在执行 ${label}`
-    : failed
-      ? `执行失败 ${label}`
-      : operation.status === "canceled"
-        ? `已取消 ${label}`
-        : `已完成 ${label}`;
+  const text = getCanonicalOperationStatusText(operation, label, isRetry);
+  const statusClass = running ? "running" : failed ? "error" : "done";
   return (
     <div
-      className={`bubble-tool-call-line ${running ? "a-flicker-opacity" : ""} bubble-tool-call-line--${running ? "running" : "done"}`}
+      className={`bubble-tool-call-line ${running ? "a-flicker-opacity" : ""} bubble-tool-call-line--${statusClass}`}
     >
       {running ? (
         <LoadingIcon spin className="bubble-tool-call-icon" />
@@ -313,6 +312,7 @@ function AssistantOutputInner({
           <CanonicalOperationRow
             operation={part.operation}
             label={part.label}
+            isRetry={part.isRetry}
           />
         </div>
       );
@@ -412,7 +412,7 @@ function AssistantOutputInner({
           autoOpen={executionPanel.autoOpen}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
-          hasError={workLogHasError(executionLogParts)}
+          hasError={executionPanelHasTerminalError(message)}
         >
           {executionLogItems.map(renderExecutionLogItem)}
         </ExecutionLog>

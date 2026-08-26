@@ -21,7 +21,8 @@ def build_screenplay_public_progress_policy() -> str:
 def build_screenplay_planning_policy() -> str:
     return (
         "【剧本 Agent Root 规划规则】\n"
-        "- 本域 Root 每轮都返回 needsTodos:true、1 至 8 个语义步骤和 TaskSpec；"
+        "- 本域 Root 每轮都返回 needsTodos:true、完成目标所需的最少且不重复的"
+        "用户可见语义步骤和 TaskSpec；"
         "即使是普通问答，也用一个 model 步骤表达回答目标，"
         "不使用无 TaskSpec 的直接响应形式。\n"
         "- 只生成用户可见、可验证的语义步骤；不要把读取内部状态、"

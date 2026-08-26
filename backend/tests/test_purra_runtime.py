@@ -1421,6 +1421,10 @@ async def test_runtime_retries_correctable_tool_input_without_replanning():
     assert result.outcome is RuntimeOutcome.COMPLETED
     assert result.final_response == "Recovered after correcting the tool input."
     assert len(tools.requests) == 2
+    assert dict(tools.requests[0].retry_of_tool_call_ids) == {}
+    assert dict(tools.requests[1].retry_of_tool_call_ids) == {
+        "call-corrected": "call-invalid",
+    }
     assert observer.completed_tool_rounds == 1
     assert [
         trace.outcome
