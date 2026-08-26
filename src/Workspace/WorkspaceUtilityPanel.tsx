@@ -23,14 +23,16 @@ import './WorkspaceUtilityPanel.scss'
 
 const ChapterOutlinePanel = lazy(() => import('./DirectorNotebook/ChapterOutlineModal'))
 const MemoryCenter = lazy(() => import('./AiPanel/components/MemoryCenter'))
-const StyleForm = lazy(() => import('./DirectorNotebook/StyleForm'))
+const WritingMethodBindingsPanel = lazy(() => import('./WritingMethodBindingsPanel'))
+const ContinuationCanonPanel = lazy(() => import('./ContinuationCanonPanel'))
 const SettingPanel = lazy(() => import('./SettingPanel'))
 const DashboardPanel = lazy(() => import('./DashboardPanel'))
 
 const TAB_ICONS: Record<WorkspaceUtilityTabKind, React.ReactNode> = {
   outline: <OutlineIcon />,
   memory: <StoryMemoryIcon />,
-  style: <HighlightIcon />,
+  writingMethods: <HighlightIcon />,
+  canon: <StoryMemoryIcon />,
   setting: <StorySettingIcon />,
   dashboard: <DashboardIcon />,
 }
@@ -116,9 +118,14 @@ export default function WorkspaceUtilityPanel({
             <MemoryCenter bookId={bookId} />
           </div>
         ) : null}
-        {tab.kind === 'style' ? (
-          <div className="workspace-utility-content workspace-utility-content--style">
-            <StyleForm />
+        {tab.kind === 'writingMethods' ? (
+          <div className="workspace-utility-content workspace-utility-content--writing-methods">
+            <WritingMethodBindingsPanel bookId={bookId} />
+          </div>
+        ) : null}
+        {tab.kind === 'canon' ? (
+          <div className="workspace-utility-content workspace-utility-content--canon">
+            <ContinuationCanonPanel bookId={bookId} />
           </div>
         ) : null}
         {tab.kind === 'setting' ? (

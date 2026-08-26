@@ -185,6 +185,28 @@ export const browserPlatformApi: PlatformApi = {
     }
   },
 
+  pickNovelSourceTextFile: async () => {
+    const [file] = await chooseFiles('.txt,.md,.markdown,text/plain,text/markdown')
+    if (!file) return failure('canceled')
+    const extension = (`.${file.name.split('.').pop() || ''}`).toLowerCase()
+    if (!['.txt', '.md', '.markdown'].includes(extension)) {
+      return failure('首版只支持 TXT、Markdown 文件')
+    }
+    try {
+      return {
+        success: true,
+        data: {
+          fileName: file.name,
+          extension: extension as '.txt' | '.md' | '.markdown',
+          byteCount: file.size,
+          content: await file.text(),
+        },
+      }
+    } catch (error) {
+      return failure(error instanceof Error ? error.message : String(error))
+    }
+  },
+
   pickStoryBackgroundAttachments: async ({ bookId }) => {
     const files = await chooseFiles('', true)
     if (!files.length) return failure<StoryBackgroundAttachment[]>('canceled')

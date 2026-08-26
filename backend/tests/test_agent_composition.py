@@ -343,12 +343,16 @@ async def test_writing_profile_owns_product_capabilities(
 
 
 @pytest.mark.asyncio
-async def test_product_composition_registers_writing_and_screenplay_profiles(
+async def test_product_composition_registers_product_profiles(
     temp_db: DatabaseConnection,
 ):
     composition = create_agent_composition(temp_db)
     try:
-        assert composition.agent_profile_ids == ("writing", "screenplay")
+        assert composition.agent_profile_ids == (
+            "writing",
+            "novel_analysis",
+            "screenplay",
+        )
         core = composition.create_core("key", agent_profile="screenplay")
         assert core._planner._result_validator is not None
         assert core._planner._limits.max_repair_attempts == 3
@@ -1287,7 +1291,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
     monkeypatch: pytest.MonkeyPatch,
 ):
     chapter_text = "弄堂里没有雨声，只有晾衣竹竿在风里轻撞墙面。"
-    style_fact = "克制、寂静，以细微物声衬托空间感"
+    background_fact = "弄堂狭窄安静，晾衣竹竿会在风中轻撞墙面"
     await temp_db.execute(
         "INSERT INTO books (id, title) VALUES (?, ?)",
         ["book-replan", "重规划测试书"],
@@ -1307,8 +1311,8 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         ["chapter-replan", _lexical(chapter_text)],
     )
     await temp_db.execute(
-        "INSERT INTO book_style (book_id, tone) VALUES (?, ?)",
-        ["book-replan", style_fact],
+        "INSERT INTO story_background (book_id, content) VALUES (?, ?)",
+        ["book-replan", background_fact],
     )
     planner_payloads: list[dict[str, object]] = []
 
@@ -1320,14 +1324,14 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
-                "goal": "根据书籍风格证据提出氛围改写",
+                "goal": "根据故事背景证据提出氛围改写",
                 "todos": [
                     {
-                        "id": "inspect-book-style",
-                        "title": "检查书籍风格",
+                        "id": "inspect-story-background",
+                        "title": "检查故事背景",
                         "type": "read",
                         "executor": "tool",
-                        "expectedTools": ["getBookStyle"],
+                        "expectedTools": ["getStoryBackground"],
                         "riskLevel": "read",
                     },
                     {
@@ -1343,19 +1347,19 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         else:
             execution = payload["executionState"]
             assert execution["completedSteps"][0]["id"] == (
-                "inspect-book-style"
+                "inspect-story-background"
             )
-            assert style_fact in json.dumps(
+            assert background_fact in json.dumps(
                 execution["recentToolObservations"],
                 ensure_ascii=False,
             )
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
-                "goal": "利用克制寂静的风格证据调整氛围策略",
+                "goal": "利用弄堂背景证据调整氛围策略",
                 "todos": [{
-                    "id": "shape-restrained-alley-atmosphere",
-                    "title": "按克制风格重塑弄堂氛围",
+                    "id": "shape-alley-atmosphere",
+                    "title": "按背景证据重塑弄堂氛围",
                     "type": "review",
                     "executor": "model",
                     "expectedTools": [],
@@ -1383,7 +1387,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 assert [
                     item["function"]["name"]
                     for item in options.get("tools", [])
-                ] == ["getBookStyle"]
+                ] == ["getStoryBackground"]
                 yield {
                     "choices": [{
                         "delta": {
@@ -1392,7 +1396,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                                 "id": "call-read-replan",
                                 "type": "function",
                                 "function": {
-                                    "name": "getBookStyle",
+                                    "name": "getStoryBackground",
                                     "arguments": "{}",
                                 },
                             }],
@@ -1402,7 +1406,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }
                 return
             assert not options.get("tools")
-            assert style_fact in json.dumps(messages, ensure_ascii=False)
+            assert background_fact in json.dumps(messages, ensure_ascii=False)
             yield {
                 "choices": [{
                     "delta": {"content": "改写应以寂静和轻微碰撞声为核心。"},
@@ -1455,10 +1459,10 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         (step["id"], step["title"], step["status"])
         for step in latest["steps"]
     ] == [
-        ("inspect-book-style", "检查书籍风格", "done"),
+        ("inspect-story-background", "检查故事背景", "done"),
         (
-            "shape-restrained-alley-atmosphere",
-            "按克制风格重塑弄堂氛围",
+            "shape-alley-atmosphere",
+            "按背景证据重塑弄堂氛围",
             "running",
         ),
     ]

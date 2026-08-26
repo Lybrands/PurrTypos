@@ -1,6 +1,6 @@
 import type { AiBuiltinProviderId, AiModelConfig } from '../types'
 import { deepseekV4FlashProfile, deepseekV4ProProfile } from './profiles/deepseekV4'
-import { glm5_2Profile } from './profiles/glm5_2'
+import { glm5_3FlashProfile } from './profiles/glm5_3Flash'
 import { kimiK3Profile } from './profiles/kimiK3'
 import { kimiK2_6Profile } from './profiles/kimiK2_6'
 import { minimaxM3Profile } from './profiles/minimaxM3'
@@ -9,7 +9,7 @@ import { hasSameModelFields } from './shared'
 import type { BuiltinModelProfile } from './types'
 
 export const AI_BUILTIN_MODEL_PROFILES: readonly BuiltinModelProfile[] = [
-  glm5_2Profile,
+  glm5_3FlashProfile,
   deepseekV4ProProfile,
   deepseekV4FlashProfile,
   kimiK3Profile,

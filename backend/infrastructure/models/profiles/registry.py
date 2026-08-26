@@ -7,7 +7,7 @@ from infrastructure.models.profiles.deepseek_v4 import (
     DEEPSEEK_V4_FLASH_PROFILE,
     DEEPSEEK_V4_PRO_PROFILE,
 )
-from infrastructure.models.profiles.glm5_2 import GLM5_2_PROFILE
+from infrastructure.models.profiles.glm5_3_flash import GLM5_3_FLASH_PROFILE
 from infrastructure.models.profiles.kimi_k3 import KIMI_K3_PROFILE
 from infrastructure.models.profiles.kimi_k2_6 import KIMI_K2_6_PROFILE
 from infrastructure.models.profiles.minimax_m3 import MINIMAX_M3_PROFILE
@@ -32,7 +32,7 @@ def _validated_profiles(*profiles: ModelProfile) -> tuple[ModelProfile, ...]:
 
 
 BUILTIN_MODEL_PROFILES: tuple[ModelProfile, ...] = _validated_profiles(
-    GLM5_2_PROFILE,
+    GLM5_3_FLASH_PROFILE,
     DEEPSEEK_V4_PRO_PROFILE,
     DEEPSEEK_V4_FLASH_PROFILE,
     KIMI_K3_PROFILE,

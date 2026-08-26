@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from purra.context_budget import estimate_json_tokens
 from purra.contracts import (
@@ -18,6 +18,7 @@ from purra.contracts import (
 )
 from purra.json_values import thaw_json_mapping
 from purra.evidence import CONTEXT_EVIDENCE_RECEIPTS_KEY
+from purra.evidence import ContextEvidenceReceipt
 from purra.ports import CancellationSignal
 from domains.writing.associated_context import (
     AssociatedContextResult,
@@ -29,6 +30,13 @@ from domains.writing.memory_context import (
     MemoryContextBlock,
     MemoryContextRequest,
     unavailable_memory_context,
+)
+from domains.writing.method_resolution import (
+    WRITING_METHODS_CONTEXT,
+    WRITING_METHOD_POLICY_CONTEXT,
+    resolve_writing_methods,
+    writing_method_desired_tokens,
+    writing_method_policy,
 )
 from domains.writing.unified_memory_context import MemoryContextPack
 from domains.writing.prompts import (
@@ -45,6 +53,7 @@ WRITING_BINDING_CONTEXT = "writing_session_binding"
 WRITING_EVIDENCE_POLICY_CONTEXT = "writing_evidence_policy"
 WRITING_AGENT_POLICY_CONTEXT = "writing_agent_policy"
 WRITING_PLANNING_FACTS_CONTEXT = "writing_planning_facts"
+CONTINUATION_CANON_CONTEXT = "continuation_canon"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +151,35 @@ class WritingContextProvider:
             associated=associated,
             include_evidence_read_rules=False,
         )
+        snapshot = context.writing_method_binding_snapshot or {}
+        catalog = snapshot.get("catalog") or ()
+        if catalog:
+            host_facts["writingMethods"] = {
+                "bindingSnapshotDigest": snapshot.get("bindingSnapshotDigest"),
+                "available": [
+                    {
+                        "revisionId": item.get("revisionId"),
+                        "name": item.get("name"),
+                        "methodType": item.get("methodType"),
+                        "tags": list(item.get("tags") or ()),
+                    }
+                    for item in catalog
+                    if isinstance(item, dict)
+                ],
+                "forceRevisionIds": list(snapshot.get("forceRevisionIds") or ()),
+                "excludeRevisionIds": list(snapshot.get("excludeRevisionIds") or ()),
+            }
+        if context.creation_mode == "continuation":
+            binding = dict(context.continuation_binding or {})
+            host_facts["continuation"] = {
+                "bound": True,
+                "sourceTitle": binding.get("sourceTitle"),
+                "forkSectionTitle": binding.get("forkSectionTitle"),
+                "forkOrdinal": binding.get("forkOrdinal"),
+                "canonSnapshotDigest": binding.get("canonSnapshotDigest"),
+                "sourceReadsAreLimitedToFork": True,
+                "allWritesTargetCurrentBook": True,
+            }
         existing_rules = host_facts.get("planningRules")
         host_facts["planningRules"] = [
             policy,
@@ -309,6 +347,48 @@ class WritingContextProvider:
         retrieval = fitted_retrieval
 
         blocks: list[ContextBlock] = []
+        canon_result = _continuation_canon_context(
+            context,
+            budget.allocation_for(CONTINUATION_CANON_CONTEXT),
+        )
+        if canon_result["content"]:
+            blocks.append(ContextBlock(
+                name=CONTINUATION_CANON_CONTEXT,
+                content=canon_result["content"],
+                token_count=canon_result["tokenCount"],
+                untrusted=False,
+                host_metadata={
+                    CONTEXT_EVIDENCE_RECEIPTS_KEY: [
+                        receipt.to_mapping() for receipt in canon_result["receipts"]
+                    ],
+                },
+            ))
+        method_snapshot = context.writing_method_binding_snapshot or {}
+        method_resolution = resolve_writing_methods(
+            method_snapshot,
+            task=task,
+            token_budget=budget.allocation_for(WRITING_METHODS_CONTEXT),
+        )
+        if method_resolution["content"]:
+            policy = writing_method_policy()
+            blocks.append(ContextBlock(
+                name=WRITING_METHOD_POLICY_CONTEXT,
+                content=policy,
+                token_count=estimate_json_tokens(policy),
+                untrusted=False,
+            ))
+            blocks.append(ContextBlock(
+                name=WRITING_METHODS_CONTEXT,
+                content=method_resolution["content"],
+                token_count=method_resolution["tokenCount"],
+                untrusted=True,
+                host_metadata={
+                    CONTEXT_EVIDENCE_RECEIPTS_KEY: [
+                        receipt.to_mapping()
+                        for receipt in method_resolution["receipts"]
+                    ],
+                },
+            ))
         if retrieval:
             blocks.append(ContextBlock(
                 name=WRITING_RETRIEVAL_CONTEXT,
@@ -384,6 +464,21 @@ class WritingContextProvider:
                     memory=memory_result,
                     associated=associated_result,
                 ),
+                "writingMethodResolution": {
+                    "bindingSnapshotDigest": method_snapshot.get(
+                        "bindingSnapshotDigest"
+                    ),
+                    "resolutionDigest": method_resolution["resolutionDigest"],
+                    "usedRevisionIds": method_resolution["usedRevisionIds"],
+                    "tokens": method_resolution["tokenCount"],
+                },
+                "continuationCanon": {
+                    "creationMode": context.creation_mode,
+                    "included": canon_result["included"],
+                    "deferred": canon_result["deferred"],
+                    "authority": "inherited_canon_over_target_story_memory",
+                    "conflicts": _canon_story_conflicts(context, memory_result),
+                },
             },
         )
 
@@ -471,9 +566,108 @@ def writing_context_claims(request: AgentRunRequest) -> tuple[ContextBudgetClaim
 
     context = WritingDomainContext.from_core_context(request.domain_context)
     desired = _desired_budgets(request, context)
-    if desired.total <= 0:
-        return ()
-    return (ContextBudgetClaim(WRITING_RETRIEVAL_CONTEXT, desired.total),)
+    claims: list[ContextBudgetClaim] = []
+    if desired.total > 0:
+        claims.append(ContextBudgetClaim(WRITING_RETRIEVAL_CONTEXT, desired.total))
+    method_snapshot = context.writing_method_binding_snapshot or {}
+    method_desired = writing_method_desired_tokens(method_snapshot)
+    if method_desired > 0:
+        mandatory = resolve_writing_methods(
+            method_snapshot,
+            task=None,
+            token_budget=method_desired,
+        )["tokenCount"]
+        claims.append(ContextBudgetClaim(
+            WRITING_METHODS_CONTEXT,
+            method_desired,
+            minimum_tokens=mandatory,
+            maximum_tokens=method_desired,
+            priority=100,
+        ))
+    if context.creation_mode == "continuation" and context.inherited_canon_records:
+        desired_canon = min(
+            24_000,
+            max(2_000, estimate_json_tokens(context.inherited_canon_records) + 400),
+        )
+        claims.append(ContextBudgetClaim(
+            CONTINUATION_CANON_CONTEXT,
+            desired_canon,
+            minimum_tokens=min(1_000, desired_canon),
+            maximum_tokens=desired_canon,
+            priority=110,
+        ))
+    return tuple(claims)
+
+
+def _continuation_canon_context(
+    context: WritingDomainContext,
+    token_budget: int,
+) -> dict[str, object]:
+    if context.creation_mode != "continuation" or token_budget <= 0:
+        return {"content": "", "tokenCount": 0, "receipts": (), "included": 0, "deferred": 0}
+    binding = dict(context.continuation_binding or {})
+    header = (
+        "【继承正史 — 宿主冻结、只读、优先于目标书 Story Memory】\n"
+        "冲突时以本块硬事实为准；不得修改来源、正史快照或来源分析。"
+    )
+    rows: list[str] = []
+    included: list[Mapping[str, object]] = []
+    records = tuple(context.inherited_canon_records)
+    for item in records:
+        row = "- " + json.dumps({
+            "factKind": item.get("factKind"),
+            "subjectKey": item.get("subjectKey"),
+            "predicate": item.get("predicate"),
+            "value": item.get("value"),
+        }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        candidate = "\n".join((header, *rows, row))
+        if estimate_json_tokens(candidate) > token_budget:
+            continue
+        rows.append(row)
+        included.append(item)
+    content = "\n".join((header, *rows)) if rows else ""
+    receipts = tuple(
+        ContextEvidenceReceipt(
+            evidence_id=f"continuation-canon:{binding.get('canonSnapshotId')}:{item.get('id')}",
+            context_block=CONTINUATION_CANON_CONTEXT,
+            source="continuation_canon_snapshot",
+            item_id=str(item.get("id") or ""),
+            metadata={
+                "canonSnapshotId": binding.get("canonSnapshotId"),
+                "canonSnapshotDigest": binding.get("canonSnapshotDigest"),
+                "contentDigest": item.get("contentDigest"),
+                "sourceRevisionId": binding.get("sourceRevisionId"),
+                "forkSectionId": binding.get("forkSectionId"),
+            },
+        )
+        for item in included
+    )
+    return {
+        "content": content,
+        "tokenCount": estimate_json_tokens(content) if content else 0,
+        "receipts": receipts,
+        "included": len(included),
+        "deferred": len(records) - len(included),
+    }
+
+
+def _canon_story_conflicts(
+    context: WritingDomainContext,
+    memory: MemoryContextBlock | MemoryContextPack,
+) -> list[dict[str, str]]:
+    if not isinstance(memory, MemoryContextPack):
+        return []
+    story_by_key = {item.memory_key: item for item in memory.story.included_items}
+    conflicts: list[dict[str, str]] = []
+    for record in context.inherited_canon_records:
+        key = f"{record.get('subjectKey')}:{record.get('predicate')}"
+        if key in story_by_key:
+            conflicts.append({
+                "key": key,
+                "winner": "inherited_canon",
+                "suppressed": f"target_story_memory:{story_by_key[key].record_id}",
+            })
+    return conflicts
 
 
 def _desired_budgets(

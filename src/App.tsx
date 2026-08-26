@@ -20,11 +20,13 @@ const BookshelfPage = lazy(() => import('./BookshelfPage'))
 const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const ScreenplayAgentPage = lazy(() => import('./ScreenplayAgentPage'))
+const WritingMethodsPage = lazy(() => import('./WritingMethodsPage'))
+const NovelSourcesPage = lazy(() => import('./NovelSourcesPage'))
 const AiDevInspector = import.meta.env.DEV
   ? lazy(() => import('./components/AiDevInspector'))
   : null
 
-type Page = 'home' | 'screenplay' | 'bookshelf' | 'workspace'
+type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'novelSources' | 'workspace'
 type BooksStatus = 'idle' | 'loading' | 'loaded'
 type SettingsLocationState = { returnTo?: string }
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
@@ -66,6 +68,10 @@ export default function App() {
       ? 'screenplay'
       : contentPath === '/bookshelf'
         ? 'bookshelf'
+        : contentPath === '/writing-methods'
+          ? 'writingMethods'
+        : contentPath === '/novel-sources'
+          ? 'novelSources'
         : 'home'
   const [books, setBooks] = React.useState<Book[]>([])
   const [booksStatus, setBooksStatus] = React.useState<BooksStatus>('idle')
@@ -141,7 +147,7 @@ export default function App() {
   }, [])
 
   React.useEffect(() => {
-    if (page === 'bookshelf' || page === 'screenplay' || page === 'workspace') loadBooks()
+    if (page === 'bookshelf' || page === 'screenplay' || page === 'workspace' || page === 'novelSources') loadBooks()
   }, [page, loadBooks])
 
   const handleEnterBookshelf = React.useCallback(() => {
@@ -150,6 +156,14 @@ export default function App() {
 
   const handleEnterScreenplayAgent = React.useCallback(() => {
     navigate('/screenplay')
+  }, [navigate])
+
+  const handleEnterWritingMethods = React.useCallback(() => {
+    navigate('/writing-methods')
+  }, [navigate])
+
+  const handleEnterNovelSources = React.useCallback(() => {
+    navigate('/novel-sources')
   }, [navigate])
 
   const handleOpenSettings = React.useCallback(() => {
@@ -267,7 +281,20 @@ export default function App() {
                 onCreateBook={handleCreateBook}
                 onDeleteBook={handleDeleteBook}
                 onRenameBook={handleRenameBook}
+                onContinuationCreated={loadBooks}
+                onOpenNovelSources={handleEnterNovelSources}
+                onOpenWritingMethods={handleEnterWritingMethods}
                 onBack={handleBackToHome}
+              />
+            )} />
+            <Route path="/writing-methods" element={(
+              <WritingMethodsPage onBack={handleEnterBookshelf} />
+            )} />
+            <Route path="/novel-sources" element={(
+              <NovelSourcesPage
+                books={books}
+                modelConfigs={configuredModelConfigs}
+                onBack={handleEnterBookshelf}
               />
             )} />
             <Route path="/books/:bookId" element={activeBook ? (
@@ -275,6 +302,7 @@ export default function App() {
                 bookId={activeBook.id}
                 bookTitle={activeBook.title}
                 enableVolume={!!activeBook.enable_volume}
+                creationMode={activeBook.creation_mode ?? 'original'}
                 onBack={handleBackToBookshelf}
                 onGoHome={handleBackToHome}
                 onOpenSettings={handleOpenSettings}

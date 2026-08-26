@@ -79,11 +79,6 @@ def _rck_get_setting_entities(ctx: dict, args: dict) -> str | None:
     return f"getSettingEntities:all:{book_id}"
 
 
-def _rck_get_book_style(ctx: dict, args: dict) -> str | None:
-    book_id = resolve_book_id_for_tools(ctx, args)
-    return f"getBookStyle:{book_id}"
-
-
 def _rck_get_story_health_dashboard(ctx: dict, args: dict) -> str | None:
     book_id = resolve_book_id_for_tools(ctx, args)
     return f"getStoryHealthDashboard:{book_id}" if book_id else None
@@ -124,7 +119,6 @@ WRITING_READ_CACHE_KEY_BUILDERS = MappingProxyType({
     "getStoryBackground": _rck_get_story_background,
     "listSettingEntities": _rck_list_setting_entities,
     "getSettingEntities": _rck_get_setting_entities,
-    "getBookStyle": _rck_get_book_style,
     "getStoryHealthDashboard": _rck_get_story_health_dashboard,
     "getWritingStatsDashboard": _rck_get_writing_stats_dashboard,
     "queryOutline": _rck_query_outline,

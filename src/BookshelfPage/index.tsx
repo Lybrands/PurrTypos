@@ -2,7 +2,15 @@ import { services } from '@/services'
 import React from 'react'
 import { PlusIcon, ArrowLeftIcon, DeleteIcon, EditIcon, ExportIcon } from '@/purr-components'
 import { PurrButton, PurrCheckbox, PurrInput, PurrModal, PurrTooltip } from '@/purr-components'
-import { Book, type EntityId } from '../types'
+import {
+  Book,
+  type ContinuationCanonPreview,
+  type EntityId,
+  type NovelSourceRevision,
+  type NovelSourceSection,
+  type NovelSourceWork,
+  type PublishedNovelAnalysis,
+} from '../types'
 import { useAppFeedback } from '../hooks/useAppFeedback'
 import AppHeader from '../components/AppHeader'
 import ExportModal, { type ExportFormat } from '../components/ExportModal'
@@ -16,6 +24,9 @@ interface BookshelfPageProps {
   onCreateBook: (title: string, enableVolume?: boolean) => void
   onDeleteBook: (bookId: EntityId) => void
   onRenameBook: (bookId: EntityId, title: string) => void
+  onContinuationCreated: () => void
+  onOpenNovelSources: () => void
+  onOpenWritingMethods: () => void
   onBack: () => void
 }
 
@@ -26,6 +37,9 @@ export default function BookshelfPage({
   onCreateBook,
   onDeleteBook,
   onRenameBook,
+  onContinuationCreated,
+  onOpenNovelSources,
+  onOpenWritingMethods,
   onBack,
 }: BookshelfPageProps) {
   const { message } = useAppFeedback()
@@ -39,6 +53,22 @@ export default function BookshelfPage({
   const [exportModalOpen, setExportModalOpen] = React.useState(false)
   const [exportSelectedIds, setExportSelectedIds] = React.useState<EntityId[]>([])
   const [exporting, setExporting] = React.useState(false)
+  const [continuationModalOpen, setContinuationModalOpen] = React.useState(false)
+  const [continuationSources, setContinuationSources] = React.useState<NovelSourceWork[]>([])
+  const [continuationRevisions, setContinuationRevisions] = React.useState<NovelSourceRevision[]>([])
+  const [continuationSections, setContinuationSections] = React.useState<NovelSourceSection[]>([])
+  const [continuationAnalyses, setContinuationAnalyses] = React.useState<PublishedNovelAnalysis[]>([])
+  const [continuationSourceWorkId, setContinuationSourceWorkId] = React.useState('')
+  const [continuationRevisionId, setContinuationRevisionId] = React.useState('')
+  const [continuationAnalysisId, setContinuationAnalysisId] = React.useState('')
+  const [continuationForkSectionId, setContinuationForkSectionId] = React.useState('')
+  const [continuationTitle, setContinuationTitle] = React.useState('')
+  const [continuationEnableVolume, setContinuationEnableVolume] = React.useState(false)
+  const [canonPreview, setCanonPreview] = React.useState<ContinuationCanonPreview | null>(null)
+  const [creatingContinuation, setCreatingContinuation] = React.useState(false)
+
+  const originalBooks = books.filter((book) => book.creation_mode !== 'continuation')
+  const continuationBooks = books.filter((book) => book.creation_mode === 'continuation')
 
   const handleCreate = React.useCallback(() => {
     const t = createTitle.trim()
@@ -80,6 +110,122 @@ export default function BookshelfPage({
     setExportSelectedIds([])
     setExportModalOpen(true)
   }, [])
+
+  const openContinuationWizard = React.useCallback(async () => {
+    const result = await services.novelSources.list()
+    if (!result.success) return message.error(result.error || '读取来源库失败')
+    setContinuationSources(result.data ?? [])
+    setContinuationModalOpen(true)
+  }, [message])
+
+  const chooseContinuationSource = React.useCallback(async (workId: string) => {
+    setContinuationSourceWorkId(workId)
+    setContinuationRevisionId('')
+    setContinuationAnalysisId('')
+    setContinuationForkSectionId('')
+    setCanonPreview(null)
+    if (!workId) return setContinuationRevisions([])
+    const result = await services.novelSources.get({ workId })
+    if (!result.success || !result.data) return message.error(result.error || '读取来源版本失败')
+    setContinuationRevisions(result.data.revisions ?? [])
+    setContinuationTitle(`${result.data.title} · 续写`)
+  }, [message])
+
+  const chooseContinuationRevision = React.useCallback(async (revisionId: string) => {
+    setContinuationRevisionId(revisionId)
+    setContinuationAnalysisId('')
+    setContinuationForkSectionId('')
+    setCanonPreview(null)
+    if (!revisionId) return
+    const [revision, analyses] = await Promise.all([
+      services.novelSources.getRevision({ revisionId }),
+      services.novelSources.listPublishedAnalyses({ revisionId }),
+    ])
+    if (!revision.success || !revision.data) return message.error(revision.error || '读取来源章节失败')
+    if (!analyses.success) return message.error(analyses.error || '读取正式分析失败')
+    setContinuationSections(revision.data.sections ?? [])
+    setContinuationAnalyses(analyses.data ?? [])
+  }, [message])
+
+  const handleContinuationPrimary = React.useCallback(async () => {
+    if (!continuationTitle.trim() || !continuationRevisionId || !continuationAnalysisId || !continuationForkSectionId) {
+      message.warning('请选择来源版本、正式分析和章末分叉点，并填写续写名称')
+      return
+    }
+    setCreatingContinuation(true)
+    try {
+      if (!canonPreview) {
+        const result = await services.continuations.previewCanon({
+          sourceRevisionId: continuationRevisionId,
+          sourceAnalysisId: continuationAnalysisId,
+          forkSectionId: continuationForkSectionId,
+        })
+        if (!result.success || !result.data) throw new Error(result.error || '正史预览失败')
+        setCanonPreview(result.data)
+        return
+      }
+      const result = await services.continuations.create({
+        title: continuationTitle.trim(),
+        sourceRevisionId: continuationRevisionId,
+        sourceAnalysisId: continuationAnalysisId,
+        forkSectionId: continuationForkSectionId,
+        expectedSnapshotDigest: canonPreview.snapshotDigest,
+        enableVolume: continuationEnableVolume,
+      })
+      if (!result.success) throw new Error(result.error || '创建续写作品失败')
+      setContinuationModalOpen(false)
+      setCanonPreview(null)
+      message.success('续写作品、正史快照和来源绑定已原子创建')
+      onContinuationCreated()
+    } catch (error) {
+      message.error((error as Error).message)
+    } finally {
+      setCreatingContinuation(false)
+    }
+  }, [
+    canonPreview,
+    continuationAnalysisId,
+    continuationEnableVolume,
+    continuationForkSectionId,
+    continuationRevisionId,
+    continuationTitle,
+    message,
+    onContinuationCreated,
+  ])
+
+  const renderBookCard = (book: Book) => {
+    const isLastOpened = book.id === lastOpenedBookId
+    return <div
+      key={book.id}
+      className={`book-card${isLastOpened ? ' is-last-opened' : ''}`}
+    >
+      <button
+        type="button"
+        className="book-card-open"
+        aria-label={`打开《${book.title}》${isLastOpened ? '，上次打开' : ''}`}
+        onClick={() => onOpenBook(book)}
+      >
+        <span className="book-cover" style={{ '--book-color': book.cover_color || '#c94361' } as React.CSSProperties}>
+          <span className="book-spine" style={{ background: book.cover_color || '#c94361' }} />
+          <span className="book-cover-brand">{book.creation_mode === 'continuation' ? 'CONTINUATION' : 'PURR TYPOS'}</span>
+          <span className="book-cover-title">{book.title}</span>
+          {isLastOpened && <span className="book-last-opened-badge">上次打开</span>}
+          <span className="book-cover-mark">✦</span>
+        </span>
+        {book.creation_mode === 'continuation' ? <small className="book-continuation-source">
+          来源：{book.continuation_source_title || '来源作品'} · {book.continuation_fork_section_title || '章末分叉'}
+        </small> : null}
+      </button>
+      <div className="book-actions">
+        <PurrTooltip title="重命名">
+          <button type="button" aria-label={`重命名《${book.title}》`} className="book-action-btn" onClick={(e) => openRename(e, book)}><EditIcon /></button>
+        </PurrTooltip>
+        <PurrTooltip title="删除书籍">
+          <button type="button" aria-label={`删除《${book.title}》`} className="book-action-btn danger" onClick={(e) => openDelete(e, book)}><DeleteIcon /></button>
+        </PurrTooltip>
+      </div>
+    </div>
+  }
 
   const handleExportConfirm = React.useCallback(
     async (selectedIds: EntityId[], format: ExportFormat, exportAsZip: boolean) => {
@@ -153,6 +299,56 @@ export default function BookshelfPage({
     [message, books]
   )
 
+  if (continuationModalOpen) {
+    const closeContinuationWizard = () => {
+      setContinuationModalOpen(false)
+      setCanonPreview(null)
+    }
+    return (
+      <div className="bookshelf-page continuation-create-page">
+        <AppHeader
+          title="新建续写作品"
+          left={
+            <PurrTooltip title="返回书架">
+              <PurrButton
+                type="text"
+                size="small"
+                aria-label="返回书架"
+                icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
+                onClick={closeContinuationWizard}
+              />
+            </PurrTooltip>
+          }
+          showActions
+        />
+        <main className="continuation-create-main">
+          <div className="continuation-create-toolbar">
+            <div>
+              <span className="bookshelf-eyebrow">CONTINUATION</span>
+              <h1>新建续写作品</h1>
+              <p>冻结来源版本、章末分叉点和继承正史，再创建独立作品。</p>
+            </div>
+          </div>
+          <section className="continuation-create-panel">
+            <div className="continuation-wizard">
+              <label>来源作品<select value={continuationSourceWorkId} onChange={(event) => void chooseContinuationSource(event.target.value)}><option value="">请选择</option>{continuationSources.map((work) => <option key={work.id} value={work.id}>{work.title}</option>)}</select></label>
+              <label>不可变来源版本<select value={continuationRevisionId} onChange={(event) => void chooseContinuationRevision(event.target.value)}><option value="">请选择</option>{continuationRevisions.map((revision) => <option key={revision.id} value={revision.id}>v{revision.version_no}</option>)}</select></label>
+              <label>正式分析<select value={continuationAnalysisId} onChange={(event) => { setContinuationAnalysisId(event.target.value); setCanonPreview(null) }}><option value="">请选择</option>{continuationAnalyses.map((analysis) => <option key={analysis.id} value={analysis.id}>分析 v{analysis.versionNo}</option>)}</select></label>
+              <label>章末分叉点<select value={continuationForkSectionId} onChange={(event) => { setContinuationForkSectionId(event.target.value); setCanonPreview(null) }}><option value="">请选择完整章节</option>{continuationSections.map((section) => <option key={section.id} value={section.id}>{section.title}</option>)}</select></label>
+              <label>续写作品名称<PurrInput value={continuationTitle} onChange={(event) => setContinuationTitle(event.target.value)} maxLength={50} /></label>
+              <PurrCheckbox checked={continuationEnableVolume} onChange={(event) => setContinuationEnableVolume(event.target.checked)}>文章分卷</PurrCheckbox>
+              {canonPreview ? <div className="continuation-canon-preview"><strong>继承正史预览</strong><span>{canonPreview.sourceTitle} v{canonPreview.sourceVersionNo} · {canonPreview.forkSectionTitle}末</span><p>{canonPreview.records.length} 条硬事实。风格与技法不会写入正史。</p></div> : null}
+            </div>
+            <div className="continuation-create-actions">
+              <PurrButton onClick={closeContinuationWizard}>取消</PurrButton>
+              <PurrButton type="primary" loading={creatingContinuation} onClick={() => void handleContinuationPrimary()}>{canonPreview ? '确认并原子创建' : '预览继承正史'}</PurrButton>
+            </div>
+          </section>
+        </main>
+      </div>
+    )
+  }
+
   return (
     <div className="bookshelf-page">
       <AppHeader
@@ -162,6 +358,7 @@ export default function BookshelfPage({
             <PurrButton
               type="text"
               size="small"
+              aria-label="返回首页"
               icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
               onClick={onBack}
             />
@@ -188,51 +385,34 @@ export default function BookshelfPage({
             <h1>作品书架</h1>
             <p>{books.length > 0 ? `共 ${books.length} 部作品，挑一本继续创作吧。` : '从一个书名开始，写下你的第一部作品。'}</p>
           </div>
+          <div className="bookshelf-toolbar-actions">
+            <PurrButton onClick={onOpenNovelSources}>小说来源库</PurrButton>
+            <PurrButton onClick={onOpenWritingMethods}>写作方法库</PurrButton>
+          </div>
         </div>
 
+        <h2 className="bookshelf-section-title">原创作品</h2>
         <div className="bookshelf-list">
-          {books.map((book) => {
-            const isLastOpened = book.id === lastOpenedBookId
-            return (
-              <div
-                key={book.id}
-                className={`book-card${isLastOpened ? ' is-last-opened' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="book-card-open"
-                  aria-label={`打开《${book.title}》${isLastOpened ? '，上次打开' : ''}`}
-                  onClick={() => onOpenBook(book)}
-                >
-                  <span className="book-cover" style={{ '--book-color': book.cover_color || '#c94361' } as React.CSSProperties}>
-                    <span className="book-spine" style={{ background: book.cover_color || '#c94361' }} />
-                    <span className="book-cover-brand">PURR TYPOS</span>
-                    <span className="book-cover-title">{book.title}</span>
-                    {isLastOpened && <span className="book-last-opened-badge">上次打开</span>}
-                    <span className="book-cover-mark">✦</span>
-                  </span>
-                </button>
-                <div className="book-actions">
-                  <PurrTooltip title="重命名">
-                    <button type="button" aria-label={`重命名《${book.title}》`} className="book-action-btn" onClick={(e) => openRename(e, book)}>
-                      <EditIcon />
-                    </button>
-                  </PurrTooltip>
-                  <PurrTooltip title="删除书籍">
-                    <button type="button" aria-label={`删除《${book.title}》`} className="book-action-btn danger" onClick={(e) => openDelete(e, book)}>
-                      <DeleteIcon />
-                    </button>
-                  </PurrTooltip>
-                </div>
-              </div>
-            )
-          })}
+          {originalBooks.map(renderBookCard)}
 
           <button type="button" className="book-card book-card-add" onClick={() => setCreateModalOpen(true)}>
             <span className="book-card-add-inner purr-entry-surface">
               <span className="book-add-icon"><PlusIcon /></span>
               <strong>新建书籍</strong>
               <small>让一个新故事从这里开始</small>
+            </span>
+          </button>
+        </div>
+
+        <h2 className="bookshelf-section-title continuation">续写作品</h2>
+        <div className="bookshelf-list">
+          {continuationBooks.map(renderBookCard)}
+
+          <button type="button" className="book-card book-card-add" onClick={() => void openContinuationWizard()}>
+            <span className="book-card-add-inner purr-entry-surface">
+              <span className="book-add-icon"><PlusIcon /></span>
+              <strong>新建续写</strong>
+              <small>从原作章末继续故事</small>
             </span>
           </button>
         </div>

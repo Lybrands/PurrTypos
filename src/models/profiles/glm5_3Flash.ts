@@ -11,16 +11,16 @@ const provider = {
 } as const
 
 const preset = {
-  id: 'zai:glm-5.2',
+  id: 'zai:glm-5.3-flash',
   providerId: 'zai',
-  name: 'glm-5.2',
-  label: 'GLM-5.2',
+  name: 'glm-5.3-flash',
+  label: 'GLM-5.3-Flash',
   summary: '1M 上下文，支持深度思考与工具调用',
   contextWindowOptions: ['32k', '256k', '1m'],
   contextWindow: '1m',
   maxOutputTokens: 131_072,
   supportsThinking: true,
-  thinkingOnly: false,
+  thinkingOnly: true,
   thinkingEnabled: true,
   customizeTemperature: true,
   temperatureThinking: 1,
@@ -29,11 +29,11 @@ const preset = {
 } as const
 
 function matches(config: AiModelConfig) {
-  return config.name === preset.name
+  return (config.name === preset.name || config.name === 'glm-5.2')
     && normalizeBaseUrl(config.baseUrl) === normalizeBaseUrl(provider.baseUrl)
 }
 
-export const glm5_2Profile: BuiltinModelProfile = {
+export const glm5_3FlashProfile: BuiltinModelProfile = {
   provider,
   preset,
   matches,
@@ -44,10 +44,12 @@ export const glm5_2Profile: BuiltinModelProfile = {
       presetId: preset.id,
       providerId: provider.id,
       apiProvider: provider.apiProvider,
+      name: preset.name,
+      nickname: config.nickname === 'GLM-5.2' ? preset.label : config.nickname,
       baseUrl: provider.baseUrl,
       supportsThinking: preset.supportsThinking,
       thinkingOnly: preset.thinkingOnly,
-      thinkingEnabled: config.thinkingEnabled ?? preset.thinkingEnabled,
+      thinkingEnabled: true,
       contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
       customizeTemperature: config.customizeTemperature ?? preset.customizeTemperature,
       temperatureThinking: config.temperatureThinking ?? preset.temperatureThinking,

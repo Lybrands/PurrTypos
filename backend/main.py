@@ -210,12 +210,12 @@ async def lifespan(application: FastAPI):
         from routers import (
             ai,
             articles,
-            book_style,
             books,
             chapter_diff,
             chapters,
             characters,
             conversations,
+            continuations,
             dashboard,
             export,
             files,
@@ -228,6 +228,8 @@ async def lifespan(application: FastAPI):
             setting_entities,
             settings,
             story_memory,
+            writing_methods,
+            novel_sources,
             story_background,
         )
 
@@ -245,11 +247,13 @@ async def lifespan(application: FastAPI):
         application.include_router(files.router, prefix="/api")
         application.include_router(prompt_templates.router, prefix="/api")
         application.include_router(screenplay_v2.router, prefix="/api")
-        application.include_router(book_style.router, prefix="/api")
         application.include_router(chapter_diff.router, prefix="/api")
         application.include_router(setting_diff.router, prefix="/api")
         application.include_router(setting_entities.router, prefix="/api")
         application.include_router(story_memory.router, prefix="/api")
+        application.include_router(writing_methods.router, prefix="/api")
+        application.include_router(novel_sources.router, prefix="/api")
+        application.include_router(continuations.router, prefix="/api")
         application.include_router(dashboard.router, prefix="/api")
         application.include_router(export.router, prefix="/api")
 

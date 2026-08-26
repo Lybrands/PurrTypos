@@ -148,7 +148,6 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
         "readSourceBackground": query.read_background,
         "querySourceStoryFacts": query.query_story_facts,
         "readSourceOutline": query.read_outline,
-        "readSourceStyle": query.read_style,
     }
     return build_domain_catalog(handlers={
         **{

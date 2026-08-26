@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import MappingProxyType
 
 from infrastructure.writing.tools.handlers import (
-    book_style_tools,
     chapter_tools,
     character_tools,
     dashboard_tools,
@@ -13,11 +12,12 @@ from infrastructure.writing.tools.handlers import (
     outline_tools,
     setting_entity_tools,
     story_background_tools,
+    writing_method_tools,
+    continuation_tools,
 )
 
 
 WRITING_TOOL_OPERATIONS = MappingProxyType({
-    "getBookStyle": book_style_tools._tool_get_book_style,
     "getChapterContent": chapter_tools._tool_get_chapter_content,
     "listWritingChapters": chapter_tools._tool_list_writing_chapters,
     "createWritingChapter": chapter_tools._tool_create_writing_chapter,
@@ -53,6 +53,8 @@ WRITING_TOOL_OPERATIONS = MappingProxyType({
     "deleteSettingEntity": setting_entity_tools._tool_delete_setting_entity,
     "getStoryBackground": story_background_tools._tool_get_story_background,
     "editStoryBackground": story_background_tools._tool_edit_story_background,
+    "searchWritingMethods": writing_method_tools._tool_search_writing_methods,
+    "readContinuationSourceSection": continuation_tools._tool_read_continuation_source_section,
 })
 
 

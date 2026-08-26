@@ -6,7 +6,8 @@ export const EDITOR_TAB_KEY = 'editor'
 export type WorkspaceUtilityTabKind =
   | 'outline'
   | 'memory'
-  | 'style'
+  | 'writingMethods'
+  | 'canon'
   | 'setting'
   | 'dashboard'
 
@@ -30,10 +31,16 @@ export const MEMORY_TAB: WorkspaceUtilityTab = {
   title: '记忆 / 伏笔',
 }
 
-export const STYLE_TAB: WorkspaceUtilityTab = {
-  key: 'style',
-  kind: 'style',
-  title: '风格基调',
+export const WRITING_METHODS_TAB: WorkspaceUtilityTab = {
+  key: 'writing-methods',
+  kind: 'writingMethods',
+  title: '写作方法',
+}
+
+export const CANON_TAB: WorkspaceUtilityTab = {
+  key: 'continuation-canon',
+  kind: 'canon',
+  title: '继承正史',
 }
 
 export const SETTING_TAB: WorkspaceUtilityTab = {

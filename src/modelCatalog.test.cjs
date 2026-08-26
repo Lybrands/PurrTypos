@@ -31,7 +31,7 @@ test('every built-in provider has presets and one default', () => {
   assert.equal(getDefaultPreset('moonshot').id, 'moonshot:kimi-k3')
 })
 
-test('Z.ai GLM-5.2 is the first built-in and materializes as the default candidate', () => {
+test('Z.ai GLM-5.3-Flash is the first built-in and materializes as the default candidate', () => {
   const provider = getBuiltinProvider('zai')
   const preset = getDefaultPreset('zai')
 
@@ -54,21 +54,21 @@ test('Z.ai GLM-5.2 is the first built-in and materializes as the default candida
       temperatureNonThinking: preset.temperatureNonThinking,
     },
     {
-      id: 'zai:glm-5.2',
-      name: 'glm-5.2',
+      id: 'zai:glm-5.3-flash',
+      name: 'glm-5.3-flash',
       contextWindow: '1m',
       supportsThinking: true,
-      thinkingOnly: false,
+      thinkingOnly: true,
       thinkingEnabled: true,
       temperatureThinking: 1,
       temperatureNonThinking: 1,
     },
   )
-  assert.equal(AI_MODEL_PRESETS[0].id, 'zai:glm-5.2')
+  assert.equal(AI_MODEL_PRESETS[0].id, 'zai:glm-5.3-flash')
 
   const result = migrateKnownModelConfigs([])
-  assert.equal(result.configs[0].id, 'builtin_zai_glm_5_2')
-  assert.equal(result.configs[0].presetId, 'zai:glm-5.2')
+  assert.equal(result.configs[0].id, 'builtin_zai_glm_5_3_flash')
+  assert.equal(result.configs[0].presetId, 'zai:glm-5.3-flash')
   assert.equal(result.configs[0].apiProvider, 'zai')
 })
 
@@ -181,11 +181,11 @@ test('model catalog exposes capability ceilings instead of task budgets', () => 
   assert.equal(getModelMaxOutputTokens({ contextWindow: '1m' }), undefined)
 })
 
-test('the catalog contains GLM-5.2 and the existing models', () => {
+test('the catalog contains GLM-5.3-Flash and the existing models', () => {
   assert.deepEqual(
     AI_MODEL_PRESETS.map((preset) => preset.name),
     [
-      'glm-5.2',
+      'glm-5.3-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash',
       'kimi-k3',
@@ -197,7 +197,7 @@ test('the catalog contains GLM-5.2 and the existing models', () => {
   assert.deepEqual(
     Object.fromEntries(AI_MODEL_PRESETS.map((preset) => [preset.name, preset.contextWindow])),
     {
-      'glm-5.2': '1m',
+      'glm-5.3-flash': '1m',
       'deepseek-v4-pro': '1m',
       'deepseek-v4-flash': '1m',
       'kimi-k3': '1m',
@@ -211,7 +211,7 @@ test('the catalog contains GLM-5.2 and the existing models', () => {
       AI_MODEL_PRESETS.map((preset) => [preset.name, preset.thinkingOnly]),
     ),
     {
-      'glm-5.2': false,
+      'glm-5.3-flash': true,
       'deepseek-v4-pro': false,
       'deepseek-v4-flash': false,
       'kimi-k3': true,
@@ -225,7 +225,7 @@ test('the catalog contains GLM-5.2 and the existing models', () => {
       AI_MODEL_PRESETS.map((preset) => [preset.name, [...preset.contextWindowOptions]]),
     ),
     {
-      'glm-5.2': ['32k', '256k', '1m'],
+      'glm-5.3-flash': ['32k', '256k', '1m'],
       'deepseek-v4-pro': ['32k', '256k', '1m'],
       'deepseek-v4-flash': ['32k', '256k', '1m'],
       'kimi-k3': ['32k', '256k', '1m'],
@@ -238,7 +238,7 @@ test('the catalog contains GLM-5.2 and the existing models', () => {
 
 test('context choices follow each built-in model maximum without dense legacy tiers', () => {
   assert.deepEqual(
-    [...getModelContextWindowOptions({ presetId: 'zai:glm-5.2' })],
+    [...getModelContextWindowOptions({ presetId: 'zai:glm-5.3-flash' })],
     ['32k', '256k', '1m'],
   )
   assert.deepEqual(
@@ -369,10 +369,10 @@ test('known config migration updates only exact legacy provider models', () => {
     })),
     [
       {
-        name: 'glm-5.2',
-        nickname: 'GLM-5.2',
+        name: 'glm-5.3-flash',
+        nickname: 'GLM-5.3-Flash',
         contextWindow: '1m',
-        presetId: 'zai:glm-5.2',
+        presetId: 'zai:glm-5.3-flash',
         providerId: 'zai',
         apiKey: '',
       },
@@ -448,7 +448,7 @@ test('known config migration updates only exact legacy provider models', () => {
   assert.equal(result.configs[5].outputTokenBudget, undefined)
 })
 
-test('GLM-5.2 migration claims only the official Z.ai endpoint', () => {
+test('GLM-5.2 migration upgrades only the official Z.ai endpoint to GLM-5.3-Flash', () => {
   const official = {
     id: 'official-glm',
     name: 'glm-5.2',
@@ -472,11 +472,14 @@ test('GLM-5.2 migration claims only the official Z.ai endpoint', () => {
   const preservedProxy = result.configs.find((config) => config.id === proxy.id)
 
   assert.equal(result.configs[0].id, official.id)
-  assert.equal(migratedOfficial.presetId, 'zai:glm-5.2')
+  assert.equal(migratedOfficial.name, 'glm-5.3-flash')
+  assert.equal(migratedOfficial.presetId, 'zai:glm-5.3-flash')
   assert.equal(migratedOfficial.providerId, 'zai')
   assert.equal(migratedOfficial.apiProvider, 'zai')
   assert.equal(migratedOfficial.baseUrl, 'https://open.bigmodel.cn/api/paas/v4/')
   assert.equal(migratedOfficial.apiKey, 'zai-secret')
+  assert.equal(migratedOfficial.thinkingOnly, true)
+  assert.equal(migratedOfficial.thinkingEnabled, true)
   assert.equal(preservedProxy, proxy)
 })
 
@@ -532,7 +535,7 @@ test('system built-ins are materialized without user add actions', () => {
   assert.deepEqual(
     result.configs.slice(0, 7).map((config) => config.presetId),
     [
-      'zai:glm-5.2',
+      'zai:glm-5.3-flash',
       'deepseek:deepseek-v4-pro',
       'deepseek:deepseek-v4-flash',
       'moonshot:kimi-k3',

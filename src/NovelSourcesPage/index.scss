@@ -1,0 +1,88 @@
+.novel-sources-page {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.novel-sources-main {
+  min-height: 0;
+  padding: 34px clamp(24px, 5vw, 64px) 56px;
+  flex: 1;
+  overflow-y: auto;
+
+  > .novel-sources-toolbar,
+  > .novel-source-freeze,
+  > .novel-source-preview,
+  > .novel-source-list,
+  > .novel-analysis-panel,
+  > .novel-sources-loading {
+    max-width: 1180px;
+    margin-right: auto;
+    margin-left: auto;
+  }
+
+  > .novel-source-freeze,
+  > .novel-source-preview,
+  > .novel-source-list,
+  > .novel-analysis-panel {
+    padding: 20px;
+    margin-bottom: 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg-elevated);
+  }
+
+  > .novel-source-freeze {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  h1, h2, p { margin: 0; }
+  .novel-source-freeze p { color: var(--text-secondary); }
+  input:not([type='checkbox']), select { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface); color: inherit; }
+}
+
+.novel-sources-toolbar { display: flex; margin-bottom: 28px; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.novel-sources-toolbar h1 { margin: 3px 0 5px; font-size: clamp(24px, 3vw, 32px); font-weight: var(--font-weight-semibold); letter-spacing: -0.03em; }
+.novel-sources-toolbar p { color: var(--text-muted); }
+.novel-sources-eyebrow { color: var(--accent); font-size: 10px; font-weight: var(--font-weight-semibold); letter-spacing: 0.18em; }
+.novel-sources-loading { display: grid; min-height: 100px; place-items: center; }
+
+.novel-source-preview { display: grid; gap: 14px; }
+.novel-source-preview label { display: flex; gap: 8px; align-items: center; }
+.novel-source-metrics { display: flex; flex-wrap: wrap; gap: 8px; }
+.novel-source-metrics span, .novel-source-list article span { color: var(--text-secondary); }
+.novel-source-boundary { padding: 12px; border-radius: 10px; background: var(--bg-hover); }
+.novel-source-sections { display: grid; gap: 8px; max-height: 320px; overflow: auto; }
+.novel-source-sections article, .novel-source-list article { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.novel-source-sections p { color: var(--text-secondary); white-space: pre-wrap; }
+.novel-source-list { display: grid; gap: 10px; }
+.novel-source-list article { grid-template-columns: 1fr auto; }
+.novel-source-list article div { display: flex; gap: 10px; }
+
+.novel-analysis-panel { display: grid; gap: 12px; }
+.novel-analysis-heading,
+.novel-analysis-run,
+.novel-analysis-actions,
+.novel-analysis-review > div { display: flex; align-items: center; gap: 10px; }
+.novel-analysis-heading { justify-content: space-between; }
+.novel-analysis-heading > div { flex: 1; }
+.novel-analysis-heading p,
+.novel-analysis-review p { color: var(--text-secondary); }
+.novel-analysis-run { justify-content: space-between; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
+.novel-analysis-run > div:first-child { display: grid; gap: 4px; }
+.novel-analysis-run span { color: var(--text-secondary); }
+.novel-analysis-review { display: grid; gap: 12px; padding: 16px; border-radius: 12px; background: var(--bg-hover); }
+.novel-analysis-review label { display: grid; gap: 6px; }
+.novel-analysis-review textarea { min-height: 220px; padding: 10px; resize: vertical; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-surface); color: inherit; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+@media (max-width: 760px) {
+  .novel-sources-main { padding: 24px 20px 48px; }
+  .novel-sources-toolbar, .novel-source-freeze, .novel-analysis-heading { align-items: flex-start; flex-direction: column; }
+}
