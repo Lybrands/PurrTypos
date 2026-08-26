@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "npm run dev:web",
     "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "dev:web": "concurrently -k \"node scripts/run-web-backend.cjs\" \"vite --open\"",
+    "dev:web": "concurrently -k \"node scripts/run-web-backend.cjs\" \"wait-on http-get://127.0.0.1:18321/health && vite --open\"",
     "prepare:backend-resources": "node scripts/prepare-backend-resources.cjs",
     "build:backend:win": "py -m pip install -q -r backend/requirements.txt pyinstaller && py -m PyInstaller --clean --noconfirm --distpath backend/dist --workpath backend/build backend/purrtypos-backend.spec",
     "build:win": "npm run build:backend:win && npm run build:electron",
