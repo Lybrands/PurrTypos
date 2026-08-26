@@ -224,7 +224,12 @@ class DatabaseConnection:
 
     async def execute(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> None:
         async with self._connection_access() as (conn, in_transaction):
-            await conn.execute(sql, params)
+            try:
+                await conn.execute(sql, params)
+            except BaseException:
+                if not in_transaction:
+                    await _rollback_uninterruptibly(conn)
+                raise
             if not in_transaction:
                 await conn.commit()
 
@@ -244,7 +249,12 @@ class DatabaseConnection:
 
     async def execute_and_get_id(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> int | None:
         async with self._connection_access() as (conn, in_transaction):
-            cursor = await conn.execute(sql, params)
+            try:
+                cursor = await conn.execute(sql, params)
+            except BaseException:
+                if not in_transaction:
+                    await _rollback_uninterruptibly(conn)
+                raise
             if not in_transaction:
                 await conn.commit()
             return cursor.lastrowid

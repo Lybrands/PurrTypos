@@ -307,6 +307,10 @@ async def test_repository_implements_the_output_port_and_creates_schema(
         "occurred_at",
         "emitted_at",
         "source_event_key",
+        "root_run_id",
+        "agent_id",
+        "parent_run_id",
+        "root_sequence",
     }.issubset(event_columns)
 
 
@@ -319,6 +323,179 @@ async def test_sqlite_host_adapters_pass_the_shared_conformance_suite(output_db)
         publisher=InProcessAgentOutputPublisher(),
         session_id=7,
     )
+
+
+@pytest.mark.asyncio
+async def test_schema_backfills_historical_canonical_root_journal(tmp_path: Path):
+    original = DatabaseConnection(tmp_path)
+    await original.init()
+    runs = SqliteRunRepository(original)
+    root_id = await runs.create(RunCreateParams(
+        session_id=None,
+        prompt="historical root",
+        mode="agent",
+        requested_run_id="historical-root",
+        agent_id="historical-agent",
+    ))
+    timestamp = datetime.now(timezone.utc).isoformat()
+    await original.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, sequence, source, kind, "
+        "channel, visibility, occurred_at, emitted_at, source_event_key) "
+        "VALUES (?, 'runtime.event', '{}', 'historical-event', 1, 'runtime', "
+        "'runtime.event', 'diagnostic', 'private', ?, ?, 'historical:source')",
+        [root_id, timestamp, timestamp],
+    )
+    await original.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    try:
+        repository = _repository(migrated)
+        journal = await repository.list_root_events(
+            root_id,
+            after_root_sequence=0,
+        )
+        assert len(journal) == 1
+        assert journal[0].root_run_id == root_id
+        assert journal[0].agent_id == "historical-agent"
+        assert journal[0].parent_run_id is None
+        assert journal[0].root_sequence == 1
+        assert journal[0].source_event_key == "historical:source"
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_appends_missing_root_sequences_after_existing_journal(
+    tmp_path: Path,
+):
+    original = DatabaseConnection(tmp_path)
+    await original.init()
+    runs = SqliteRunRepository(original)
+    root_id = await runs.create(RunCreateParams(
+        session_id=None,
+        prompt="partially migrated root",
+        mode="agent",
+        requested_run_id="partially-migrated-root",
+    ))
+    repository = _repository(original, run_repository=runs)
+    timestamp = datetime.now(timezone.utc)
+    first = await repository.append_event(AgentOutputEventDraft(
+        run_id=root_id,
+        turn_id=None,
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key="partial:first",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={},
+        occurred_at=timestamp,
+    ))
+    await original.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, sequence, source, kind, "
+        "channel, visibility, occurred_at, emitted_at, source_event_key) "
+        "VALUES (?, 'runtime.event', '{}', 'partial-missing', 2, 'runtime', "
+        "'runtime.event', 'diagnostic', 'private', ?, ?, 'partial:missing')",
+        [root_id, timestamp.isoformat(), timestamp.isoformat()],
+    )
+    second = await repository.append_event(AgentOutputEventDraft(
+        run_id=root_id,
+        turn_id=None,
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key="partial:second",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={},
+        occurred_at=timestamp,
+    ))
+    assert (first.root_sequence, second.root_sequence) == (1, 2)
+    await original.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    try:
+        rows = await migrated.fetch_all(
+            "SELECT event_id, root_sequence FROM ai_agent_run_events "
+            "WHERE run_id = ? ORDER BY root_sequence",
+            [root_id],
+        )
+        assert rows == [
+            {"event_id": first.event_id, "root_sequence": 1},
+            {"event_id": second.event_id, "root_sequence": 2},
+            {"event_id": "partial-missing", "root_sequence": 3},
+        ]
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_child_events_share_one_atomic_root_journal(output_db):
+    db, _run_id, runs = output_db
+    root_id = await runs.create(RunCreateParams(
+        session_id=7,
+        prompt="journal root",
+        mode="agent",
+        requested_run_id="journal-root",
+        agent_id="journal-root-agent",
+    ))
+    child_ids = tuple([
+        await runs.create(RunCreateParams(
+            session_id=7,
+            prompt=f"journal child {index}",
+            mode="agent",
+            requested_run_id=f"journal-child-{index}",
+            root_run_id=root_id,
+            agent_id=f"journal-child-agent-{index}",
+            parent_run_id=root_id,
+        ))
+        for index in (1, 2)
+    ])
+    repository = _repository(db)
+    events = await asyncio.gather(*(
+        repository.append_event(AgentOutputEventDraft(
+            run_id=child_id,
+            turn_id=None,
+            output_stream_id=None,
+            invocation_id=None,
+            source_event_key=f"journal:{child_id}",
+            source=OutputSource.RUNTIME,
+            kind=OutputEventKind.RUNTIME,
+            channel=OutputChannel.DIAGNOSTIC,
+            visibility=OutputVisibility.PRIVATE,
+            payload={"childId": child_id},
+            occurred_at=datetime.now(timezone.utc),
+        ))
+        for child_id in child_ids
+    ))
+
+    assert {event.sequence for event in events} == {1}
+    journal = await repository.list_root_events(
+        root_id,
+        after_root_sequence=0,
+    )
+    assert [event.root_sequence for event in journal] == [1, 2]
+    assert {event.run_id for event in journal} == set(child_ids)
+    assert {event.parent_run_id for event in journal} == {root_id}
+    assert {
+        event.agent_id for event in journal
+    } == {"journal-child-agent-1", "journal-child-agent-2"}
+    assert await repository.list_root_events(
+        root_id,
+        after_root_sequence=1,
+    ) == (journal[1],)
+    with pytest.raises(ContractViolationError) as conflict:
+        await repository.list_root_events(
+            child_ids[0],
+            after_root_sequence=0,
+        )
+    assert conflict.value.code == "run_scope_conflict"
 
 
 @pytest.mark.asyncio

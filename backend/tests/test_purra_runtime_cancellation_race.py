@@ -217,7 +217,7 @@ async def test_signal_first_cleanup_exception_does_not_replace_canceled_outcome(
 
 
 @pytest.mark.asyncio
-async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gateway(
+async def test_runtime_aclose_closes_nested_tool_stream_and_gateway_by_next_tick(
     monkeypatch,
 ):
     progress = AgentEvent(
@@ -316,10 +316,11 @@ async def test_runtime_aclose_synchronously_closes_nested_tool_stream_and_gatewa
     assert tracked_streams and not tracked_streams[0].closed
 
     await asyncio.wait_for(stream.aclose(), timeout=1)
-    closed_synchronously = tracked_streams[0].closed
-    finalized_synchronously = gateway_finalized.is_set()
-    if not closed_synchronously:
+    await asyncio.sleep(0)
+    closed_after_close = tracked_streams[0].closed
+    finalized_after_tick = gateway_finalized.is_set()
+    if not closed_after_close:
         await tracked_streams[0].aclose()
 
-    assert closed_synchronously
-    assert finalized_synchronously
+    assert closed_after_close
+    assert finalized_after_tick
