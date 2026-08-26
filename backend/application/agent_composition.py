@@ -23,6 +23,7 @@ from purra.context_orchestration import (
     ContextCompressionSettings,
 )
 from purra.api import (
+    AgentComponentBinding,
     AgentCore,
     AgentCoreRunOptions,
     AgentPlanner,
@@ -106,6 +107,22 @@ from config import AGENT_APPROVAL_TIMEOUT_SECONDS
 
 
 logger = logging.getLogger(__name__)
+
+
+def _host_component_bindings(profile_id: str):
+    prefix = f"purrtypos.{str(profile_id or '').strip()}"
+    return {
+        role: AgentComponentBinding(f"{prefix}.{role}", "1")
+        for role in (
+            "contextProvider",
+            "conversationCompactor",
+            "executionStateFactory",
+            "planner",
+            "planningPolicy",
+            "taskAdmissionEvaluator",
+            "longTaskDispatcher",
+        )
+    }
 
 
 def _compose_tool_catalog(
@@ -457,6 +474,8 @@ class AgentComposition:
             execution_state_factory=adapter.execution_state_factory,
             runtime_limits=adapter.runtime_limits,
             recovery_policy=adapter.recovery_policy,
+            component_bindings=_host_component_bindings(profile.id),
+            delegation_policy=self._delegation_policy,
         )
         core = AgentCore(
             model_gateway=model_gateway,
@@ -472,7 +491,6 @@ class AgentComposition:
             execution_owner_id=self._repository.owner_id,
             execution_lease_duration_ms=self._repository.lease_duration_ms,
             delegation_repository=self._delegation_repository,
-            delegation_policy=self._delegation_policy,
         )
         self._active_cores.add(core)
         return core

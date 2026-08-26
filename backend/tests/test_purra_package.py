@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from importlib import metadata
 from pathlib import Path
 
@@ -11,11 +12,9 @@ import purra
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PINNED_PURRA_COMMIT = "cdee52008cc8a8835ce1be9b3bb088cdd5b34b09"
-PURRA_REQUIREMENT = (
-    "purra @ https://github.com/Lybrands/purra/archive/"
-    f"{PINNED_PURRA_COMMIT}.zip"
-)
+PURRA_VERSION = "0.3.0"
+PURRA_REQUIREMENT = f"purra=={PURRA_VERSION}"
+LOCAL_PURRA_DIR = (ROOT_DIR.parent / "purra").resolve()
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
 }
@@ -43,6 +42,7 @@ PUBLIC_PURRA_HOST_MODULES = frozenset({
     "purra.ports",
     "purra.recovery",
     "purra.run_control",
+    "purra.run_state",
     "purra.stream_ownership",
     "purra.structured_output",
     "purra.task_admission",
@@ -84,15 +84,29 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
+def _uses_expected_local_editable_purra(package_path: Path) -> bool:
+    direct_url = metadata.distribution("purra").read_text("direct_url.json")
+    if not direct_url:
+        return False
+    value = json.loads(direct_url)
+    return (
+        value.get("dir_info", {}).get("editable") is True
+        and package_path.is_relative_to(LOCAL_PURRA_DIR)
+    )
+
+
 def test_purra_is_pinned_and_loaded_as_an_external_distribution():
     requirement = (BACKEND_DIR / "requirements-purra.txt").read_text(
         encoding="utf-8"
     ).strip()
-    package_path = Path(purra.__file__).resolve().as_posix()
+    package_path = Path(purra.__file__).resolve()
 
     assert requirement == PURRA_REQUIREMENT
-    assert metadata.version("purra") == "0.1.1"
-    assert "/packages/purra/src/" not in package_path
+    assert (
+        metadata.version("purra") == PURRA_VERSION
+        or _uses_expected_local_editable_purra(package_path)
+    )
+    assert "/packages/purra/src/" not in package_path.as_posix()
     assert not (ROOT_DIR / "packages" / "purra").exists()
 
 

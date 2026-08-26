@@ -119,7 +119,10 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
     assert "function_call" not in invocation.request.options
     assert "parallel_tool_calls" not in invocation.request.options
     assert "response_format" not in invocation.request.options
-    assert observed_signal is signal
+    assert observed_signal is not signal
+    assert not observed_signal.is_set()
+    signal.set()
+    assert observed_signal.is_set()
     assert policy.evaluated == [('{"ok":true}', "candidate")]
 
 

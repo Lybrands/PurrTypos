@@ -808,8 +808,12 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
     signal = asyncio.Event()
 
     async def _stream(_key, _messages, _options, _provider, received_signal):
-        assert received_signal is signal
+        # PurrA 0.3 clips the caller signal with its invocation deadline and
+        # passes that reason-aware child signal to the Provider boundary.
+        assert received_signal is not signal
+        assert not received_signal.is_set()
         signal.set()
+        assert received_signal.is_set()
         return {"stream": raw_stream, "model": "resolved-model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)

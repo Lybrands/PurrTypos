@@ -14,6 +14,7 @@ from purra.contracts import (
     RunCreateParams,
     RunId,
     RunStatus,
+    RuntimeLimits,
 )
 from purra.errors import ContractViolationError, RunCommitProjectionError
 from purra.json_values import thaw_json_mapping
@@ -115,6 +116,43 @@ class SqliteAgentOutputRepository:
             raise TypeError("output repository requires an AgentOutputEventDraft")
         async with self._db.transaction(cancellation_linearizable=True):
             return await self._append_event_in_transaction(draft)
+
+    async def append_batch(
+        self,
+        drafts: tuple[AgentOutputEventDraft, ...],
+    ) -> tuple[AgentOutputEvent, ...]:
+        normalized = tuple(drafts)
+        if any(not isinstance(item, AgentOutputEventDraft) for item in normalized):
+            raise TypeError("output batch requires AgentOutputEventDraft values")
+        if not normalized:
+            return ()
+        run_ids = {item.run_id for item in normalized}
+        if len(run_ids) != 1:
+            raise ContractViolationError("one output batch cannot span Runs")
+        source_keys = [item.source_event_key for item in normalized]
+        if len(source_keys) != len(set(source_keys)):
+            raise ContractViolationError("output batch source keys must be unique")
+        async with self._db.transaction(cancellation_linearizable=True):
+            pending: list[AgentOutputEventDraft] = []
+            for item in normalized:
+                if await self._existing_event_for_draft(item) is None:
+                    await self._validate_draft_for_append(item)
+                    pending.append(item)
+            costs = tuple(_provider_output_cost(item) for item in pending)
+            await self._reserve_provider_output_budget(
+                normalized[0].run_id,
+                event_count=sum(count for count, _ in costs),
+                payload_bytes=sum(size for _, size in costs),
+            )
+            return tuple(
+                [
+                    await self._append_event_in_transaction(
+                        item,
+                        budget_prechecked=True,
+                    )
+                    for item in normalized
+                ]
+            )
 
     async def begin_run_lifecycle(
         self,
@@ -521,33 +559,30 @@ class SqliteAgentOutputRepository:
                     )
                 return (_event(existing_commentary), _event(existing_commit))
 
-            tool_call = await self._db.fetch_one(
-                "SELECT id FROM ai_agent_run_events "
-                "WHERE output_stream_id = ? AND source = ? AND kind = ? LIMIT 1",
+            scoped = await self._db.fetch_all(
+                "SELECT kind, payload_json, occurred_at, channel, visibility "
+                "FROM ai_agent_run_events WHERE output_stream_id = ? "
+                "AND source = ? ORDER BY sequence, id",
                 [
                     stream_id,
                     OutputSource.PROVIDER.value,
-                    OutputEventKind.PROVIDER_TOOL_CALL_DELTA.value,
                 ],
             )
-            if tool_call is None:
+            if not any(_row_has_tool_call_delta(row) for row in scoped):
                 raise ContractViolationError(
                     "commentary publication requires a Provider tool call"
                 )
-            rows = await self._db.fetch_all(
-                "SELECT payload_json, occurred_at FROM ai_agent_run_events "
-                "WHERE output_stream_id = ? AND source = ? AND kind = ? "
-                "AND channel = ? AND visibility = ? ORDER BY sequence, id",
-                [
-                    stream_id,
-                    OutputSource.PROVIDER.value,
+            rows = [
+                row for row in scoped
+                if row.get("channel") == OutputChannel.DIAGNOSTIC.value
+                and row.get("visibility") == OutputVisibility.PRIVATE.value
+                and row.get("kind") in {
                     OutputEventKind.PROVIDER_CONTENT_DELTA.value,
-                    OutputChannel.DIAGNOSTIC.value,
-                    OutputVisibility.PRIVATE.value,
-                ],
-            )
+                    OutputEventKind.PROVIDER_DELTA_BATCH.value,
+                }
+            ]
             content = "".join(
-                str(_json_mapping(row.get("payload_json")).get("delta") or "")
+                _provider_text(row)
                 for row in rows
             )
             if not content.strip():
@@ -642,6 +677,37 @@ class SqliteAgentOutputRepository:
         )
         return tuple(_event(row) for row in rows)
 
+    async def list_root_events(
+        self,
+        root_run_id: RunId,
+        *,
+        after_root_sequence: int,
+        limit: int = 200,
+    ) -> tuple[AgentOutputEvent, ...]:
+        normalized_root_id = required_text(root_run_id, "root Run id")
+        cursor = non_negative_int(after_root_sequence, "after root sequence")
+        page_size = positive_int(limit, "limit")
+        root = await self._db.fetch_one(
+            "SELECT id, root_run_id FROM ai_agent_runs WHERE id = ?",
+            [normalized_root_id],
+        )
+        if root is None:
+            raise ContractViolationError(
+                f"run {normalized_root_id!r} does not exist"
+            )
+        if str(root.get("root_run_id") or root["id"]) != normalized_root_id:
+            raise ContractViolationError(
+                "Root journal query requires a Root Run",
+                code="run_scope_conflict",
+            )
+        rows = await self._db.fetch_all(
+            "SELECT * FROM ai_agent_run_events "
+            "WHERE root_run_id = ? AND event_id IS NOT NULL "
+            "AND root_sequence > ? ORDER BY root_sequence, id LIMIT ?",
+            [normalized_root_id, cursor, page_size],
+        )
+        return tuple(_event(row) for row in rows)
+
     async def load_validated_result(self, run_id: RunId) -> str:
         """Read one private validated result from the canonical Run journal."""
 
@@ -731,10 +797,23 @@ class SqliteAgentOutputRepository:
         draft: AgentOutputEventDraft,
         *,
         allow_committed_stream: bool = False,
+        budget_prechecked: bool = False,
     ) -> AgentOutputEvent:
         existing = await self._existing_event_for_draft(draft)
         if existing is not None:
             return existing
+
+        await self._validate_draft_for_append(
+            draft,
+            allow_committed_stream=allow_committed_stream,
+        )
+        if not budget_prechecked:
+            event_count, payload_bytes = _provider_output_cost(draft)
+            await self._reserve_provider_output_budget(
+                draft.run_id,
+                event_count=event_count,
+                payload_bytes=payload_bytes,
+            )
 
         if draft.output_stream_id is not None:
             stream = await self._require_stream(draft.output_stream_id)
@@ -794,6 +873,7 @@ class SqliteAgentOutputRepository:
                     "domain event projector must return None"
                 )
 
+        run_scope = await self._require_run_scope(draft.run_id)
         sequence_row = await self._db.fetch_one(
             "SELECT COALESCE(MAX(sequence), 0) AS value "
             "FROM ai_agent_run_events "
@@ -801,14 +881,24 @@ class SqliteAgentOutputRepository:
             [draft.run_id],
         )
         sequence = int((sequence_row or {}).get("value") or 0) + 1
+        root_sequence_row = await self._db.fetch_one(
+            "SELECT COALESCE(MAX(root_sequence), 0) AS value "
+            "FROM ai_agent_run_events WHERE root_run_id = ? "
+            "AND event_id IS NOT NULL",
+            [run_scope["root_run_id"]],
+        )
+        root_sequence = int(
+            (root_sequence_row or {}).get("value") or 0
+        ) + 1
         emitted_at = _now()
         event_id = f"output-event-{uuid4().hex}"
         await self._db.execute(
             "INSERT INTO ai_agent_run_events "
             "(run_id, event_type, payload_json, event_id, turn_id, "
             "invocation_id, output_stream_id, sequence, source, kind, "
-            "channel, visibility, occurred_at, emitted_at, source_event_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "channel, visibility, occurred_at, emitted_at, source_event_key, "
+            "root_run_id, agent_id, parent_run_id, root_sequence) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 draft.run_id,
                 draft.kind.value,
@@ -829,6 +919,10 @@ class SqliteAgentOutputRepository:
                 draft.occurred_at.isoformat(),
                 emitted_at.isoformat(),
                 draft.source_event_key,
+                run_scope["root_run_id"],
+                run_scope["agent_id"],
+                run_scope["parent_run_id"],
+                root_sequence,
             ],
         )
         return AgentOutputEvent(
@@ -845,7 +939,130 @@ class SqliteAgentOutputRepository:
             payload=draft.payload,
             occurred_at=draft.occurred_at,
             emitted_at=emitted_at,
+            root_run_id=run_scope["root_run_id"],
+            agent_id=run_scope["agent_id"],
+            parent_run_id=run_scope["parent_run_id"],
+            root_sequence=root_sequence,
+            source_event_key=draft.source_event_key,
         )
+
+    async def _validate_draft_for_append(
+        self,
+        draft: AgentOutputEventDraft,
+        *,
+        allow_committed_stream: bool = False,
+    ) -> None:
+        if draft.output_stream_id is not None:
+            stream = await self._require_stream(draft.output_stream_id)
+            if stream["status"] != "open" and not (
+                allow_committed_stream and stream["status"] == "committed"
+            ):
+                raise ContractViolationError(
+                    "canonical event requires an open output stream"
+                )
+            if (
+                stream["run_id"] != draft.run_id
+                or stream.get("turn_id") != draft.turn_id
+                or stream["invocation_id"] != draft.invocation_id
+            ):
+                raise ContractViolationError(
+                    "canonical event does not match its output stream"
+                )
+        else:
+            run = await self._db.fetch_one(
+                "SELECT id FROM ai_agent_runs WHERE id = ?",
+                [draft.run_id],
+            )
+            if run is None:
+                raise ContractViolationError(
+                    f"canonical event run {draft.run_id!r} does not exist"
+                )
+        is_domain_effect = draft.kind is OutputEventKind.DOMAIN_EFFECT
+        if is_domain_effect != (draft.source is OutputSource.DOMAIN):
+            raise ContractViolationError(
+                "domain effect events require domain source and kind"
+            )
+
+    async def _reserve_provider_output_budget(
+        self,
+        run_id: str,
+        *,
+        event_count: int,
+        payload_bytes: int,
+    ) -> None:
+        if event_count == 0 and payload_bytes == 0:
+            return
+        run_scope = await self._require_run_scope(run_id)
+        root = await self._db.fetch_one(
+            "SELECT runtime_limits_json FROM ai_agent_runs WHERE id = ?",
+            [run_scope["root_run_id"]],
+        )
+        raw_limits = _json_mapping((root or {}).get("runtime_limits_json"))
+        allowed = RuntimeLimits.__dataclass_fields__
+        limits = RuntimeLimits(**{
+            key: value for key, value in raw_limits.items() if key in allowed
+        })
+        usage = await self._db.fetch_one(
+            "SELECT COALESCE(SUM(provider_output_events), 0) AS events, "
+            "COALESCE(SUM(provider_output_bytes), 0) AS bytes "
+            "FROM ai_agent_runs WHERE root_run_id = ?",
+            [run_scope["root_run_id"]],
+        )
+        if int((usage or {}).get("events") or 0) + event_count > (
+            limits.max_provider_output_events
+        ):
+            raise ContractViolationError(
+                "Root Run Provider output event budget was exceeded",
+                code="runtime_budget_exceeded",
+                details={"budgetKind": "provider_output_events"},
+            )
+        if int((usage or {}).get("bytes") or 0) + payload_bytes > (
+            limits.max_provider_output_bytes
+        ):
+            raise ContractViolationError(
+                "Root Run Provider output byte budget was exceeded",
+                code="runtime_budget_exceeded",
+                details={"budgetKind": "provider_output_bytes"},
+            )
+        await self._db.execute(
+            "UPDATE ai_agent_runs SET provider_output_events = "
+            "provider_output_events + ?, provider_output_bytes = "
+            "provider_output_bytes + ?, update_time = CURRENT_TIMESTAMP "
+            "WHERE id = ?",
+            [event_count, payload_bytes, run_id],
+        )
+
+    async def _require_run_scope(self, run_id: str) -> dict[str, Any]:
+        run = await self._db.fetch_one(
+            "SELECT id, root_run_id, agent_id, parent_run_id "
+            "FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if run is None:
+            raise ContractViolationError(
+                f"canonical event run {run_id!r} does not exist"
+            )
+        root_run_id = str(run.get("root_run_id") or run["id"])
+        root = await self._db.fetch_one(
+            "SELECT id, root_run_id FROM ai_agent_runs WHERE id = ?",
+            [root_run_id],
+        )
+        if root is None or str(root.get("root_run_id") or root["id"]) != (
+            root_run_id
+        ):
+            raise ContractViolationError(
+                "canonical event Run has an invalid Root scope",
+                code="run_scope_conflict",
+            )
+        return {
+            "root_run_id": root_run_id,
+            "agent_id": str(run.get("agent_id") or run["id"]),
+            "parent_run_id": (
+                str(run["parent_run_id"])
+                if run.get("parent_run_id") is not None
+                else None
+            ),
+        }
 
     async def _existing_event_for_draft(
         self,
@@ -882,18 +1099,19 @@ class SqliteAgentOutputRepository:
 
     async def _project_final_conversation(self, spec: OutputStreamSpec) -> None:
         rows = await self._db.fetch_all(
-            "SELECT payload_json FROM ai_agent_run_events "
-            "WHERE output_stream_id = ? AND kind = ? AND source = ? "
+            "SELECT kind, payload_json FROM ai_agent_run_events "
+            "WHERE output_stream_id = ? AND kind IN (?, ?) AND source = ? "
             "AND visibility = ? ORDER BY sequence, id",
             [
                 spec.output_stream_id,
                 OutputEventKind.PROVIDER_CONTENT_DELTA.value,
+                OutputEventKind.PROVIDER_DELTA_BATCH.value,
                 OutputSource.PROVIDER.value,
                 OutputVisibility.PUBLIC.value,
             ],
         )
         content = "".join(
-            str(_json_mapping(row.get("payload_json")).get("delta") or "")
+            _provider_text(row)
             for row in rows
         )
         run = await self._db.fetch_one(
@@ -1051,6 +1269,15 @@ def _event(row: dict[str, Any]) -> AgentOutputEvent:
         payload=_json_mapping(row.get("payload_json")),
         occurred_at=datetime.fromisoformat(str(row["occurred_at"])),
         emitted_at=datetime.fromisoformat(str(row["emitted_at"])),
+        root_run_id=str(row.get("root_run_id") or row["run_id"]),
+        agent_id=str(row.get("agent_id") or row["run_id"]),
+        parent_run_id=(
+            str(row["parent_run_id"])
+            if row.get("parent_run_id") is not None
+            else None
+        ),
+        root_sequence=int(row.get("root_sequence") or row["sequence"]),
+        source_event_key=str(row.get("source_event_key") or "") or None,
     )
 
 
@@ -1060,6 +1287,60 @@ def _json_mapping(value: object) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+_PROVIDER_OUTPUT_BUDGET_KINDS = frozenset({
+    OutputEventKind.PROVIDER_CONTENT_DELTA,
+    OutputEventKind.PROVIDER_REASONING_DELTA,
+    OutputEventKind.PROVIDER_TOOL_CALL_DELTA,
+    OutputEventKind.PROVIDER_DELTA_BATCH,
+})
+
+
+def _provider_output_cost(
+    draft: AgentOutputEventDraft,
+) -> tuple[int, int]:
+    if draft.kind not in _PROVIDER_OUTPUT_BUDGET_KINDS:
+        return 0, 0
+    payload = json.dumps(
+        thaw_json_mapping(draft.payload),
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return 1, len(payload)
+
+
+def _provider_text(row: Mapping[str, Any]) -> str:
+    payload = _json_mapping(row.get("payload_json"))
+    if row.get("kind") == OutputEventKind.PROVIDER_CONTENT_DELTA.value:
+        return str(payload.get("delta") or "")
+    if row.get("kind") != OutputEventKind.PROVIDER_DELTA_BATCH.value:
+        return ""
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return ""
+    return "".join(
+        str((entry.get("payload") or {}).get("delta") or "")
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("kind") == OutputEventKind.PROVIDER_CONTENT_DELTA.value
+        and isinstance(entry.get("payload"), dict)
+    )
+
+
+def _row_has_tool_call_delta(row: Mapping[str, Any]) -> bool:
+    if row.get("kind") == OutputEventKind.PROVIDER_TOOL_CALL_DELTA.value:
+        return True
+    if row.get("kind") != OutputEventKind.PROVIDER_DELTA_BATCH.value:
+        return False
+    entries = _json_mapping(row.get("payload_json")).get("entries")
+    return isinstance(entries, list) and any(
+        isinstance(entry, dict)
+        and entry.get("kind") == OutputEventKind.PROVIDER_TOOL_CALL_DELTA.value
+        for entry in entries
+    )
 
 
 def _now() -> datetime:
