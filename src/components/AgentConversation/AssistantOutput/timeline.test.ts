@@ -12,7 +12,7 @@ import {
   type AssistantTimelinePart,
 } from './timeline.ts'
 
-test('canonical timeline filters model operations and groups consecutive work once', () => {
+test('canonical timeline filters model operations, localizes tools, and groups consecutive work once', () => {
   const base = initialCanonicalOutputState()
   const operation = (operationId: string, kind: string, status: 'running' | 'succeeded') => ({
     operationId,
@@ -27,8 +27,26 @@ test('canonical timeline filters model operations and groups consecutive work on
   const operations = {
     'model-1': operation('model-1', 'model', 'succeeded'),
     'validation-1': operation('validation-1', 'validation', 'succeeded'),
-    'tool-1': operation('tool-1', 'tool', 'succeeded'),
-    'tool-2': operation('tool-2', 'tool', 'running'),
+    'tool-1': {
+      ...operation('tool-1', 'tool', 'succeeded'),
+      toolName: 'inspectScreenplayProject',
+      display: {
+        labelParams: {
+          toolName: 'inspectScreenplayProject',
+          displayNames: { 'zh-CN': '查看剧本项目' },
+        },
+      },
+    },
+    'tool-2': {
+      ...operation('tool-2', 'tool', 'running'),
+      toolName: 'readScreenplayDeliverable',
+      display: {
+        labelParams: {
+          toolName: 'readScreenplayDeliverable',
+          displayNames: { 'zh-CN': '读取剧本交付物' },
+        },
+      },
+    },
   }
   const message: AgentConversationMessage = {
     role: 'assistant',
@@ -45,8 +63,16 @@ test('canonical timeline filters model operations and groups consecutive work on
   })
   const visible = timeline.filter((part) => part.type === 'operation')
   assert.deepEqual(visible.map((part) => part.operation.kind), ['tool', 'tool'])
+  assert.deepEqual(visible.map((part) => part.label), [
+    '查看剧本项目',
+    '读取剧本交付物',
+  ])
   const grouped = groupConsecutiveWorkSteps(visible, 'turn-1')
-  assert.equal(grouped.length, 2)
+  assert.equal(grouped.length, 1)
+  assert.equal(grouped[0].type, 'stepGroup')
+  if (grouped[0].type === 'stepGroup') {
+    assert.equal(grouped[0].parts.length, 2)
+  }
   assert.equal(getExecutionPanelPresentation(visible, {
     isStreaming: true,
   }).title, '正在进行')
@@ -165,7 +191,7 @@ test('canonical timeline retains compaction and sequenced delegation without dup
   assert.deepEqual(
     groupConsecutiveWorkSteps(timeline, 'turn-canonical')
       .map((part) => part.type),
-    ['contextCompaction', 'commentary', 'operation', 'delegations'],
+    ['contextCompaction', 'commentary', 'stepGroup'],
   )
 })
 
@@ -499,7 +525,7 @@ test('execution progress counts only visible rows at the active frontier', () =>
   })
 })
 
-test('consecutive legacy operations remain direct rows under one panel', () => {
+test('consecutive legacy operations collapse into one step group', () => {
   const grouped = groupConsecutiveWorkSteps([
     {
       type: 'commentary',
@@ -526,15 +552,18 @@ test('consecutive legacy operations remain direct rows under one panel', () => {
 
   assert.deepEqual(grouped.map((item) => item.type), [
     'commentary',
-    'tools',
-    'tools',
+    'stepGroup',
   ])
-  assert.deepEqual(
-    grouped
-      .filter((part) => part.type === 'tools')
-      .flatMap((part) => part.segment.labels),
-    ['写入剧本候选稿', '检查剧本候选稿', '发布候选稿'],
-  )
+  const stepGroup = grouped[1]
+  assert.equal(stepGroup.type, 'stepGroup')
+  if (stepGroup.type === 'stepGroup') {
+    assert.deepEqual(
+      stepGroup.parts
+        .filter((part) => part.type === 'tools')
+        .flatMap((part) => part.segment.labels),
+      ['写入剧本候选稿', '检查剧本候选稿', '发布候选稿'],
+    )
+  }
 })
 
 test('a persisted single-operation batch keeps its recorded row timing', () => {
@@ -592,7 +621,7 @@ test('an explicit empty row-timing array disables the legacy fallback', () => {
   assert.deepEqual(toolPart?.segment.itemDurationsMs, [])
 })
 
-test('runtime metadata never becomes host-authored assistant copy', () => {
+test('runtime metadata falls back to model-neutral thinking copy', () => {
   const states: AgentConversationMessage[] = [
     { role: 'assistant', content: '' },
     {
@@ -610,10 +639,139 @@ test('runtime metadata never becomes host-authored assistant copy', () => {
   ]
 
   for (const state of states) {
-    assert.equal(getAssistantProcessingLabel(state), '')
+    assert.equal(getAssistantProcessingLabel(state), '正在思考')
   }
   assert.deepEqual(
     buildAssistantTimeline(states[3], { messageIndex: 0 }),
     [],
   )
+})
+
+test('only model commentary from the current invocation becomes the standby title', () => {
+  const base = initialCanonicalOutputState()
+  const canonicalOutput = {
+    ...base,
+    commentaryBlocks: [{
+      outputStreamId: 'commentary-safe',
+      invocationId: 'invocation-1',
+      firstSequence: 1,
+      lastSequence: 1,
+      startedAt: '2026-08-12T00:00:00Z',
+      text: '**正在梳理人物关系与关键冲突**',
+      committed: true,
+      aborted: false,
+    }],
+    operationOrder: ['tool-1'],
+    operations: {
+      'tool-1': {
+        operationId: 'tool-1',
+        runId: 'run-1',
+        invocationId: 'invocation-1',
+        kind: 'tool',
+        firstSequence: 2,
+        status: 'running' as const,
+        startedAt: '2026-08-12T00:00:00Z',
+        display: { labelParams: { toolName: 'inspectScreenplayProject' } },
+      },
+    },
+  }
+  const safe: AgentConversationMessage = {
+    role: 'assistant',
+    content: '',
+    canonicalOutput,
+    taskPlan: {
+      title: '审阅剧本',
+      status: 'running',
+      steps: [{
+        id: 'review-characters',
+        title: '检查人物关系与关键冲突',
+        type: 'review',
+        status: 'running',
+      }],
+    },
+  }
+  assert.equal(
+    getAssistantProcessingLabel(safe),
+    '正在梳理人物关系与关键冲突',
+  )
+  assert.deepEqual(
+    buildAssistantTimeline(safe, { messageIndex: 0 })
+      .filter((part) => part.type === 'commentary')
+      .map((part) => part.md),
+    ['正在梳理人物关系与关键冲突'],
+  )
+
+  const unsafe: AgentConversationMessage = {
+    ...safe,
+    canonicalOutput: {
+      ...canonicalOutput,
+      commentaryBlocks: [
+        canonicalOutput.commentaryBlocks[0],
+        {
+          ...canonicalOutput.commentaryBlocks[0],
+          outputStreamId: 'commentary-unsafe',
+          lastSequence: 3,
+          text: '调用 inspectScreenplayProject，处理 run_abcd1234。',
+        },
+      ],
+    },
+  }
+  assert.equal(getAssistantProcessingLabel(unsafe), '正在思考')
+  assert.deepEqual(
+    buildAssistantTimeline(unsafe, { messageIndex: 0 })
+      .filter((part) => part.type === 'commentary')
+      .map((part) => part.md),
+    ['正在梳理人物关系与关键冲突'],
+  )
+})
+
+test('standby does not reuse a plan, previous invocation, or tool row title', () => {
+  const message: AgentConversationMessage = {
+    role: 'assistant',
+    content: '',
+    toolCalling: true,
+    canonicalOutput: {
+      ...initialCanonicalOutputState(),
+      commentaryBlocks: [{
+        outputStreamId: 'previous-commentary',
+        invocationId: 'previous-invocation',
+        firstSequence: 1,
+        lastSequence: 1,
+        startedAt: '2026-08-12T00:00:00Z',
+        text: '核对上一步资料',
+        committed: true,
+        aborted: false,
+      }],
+      operationOrder: ['current-tool'],
+      operations: {
+        'current-tool': {
+          operationId: 'current-tool',
+          runId: 'run-1',
+          invocationId: 'current-invocation',
+          kind: 'tool',
+          firstSequence: 2,
+          status: 'running',
+          startedAt: '2026-08-12T00:00:01Z',
+          display: { labelParams: {} },
+        },
+      },
+    },
+    taskPlan: {
+      title: '审阅剧本',
+      status: 'running',
+      steps: [{
+        id: 'review',
+        title: '检查人物关系',
+        type: 'review',
+        status: 'running',
+      }],
+    },
+    toolCallSegments: [{
+      labels: ['读取人物资料', '读取场景资料'],
+      commentaryBlockIndex: null,
+      completedToolCount: 1,
+    }],
+  }
+
+  assert.equal(getAssistantProcessingLabel(message), '正在思考')
 })

@@ -35,6 +35,8 @@ export interface AgentAccumulator {
   commentaryBlockStartedAt?: number
   agentRunId?: string
   conversationRunId?: string
+  relatedRunIds?: string[]
+  finalResponseRunId?: string
   longTaskId?: string
   taskPlan?: AiTaskPlan
   delegations?: AiAgentDelegation[]
