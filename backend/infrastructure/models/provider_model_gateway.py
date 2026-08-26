@@ -23,8 +23,9 @@ from purra.json_values import thaw_json_mapping, thaw_json_value
 from purra.model_call_parameters import build_model_call_parameters
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 from purra.ports import CancellationSignal
+from purra.cancellation import raise_if_stopped
 from infrastructure.models import provider_router
-from purra.stream_ownership import OwnedAsyncIterator
+from purra.stream_ownership import OwnedAsyncIterator, close_async_resource
 
 
 class ProviderModelGateway:
@@ -80,6 +81,9 @@ class ProviderModelGateway:
             )
         except Exception as error:
             raise self._request_error(invocation, error) from error
+        if signal is not None and signal.is_set():
+            await close_async_resource(result.get("stream"))
+            raise_if_stopped(signal)
         return ModelStream(
             chunks=_normalize_openai_stream(result["stream"]),
             model=str(result.get("model") or request.model),

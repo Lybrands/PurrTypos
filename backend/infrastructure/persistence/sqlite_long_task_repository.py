@@ -11,9 +11,11 @@ from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 from purra.contracts import SessionId
+from purra.errors import ContractViolationError
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import (
     LongTaskCreateCommand,
+    LongTaskBudgetLimits,
     LongTaskRecord,
     LongTaskRunBinding,
     LongTaskRunRelation,
@@ -54,8 +56,9 @@ class SqliteLongTaskRepository:
                 await self._db.execute(
                     "INSERT INTO ai_agent_long_tasks "
                     "(id, namespace, kind, owner_id, "
-                    "created_by_run_id, total_units, max_parallelism, metadata_json) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "created_by_run_id, total_units, max_parallelism, "
+                    "deadline_at_ms, budget_limits_json, metadata_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         normalized_id,
                         command.namespace,
@@ -64,6 +67,8 @@ class SqliteLongTaskRepository:
                         command.created_by_run_id,
                         sum(1 for unit in command.units if unit.required),
                         command.max_parallelism,
+                        command.deadline_at_ms,
+                        _json_dump(command.budget_limits.to_mapping()),
                         _json_dump(command.metadata),
                     ],
                 )
@@ -263,12 +268,14 @@ class SqliteLongTaskRepository:
                 raise ValueError("long task revision conflict")
             await self._db.execute(
                 "INSERT INTO ai_agent_long_task_usage "
-                "(task_id, run_id, invocation_count, input_tokens, "
-                "output_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?)",
+                "(task_id, run_id, invocation_count, "
+                "unreported_usage_attempts, input_tokens, "
+                "output_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                     task.id,
                     normalized_run_id,
                     usage.invocation_count,
+                    usage.unreported_usage_attempts,
                     usage.input_tokens,
                     usage.output_tokens,
                     usage.reasoning_tokens,
@@ -276,6 +283,7 @@ class SqliteLongTaskRepository:
             )
             aggregate = await self._db.fetch_one(
                 "SELECT SUM(invocation_count) AS invocation_count, "
+                "SUM(unreported_usage_attempts) AS unreported_usage_attempts, "
                 "SUM(input_tokens) AS input_tokens, "
                 "SUM(output_tokens) AS output_tokens, "
                 "SUM(reasoning_tokens) AS reasoning_tokens, "
@@ -291,7 +299,11 @@ class SqliteLongTaskRepository:
                 "WHERE id = ?",
                 [_json_dump(total.to_mapping()), task.id],
             )
-            return await self._require(task.id)
+            updated = await self._require(task.id)
+            budget_kind = _task_budget_exhaustion(updated, exceeded_only=True)
+            if budget_kind is not None:
+                return await self._fail_budget(updated, budget_kind)
+            return updated
 
     async def start(
         self,
@@ -301,6 +313,8 @@ class SqliteLongTaskRepository:
     ) -> LongTaskRecord:
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if _deadline_elapsed(task):
+                return await self._expire_deadline_in_transaction(task)
             if task.cancellation_requested_at_ms is not None:
                 return await self._cancel_in_transaction(task)
             if task.status is LongTaskStatus.RUNNING:
@@ -320,10 +334,19 @@ class SqliteLongTaskRepository:
         lease_duration_ms: int,
     ) -> LongTaskUnitRecord | None:
         normalized_worker = _required(worker_id, "long task worker id")
+        if int(lease_duration_ms) <= 0:
+            raise ValueError("long task lease duration must be positive")
         now_ms = int(time.time() * 1000)
         lease_expires = now_ms + int(lease_duration_ms)
         async with self._db.transaction(cancellation_linearizable=True):
             task = await self._require(task_id)
+            if _deadline_elapsed(task, now_ms=now_ms):
+                await self._expire_deadline_in_transaction(task)
+                return None
+            budget_kind = _task_budget_exhaustion(task)
+            if budget_kind is not None:
+                await self._fail_budget(task, budget_kind)
+                return None
             if (
                 task.status is not LongTaskStatus.RUNNING
                 or task.cancellation_requested_at_ms is not None
@@ -337,6 +360,16 @@ class SqliteLongTaskRepository:
             )
             if int((active or {}).get("count") or 0) >= task.max_parallelism:
                 return None
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'blocked', "
+                "worker_id = NULL, lease_expires_at_ms = NULL, "
+                "error_code = 'lease_expired_attempts_exhausted', "
+                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                "AND status IN ('claimed', 'running') "
+                "AND COALESCE(lease_expires_at_ms, 0) <= ? "
+                "AND attempt >= max_attempts",
+                [task.id, now_ms],
+            )
             row = await self._db.fetch_one(
                 "SELECT u.* FROM ai_agent_long_task_units AS u "
                 "WHERE u.task_id = ? AND u.attempt < u.max_attempts AND ("
@@ -358,6 +391,7 @@ class SqliteLongTaskRepository:
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'claimed', "
                 "attempt = attempt + 1, worker_id = ?, lease_expires_at_ms = ?, "
+                "lease_epoch = lease_epoch + 1, settled_by_worker_id = NULL, "
                 "run_id = NULL, update_time = CURRENT_TIMESTAMP "
                 "WHERE task_id = ? AND unit_id = ?",
                 [normalized_worker, lease_expires, task.id, str(row["unit_id"])],
@@ -370,12 +404,25 @@ class SqliteLongTaskRepository:
             )
             return _unit(claimed)
 
+    async def expire_deadline(self, task_id: str) -> LongTaskRecord:
+        async with self._db.transaction(cancellation_linearizable=True):
+            task = await self._require(task_id)
+            if task.status.terminal:
+                return task
+            if not _deadline_elapsed(task):
+                raise ContractViolationError(
+                    "long task deadline has not elapsed",
+                    code="long_task_deadline_not_elapsed",
+                )
+            return await self._expire_deadline_in_transaction(task)
+
     async def bind_unit_run(
         self,
         task_id: str,
         unit_id: str,
         *,
         worker_id: str,
+        lease_epoch: int,
         run_id: str,
     ) -> LongTaskUnitRecord:
         async with self._db.transaction(cancellation_linearizable=True):
@@ -384,9 +431,12 @@ class SqliteLongTaskRepository:
             if task.cancellation_requested_at_ms is not None:
                 await self._cancel_in_transaction(task)
                 return await self._require_unit(task.id, unit.id)
-            _require_worker(unit, worker_id)
-            if unit.status not in {LongTaskUnitStatus.CLAIMED, LongTaskUnitStatus.RUNNING}:
-                raise ValueError("long task unit is not claimed")
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
             metadata = thaw_json_mapping(unit.metadata)
             raw_history = metadata.get("runHistory")
             run_history = [
@@ -414,12 +464,42 @@ class SqliteLongTaskRepository:
             )
             return await self._require_unit(unit.task_id, unit.id)
 
+    async def renew_unit_lease(
+        self,
+        task_id: str,
+        unit_id: str,
+        *,
+        worker_id: str,
+        lease_epoch: int,
+        lease_duration_ms: int,
+    ) -> LongTaskUnitRecord:
+        duration = int(lease_duration_ms)
+        if duration <= 0:
+            raise ValueError("long task lease duration must be positive")
+        async with self._db.transaction(cancellation_linearizable=True):
+            task = await self._require(task_id)
+            unit = await self._require_unit(task.id, unit_id)
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET lease_expires_at_ms = ?, "
+                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
+                [int(time.time() * 1000) + duration, task.id, unit.id],
+            )
+            await self._touch_task(task)
+            return await self._require_unit(task.id, unit.id)
+
     async def update_unit_progress(
         self,
         task_id: str,
         unit_id: str,
         *,
         worker_id: str,
+        lease_epoch: int,
         metadata,
     ) -> LongTaskUnitRecord:
         """Persist bounded live progress without completing the unit."""
@@ -430,14 +510,12 @@ class SqliteLongTaskRepository:
             if task.cancellation_requested_at_ms is not None:
                 await self._cancel_in_transaction(task)
                 return await self._require_unit(task.id, unit.id)
-            if task.status is not LongTaskStatus.RUNNING:
-                return unit
-            _require_worker(unit, worker_id)
-            if unit.status not in {
-                LongTaskUnitStatus.CLAIMED,
-                LongTaskUnitStatus.RUNNING,
-            }:
-                raise ValueError("long task unit is not active")
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
             merged = {
                 **thaw_json_mapping(unit.metadata),
                 **thaw_json_mapping(metadata),
@@ -456,6 +534,7 @@ class SqliteLongTaskRepository:
         unit_id: str,
         *,
         worker_id: str,
+        lease_epoch: int,
         result: LongTaskUnitResult,
     ) -> LongTaskRecord:
         async with self._db.transaction(cancellation_linearizable=True):
@@ -463,23 +542,29 @@ class SqliteLongTaskRepository:
             unit = await self._require_unit(task.id, unit_id)
             if unit.status is LongTaskUnitStatus.COMPLETED:
                 if (
+                    unit.lease_epoch == int(lease_epoch)
+                    and unit.settled_by_worker_id
+                    == _required(worker_id, "long task worker id")
+                    and
                     unit.output_ref == result.output_ref
                     and unit.artifact_digest == result.artifact_digest
                     and thaw_json_mapping(unit.validation_receipt)
                     == thaw_json_mapping(result.validation_receipt)
                 ):
                     return task
-                raise ValueError("long task unit completion conflicts")
+                self._raise_lease_lost(unit)
             if task.cancellation_requested_at_ms is not None:
                 return await self._cancel_in_transaction(task)
-            if task.status is not LongTaskStatus.RUNNING:
-                raise ValueError("long task is not running")
-            _require_worker(unit, worker_id)
-            if unit.status not in {LongTaskUnitStatus.CLAIMED, LongTaskUnitStatus.RUNNING}:
-                raise ValueError("long task unit is not active")
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'completed', "
                 "output_ref = ?, run_id = COALESCE(?, run_id), worker_id = NULL, "
+                "settled_by_worker_id = ?, "
                 "artifact_digest = ?, validation_receipt_json = ?, "
                 "lease_expires_at_ms = NULL, error_code = NULL, failure_json = '{}', "
                 "disposition = NULL, "
@@ -488,6 +573,7 @@ class SqliteLongTaskRepository:
                 [
                     result.output_ref,
                     result.run_id,
+                    _required(worker_id, "long task worker id"),
                     result.artifact_digest,
                     _json_dump(result.validation_receipt),
                     _json_dump({
@@ -507,6 +593,7 @@ class SqliteLongTaskRepository:
         unit_id: str,
         *,
         worker_id: str,
+        lease_epoch: int,
         decision: FailureDecision,
     ) -> LongTaskRecord:
         if not isinstance(decision, FailureDecision):
@@ -516,7 +603,12 @@ class SqliteLongTaskRepository:
             unit = await self._require_unit(task.id, unit_id)
             if task.cancellation_requested_at_ms is not None:
                 return await self._cancel_in_transaction(task)
-            _require_worker(unit, worker_id)
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
             disposition = decision.disposition
             if disposition in {
                 FailureDisposition.RETRY_ATTEMPT,
@@ -589,6 +681,7 @@ class SqliteLongTaskRepository:
         unit_id: str,
         *,
         worker_id: str,
+        lease_epoch: int,
         split: LongTaskSplitResult,
         decision: FailureDecision,
     ) -> LongTaskRecord:
@@ -608,16 +701,19 @@ class SqliteLongTaskRepository:
             if task.cancellation_requested_at_ms is not None:
                 return await self._cancel_in_transaction(task)
             if unit.status is LongTaskUnitStatus.EXPANDED:
-                return task
-            if task.status is not LongTaskStatus.RUNNING:
-                raise ValueError("long task is not running")
-            _require_worker(unit, worker_id)
-            if unit.status not in {
-                LongTaskUnitStatus.CLAIMED,
-                LongTaskUnitStatus.RUNNING,
-                LongTaskUnitStatus.NEEDS_SPLIT,
-            }:
-                raise ValueError("long task unit is not active")
+                if (
+                    unit.lease_epoch == int(lease_epoch)
+                    and unit.settled_by_worker_id
+                    == _required(worker_id, "long task worker id")
+                ):
+                    return task
+                self._raise_lease_lost(unit)
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
 
             existing_rows = await self._db.fetch_all(
                 "SELECT unit_id, semantic_key, position FROM ai_agent_long_task_units "
@@ -717,8 +813,9 @@ class SqliteLongTaskRepository:
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'expanded', "
                 "required = 0, worker_id = NULL, lease_expires_at_ms = NULL, "
+                "settled_by_worker_id = ?, "
                 "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
-                [task.id, unit.id],
+                [_required(worker_id, "long task worker id"), task.id, unit.id],
             )
             await self._refresh_task_totals(task.id)
             return await self._require(task.id)
@@ -729,6 +826,7 @@ class SqliteLongTaskRepository:
         unit_id: str,
         *,
         worker_id: str,
+        lease_epoch: int,
         reason_code: str,
     ) -> LongTaskRecord:
         """Checkpoint an in-flight unit without consuming its retry budget."""
@@ -740,14 +838,12 @@ class SqliteLongTaskRepository:
                 return await self._cancel_in_transaction(task)
             if task.status in {LongTaskStatus.PAUSED, LongTaskStatus.CANCELED}:
                 return task
-            if task.status is not LongTaskStatus.RUNNING:
-                raise ValueError("long task is not running")
-            _require_worker(unit, worker_id)
-            if unit.status not in {
-                LongTaskUnitStatus.CLAIMED,
-                LongTaskUnitStatus.RUNNING,
-            }:
-                raise ValueError("long task unit is not active")
+            await self._require_active_unit(
+                task,
+                unit,
+                worker_id=worker_id,
+                lease_epoch=lease_epoch,
+            )
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'pending', "
                 "max_attempts = max_attempts + 1, worker_id = NULL, "
@@ -1057,6 +1153,81 @@ class SqliteLongTaskRepository:
             raise LookupError("long task unit does not exist")
         return _unit(row)
 
+    async def _require_active_unit(
+        self,
+        task: LongTaskRecord,
+        unit: LongTaskUnitRecord,
+        *,
+        worker_id: str,
+        lease_epoch: int,
+    ) -> None:
+        if _deadline_elapsed(task):
+            raise ContractViolationError(
+                "long task deadline was exceeded",
+                code="long_task_deadline_exceeded",
+                details={"taskId": task.id},
+            )
+        worker = _required(worker_id, "long task worker id")
+        if (
+            task.status is not LongTaskStatus.RUNNING
+            or unit.status not in {
+                LongTaskUnitStatus.CLAIMED,
+                LongTaskUnitStatus.RUNNING,
+            }
+            or unit.worker_id != worker
+            or unit.lease_epoch != int(lease_epoch)
+            or unit.lease_expires_at_ms is None
+            or unit.lease_expires_at_ms <= int(time.time() * 1000)
+        ):
+            self._raise_lease_lost(unit)
+
+    @staticmethod
+    def _raise_lease_lost(unit: LongTaskUnitRecord) -> None:
+        raise ContractViolationError(
+            "long task unit lease authority was lost",
+            code="long_task_unit_lease_lost",
+            details={"taskId": unit.task_id, "unitId": unit.id},
+        )
+
+    async def _expire_deadline_in_transaction(
+        self,
+        task: LongTaskRecord,
+    ) -> LongTaskRecord:
+        await self._db.execute(
+            "UPDATE ai_agent_long_task_units SET status = 'failed', "
+            "worker_id = NULL, lease_expires_at_ms = NULL, "
+            "error_code = 'long_task_deadline_exceeded', "
+            "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+            "AND status NOT IN ('completed', 'expanded', 'failed', 'canceled')",
+            [task.id],
+        )
+        await self._refresh_task_totals(task.id)
+        current = await self._require(task.id)
+        if not current.status.terminal:
+            await self._update_task_status(current, LongTaskStatus.FAILED)
+        return await self._require(task.id)
+
+    async def _fail_budget(
+        self,
+        task: LongTaskRecord,
+        budget_kind: str,
+    ) -> LongTaskRecord:
+        await self._db.execute(
+            "UPDATE ai_agent_long_task_units SET status = 'failed', "
+            "worker_id = NULL, lease_expires_at_ms = NULL, "
+            "error_code = 'runtime_budget_exceeded', "
+            "metadata_json = json_set(COALESCE(metadata_json, '{}'), "
+            "'$.budgetKind', ?), update_time = CURRENT_TIMESTAMP "
+            "WHERE task_id = ? AND status NOT IN "
+            "('completed', 'expanded', 'failed', 'canceled')",
+            [budget_kind, task.id],
+        )
+        await self._refresh_task_totals(task.id)
+        current = await self._require(task.id)
+        if not current.status.terminal:
+            await self._update_task_status(current, LongTaskStatus.FAILED)
+        return await self._require(task.id)
+
     async def _update_task_status(self, task, target):
         await self._db.execute(
             "UPDATE ai_agent_long_tasks SET status = ?, revision = revision + 1, "
@@ -1123,6 +1294,10 @@ def _task(row: dict[str, Any] | None) -> LongTaskRecord:
         completed_units=int(row["completed_units"]),
         failed_units=int(row["failed_units"]),
         max_parallelism=int(row["max_parallelism"]),
+        deadline_at_ms=row.get("deadline_at_ms"),
+        budget_limits=_budget_limits(
+            _json_load(row.get("budget_limits_json"), {})
+        ),
         cancellation_requested_at_ms=row.get("cancel_requested_at_ms"),
         usage=_usage_mapping(_json_load(row.get("usage_json"), {})),
         metadata=_json_load(row.get("metadata_json"), {}),
@@ -1146,7 +1321,9 @@ def _unit(row: dict[str, Any] | None) -> LongTaskUnitRecord:
         attempt=int(row.get("attempt") or 0),
         max_attempts=int(row.get("max_attempts") or 3),
         worker_id=row.get("worker_id"),
+        lease_epoch=int(row.get("lease_epoch") or 0),
         lease_expires_at_ms=row.get("lease_expires_at_ms"),
+        settled_by_worker_id=row.get("settled_by_worker_id"),
         run_id=row.get("run_id"),
         input_ref=row.get("input_ref"),
         output_ref=row.get("output_ref"),
@@ -1193,6 +1370,9 @@ def _json_load(value: object, default):
 def _usage_mapping(value: Mapping[str, Any]) -> LongTaskUsage:
     return LongTaskUsage(
         invocation_count=int(value.get("invocationCount") or 0),
+        unreported_usage_attempts=int(
+            value.get("unreportedUsageAttempts") or 0
+        ),
         input_tokens=int(value.get("inputTokens") or 0),
         output_tokens=int(value.get("outputTokens") or 0),
         reasoning_tokens=(
@@ -1207,6 +1387,9 @@ def _usage_mapping(value: Mapping[str, Any]) -> LongTaskUsage:
 def _usage_row(row: Mapping[str, Any]) -> LongTaskUsage:
     return LongTaskUsage(
         invocation_count=int(row.get("invocation_count") or 0),
+        unreported_usage_attempts=int(
+            row.get("unreported_usage_attempts") or 0
+        ),
         input_tokens=int(row.get("input_tokens") or 0),
         output_tokens=int(row.get("output_tokens") or 0),
         reasoning_tokens=(
@@ -1221,6 +1404,9 @@ def _aggregate_usage(row: Mapping[str, Any] | None) -> LongTaskUsage:
     value = row or {}
     return LongTaskUsage(
         invocation_count=int(value.get("invocation_count") or 0),
+        unreported_usage_attempts=int(
+            value.get("unreported_usage_attempts") or 0
+        ),
         input_tokens=int(value.get("input_tokens") or 0),
         output_tokens=int(value.get("output_tokens") or 0),
         reasoning_tokens=(
@@ -1229,6 +1415,56 @@ def _aggregate_usage(row: Mapping[str, Any] | None) -> LongTaskUsage:
             else int(value.get("reasoning_tokens") or 0)
         ),
     )
+
+
+def _budget_limits(value: Mapping[str, Any]) -> LongTaskBudgetLimits:
+    return LongTaskBudgetLimits(
+        max_invocation_attempts=value.get("maxInvocationAttempts"),
+        max_input_tokens=value.get("maxInputTokens"),
+        max_output_tokens=value.get("maxOutputTokens"),
+        max_reasoning_tokens=value.get("maxReasoningTokens"),
+    )
+
+
+def _deadline_elapsed(
+    task: LongTaskRecord,
+    *,
+    now_ms: int | None = None,
+) -> bool:
+    return task.deadline_at_ms is not None and task.deadline_at_ms <= (
+        int(time.time() * 1000) if now_ms is None else int(now_ms)
+    )
+
+
+def _task_budget_exhaustion(
+    task: LongTaskRecord,
+    *,
+    exceeded_only: bool = False,
+) -> str | None:
+    usage = task.usage
+    limits = task.budget_limits
+    if usage.unreported_usage_attempts and any(
+        limit is not None
+        for limit in (
+            limits.max_input_tokens,
+            limits.max_output_tokens,
+            limits.max_reasoning_tokens,
+        )
+    ):
+        return "provider_usage_unreported"
+    if limits.max_reasoning_tokens is not None and usage.reasoning_tokens is None:
+        return "reasoning_tokens_unreported"
+    for kind, value, limit in (
+        ("model_attempts", usage.invocation_count, limits.max_invocation_attempts),
+        ("input_tokens", usage.input_tokens, limits.max_input_tokens),
+        ("output_tokens", usage.output_tokens, limits.max_output_tokens),
+        ("reasoning_tokens", usage.reasoning_tokens, limits.max_reasoning_tokens),
+    ):
+        if limit is not None and value is not None and (
+            value > limit or (not exceeded_only and value >= limit)
+        ):
+            return kind
+    return None
 
 
 def _metadata_session_id(value: object) -> SessionId | None:
@@ -1247,6 +1483,8 @@ def _matches_create(task, units, command: LongTaskCreateCommand) -> bool:
         or task.owner_id != command.owner_id
         or task.created_by_run_id != command.created_by_run_id
         or task.max_parallelism != command.max_parallelism
+        or task.deadline_at_ms != command.deadline_at_ms
+        or task.budget_limits != command.budget_limits
         or thaw_json_mapping(task.metadata) != thaw_json_mapping(command.metadata)
         or len(units) != len(command.units)
     ):

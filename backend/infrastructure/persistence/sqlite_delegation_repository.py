@@ -13,6 +13,7 @@ from purra.contracts import (
     DelegationAggregation,
     DelegationContextMode,
 )
+from purra.errors import ContractViolationError
 
 
 class SqliteDelegationRepository:
@@ -63,6 +64,7 @@ class SqliteDelegationRepository:
         batch_id: str,
     ) -> AgentDelegation | None:
         async with self._db.transaction(cancellation_linearizable=True):
+            await self._require_owned(delegation_id, run_id, batch_id)
             await self._db.execute(
                 "UPDATE ai_agent_delegations SET status = 'running', "
                 "update_time = CURRENT_TIMESTAMP WHERE id = ? AND run_id = ? "
@@ -204,6 +206,7 @@ class SqliteDelegationRepository:
     ) -> bool:
         placeholders = ",".join("?" for _ in active_statuses)
         async with self._db.transaction(cancellation_linearizable=True):
+            await self._require_owned(delegation_id, run_id, batch_id)
             await self._db.execute(
                 "UPDATE ai_agent_delegations SET status = ?, result_summary = ?, "
                 "error = ?, update_time = CURRENT_TIMESTAMP WHERE id = ? "
@@ -221,6 +224,24 @@ class SqliteDelegationRepository:
             )
             changed = await self._db.fetch_one("SELECT changes() AS count")
             return int((changed or {}).get("count") or 0) == 1
+
+    async def _require_owned(
+        self,
+        delegation_id: str,
+        run_id: str,
+        batch_id: str,
+    ) -> AgentDelegation:
+        try:
+            delegation = await self._require(delegation_id)
+        except LookupError as error:
+            raise ContractViolationError(
+                f"delegation {delegation_id!r} does not exist"
+            ) from error
+        if delegation.run_id != run_id or delegation.batch_id != batch_id:
+            raise ContractViolationError(
+                "delegation does not belong to the requested Root Run batch"
+            )
+        return delegation
 
     async def _require(self, delegation_id: str) -> AgentDelegation:
         row = await self._db.fetch_one(
