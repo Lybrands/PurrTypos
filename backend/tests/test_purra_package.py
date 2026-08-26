@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import json
 from importlib import metadata
 from pathlib import Path
 
@@ -12,9 +11,8 @@ import purra
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "0.3.0"
+PURRA_VERSION = "0.4.0"
 PURRA_REQUIREMENT = f"purra=={PURRA_VERSION}"
-LOCAL_PURRA_DIR = (ROOT_DIR.parent / "purra").resolve()
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
 }
@@ -84,17 +82,6 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
-def _uses_expected_local_editable_purra(package_path: Path) -> bool:
-    direct_url = metadata.distribution("purra").read_text("direct_url.json")
-    if not direct_url:
-        return False
-    value = json.loads(direct_url)
-    return (
-        value.get("dir_info", {}).get("editable") is True
-        and package_path.is_relative_to(LOCAL_PURRA_DIR)
-    )
-
-
 def test_purra_is_pinned_and_loaded_as_an_external_distribution():
     requirement = (BACKEND_DIR / "requirements-purra.txt").read_text(
         encoding="utf-8"
@@ -102,10 +89,9 @@ def test_purra_is_pinned_and_loaded_as_an_external_distribution():
     package_path = Path(purra.__file__).resolve()
 
     assert requirement == PURRA_REQUIREMENT
-    assert (
-        metadata.version("purra") == PURRA_VERSION
-        or _uses_expected_local_editable_purra(package_path)
-    )
+    assert metadata.version("purra") == PURRA_VERSION
+    assert metadata.distribution("purra").read_text("direct_url.json") is None
+    assert "/site-packages/purra/" in package_path.as_posix()
     assert "/packages/purra/src/" not in package_path.as_posix()
     assert not (ROOT_DIR / "packages" / "purra").exists()
 
