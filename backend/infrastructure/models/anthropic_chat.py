@@ -18,6 +18,7 @@ from anthropic import AsyncAnthropic
 from infrastructure.models.capabilities import (
     build_anthropic_thinking_param,
     normalize_thinking_enabled,
+    require_supported_reasoning_mode,
 )
 from infrastructure.models.profiles import resolve_model_profile
 from utils.session_title import (
@@ -225,9 +226,6 @@ def _anthropic_usage_as_openai(
 # 统一实现位于 ``infrastructure.models.capabilities``。
 # 本文件只保留对错误返回的"自动降级重试"。
 
-_THINKING_ERR_RE = re.compile(r"thinking|not support|unrecogniz|invalid", re.IGNORECASE)
-
-
 # ── Streaming (Anthropic → OpenAI chunks) ───────────────────────
 
 async def chat_stream_as_openai_format(
@@ -250,6 +248,7 @@ async def chat_stream_as_openai_format(
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
@@ -414,6 +413,7 @@ async def chat_no_stream_as_openai_format(
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
 
     client = _create_client(api_key, base_url)
@@ -455,15 +455,7 @@ async def chat_no_stream_as_openai_format(
         except (TypeError, ValueError):
             pass
 
-    try:
-        msg = await client.messages.create(**params)
-    except Exception as err:
-        err_msg = str(err)
-        if _THINKING_ERR_RE.search(err_msg) and "thinking" in params:
-            params.pop("thinking")
-            msg = await client.messages.create(**params)
-        else:
-            raise
+    msg = await client.messages.create(**params)
 
     blocks = msg.content if isinstance(msg.content, list) else []
     text_parts: list[str] = []
@@ -548,26 +540,31 @@ async def generate_title(
     opts = options or {}
     model: str = opts.get("model", "")
     base_url: str | None = opts.get("baseURL")
+    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
+    thinking_enabled = normalize_thinking_enabled(opts)
 
     client = _create_client(api_key, base_url)
     user_text = str(text or "").strip()[:4000]
 
-    # 标题生成走窄任务：禁用思考。Anthropic 的 none → 不传 thinking 字段。
+    thinking_param, max_tokens = build_anthropic_thinking_param(
+        thinking_enabled and not profile.native_anthropic_thinking
+        if thinking_enabled is not None
+        else None,
+        512,
+    )
     payload: dict[str, Any] = {
         "model": model,
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
         "system": SESSION_TITLE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_text}],
     }
-    try:
-        msg = await client.messages.create(**payload)
-    except Exception as err:
-        err_msg = str(err)
-        if _THINKING_ERR_RE.search(err_msg) and "thinking" in payload:
-            payload.pop("thinking")
-            msg = await client.messages.create(**payload)
-        else:
-            raise
+    if thinking_param is not None:
+        payload["thinking"] = thinking_param
+    for key in ("temperature", "top_k"):
+        if opts.get(key) is not None:
+            payload[key] = opts[key]
+    msg = await client.messages.create(**payload)
 
     raw = _extract_anthropic_title_plain_text(msg)
     logger.info("[ai-generate-title][anthropic] 模型返回原文: %s", raw)

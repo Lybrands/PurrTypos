@@ -7,9 +7,12 @@ import inspect
 from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
-from infrastructure.models.capabilities import normalize_thinking_enabled
+from infrastructure.models.capabilities import (
+    require_supported_reasoning_mode,
+)
 from infrastructure.models.profiles import resolve_model_profile
 from infrastructure.models.profiles.base import ModelProfile
+from purra.contracts import ReasoningMode
 from purra.model_protocol import ReasoningControl
 from purra.stream_ownership import OwnedAsyncIterator, openai_chunk_is_terminal
 from utils.session_title import SESSION_TITLE_SYSTEM_PROMPT, normalize_session_title
@@ -50,22 +53,19 @@ def _build_chat_params(
     *,
     stream: bool,
 ) -> dict[str, Any]:
-    thinking_enabled = (
-        profile.reasoning_control is ReasoningControl.ALWAYS_ENABLED
-        or normalize_thinking_enabled(options)
+    mode = require_supported_reasoning_mode(
+        options,
+        profile.protocol_capabilities(),
     )
     params: dict[str, Any] = {
         "model": str(options.get("model") or ""),
         "messages": messages,
         "stream": stream,
-        "thinking": {
-            "type": (
-                "enabled"
-                if thinking_enabled
-                else "disabled"
-            ),
-        },
     }
+    if profile.reasoning_control is ReasoningControl.ALWAYS_ENABLED:
+        params["thinking"] = {"type": "enabled"}
+    elif mode is not ReasoningMode.DEFAULT:
+        params["thinking"] = {"type": mode.value}
     for key in (
         "temperature",
         "max_tokens",
@@ -204,22 +204,17 @@ async def generate_title(
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     client = _create_client(api_key, opts.get("baseURL"))
     try:
+        title_options = {
+            **opts,
+            "model": model,
+            "max_tokens": 32,
+        }
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            model=model,
-            messages=[
+            **_build_chat_params([
                 {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
                 {"role": "user", "content": str(text or "").strip()},
-            ],
-            thinking={
-                "type": (
-                    "enabled"
-                    if profile.reasoning_control is ReasoningControl.ALWAYS_ENABLED
-                    else "disabled"
-                ),
-            },
-            max_tokens=32,
-            stream=False,
+            ], title_options, profile, stream=False),
         )
         payload = _as_mapping(response)
         choices = payload.get("choices")

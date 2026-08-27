@@ -160,7 +160,7 @@ test('switching to a different model window keeps the current conversation estim
       },
     }],
     windowTokens: 1000000,
-    modelName: 'deepseek-v4-pro',
+    modelName: 'deepseek-v4-flash',
   })
 
   assert.ok(usage.usedTokens > 18921)
@@ -184,8 +184,8 @@ test('models with the same window keep usage but do not claim provider calibrati
       },
     }],
     windowTokens: 1000000,
-    modelConfigId: 'builtin_deepseek_deepseek_v4_pro',
-    modelName: 'deepseek-v4-pro',
+    modelConfigId: 'builtin_deepseek_deepseek_v4_flash',
+    modelName: 'deepseek-v4-flash',
   })
 
   assert.ok(usage.usedTokens > 24000)
@@ -254,7 +254,7 @@ test('current input draft is excluded until the request is sent', () => {
       { role: 'assistant', content: '已有回答' },
     ],
     windowTokens: 1000000,
-    modelName: 'deepseek-v4-pro',
+    modelName: 'deepseek-v4-flash',
   }
   const withoutDraft = calculateContextUsage(baseParams)
   const withDraft = calculateContextUsage({

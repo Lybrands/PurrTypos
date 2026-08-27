@@ -40,22 +40,17 @@ export function getModelMaxOutputTokens(config?: AiModelConfig | null): number |
 }
 
 export function isModelThinkingEnabled(config?: AiModelConfig | null) {
-  return Boolean(config?.thinkingOnly || config?.thinkingEnabled)
+  return config?.thinkingEnabled
 }
 
 export function applyModelRuntimeConfigPatch(
   config: AiModelConfig,
   patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
 ): AiModelConfig {
-  const thinkingEnabled = config.thinkingOnly
-    ? true
-    : (patch.thinkingEnabled ?? isModelThinkingEnabled(config))
   return {
     ...config,
     ...patch,
-    supportsThinking: thinkingEnabled === true || config.supportsThinking,
     thinkingOnly: config.thinkingOnly,
-    thinkingEnabled,
   }
 }
 

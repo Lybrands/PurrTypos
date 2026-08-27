@@ -8,14 +8,14 @@ export interface StreamRequestOptions {
   model: string;
   model_profile?: string;
   temperature?: number;
-  thinking: { type: 'enabled' | 'disabled' };
+  thinking?: { type: 'enabled' | 'disabled' };
   context_window: AiContextWindow;
 }
 
 export interface BuiltStream {
   options: StreamRequestOptions;
   /** 实际生效的 thinking 开关 */
-  effectiveThinking: boolean;
+  effectiveThinking: boolean | undefined;
   /** 真正发给 API 的 model 名（cfg.name 优先，缺失退回 selectedModel） */
   apiModelName: string;
 }
@@ -33,10 +33,12 @@ export function buildStreamOptions(params: {
   const options: StreamRequestOptions = {
     model: apiModelName,
     ...(cfg?.presetId ? { model_profile: cfg.presetId } : {}),
-    ...(useConfiguredTemperature
+    ...(useConfiguredTemperature && effectiveThinking !== undefined
       ? { temperature: effectiveThinking ? (cfg?.temperatureThinking ?? 0.6) : (cfg?.temperatureNonThinking ?? 0.6) }
       : {}),
-    thinking: { type: effectiveThinking ? 'enabled' : 'disabled' },
+    ...(effectiveThinking === undefined
+      ? {}
+      : { thinking: { type: effectiveThinking ? 'enabled' as const : 'disabled' as const } }),
     context_window: contextWindow,
   }
   return { options, effectiveThinking, apiModelName }

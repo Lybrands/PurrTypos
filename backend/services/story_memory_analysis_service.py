@@ -27,6 +27,7 @@ from infrastructure.persistence.writing.sqlite_story_memory_repository import (
 from schemas.story_memory import StorySettingInput
 from services.memory_intelligence_service import MEMORY_INTELLIGENCE_MODEL_ID_KEY
 from services.model_settings_service import (
+    build_model_options,
     is_setting_enabled,
     resolve_model_config,
 )
@@ -243,18 +244,7 @@ async def analyze_chapter(
                 ),
             },
         ]
-        options = {
-            "model": str(config["name"]),
-            "baseURL": config.get("baseUrl") or config.get("baseURL") or "",
-            "temperature": 0,
-            "max_tokens": 4_000,
-            "thinking": {"type": "disabled"},
-            **(
-                {"model_profile": str(config["presetId"])}
-                if config.get("presetId")
-                else {}
-            ),
-        }
+        options = build_model_options(config, max_tokens=4_000)
         result = await create_chat_no_stream(
             str(config["apiKey"]),
             messages,

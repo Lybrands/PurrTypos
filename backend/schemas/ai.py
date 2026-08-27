@@ -88,6 +88,7 @@ class GenerateTitleRequest(BaseModel):
     prompt: str
     apiProvider: str = "openai"
     model: Optional[str] = None
+    options: Optional[Dict[str, Any]] = None
 
 
 class ResolveToolApprovalRequest(BaseModel):

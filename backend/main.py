@@ -70,7 +70,7 @@ async def lifespan(application: FastAPI):
         await db.init()
         set_db(db)
         execution_db = DatabaseConnection(data_dir)
-        await execution_db.init()
+        await execution_db.init(initialize_schema=False)
 
         from infrastructure.persistence.approval_store import (
             recover_pending_approvals,

@@ -14,6 +14,7 @@ from typing import Any
 from infrastructure.models.provider_router import create_chat_no_stream
 from services import long_term_memory_service
 from services.model_settings_service import (
+    build_model_options,
     is_setting_enabled,
     resolve_model_config,
 )
@@ -105,13 +106,7 @@ async def extract_and_store_candidates(
             ),
         },
     ]
-    options = {
-        "model": config["name"],
-        "baseURL": config.get("baseUrl") or config.get("baseURL") or "",
-        "temperature": 0,
-        "max_tokens": 1200,
-        "reasoning": "off",
-    }
+    options = build_model_options(config, max_tokens=1_200)
 
     try:
         result = await create_chat_no_stream(

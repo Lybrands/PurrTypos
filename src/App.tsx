@@ -12,7 +12,7 @@ import {
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId } from './types'
-import { applyModelRuntimeConfigPatch, migrateKnownModelConfigs } from './modelCatalog'
+import { applyModelRuntimeConfigPatch } from './modelCatalog'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -70,7 +70,7 @@ export default function App() {
         ? 'bookshelf'
         : contentPath === '/writing-methods'
           ? 'writingMethods'
-        : contentPath === '/novel-sources'
+        : contentPath === '/novel-sources' || contentPath.startsWith('/novel-sources/')
           ? 'novelSources'
         : 'home'
   const [books, setBooks] = React.useState<Book[]>([])
@@ -94,11 +94,7 @@ export default function App() {
       if (!res.success || !res.data) return
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
-        const migration = migrateKnownModelConfigs(res.data.ai_model_configs)
-        setModelConfigs(migration.configs)
-        if (migration.changed) {
-          void services.settings.setSettings({ ai_model_configs: migration.configs })
-        }
+        setModelConfigs(res.data.ai_model_configs)
       }
     })
   }, [])
@@ -288,13 +284,14 @@ export default function App() {
               />
             )} />
             <Route path="/writing-methods" element={(
-              <WritingMethodsPage onBack={handleEnterBookshelf} />
+              <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} />
             )} />
-            <Route path="/novel-sources" element={(
+            <Route path="/novel-sources/:workId?" element={(
               <NovelSourcesPage
                 books={books}
                 modelConfigs={configuredModelConfigs}
                 onBack={handleEnterBookshelf}
+                onHome={handleBackToHome}
               />
             )} />
             <Route path="/books/:bookId" element={activeBook ? (
@@ -317,10 +314,6 @@ export default function App() {
           </Routes>
         </Suspense>
       </main>
-      <footer className="app-footer">
-        © 2026 Liu Yubin (PurrTypos). Powered by AI.
-      </footer>
-
       {showSettings && (
         <div className="app-settings-overlay">
           <Suspense fallback={<PurrSpin size="large" />}>

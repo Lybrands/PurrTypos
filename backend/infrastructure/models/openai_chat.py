@@ -16,6 +16,7 @@ from openai import AsyncOpenAI
 
 from infrastructure.models.capabilities import (
     normalize_thinking_enabled,
+    require_supported_reasoning_mode,
 )
 from infrastructure.models.profiles import resolve_model_profile
 from utils.session_title import (
@@ -58,6 +59,7 @@ async def chat_no_stream(
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
     response_format = opts.get("response_format")
 
@@ -69,8 +71,7 @@ async def chat_no_stream(
     params.setdefault("extra_body", {}).update(
         profile.build_openai_extra_body(thinking_enabled)
     )
-    if max_tokens:
-        params["max_tokens"] = max_tokens
+    profile.apply_openai_output_limit(params, max_tokens)
     if isinstance(response_format, Mapping):
         params["response_format"] = dict(response_format)
     if tools:
@@ -120,6 +121,7 @@ async def chat_stream(
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
     response_format = opts.get("response_format")
 
@@ -140,8 +142,7 @@ async def chat_stream(
     params.setdefault("extra_body", {}).update(
         profile.build_openai_extra_body(thinking_enabled)
     )
-    if max_tokens:
-        params["max_tokens"] = max_tokens
+    profile.apply_openai_output_limit(params, max_tokens)
     if isinstance(response_format, Mapping):
         params["response_format"] = dict(response_format)
     if tools:
@@ -250,20 +251,29 @@ async def generate_title(
     model: str = opts.get("model", "")
     base_url: str | None = opts.get("baseURL")
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
+    thinking_enabled = normalize_thinking_enabled(opts)
 
     client = _create_client(api_key, base_url)
 
     try:
-        res = await client.chat.completions.create(
-            model=model,
-            messages=[
+        params: dict[str, Any] = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
                 {"role": "user", "content": str(text or "").strip()},
             ],
-            max_tokens=32,
-            extra_body=profile.build_openai_extra_body(False),
-            stream=False,
-        )
+            "stream": False,
+        }
+        profile.apply_openai_output_limit(params, 32)
+        if opts.get("temperature") is not None:
+            params["temperature"] = opts["temperature"]
+        extra_body = profile.build_openai_extra_body(thinking_enabled)
+        if opts.get("top_k") is not None:
+            extra_body["top_k"] = opts["top_k"]
+        if extra_body:
+            params["extra_body"] = extra_body
+        res = await client.chat.completions.create(**params)
         raw = (
             res.choices[0].message.content
             if res.choices and res.choices[0].message

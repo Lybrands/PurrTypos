@@ -121,10 +121,16 @@ async def test_minimax_openai_stream_requests_split_reasoning(
             "model": "MiniMax-M3",
             "baseURL": "https://api.minimaxi.com/v1",
             "thinking": {"type": "enabled"},
+            "max_tokens": 2_048,
         },
     )
 
-    assert captured["extra_body"] == {"reasoning_split": True}
+    assert captured["extra_body"] == {
+        "reasoning_split": True,
+        "thinking": {"type": "adaptive"},
+    }
+    assert captured["max_completion_tokens"] == 2_048
+    assert "max_tokens" not in captured
 
 
 @pytest.mark.asyncio
@@ -162,11 +168,14 @@ async def test_kimi_k3_stream_forces_max_reasoning_and_preserves_history(
             "model": "kimi-k3",
             "model_profile": "moonshot:kimi-k3",
             "baseURL": "https://api.moonshot.cn/v1",
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": "enabled"},
+            "max_tokens": 2_048,
         },
     )
 
     assert captured["extra_body"] == {"reasoning_effort": "max"}
+    assert captured["max_completion_tokens"] == 2_048
+    assert "max_tokens" not in captured
     assert captured["messages"] == messages
 
 

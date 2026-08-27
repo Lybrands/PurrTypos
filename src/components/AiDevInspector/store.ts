@@ -5,6 +5,7 @@ import type {
   ElectronAPI,
 } from "../../types";
 import {
+  canonicalProviderTextDelta,
   isCanonicalOutputEvent,
   type CanonicalOutputEvent,
 } from "../../agent-runtime/canonicalOutput.ts";
@@ -400,7 +401,7 @@ function compactEventPayload(chunk: AiDebugChunk): unknown {
 
 function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
   if (isCanonicalOutputEvent(chunk)) {
-    if (chunk.kind === "provider.content_delta") {
+    if (canonicalProviderTextDelta(chunk)) {
       return chunk.channel === "final"
         ? { type: "response", label: "收到 Provider 最终回答增量" }
         : { type: "commentary", label: "收到 Provider 执行说明增量" };
@@ -432,6 +433,7 @@ function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
     }
     return { type: "event", label: `Agent 事件 · ${chunk.kind}` };
   }
+  if (successfulTerminal(chunk)) return { type: "done", label: "本轮完成" };
   if (chunk.error) return { type: "error", label: chunk.error };
   if (chunk.done && chunk.errorReport) {
     return { type: "error", label: chunk.errorReport.errorMessage };
@@ -457,7 +459,7 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
       if (status === "failed" || status === "blocked") return "failed";
       if (status === "canceled") return "aborted";
     }
-    if (chunk.kind === "provider.content_delta") {
+    if (canonicalProviderTextDelta(chunk)) {
       return chunk.channel === "final" ? "responding" : "planning";
     }
     if (chunk.kind === "operation.started") {
@@ -481,7 +483,15 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
   return run.status;
 }
 
+function successfulTerminal(chunk: AiDebugChunk): boolean {
+  if (String(chunk.runResult?.status || "") === "done") return true;
+  return isCanonicalOutputEvent(chunk)
+    && chunk.kind === "run.lifecycle"
+    && String(chunk.payload.status || "") === "done";
+}
+
 function runTerminalError(chunk: AiDebugChunk): string | undefined {
+  if (successfulTerminal(chunk)) return undefined;
   const runResultStatus = String(chunk.runResult?.status || "");
   if (["failed", "blocked", "canceled"].includes(runResultStatus)) {
     const errorCode = String(chunk.runResult?.errorCode || "").trim();
@@ -928,10 +938,9 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
     const terminal = FINAL_STATUSES.has(status);
     const runId = getAgentRunId(chunk);
     const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
-    const delta = canonicalEvent?.kind === "provider.content_delta"
-      ? String(canonicalEvent.payload.delta || "")
-      : "";
+    const delta = canonicalEvent ? canonicalProviderTextDelta(canonicalEvent) : "";
     const runtimeData = canonicalRuntimeData(canonicalEvent);
+    const succeeded = successfulTerminal(chunk);
     const delegation = canonicalEvent?.kind === "delegation.event"
       ? canonicalEvent.payload
       : null;
@@ -968,8 +977,8 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
         : run.delegations,
       delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: runTerminalError(chunk) || run.error,
-      errorReport: chunk.errorReport ?? run.errorReport,
+      error: succeeded ? undefined : runTerminalError(chunk) || run.error,
+      errorReport: succeeded ? undefined : chunk.errorReport ?? run.errorReport,
     };
   });
 }
@@ -1039,10 +1048,9 @@ export function recordAiDebugRunEvent(
               : nextStatus(observedRun, chunk);
     const terminal = FINAL_STATUSES.has(status);
     const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
-    const delta = canonicalEvent?.kind === "provider.content_delta"
-      ? String(canonicalEvent.payload.delta || "")
-      : "";
+    const delta = canonicalEvent ? canonicalProviderTextDelta(canonicalEvent) : "";
     const runtimeData = canonicalRuntimeData(canonicalEvent);
+    const succeeded = successfulTerminal(chunk);
     const delegation = canonicalEvent?.kind === "delegation.event"
       ? canonicalEvent.payload
       : null;
@@ -1080,8 +1088,8 @@ export function recordAiDebugRunEvent(
         : run.delegations,
       delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: runTerminalError(chunk) || run.error,
-      errorReport: chunk.errorReport ?? run.errorReport,
+      error: succeeded ? undefined : runTerminalError(chunk) || run.error,
+      errorReport: succeeded ? undefined : chunk.errorReport ?? run.errorReport,
     };
   });
 }

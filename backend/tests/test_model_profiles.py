@@ -5,11 +5,17 @@ from types import SimpleNamespace
 import pytest
 
 from application.model_runtime import model_request_from_runtime
+from infrastructure.models.capabilities import normalize_thinking_enabled
 from infrastructure.models.profiles.registry import (
     BUILTIN_MODEL_PROFILES,
     resolve_model_profile,
 )
-from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
+from purra.contracts import ReasoningMode
+from purra.model_protocol import (
+    FeatureSupport,
+    ReasoningControl,
+    ReasoningReplayPolicy,
+)
 
 
 def test_registry_resolves_each_builtin_profile_and_generic_fallback():
@@ -22,20 +28,12 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
     assert glm.build_openai_extra_body(True) == {
         "thinking": {"type": "enabled"},
     }
-    assert glm.build_openai_extra_body(False) == {
-        "thinking": {"type": "enabled"},
-    }
+    with pytest.raises(ValueError, match="does not support disabling"):
+        glm.build_openai_extra_body(False)
     assert glm.protocol_capabilities().reasoning_control is (
         ReasoningControl.ALWAYS_ENABLED
     )
     assert glm.output_capabilities().max_output_tokens == 131_072
-    deepseek_pro = resolve_model_profile(
-        "deepseek:deepseek-v4-pro",
-        "deepseek-v4-pro",
-        "https://api.deepseek.com",
-    )
-    assert deepseek_pro.profile_id == "deepseek:deepseek-v4-pro"
-    assert deepseek_pro.output_capabilities().max_output_tokens == 393_216
     assert resolve_model_profile(
         "deepseek:deepseek-v4-flash",
         "deepseek-v4-flash",
@@ -79,7 +77,17 @@ def test_minimax_profile_owns_reasoning_request_and_response_normalization():
         "https://api.minimaxi.com/v1",
     )
 
-    assert profile.build_openai_extra_body(True) == {"reasoning_split": True}
+    assert profile.build_openai_extra_body(True) == {
+        "reasoning_split": True,
+        "thinking": {"type": "adaptive"},
+    }
+    assert profile.build_openai_extra_body(False) == {
+        "reasoning_split": True,
+        "thinking": {"type": "disabled"},
+    }
+    assert profile.protocol_capabilities().reasoning_replay is (
+        ReasoningReplayPolicy.REQUIRED
+    )
     normalized = profile.normalize_openai_chunk({
         "choices": [{
             "delta": {"reasoning": "native reasoning"},
@@ -91,7 +99,7 @@ def test_minimax_profile_owns_reasoning_request_and_response_normalization():
     )
 
 
-def test_kimi_k3_profile_forces_currently_supported_max_reasoning():
+def test_kimi_k3_profile_rejects_unsupported_reasoning_override():
     profile = resolve_model_profile(
         "moonshot:kimi-k3",
         "kimi-k3",
@@ -99,10 +107,14 @@ def test_kimi_k3_profile_forces_currently_supported_max_reasoning():
     )
 
     assert profile.build_openai_extra_body(True) == {"reasoning_effort": "max"}
-    assert profile.build_openai_extra_body(False) == {"reasoning_effort": "max"}
-    assert profile.capability_snapshot(
-        context_window_tokens=1_000_000,
-    ).max_output_tokens is None
+    with pytest.raises(ValueError, match="does not support disabling"):
+        profile.build_openai_extra_body(False)
+    snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
+    assert snapshot.actionable is True
+    assert snapshot.max_output_tokens == 1_048_576
+    assert snapshot.source == (
+        "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart"
+    )
 
 
 def test_generic_profile_omits_undeclared_thinking_extensions():
@@ -119,6 +131,18 @@ def test_generic_profile_omits_undeclared_thinking_extensions():
     )
 
 
+def test_glm_profile_rejects_a_false_non_reasoning_claim():
+    profile = resolve_model_profile(
+        "zai:glm-5.3-flash",
+        "glm-5.3-flash",
+        "https://open.bigmodel.cn/api/paas/v4/",
+    )
+
+    capabilities = profile.protocol_capabilities()
+    assert not capabilities.reasoning_mode_is_supported(ReasoningMode.DISABLED)
+    assert capabilities.reasoning_mode_is_supported(ReasoningMode.DEFAULT)
+
+
 def test_replay_required_profile_declares_protocol_without_core_model_checks():
     profile = resolve_model_profile(
         "deepseek:deepseek-v4-flash",
@@ -132,6 +156,21 @@ def test_replay_required_profile_declares_protocol_without_core_model_checks():
     assert profile.protocol_capabilities().reasoning_replay is (
         ReasoningReplayPolicy.REQUIRED
     )
+    assert profile.protocol_capabilities().required_tool_choice is (
+        FeatureSupport.UNAVAILABLE
+    )
+
+
+def test_kimi_k2_6_declares_thinking_tool_choice_constraint():
+    profile = resolve_model_profile(
+        "moonshot:kimi-k2.6",
+        "kimi-k2.6",
+        "https://api.moonshot.cn/v1",
+    )
+
+    capabilities = profile.protocol_capabilities()
+    assert capabilities.reasoning_replay is ReasoningReplayPolicy.REQUIRED
+    assert capabilities.required_tool_choice is FeatureSupport.UNAVAILABLE
 
 
 def test_builtin_profiles_publish_stable_versioned_capability_snapshots():
@@ -163,9 +202,11 @@ def test_builtin_profiles_publish_stable_versioned_capability_snapshots():
 @pytest.mark.parametrize(
     ("profile_id", "expected_max_output"),
     [
-        ("deepseek:deepseek-v4-pro", 393_216),
         ("deepseek:deepseek-v4-flash", 393_216),
         ("zai:glm-5.3-flash", 131_072),
+        ("moonshot:kimi-k3", 1_048_576),
+        ("moonshot:kimi-k2.6", 262_144),
+        ("minimax:MiniMax-M3", 524_288),
         ("mimo:mimo-v2.5-pro", 131_072),
     ],
 )
@@ -181,19 +222,27 @@ def test_actionable_profile_output_limits_are_owned_by_each_profile(
     assert snapshot.actionable is True
     assert snapshot.max_output_tokens == expected_max_output
 
-
 @pytest.mark.parametrize(
-    "profile_id",
-    ["moonshot:kimi-k3", "moonshot:kimi-k2.6", "minimax:MiniMax-M3"],
+    ("profile_id", "expected_parameter"),
+    [
+        ("moonshot:kimi-k3", "max_completion_tokens"),
+        ("moonshot:kimi-k2.6", "max_completion_tokens"),
+        ("minimax:MiniMax-M3", "max_completion_tokens"),
+        ("deepseek:deepseek-v4-flash", "max_tokens"),
+    ],
 )
-def test_unverified_builtin_output_limits_are_explicitly_not_actionable(profile_id):
+def test_profiles_translate_internal_output_limit_to_provider_parameter(
+    profile_id,
+    expected_parameter,
+):
     profile = next(
         item for item in BUILTIN_MODEL_PROFILES if item.profile_id == profile_id
     )
-    snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
+    params = {}
 
-    assert snapshot.actionable is False
-    assert snapshot.max_output_tokens is None
+    profile.apply_openai_output_limit(params, 2_048)
+
+    assert params == {expected_parameter: 2_048}
 
 
 def test_runtime_mapping_preserves_explicit_output_limit_and_reasoning_choice():
@@ -215,3 +264,4 @@ def test_runtime_mapping_preserves_explicit_output_limit_and_reasoning_choice():
     assert request.options["thinking"] == {"type": "enabled"}
     assert request.capability_snapshot.profile_id == "deepseek:deepseek-v4-flash"
     assert request.capability_snapshot.context_window_tokens == 1_000_000
+    assert normalize_thinking_enabled(dict(request.options)) is True

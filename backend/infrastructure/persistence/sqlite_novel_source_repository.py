@@ -26,6 +26,9 @@ class SqliteNovelSourceRepository:
         rows = await self._db.fetch_all(
             "SELECT w.*, (SELECT COUNT(*) FROM novel_source_revisions r "
             "WHERE r.work_id = w.id) AS revision_count, "
+            "CASE WHEN EXISTS(SELECT 1 FROM novel_source_analyses a "
+            "JOIN novel_source_revisions ar ON ar.id = a.source_revision_id "
+            "WHERE ar.work_id = w.id) THEN 1 ELSE 0 END AS analysis_count, "
             "(SELECT r.id FROM novel_source_revisions r WHERE r.work_id = w.id "
             "ORDER BY r.version_no DESC LIMIT 1) AS latest_revision_id "
             "FROM novel_source_works w "
@@ -210,6 +213,54 @@ class SqliteNovelSourceRepository:
             [work_id],
         )
         return await self.get_work(work_id)
+
+    async def delete_work(self, work_id: str) -> None:
+        async with self._db.transaction():
+            await self._require_work(work_id)
+            revisions = await self._db.fetch_all(
+                "SELECT id FROM novel_source_revisions WHERE work_id = ?", [work_id]
+            )
+            for revision in revisions:
+                revision_id = str(revision["id"])
+                referenced = await self._db.fetch_one(
+                    "SELECT 1 AS found FROM continuation_bindings "
+                    "WHERE source_work_id = ? OR source_revision_id = ? "
+                    "UNION SELECT 1 AS found FROM novel_source_analyses "
+                    "WHERE source_revision_id = ? "
+                    "UNION SELECT 1 AS found FROM ai_agent_runs "
+                    "WHERE binding_namespace = 'novel_source_analysis' "
+                    "AND binding_aggregate_id = ? LIMIT 1",
+                    [work_id, revision_id, revision_id, revision_id],
+                )
+                if referenced:
+                    raise NovelSourceConflictError(
+                        "来源已被分析或续写引用，不能删除"
+                    )
+            section_rows = await self._db.fetch_all(
+                "SELECT s.id FROM novel_source_sections AS s "
+                "JOIN novel_source_revisions AS r ON r.id = s.revision_id "
+                "WHERE r.work_id = ?",
+                [work_id],
+            )
+            for section in section_rows:
+                try:
+                    await self._db.execute(
+                        "DELETE FROM novel_source_sections_fts WHERE section_id = ?",
+                        [section["id"]],
+                    )
+                except Exception:
+                    pass
+            for revision in revisions:
+                await self._db.execute(
+                    "DELETE FROM novel_source_sections WHERE revision_id = ?",
+                    [revision["id"]],
+                )
+            await self._db.execute(
+                "DELETE FROM novel_source_revisions WHERE work_id = ?", [work_id]
+            )
+            await self._db.execute(
+                "DELETE FROM novel_source_works WHERE id = ?", [work_id]
+            )
 
     async def delete_revision(self, revision_id: str) -> None:
         async with self._db.transaction():

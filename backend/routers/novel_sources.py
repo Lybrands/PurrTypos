@@ -53,6 +53,9 @@ async def preview_import(body: SourceFilePayload):
             file_name=body.fileName,
             extension=body.extension,
             content=body.content,
+            import_kind=body.importKind,
+            document_count=body.documentCount,
+            skipped_file_count=body.skippedFileCount,
         ))
     except NovelSourceError as error:
         raise AppError(str(error), error.status_code) from error
@@ -65,6 +68,9 @@ async def confirm_import(body: ConfirmSourceImportRequest):
         file_name=body.fileName,
         extension=body.extension,
         content=body.content,
+        import_kind=body.importKind,
+        document_count=body.documentCount,
+        skipped_file_count=body.skippedFileCount,
         expected_content_digest=body.expectedContentDigest,
         confirm_single_section=body.confirmSingleSection,
         rights_confirmed=body.rightsConfirmed,
@@ -91,6 +97,12 @@ async def get_work(work_id: str):
 @router.put("/novel-sources/{work_id}/archive")
 async def archive_work(work_id: str, _body: ArchiveSourceWorkRequest):
     return _ok(await _call(_service().archive_work(work_id)))
+
+
+@router.delete("/novel-sources/{work_id}")
+async def delete_work(work_id: str):
+    await _call(_service().delete_work(work_id))
+    return _ok()
 
 
 @router.get("/novel-source-revisions/{revision_id}")

@@ -27,12 +27,13 @@ class TestNormalizeThinkingEnabled:
     def test_structured_thinking_disabled(self):
         assert normalize_thinking_enabled({"thinking": {"type": "disabled"}}) is False
 
-    def test_default_off(self):
-        assert normalize_thinking_enabled({}) is False
-        assert normalize_thinking_enabled(None) is False
+    def test_default_is_preserved(self):
+        assert normalize_thinking_enabled({}) is None
+        assert normalize_thinking_enabled(None) is None
 
-    def test_thinking_non_dict_ignored(self):
-        assert normalize_thinking_enabled({"thinking": "enabled"}) is False
+    def test_invalid_thinking_is_rejected(self):
+        with pytest.raises(ValueError, match="thinking must be an object"):
+            normalize_thinking_enabled({"thinking": "enabled"})
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,9 @@ class TestBuildOpenAIThinkingExtraBody:
         assert build_openai_thinking_extra_body(False) == {
             "thinking": {"type": "disabled"},
         }
+
+    def test_default_is_omitted(self):
+        assert build_openai_thinking_extra_body(None) == {}
 
 
 # ---------------------------------------------------------------------------

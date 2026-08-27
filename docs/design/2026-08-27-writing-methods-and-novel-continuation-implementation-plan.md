@@ -65,11 +65,11 @@
 
 首版来源只支持：
 
-- TXT；
-- Markdown；
+- 单个 TXT / Markdown 文稿；
+- 只包含 TXT / Markdown 文稿的文件夹或 ZIP 压缩包；
 - 从现有 PurrTypos 作品冻结。
 
-EPUB 导入在 TXT/Markdown 全流程通过后另立任务。原因是当前只有 EPUB 导出，导入还需要容器解析、HTML 清洗、目录与正文排序、编码和异常书籍测试；这些工作不影响“冻结原作 → 分析 → 正史快照 → 续写”的核心价值验证。
+文件夹和 ZIP 只是多文稿输入载体，按自然文件名排序后仍进入同一 TXT/Markdown 预览与确认协议，不扩大正文格式范围。EPUB 导入在 TXT/Markdown 全流程通过后另立任务。原因是当前只有 EPUB 导出，导入还需要容器解析、HTML 清洗、目录与正文排序、编码和异常书籍测试；这些工作不影响“冻结原作 → 分析 → 正史快照 → 续写”的核心价值验证。
 
 ## 4. 保持不变的产品决策
 
@@ -455,11 +455,13 @@ enabled tool 集，返回目录元数据而不返回 Markdown，也没有任何�
 ### Phase 5：只读来源与冻结 revision
 
 - [x] 新建 continuation/source schema 初始化模块及 Repository。
-- [x] 实现 TXT/Markdown platform picker、导入限制、章节解析预览和确认。
+- [x] 实现单文稿、文件夹与 ZIP 中 TXT/Markdown 的 platform picker、导入限制、自然排序、章节解析预览和确认。
 - [x] 在确认页显示来源大小、数据发送边界和使用权提示；不默认创建后续 revision。
 - [x] 实现从现有作品的事务内冻结。
 - [x] 实现来源列表、revision/section 只读 API、FTS 搜索和 LIKE fallback。
 - [x] 增加来源归档和删除保护；已有 continuation binding 引用的 revision 不可删除。
+- [x] 来源库主页只保留类型筛选和来源操作；来源版本、分析与创建续写进入独立详情步骤。
+- [x] 支持删除整部未引用来源；已进入分析或续写证据链的来源拒绝删除。
 
 实施门禁：新增独立 continuation/source schema，历史书籍幂等回填
 `creation_mode='original'`；确定性标题解析保留单节人工确认回退。预览只计算
@@ -486,10 +488,30 @@ Recipe 或范围。宿主按 section 编译 extract → normalize → aggregate 
 coverage → review Artifact DAG，沿用 `ai_agent_runs`、LongTask Unit 和正式
 Artifact，未增加分析运行表。未完成 LongTask 的 Artifact 发布会失败，审核修订
 生成新 Artifact；正式发布事务再次逐字校验 excerpt，并把 facts、craft cards 和
-evidence 原子写成不可变 analysis revision。Phase 6/来源/Profile/数据库/生命周期/
+evidence 原子写成不可变 analysis revision；产品侧只暴露当前最新分析，不提供历史分析列表，
+底层仅为暂停恢复、诊断和既有续写精确绑定保留不可变记录。Phase 6/来源/Profile/数据库/生命周期/
 架构边界 focused 后端 109 个通过，`npm run test:unit` 399 个、
 `npm run check:agent-refactor-boundaries` 53 个、`npm run typecheck` 通过，
 暂停、重启恢复、取消和失败重试均有持久化用例，`git diff --check` 通过。
+
+分析详情页已补充自动进度刷新和会话式反馈：任务接收后每 1.5 秒读取正式
+Run/LongTask 状态，展示当前 Unit、流式响应片段计数、暂停/恢复/取消和可操作的
+失败说明，不展示私有推理或未校验的结构化结果。2026-08-27 对历史失败 Run 的审计
+确认 GLM-5.3-Flash 在 Provider 请求前因错误的 `ALWAYS_ENABLED` 能力声明导致
+`UnsupportedModelFeatureError`；前后端 Profile 已按官方可开关 thinking 协议统一为
+selectable。修复后 focused 模型/分析测试 27 个、前端 unit 401 个、完整后端 1686 个、
+Agent/PurrA 边界 53 个通过；为避免重复发送来源正文和产生费用，本轮没有自动重试
+真实 Provider 调用。
+
+2026-08-27 后续对最新 MiMo 立即失败 Run 的审计确认：失败发生在 LongTask 创建前的
+通用 LLM Planner，未进入逐章来源分析。`NovelAnalysisAgentProfile` 的执行 Recipe 本来
+已经由宿主固定编译，因此改为零模型调用的确定性 Planner，仍由同一 PurrA Core 和
+LongTask 执行，不再为固定业务步骤额外调用一次模型。来源分析详情同时接入共享
+`AgentConversationPanel`，把 Durable Unit 映射为任务步骤、实时状态、错误信息和最终
+分析附件；连接、DNS、超时等 `httpx.TransportError` 统一归类为可重试的
+`upstream_stream_interrupted`，分析模型 Unit 在剩余尝试次数内自动重试。相关 focused
+后端测试、401 个前端单测、TypeScript 类型检查和生产构建通过；Agent 边界代码测试
+52 个通过，完整边界命令仅因本机 PurrA 为相邻源码 editable 安装、不是正式外部分发包而失败。
 
 门禁：未完成 Artifact 不能发布；每个正式 fact/craft card 至少有一个合法来源证据；越界 section 和提示注入测试 fail closed。
 
@@ -562,12 +584,12 @@ digest、source revision 与 craft-card id/digest。技法卡的 evidence excerp
 - [x] 后端完整 pytest。
 - [x] Agent/PurrA 应用边界和持久化边界门禁。
 - [ ] Web 实机：创建方法、发布方案、绑定、`/`、历史回放、来源导入、分析、快照、续写、重启恢复。（方法/方案/绑定/`/`/书架分区/重启已实机；外部模型分析后的链路因无配置模型与 Provider 凭据阻塞。）
-- [x] Electron 实机：TXT/Markdown 选择与同一业务 API 闭环。
+- [x] Electron 实机：TXT/Markdown 选择与同一业务 API 闭环。（文件夹与 ZIP 能力新增后由 IPC focused tests 覆盖，仍需补一次原生选择实机。）
 - [x] 导出/导入数据库后验证方法版本、来源 revision、快照和 Run binding 仍一致。
 - [x] 停止所有测试启动的后端、Vite 和 Electron 进程，并确认相关端口无监听。
 
 实施门禁：最终 focused 后端 219 个、前端 unit 399 个、Agent/PurrA 边界 53 个、
-完整后端 1687 个、`npm run typecheck`、Purr Components 边界、`npm run check` 和
+完整后端 1686 个、`npm run typecheck`、Purr Components 边界和
 `git diff --check` 均通过。
 Web 隔离实机完成方法草稿自动保存、方法 v1 发布、方案对准确方法 revision 的组合发布、
 作品对准确方案 revision 的绑定，以及 `/` 仅展示本书已绑定方法；原创/续写书架分区也已验证。
@@ -693,7 +715,7 @@ npm run check
 - 来源 revision、分析 revision 和 canon snapshot 不可变；首版只允许章末分叉，分叉点后来源默认不可见。
 - 来源事实不写入目标书普通 Story Memory；组合召回可以读取继承正史，但章节分析只向目标 book 写 delta。
 - 来源正文、方法 Markdown 和分析文本均按不可信内容处理，不能获得工具权限或扩大作用域。
-- 首版外部来源只实现 TXT/Markdown 和从现有作品冻结；不要加入 EPUB、Obsidian、在线市场、向量库或自动版本清理。
+- 首版外部来源只实现单个或文件夹/ZIP 中的 TXT/Markdown，以及从现有作品冻结；不要加入 EPUB、Obsidian、在线市场、向量库或自动版本清理。
 - 彻底删除旧 book_style、getBookStyle、saveBookStyle、readSourceStyle 及现有数据，不迁移；但不要误删 Memory Center 的通用 style 记忆类型。
 - Screenplay 删除 readSourceStyle 后从实际来源文本分析风格，不自动读取作品绑定的写作方法。
 - 用户明确导入/冻结时才创建来源 revision；显示存储体积和向外部模型发送所需片段的数据边界，未确认前不得发送原文。

@@ -32,20 +32,12 @@ const sharedPreset = {
   temperatureNonThinking: 1,
 } as const
 
-const proPreset = {
-  ...sharedPreset,
-  id: 'deepseek:deepseek-v4-pro',
-  name: 'deepseek-v4-pro',
-  label: 'DeepSeek V4 Pro',
-  recommended: true,
-} as const
-
 const flashPreset = {
   ...sharedPreset,
   id: 'deepseek:deepseek-v4-flash',
   name: 'deepseek-v4-flash',
   label: 'DeepSeek V4 Flash',
-  recommended: false,
+  recommended: true,
 } as const
 
 function createProfile(preset: AiModelPreset): BuiltinModelProfile {
@@ -78,5 +70,4 @@ function createProfile(preset: AiModelPreset): BuiltinModelProfile {
   }
 }
 
-export const deepseekV4ProProfile = createProfile(proPreset)
 export const deepseekV4FlashProfile = createProfile(flashPreset)

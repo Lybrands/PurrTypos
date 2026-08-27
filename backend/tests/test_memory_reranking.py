@@ -105,7 +105,7 @@ async def test_model_reranker_selects_only_host_candidates():
     assert len(gateway.invocations) == 1
     _, invocation = gateway.invocations[0]
     assert invocation.tools == ()
-    assert invocation.request.options["temperature"] == 0
+    assert dict(invocation.request.options) == {}
 
 
 @pytest.mark.asyncio

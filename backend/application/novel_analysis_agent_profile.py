@@ -15,11 +15,19 @@ from purra.contracts import (
     ContextBundle,
     ExecutionPlan,
     ExecutionState,
+    PlanningKind,
+    PlanningResult,
     PlannerLimits,
     PlanningCapabilities,
     PlanningConstraints,
     RuntimeLimits,
+    StepExecutor,
+    StepType,
+    TaskSpec,
     TaskContextRequest,
+    ToolRiskLevel,
+    WorkPlan,
+    WorkStep,
 )
 from purra.long_tasks import (
     DurableExecutorRegistry,
@@ -76,6 +84,44 @@ class _NovelAnalysisExecutionStateFactory:
         })
 
 
+class _NovelAnalysisPlanner:
+    """Select the fixed semantic operation without spending a model call."""
+
+    async def create_plan(
+        self,
+        request,
+        capabilities,
+        signal=None,
+        *,
+        run_id=None,
+        turn_id=None,
+        reasoning_mode=None,
+    ):
+        del request, capabilities, signal, run_id, turn_id, reasoning_mode
+        step = WorkStep(
+            id="analyze-source",
+            title="分析来源",
+            type=StepType.ANALYZE,
+            executor=StepExecutor.MODEL,
+            risk_level=ToolRiskLevel.READ,
+        )
+        return PlanningResult(
+            kind=PlanningKind.PLANNED,
+            work_plan=WorkPlan(
+                title="来源分析",
+                goal="形成可审核的来源分析结果",
+                steps=(step,),
+                task_spec=TaskSpec(
+                    goal="分析已冻结的小说来源",
+                    operation="analyze",
+                    instruction="提取硬事实和有原文证据的写作技法",
+                    constraints=("只读取宿主绑定的来源章节",),
+                    deliverable="待审核来源分析",
+                ),
+            ),
+        )
+
+
 class _NovelAnalysisContextProvider:
     async def build_context(
         self,
@@ -129,6 +175,7 @@ class NovelAnalysisDomainAdapter:
     planning_policy: _NovelAnalysisPlanningPolicy = (
         _NovelAnalysisPlanningPolicy()
     )
+    planner: _NovelAnalysisPlanner = _NovelAnalysisPlanner()
     context_strategy: ContextStrategy = ContextStrategy.STAGED
     execution_state_factory: _NovelAnalysisExecutionStateFactory = (
         _NovelAnalysisExecutionStateFactory()

@@ -203,15 +203,8 @@ async def test_screenplay_part_contracts_are_explicit_and_bounded():
         == 8_192
     )
     assert all(
-        PART_CONTRACTS[key].reasoning_mode is ReasoningMode.DISABLED
-        for key in (
-            "structure.series_arc_index",
-            "structure.series_arc_phase",
-            "structure.episode_plan_index",
-            "structure.episode_plan_fragment",
-            "structure.character_arcs_index",
-            "structure.character_arc_fragment",
-        )
+        not hasattr(contract, "reasoning_mode")
+        for contract in PART_CONTRACTS.values()
     )
 
 
@@ -3485,7 +3478,10 @@ async def test_compiled_recipe_persists_part_contracts_and_nonempty_budget():
         if step not in ai_steps
     )
 
-    limits = screenplay_task_budget_limits(compiled.recipe)
+    limits = screenplay_task_budget_limits(
+        compiled.recipe,
+        ReasoningMode.ENABLED,
+    )
     assert limits.max_invocation_attempts is not None
     assert limits.max_input_tokens is not None
     assert limits.max_output_tokens is not None

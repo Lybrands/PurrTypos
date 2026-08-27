@@ -69,6 +69,39 @@ async def resolve_model_config(
     return dict(selected)
 
 
+def build_model_options(
+    config: dict[str, Any],
+    *,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Translate persisted user settings without inventing behavior overrides."""
+    options: dict[str, Any] = {
+        "model": str(config["name"]),
+        "baseURL": config.get("baseUrl") or config.get("baseURL") or "",
+        "max_tokens": max_tokens,
+    }
+    if config.get("presetId"):
+        options["model_profile"] = str(config["presetId"])
+
+    thinking_enabled = config.get("thinkingEnabled")
+    if not isinstance(thinking_enabled, bool):
+        return options
+    options["thinking"] = {
+        "type": "enabled" if thinking_enabled else "disabled",
+    }
+    if config.get("customizeTemperature") is False:
+        return options
+    temperature_key = (
+        "temperatureThinking"
+        if thinking_enabled
+        else "temperatureNonThinking"
+    )
+    temperature = config.get(temperature_key)
+    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+        options["temperature"] = temperature
+    return options
+
+
 def coerce_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -84,6 +117,7 @@ def coerce_bool(value: Any, default: bool = False) -> bool:
 
 
 __all__ = [
+    "build_model_options",
     "coerce_bool",
     "get_setting_value",
     "is_setting_enabled",

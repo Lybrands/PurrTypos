@@ -140,13 +140,29 @@ def compile_novel_analysis_recipe(
             },
         ),
     ))
+    stage_order = (
+        "extract_section",
+        "normalize_entities",
+        "aggregate_story",
+        "validate_evidence",
+        "coverage_report",
+        "build_review_artifact",
+    )
+    if len(planned) > len(stage_order):
+        raise ValueError("novel analysis plan has too many steps")
+    stage_by_kind = {
+        kind: index for index, kind in enumerate(stage_order)
+    }
     steps = tuple(
         ExecutionRecipeStep(
             id=unit_id,
             kind=kind,
             depends_on=dependencies,
             executor="novel_analysis",
-            plan_step_id=planned[index % len(planned)],
+            plan_step_id=planned[min(
+                stage_by_kind[kind] * len(planned) // len(stage_order),
+                len(planned) - 1,
+            )],
             max_attempts=2 if kind in {
                 "extract_section",
                 "normalize_entities",
@@ -154,7 +170,7 @@ def compile_novel_analysis_recipe(
             } else 1,
             metadata=dict(metadata),
         )
-        for index, (unit_id, kind, dependencies, metadata) in enumerate(specs)
+        for unit_id, kind, dependencies, metadata in specs
     )
     mapped = {step.plan_step_id for step in steps}
     if mapped != set(planned):

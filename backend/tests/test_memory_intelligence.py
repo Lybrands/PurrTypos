@@ -80,6 +80,9 @@ async def test_intelligence_enabled_stores_model_candidates_and_links(temp_db, m
         assert key == "key"
         assert options["model"] == "test-model"
         assert options["baseURL"] == "http://example.test/v1"
+        assert "thinking" not in options
+        assert "temperature" not in options
+        assert "reasoning" not in options
         assert api_provider == "openai"
         assert "玉佩在雨夜发光" in messages[-1]["content"]
         return {

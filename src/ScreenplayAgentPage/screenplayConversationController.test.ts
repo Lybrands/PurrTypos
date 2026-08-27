@@ -41,6 +41,13 @@ const bindings: ScreenplayConversationBindings = {
     status: 'active',
   } as ScreenplayProject,
   sessions,
+  historySessions: [{
+    id: 8,
+    title: '已关闭对话',
+    create_time: '2026-08-11 08:00:00',
+    closed: 1,
+  }],
+  historyLoading: false,
   activeSessionId: 7,
   messages,
   activities,
@@ -61,6 +68,9 @@ const bindings: ScreenplayConversationBindings = {
     createSession: noOp,
     closeSession: noOp,
     renameSession: noOp,
+    loadSessionHistory: noOp,
+    openHistorySession: noOp,
+    deleteSession: noOp,
     send: noOp,
     abort: noOp,
     resume: noOp,
@@ -100,6 +110,14 @@ test('screenplay adapter preserves sessions, composer state, and existing action
     title: '第一轮',
     createdAt: '2026-08-12 09:30:00',
   }])
+  assert.deepEqual(controller.conversation.history?.sessions, [{
+    id: 8,
+    title: '已关闭对话',
+    createdAt: '2026-08-11 08:00:00',
+  }])
+  assert.equal(controller.actions.loadSessionHistory, bindings.actions.loadSessionHistory)
+  assert.equal(controller.actions.openHistorySession, bindings.actions.openHistorySession)
+  assert.equal(controller.actions.deleteSession, bindings.actions.deleteSession)
   assert.equal(controller.conversation.activities, activities)
   assert.equal(controller.composer.selectedModel, modelConfigs[0])
   assert.equal(controller.actions.resolveToolApproval, resolveToolApproval)

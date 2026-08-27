@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
-
 from purra.contracts import ModelRequest, ReasoningMode, RunExecutionIntent
 from purra.model_protocol import (
     FeatureRequirement,
     TaskCapabilityRequirements,
     preflight_capabilities,
 )
+from infrastructure.models.capabilities import reasoning_mode_from_options
 from infrastructure.models.profiles.registry import resolve_model_profile
 
 
@@ -87,15 +85,6 @@ def runtime_context_window_tokens(runtime) -> int:
     return _CONTEXT_WINDOWS[key]
 
 
-def reasoning_mode_from_options(options: Mapping[str, Any]) -> ReasoningMode:
-    thinking = options.get("thinking")
-    return (
-        ReasoningMode.DEFAULT
-        if isinstance(thinking, Mapping) and thinking.get("type") == "enabled"
-        else ReasoningMode.DISABLED
-    )
-
-
 def run_execution_intent(
     request: ModelRequest,
     reasoning_mode: ReasoningMode,
@@ -105,11 +94,7 @@ def run_execution_intent(
     recovery_policy_id: str = "purra.default.v1",
 ) -> RunExecutionIntent:
     return RunExecutionIntent(
-        requested_reasoning_mode=(
-            "disabled"
-            if ReasoningMode(reasoning_mode) is ReasoningMode.DISABLED
-            else "enabled"
-        ),
+        requested_reasoning_mode=ReasoningMode(reasoning_mode).value,
         output_contract=output_contract,
         tool_protocol_contract=tool_protocol_contract,
         recovery_policy_id=recovery_policy_id,

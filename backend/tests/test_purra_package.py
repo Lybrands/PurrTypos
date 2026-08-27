@@ -11,7 +11,7 @@ import purra
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "0.4.0"
+PURRA_VERSION = "0.4.1"
 PURRA_REQUIREMENT = f"purra=={PURRA_VERSION}"
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",

@@ -14,7 +14,6 @@ from purra.contracts import (
     AgentRunRequest,
     MessageOrigin,
     MessageRole,
-    ReasoningMode,
     RunBinding,
     RunStatus,
 )
@@ -132,7 +131,6 @@ class ScreenplayStructuredCallService:
         expected_part_key: str,
         conversation_turn_id: str,
         output_token_cap: int,
-        reasoning_mode: ReasoningMode,
         bind_run: BindRun | None = None,
         signal=None,
     ) -> PublicModelResult:
@@ -170,7 +168,7 @@ class ScreenplayStructuredCallService:
             model_supports_tools=False,
             force_planned_tool_choice=False,
             require_tool_call=False,
-            reasoning_mode=reasoning_mode,
+            reasoning_mode=reasoning_mode_from_options(runtime.options),
             provenance=screenplay_run_provenance(
                 runtime,
                 user_payload,

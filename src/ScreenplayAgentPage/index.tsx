@@ -674,6 +674,10 @@ export default function ScreenplayAgentPage({
   const [agentQueueDraining, setAgentQueueDraining] = React.useState(false)
   const [agentSessionId, setAgentSessionId] = React.useState<number | null>(null)
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
+  const [agentHistorySessions, setAgentHistorySessions] = React.useState<AiSession[]>([])
+  const [agentHistoryLoading, setAgentHistoryLoading] = React.useState(false)
+  const [agentHistoryError, setAgentHistoryError] = React.useState<string>()
+  const [deletingAgentHistorySessionIds, setDeletingAgentHistorySessionIds] = React.useState<number[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
   const [agentChunkHydrating, setAgentChunkHydrating] = React.useState(false)
   const [agentLoadInitializing, setAgentLoadInitializing] = React.useState(false)
@@ -693,6 +697,7 @@ export default function ScreenplayAgentPage({
   const [comparisonDocument, setComparisonDocument] = React.useState<ScreenplayDocument | null>(null)
   const [updatingProjectStatus, setUpdatingProjectStatus] = React.useState(false)
   const activeAgentSessionRef = React.useRef<number | null>(null)
+  const agentHistoryRequestRef = React.useRef(0)
   const agentPromptRef = React.useRef('')
   const agentSessionLifecycleRef = React.useRef(
     createScreenplayConversationSessionLifecycle(),
@@ -1822,6 +1827,14 @@ export default function ScreenplayAgentPage({
   const openedProjectId = openedProject?.id ?? null
 
   React.useEffect(() => {
+    ++agentHistoryRequestRef.current
+    setAgentHistorySessions([])
+    setAgentHistoryLoading(false)
+    setAgentHistoryError(undefined)
+    setDeletingAgentHistorySessionIds([])
+  }, [openedProjectId])
+
+  React.useEffect(() => {
     const routeKey = `${location.pathname}${location.search}`
     const routeChanged = syncedScreenplayPathRef.current !== routeKey
     syncedScreenplayPathRef.current = routeKey
@@ -2158,6 +2171,13 @@ export default function ScreenplayAgentPage({
         message.error(result.error || '关闭对话失败')
         return
       }
+      ++agentHistoryRequestRef.current
+      setAgentHistoryLoading(false)
+      setAgentHistorySessions((current) => (
+        current.some((item) => item.id === session.id)
+          ? current
+          : [...current, { ...session, closed: 1 }]
+      ))
       const remaining = agentSessions.filter((item) => item.id !== session.id)
       setAgentSessions(remaining)
       if (session.id !== agentSessionId) return
@@ -2208,6 +2228,120 @@ export default function ScreenplayAgentPage({
       message.error(result.error || '更新对话名称失败')
     }
   }, [message])
+
+  const loadAgentSessionHistory = React.useCallback(async () => {
+    if (!openedProject) return
+    const request = ++agentHistoryRequestRef.current
+    setAgentHistoryLoading(true)
+    setAgentHistoryError(undefined)
+    try {
+      const result = await services.screenplay.listScreenplaySessions({
+        projectId: openedProject.id,
+        includeClosed: true,
+      })
+      if (request !== agentHistoryRequestRef.current) return
+      if (!result.success) {
+        setAgentHistoryError(result.error || '历史对话加载失败')
+        return
+      }
+      setAgentHistorySessions(
+        (result.data || []).filter((session) => (
+          session.closed === true || session.closed === 1
+        )),
+      )
+    } catch {
+      if (request === agentHistoryRequestRef.current) {
+        setAgentHistoryError('历史对话加载失败，请稍后重试')
+      }
+    } finally {
+      if (request === agentHistoryRequestRef.current) {
+        setAgentHistoryLoading(false)
+      }
+    }
+  }, [openedProject])
+
+  const openAgentHistorySession = React.useCallback(async (sessionId: number) => {
+    if (
+      !openedProject
+      || agentSessionLoading
+      || agentChunkHydrating
+      || deletingAgentHistorySessionIds.includes(sessionId)
+    ) return
+    const session = agentHistorySessions.find((item) => item.id === sessionId)
+    if (!session) return
+    setAgentSessionLoading(true)
+    try {
+      const result = await services.sessions.setSessionReopened({ sessionId })
+      if (!result.success) {
+        message.error(result.error || '重新打开对话失败')
+        return
+      }
+      ++agentHistoryRequestRef.current
+      setAgentHistoryLoading(false)
+      const reopened = { ...session, closed: 0 }
+      setAgentHistorySessions((current) => (
+        current.filter((item) => item.id !== sessionId)
+      ))
+      setAgentSessions((current) => (
+        current.some((item) => item.id === sessionId)
+          ? current
+          : [...current, reopened]
+      ))
+      await loadAgentSession(sessionId, openedProject)
+    } finally {
+      setAgentSessionLoading(false)
+    }
+  }, [
+    agentChunkHydrating,
+    agentHistorySessions,
+    agentSessionLoading,
+    deletingAgentHistorySessionIds,
+    loadAgentSession,
+    message,
+    openedProject,
+  ])
+
+  const deleteAgentHistorySession = React.useCallback(async (sessionId: number) => {
+    const session = agentHistorySessions.find((item) => item.id === sessionId)
+    if (!session || deletingAgentHistorySessionIds.includes(sessionId)) return
+    const decision = await confirm({
+      title: `永久删除「${session.title || '未命名对话'}」？`,
+      content: '该对话的消息与剧本 Agent 对话过程记录将被永久删除，无法恢复。',
+      confirmText: '永久删除',
+      confirmVariant: 'danger',
+      cancelText: '取消',
+    })
+    if (decision !== 'confirm') return
+    ++agentHistoryRequestRef.current
+    setAgentHistoryLoading(false)
+    setDeletingAgentHistorySessionIds((current) => [...current, sessionId])
+    setAgentHistoryError(undefined)
+    try {
+      const result = await services.sessions.deleteSession({ sessionId })
+      if (!result.success) {
+        setAgentHistoryError(result.error || '删除历史对话失败')
+        return
+      }
+      ++agentHistoryRequestRef.current
+      setAgentHistoryLoading(false)
+      setAgentHistorySessions((current) => (
+        current.filter((item) => item.id !== sessionId)
+      ))
+      setAgentSessions((current) => current.filter((item) => item.id !== sessionId))
+      message.success('历史对话已永久删除')
+    } catch {
+      setAgentHistoryError('删除历史对话失败，请稍后重试')
+    } finally {
+      setDeletingAgentHistorySessionIds((current) => (
+        current.filter((id) => id !== sessionId)
+      ))
+    }
+  }, [
+    agentHistorySessions,
+    confirm,
+    deletingAgentHistorySessionIds,
+    message,
+  ])
 
   const stopAgent = React.useCallback(async (): Promise<boolean> => {
     const targetOperation = cancellableConversationOperation
@@ -3008,6 +3142,13 @@ export default function ScreenplayAgentPage({
     renameSession: (sessionId, title) => {
       if (typeof sessionId === 'number') return renameAgentSession(sessionId, title)
     },
+    loadSessionHistory: loadAgentSessionHistory,
+    openHistorySession: (sessionId) => {
+      if (typeof sessionId === 'number') return openAgentHistorySession(sessionId)
+    },
+    deleteSession: (sessionId) => {
+      if (typeof sessionId === 'number') return deleteAgentHistorySession(sessionId)
+    },
     send: (content) => runAgent(content),
     abort: () => void stopAgent(),
     resume: resumeAgent,
@@ -3022,6 +3163,9 @@ export default function ScreenplayAgentPage({
     agentSessions,
     closeAgentSession,
     createAgentSession,
+    deleteAgentHistorySession,
+    loadAgentSessionHistory,
+    openAgentHistorySession,
     renameAgentSession,
     resumeAgent,
     runAgent,
@@ -3033,6 +3177,10 @@ export default function ScreenplayAgentPage({
   >(() => openedProject ? ({
     project: openedProject,
     sessions: agentSessions,
+    historySessions: agentHistorySessions,
+    historyLoading: agentHistoryLoading,
+    historyError: agentHistoryError,
+    deletingHistorySessionIds: deletingAgentHistorySessionIds,
     activeSessionId: agentSessionId,
     conversationIdentity: agentConversationIdentity,
     messages: agentMessages,
@@ -3068,6 +3216,9 @@ export default function ScreenplayAgentPage({
     agentCancelHeld,
     agentChunkHydrating,
     agentConversationIdentity,
+    agentHistoryError,
+    agentHistoryLoading,
+    agentHistorySessions,
     agentLoadInitializing,
     agentMessages,
     agentPrompt,
@@ -3079,6 +3230,7 @@ export default function ScreenplayAgentPage({
     agentSessions,
     agentSubmitting,
     cancelPendingConversationOperation,
+    deletingAgentHistorySessionIds,
     modelConfigs,
     onOpenSettings,
     onUpdateModelConfig,

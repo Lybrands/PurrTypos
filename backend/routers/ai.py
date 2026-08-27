@@ -767,6 +767,10 @@ async def generate_title(body: GenerateTitleRequest):
         return {"success": False, "error": "缺少模型参数"}
 
     base_url = normalize_base_url(body.baseURL)
+    title_options = dict(body.options or {})
+    title_options.update({"model": model, "baseURL": base_url})
+    for option_key in ("tools", "tool_choice", "response_format"):
+        title_options.pop(option_key, None)
 
     try:
         if body.apiProvider == "anthropic":
@@ -774,7 +778,7 @@ async def generate_title(body: GenerateTitleRequest):
                 generate_title as anth_title,
             )
 
-            title = await anth_title(key, body.prompt, {"model": model, "baseURL": base_url})
+            title = await anth_title(key, body.prompt, title_options)
             title = (title or "").strip()
             if not title:
                 title = _fallback_session_title_from_prompt(body.prompt)
@@ -793,7 +797,7 @@ async def generate_title(body: GenerateTitleRequest):
             title = await zai_title(
                 key,
                 body.prompt,
-                {"model": model, "baseURL": base_url},
+                title_options,
             )
             title = (title or "").strip()
             if not title:
@@ -807,7 +811,7 @@ async def generate_title(body: GenerateTitleRequest):
 
         from infrastructure.models.openai_chat import generate_title as openai_title
 
-        title = await openai_title(key, body.prompt, {"model": model, "baseURL": base_url})
+        title = await openai_title(key, body.prompt, title_options)
         title = (title or "").strip()
         if not title:
             title = _fallback_session_title_from_prompt(body.prompt)
