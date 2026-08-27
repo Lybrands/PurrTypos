@@ -159,6 +159,44 @@ async def test_referenced_revision_is_delete_protected(db):
     )
     with pytest.raises(NovelSourceConflictError, match="不能删除"):
         await service.delete_revision(revision["id"])
+    with pytest.raises(NovelSourceConflictError, match="不能删除"):
+        await service.delete_work(revision["work_id"])
+
+
+async def test_unused_source_work_can_be_deleted_with_all_revisions(db):
+    service = NovelSourceService(db)
+    first = service.preview_external_import(
+        file_name="delete.md", extension=".md", content="# 第一章\n第一版"
+    )
+    revision1 = await service.confirm_external_import(
+        title="待删除来源", file_name="delete.md", extension=".md",
+        content="# 第一章\n第一版", expected_content_digest=first["contentDigest"],
+        confirm_single_section=True, rights_confirmed=True,
+        model_data_boundary_confirmed=True,
+    )
+    second = service.preview_external_import(
+        file_name="delete.md", extension=".md", content="# 第一章\n第二版"
+    )
+    await service.confirm_external_import(
+        title="待删除来源", file_name="delete.md", extension=".md",
+        content="# 第一章\n第二版", expected_content_digest=second["contentDigest"],
+        confirm_single_section=True, rights_confirmed=True,
+        model_data_boundary_confirmed=True, work_id=revision1["work_id"],
+    )
+
+    await service.delete_work(revision1["work_id"])
+
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM novel_source_works WHERE id = ?",
+        [revision1["work_id"]],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM novel_source_revisions WHERE work_id = ?",
+        [revision1["work_id"]],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM novel_source_sections"
+    ) == {"count": 0}
 
 
 async def test_historical_books_are_idempotently_original(db):
@@ -176,12 +214,16 @@ async def test_source_http_contract_previews_then_confirms_without_model_call(db
     try:
         preview_response = await preview_import(SourceFilePayload(
             fileName="wire.md", extension=".md", content="# 第一章\n接口正文",
+            importKind="folder", documentCount=2, skippedFileCount=1,
         ))
         preview = preview_response["data"]
         confirmed = await confirm_import(ConfirmSourceImportRequest(
             fileName="wire.md",
             extension=".md",
             content="# 第一章\n接口正文",
+            importKind="folder",
+            documentCount=2,
+            skippedFileCount=1,
             title="接口来源",
             expectedContentDigest=preview["contentDigest"],
             confirmSingleSection=True,
@@ -193,6 +235,9 @@ async def test_source_http_contract_previews_then_confirms_without_model_call(db
 
     assert confirmed["data"]["content_digest"] == preview["contentDigest"]
     assert confirmed["data"]["sections"][0]["title"] == "第一章"
+    assert preview["documentCount"] == 2
+    assert confirmed["data"]["source_metadata"]["importKind"] == "folder"
+    assert confirmed["data"]["source_metadata"]["skippedFileCount"] == 1
 
 
 async def test_source_revision_recovers_after_database_restart(tmp_path):

@@ -19,7 +19,10 @@ import {
   recordAiDebugChunk,
   startAiDebugRun,
 } from '../components/AiDevInspector/store'
-import { isCanonicalOutputEvent } from '../agent-runtime/canonicalOutput'
+import {
+  canonicalProviderTextDelta,
+  isCanonicalOutputEvent,
+} from '../agent-runtime/canonicalOutput'
 import { presentAgentRunError } from '../agent-runtime/agentErrorPresentation'
 import {
   resolveRootRunBinding,
@@ -164,7 +167,7 @@ function aiErrorReportDiagnostics(data: AiStreamRequest): Record<string, unknown
     agentMode: data.chatAgentMode || '',
     taskType: data.chatAgentMode === 'agent' ? '写作 Agent 任务' : '普通对话',
     toolsEnabled: data.enableAgentTools === true,
-    thinkingEnabled: data.options?.thinking?.type === 'enabled',
+    thinkingMode: data.options?.thinking?.type ?? 'provider-default',
     contextWindow: data.contextWindow || data.options?.context_window || '',
     messageCount: data.messages.length,
     associatedChapterCount: data.associatedChapterIds?.length || 0,
@@ -491,6 +494,7 @@ export const backendApi: BackendApi = {
   archiveNovelSource: (data) => apiPut(`/novel-sources/${data.workId}/archive`, {
     status: 'archived',
   }),
+  deleteNovelSource: (data) => apiDelete(`/novel-sources/${data.workId}`),
   getNovelSourceRevision: (data) => apiGet(
     `/novel-source-revisions/${data.revisionId}`,
   ),
@@ -912,9 +916,7 @@ export const backendApi: BackendApi = {
           && canonicalBelongsToObservedRoot
           && chunk.visibility === 'public'
           && chunk.source === 'provider'
-          && chunk.kind === 'provider.content_delta'
-          && typeof chunk.payload.delta === 'string'
-          && chunk.payload.delta.trim())
+          && canonicalProviderTextDelta(chunk).trim())
         || transport.longTaskDispatched?.taskId
       ) {
         receivedVisibleOutput = true

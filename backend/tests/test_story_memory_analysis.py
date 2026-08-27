@@ -89,6 +89,8 @@ async def test_explicit_analysis_stages_inferred_candidates_and_is_idempotent(
         calls += 1
         assert key == "test-key"
         assert options["model"] == "test-model"
+        assert "thinking" not in options
+        assert "temperature" not in options
         assert provider == "openai"
         assert "林墨抵达旧城区" in messages[-1]["content"]
         assert f'"id":{character_id}' in messages[-1]["content"]

@@ -16,7 +16,12 @@ class Glm5_3FlashProfile(ModelProfile):
     supports_json_object_output = True
     reasoning_control = ReasoningControl.ALWAYS_ENABLED
 
-    def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
+    def build_openai_extra_body(
+        self,
+        thinking_enabled: bool | None,
+    ) -> dict[str, Any]:
+        if thinking_enabled is False:
+            raise ValueError("GLM-5.3-Flash does not support disabling reasoning")
         return {"thinking": {"type": "enabled"}}
 
 

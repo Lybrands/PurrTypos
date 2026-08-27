@@ -291,6 +291,7 @@ class AgentComposition:
         api_key: str,
         run_id: str,
         turn_id: str,
+        reasoning_mode,
     ) -> AgentModelTaskRunner:
         """Compose a private model-task runner for an existing Run."""
 
@@ -299,7 +300,11 @@ class AgentComposition:
                 ProviderModelGateway(api_key),
                 output_observer=self._output_processor,
             ),
-            ModelInvocationContext(run_id=run_id, turn_id=turn_id),
+            ModelInvocationContext(
+                run_id=run_id,
+                turn_id=turn_id,
+                requested_reasoning_mode=reasoning_mode,
+            ),
         )
 
     @property
@@ -435,11 +440,12 @@ class AgentComposition:
         )
         if resolved_context_strategy is None:
             resolved_context_strategy = ContextStrategy.SINGLE_PASS
+        configured_planner = getattr(adapter, "planner", None)
         execution_profile = ExecutionProfile(
             planner=(
                 None
                 if isinstance(resolved_planning_policy, ReactivePlanningPolicy)
-                else AgentPlanner(
+                else configured_planner or AgentPlanner(
                     model_gateway,
                     limits=getattr(
                         adapter,

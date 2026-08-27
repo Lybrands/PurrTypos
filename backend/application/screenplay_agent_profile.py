@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from application.model_runtime import reasoning_mode_from_options
 from application.screenplay_manifest_compiler import compile_screenplay_manifest
 from application.screenplay_part_contracts import (
     screenplay_max_generated_units,
@@ -275,7 +276,7 @@ class ScreenplayAgentProfile:
 
 class _ScreenplayTaskDescriptorResolver:
     async def resolve(self, request, plan, decision):
-        del request, plan
+        del plan
         metadata = decision.metadata
         recipe = decision.execution_recipe
         if recipe is None:
@@ -287,7 +288,10 @@ class _ScreenplayTaskDescriptorResolver:
             namespace=SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
             owner_id=str(metadata["projectId"]),
             idempotency_key=str(metadata["commandId"]),
-            budget_limits=screenplay_task_budget_limits(recipe),
+            budget_limits=screenplay_task_budget_limits(
+                recipe,
+                reasoning_mode_from_options(dict(request.model.options)),
+            ),
             metadata={
                 **{
                     key: metadata[key]

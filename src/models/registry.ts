@@ -1,5 +1,5 @@
 import type { AiBuiltinProviderId, AiModelConfig } from '../types'
-import { deepseekV4FlashProfile, deepseekV4ProProfile } from './profiles/deepseekV4'
+import { deepseekV4FlashProfile } from './profiles/deepseekV4'
 import { glm5_3FlashProfile } from './profiles/glm5_3Flash'
 import { kimiK3Profile } from './profiles/kimiK3'
 import { kimiK2_6Profile } from './profiles/kimiK2_6'
@@ -10,13 +10,16 @@ import type { BuiltinModelProfile } from './types'
 
 export const AI_BUILTIN_MODEL_PROFILES: readonly BuiltinModelProfile[] = [
   glm5_3FlashProfile,
-  deepseekV4ProProfile,
   deepseekV4FlashProfile,
   kimiK3Profile,
   kimiK2_6Profile,
   minimaxM3Profile,
   mimoV2_5ProProfile,
 ]
+
+const RETIRED_BUILTIN_PRESET_IDS = new Set([
+  'deepseek:deepseek-v4-pro',
+])
 
 export const AI_BUILTIN_PROVIDERS = [
   ...new Map(
@@ -43,22 +46,36 @@ export function getDefaultPreset(providerId: AiBuiltinProviderId) {
 }
 
 export function migrateKnownModelConfigs(configs: readonly AiModelConfig[]) {
-  let changed = false
-  const migrated: AiModelConfig[] = configs.map((config) => {
-    const current = config.outputTokenBudget === undefined ? config : { ...config }
-    if (current !== config) {
-      delete current.outputTokenBudget
-      changed = true
-    }
-    const profile = AI_BUILTIN_MODEL_PROFILES.find((candidate) => candidate.matches(current))
-    const next = profile?.migrate(current) ?? current
-    if (!hasSameModelFields(config, next)) changed = true
-    return next
-  })
+  const retired = configs.filter((config) => RETIRED_BUILTIN_PRESET_IDS.has(config.presetId ?? ''))
+  let changed = retired.length > 0
+  const migrated: AiModelConfig[] = configs
+    .filter((config) => !RETIRED_BUILTIN_PRESET_IDS.has(config.presetId ?? ''))
+    .map((config) => {
+      const current = config.outputTokenBudget === undefined ? config : { ...config }
+      if (current !== config) {
+        delete current.outputTokenBudget
+        changed = true
+      }
+      const profile = AI_BUILTIN_MODEL_PROFILES.find((candidate) => candidate.matches(current))
+      const next = profile?.migrate(current) ?? current
+      if (!hasSameModelFields(config, next)) changed = true
+      return next
+    })
+
+  for (let index = 0; index < migrated.length; index += 1) {
+    const config = migrated[index]
+    if (config.apiKey?.trim()) continue
+    const inheritedKey = retired.find(
+      (candidate) => candidate.providerId === config.providerId && candidate.apiKey?.trim(),
+    )?.apiKey
+    if (!inheritedKey) continue
+    migrated[index] = { ...config, apiKey: inheritedKey }
+    changed = true
+  }
 
   for (const profile of AI_BUILTIN_MODEL_PROFILES) {
     if (migrated.some((config) => config.presetId === profile.preset.id)) continue
-    const providerKey = migrated.find(
+    const providerKey = [...migrated, ...retired].find(
       (config) => config.providerId === profile.provider.id && config.apiKey?.trim(),
     )?.apiKey ?? ''
     const stableId = `builtin_${profile.preset.id.replace(/[^a-zA-Z0-9]+/g, '_')}`

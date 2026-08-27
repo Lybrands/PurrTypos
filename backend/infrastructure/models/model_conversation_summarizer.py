@@ -9,7 +9,6 @@ from purra.contracts import (
     AgentMessage,
     MessageRole,
     ModelRequest,
-    ReasoningMode,
 )
 from application.conversation_compaction_contracts import (
     ConversationSummary,
@@ -79,10 +78,7 @@ class ModelBackedConversationSummarizer:
                 ),
             ),
         )
-        call = AgentModelTask(
-            request=request,
-            reasoning_mode=ReasoningMode.DISABLED,
-        )
+        call = AgentModelTask(request=request)
         completion = (
             await self._model.complete(messages, call, signal)
         ).completion

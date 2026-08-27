@@ -25,6 +25,9 @@ class NovelSourceService:
         file_name: str,
         extension: str,
         content: str,
+        import_kind: str = "file",
+        document_count: int = 1,
+        skipped_file_count: int = 0,
     ) -> dict[str, Any]:
         metadata = validate_source_text(
             file_name=file_name,
@@ -34,6 +37,9 @@ class NovelSourceService:
         sections = parse_source_sections(content)
         return {
             **metadata,
+            "importKind": import_kind,
+            "documentCount": document_count,
+            "skippedFileCount": skipped_file_count,
             "suggestedTitle": _title_from_file(metadata["fileName"]),
             "parserVersion": 1,
             "sectionCount": len(sections),
@@ -59,6 +65,9 @@ class NovelSourceService:
         file_name: str,
         extension: str,
         content: str,
+        import_kind: str = "file",
+        document_count: int = 1,
+        skipped_file_count: int = 0,
         expected_content_digest: str,
         confirm_single_section: bool,
         rights_confirmed: bool,
@@ -69,6 +78,9 @@ class NovelSourceService:
             file_name=file_name,
             extension=extension,
             content=content,
+            import_kind=import_kind,
+            document_count=document_count,
+            skipped_file_count=skipped_file_count,
         )
         if preview["contentDigest"] != str(expected_content_digest or "").strip():
             raise NovelSourceConflictError("来源正文已变化，请重新预览后再确认")
@@ -86,6 +98,9 @@ class NovelSourceService:
             source_metadata={
                 "fileName": preview["fileName"],
                 "extension": preview["extension"],
+                "importKind": preview["importKind"],
+                "documentCount": preview["documentCount"],
+                "skippedFileCount": preview["skippedFileCount"],
                 "rightsConfirmed": True,
                 "modelDataBoundaryConfirmed": True,
             },
@@ -112,6 +127,9 @@ class NovelSourceService:
 
     async def archive_work(self, work_id: str):
         return await self._repository.archive_work(work_id)
+
+    async def delete_work(self, work_id: str) -> None:
+        await self._repository.delete_work(work_id)
 
     async def delete_revision(self, revision_id: str) -> None:
         await self._repository.delete_revision(revision_id)

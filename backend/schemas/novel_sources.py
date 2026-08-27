@@ -11,6 +11,9 @@ class SourceFilePayload(BaseModel):
     fileName: str = Field(min_length=1, max_length=500)
     extension: Literal[".txt", ".md", ".markdown"]
     content: str = Field(min_length=1, max_length=10_000_000)
+    importKind: Literal["file", "folder", "archive"] = "file"
+    documentCount: int = Field(default=1, ge=1, le=2_000)
+    skippedFileCount: int = Field(default=0, ge=0, le=100_000)
 
 
 class ConfirmSourceImportRequest(SourceFilePayload):

@@ -183,7 +183,7 @@ export function reduceCanonicalOutput(
       || event.kind === 'provider.delta_batch'
     )
   ) {
-    const delta = providerTextDelta(event)
+    const delta = canonicalProviderTextDelta(event)
     if (!delta) return next
     if (event.channel === 'final') {
       return {
@@ -218,7 +218,7 @@ export function reduceCanonicalOutput(
   return next
 }
 
-function providerTextDelta(event: CanonicalOutputEvent): string {
+export function canonicalProviderTextDelta(event: CanonicalOutputEvent): string {
   if (event.kind === 'provider.content_delta') {
     return stringValue(event.payload.delta)
   }

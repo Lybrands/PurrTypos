@@ -62,7 +62,7 @@ class _Policy:
 
 
 @pytest.mark.asyncio
-async def test_model_backed_judge_disables_tools_and_controls_model_options():
+async def test_model_backed_judge_disables_tools_without_rewriting_model_options():
     gateway = _Gateway()
     policy = _Policy()
     signal = asyncio.Event()
@@ -105,20 +105,20 @@ async def test_model_backed_judge_disables_tools_and_controls_model_options():
     assert [message.role.value for message in messages] == ["system", "user"]
     assert invocation.tools == ()
     assert invocation.tool_choice is ToolChoiceMode.NONE
-    assert invocation.reasoning_mode is ReasoningMode.DISABLED
+    assert invocation.reasoning_mode is ReasoningMode.DEFAULT
     assert invocation.max_output_tokens == 4_096
-    assert invocation.request.options["temperature"] == 0
+    assert invocation.request.options["temperature"] == 0.8
     assert invocation.request.options["baseURL"] == "https://provider.test/v1"
     assert invocation.request.profile_id == "fixture:writer-model"
-    assert "tools" not in invocation.request.options
-    assert "tool_choice" not in invocation.request.options
-    assert "top_p" not in invocation.request.options
-    assert "top_k" not in invocation.request.options
-    assert "seed" not in invocation.request.options
-    assert "functions" not in invocation.request.options
-    assert "function_call" not in invocation.request.options
-    assert "parallel_tool_calls" not in invocation.request.options
-    assert "response_format" not in invocation.request.options
+    assert invocation.request.options["tools"] == ({"name": "unsafe"},)
+    assert invocation.request.options["tool_choice"] == "required"
+    assert invocation.request.options["top_p"] == 0.4
+    assert invocation.request.options["top_k"] == 99
+    assert invocation.request.options["seed"] == 7
+    assert invocation.request.options["functions"] == ({"name": "legacy_unsafe"},)
+    assert invocation.request.options["function_call"] == "auto"
+    assert invocation.request.options["parallel_tool_calls"] is True
+    assert invocation.request.options["response_format"] == {"type": "text"}
     assert observed_signal is not signal
     assert not observed_signal.is_set()
     signal.set()

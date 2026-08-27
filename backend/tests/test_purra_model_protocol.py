@@ -130,6 +130,8 @@ def _requirements(
         (ReasoningControl.SELECTABLE, ReasoningMode.DEFAULT),
         (ReasoningControl.SELECTABLE, ReasoningMode.DISABLED),
         (ReasoningControl.ALWAYS_ENABLED, ReasoningMode.DEFAULT),
+        (ReasoningControl.ALWAYS_ENABLED, ReasoningMode.ENABLED),
+        (ReasoningControl.UNAVAILABLE, ReasoningMode.DEFAULT),
         (ReasoningControl.UNAVAILABLE, ReasoningMode.DISABLED),
     ],
 )
@@ -152,7 +154,7 @@ def test_capability_preflight_accepts_supported_reasoning_modes(
         ),
         (
             _snapshot(reasoning_control=ReasoningControl.UNAVAILABLE),
-            _requirements(reasoning_mode=ReasoningMode.DEFAULT),
+            _requirements(reasoning_mode=ReasoningMode.ENABLED),
         ),
         (
             _snapshot(tool_calling=FeatureSupport.UNKNOWN),

@@ -346,7 +346,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
             output_token_cap=contract.output_token_cap,
-            reasoning_mode=contract.reasoning_mode,
             host_candidate_template=_host_scene_candidate_template(scene_id),
             candidate_validation_contract={
                 "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
@@ -408,7 +407,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
             output_token_cap=contract.output_token_cap,
-            reasoning_mode=contract.reasoning_mode,
             candidate_validation_contract={
                 "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
                 "kind": contract.validation_kind,
@@ -475,7 +473,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
             output_token_cap=contract.output_token_cap,
-            reasoning_mode=contract.reasoning_mode,
             candidate_validation_contract={
                 "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
                 "kind": contract.validation_kind,
@@ -733,7 +730,6 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
             output_token_cap=contract.output_token_cap,
-            reasoning_mode=contract.reasoning_mode,
             candidate_validation_contract=validation_contract,
             signal=signal,
         )
@@ -911,7 +907,6 @@ class ScreenplayTaskModelCalls:
             expected_part_key=str(task["targetRole"]),
             conversation_turn_id=str(task["turnId"]),
             output_token_cap=contract.output_token_cap,
-            reasoning_mode=contract.reasoning_mode,
             bind_run=bind_run,
             signal=signal,
         )

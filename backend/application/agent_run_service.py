@@ -24,7 +24,7 @@ from purra.api import (
     AgentModelTask,
     AgentModelTextResult,
 )
-from purra.model_protocol import InvocationOutputLimit
+from purra.model_protocol import FeatureSupport, InvocationOutputLimit
 from purra.ports import CancellationSignal
 from application.agent_composition import AgentComposition
 from application.run_binding import RunBindingLifecycle
@@ -63,13 +63,13 @@ class AgentRunService:
             api_key=api_key,
             run_id=run_id,
             turn_id=turn_id,
+            reasoning_mode=reasoning_mode,
         )
         return await runner.stream_text(
             messages,
             AgentModelTask(
                 request=model_request,
                 output_limit=output_limit,
-                reasoning_mode=reasoning_mode,
             ),
             signal,
         )
@@ -98,7 +98,9 @@ class AgentRunService:
             thinking_enabled=normalize_thinking_enabled(model_options),
         )
         force_planned_tool_choice = (
-            not provider_capabilities.required_tool_choice_is_unsupported(
+            request.model.protocol_capabilities.required_tool_choice
+            is not FeatureSupport.UNAVAILABLE
+            and not provider_capabilities.required_tool_choice_is_unsupported(
                 capability_key
             )
         )

@@ -179,7 +179,7 @@ async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
         {
             "model": "glm-5.3-flash",
             "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
-            "thinking": {"type": "disabled"},
+            "thinking": {"type": "enabled"},
         },
     )
     chunks = [chunk async for chunk in result["stream"]]

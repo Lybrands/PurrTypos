@@ -15,6 +15,7 @@ from purra.model_protocol import (
     resolve_invocation_output_limit,
 )
 from purra.structured_output import parse_json_object
+from purra.recovery import FailureCategory, FailureScope, FailureSignal
 
 from application.agent_run_service import AgentRunService
 from application.model_runtime import (
@@ -250,6 +251,53 @@ class NovelAnalysisTaskUnitExecutor:
             payload=payload,
         )
         return _unit_result(artifact, run_id=model_run_id)
+
+    def classify_failure(self, error: Exception) -> FailureSignal:
+        code = str(getattr(error, "code", "") or type(error).__name__)
+        if code == "novel_analysis_structured_output_invalid":
+            return FailureSignal(
+                category=FailureCategory.MODEL_OUTPUT_INVALID,
+                code=code,
+                retryable=True,
+            )
+        if isinstance(error, ModelGatewayError):
+            if error.retryable or code in {
+                "model_gateway_error",
+                "provider_rate_limited",
+                "provider_unavailable",
+                "upstream_stream_interrupted",
+            }:
+                return FailureSignal(
+                    category=FailureCategory.TRANSIENT_PROVIDER,
+                    code=code,
+                    retryable=True,
+                )
+            if code in {
+                "provider_bad_request",
+                "provider_reasoning_context_invalid",
+                "unsupported_model_feature",
+            }:
+                return FailureSignal(
+                    category=FailureCategory.PROTOCOL_INCOMPATIBLE,
+                    code=code,
+                    retryable=False,
+                    scope=FailureScope.SYSTEMIC,
+                )
+            if code in {
+                "provider_authentication_failed",
+                "provider_insufficient_balance",
+            }:
+                return FailureSignal(
+                    category=FailureCategory.PERMANENT_EXTERNAL,
+                    code=code,
+                    retryable=False,
+                    scope=FailureScope.SYSTEMIC,
+                )
+        return FailureSignal(
+            category=FailureCategory.BUSINESS_INVARIANT,
+            code=code[:240],
+            retryable=False,
+        )
 
     async def _validate_candidates(
         self,

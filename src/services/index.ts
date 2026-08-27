@@ -159,6 +159,7 @@ export const services = {
     list: backendApi.listNovelSources,
     get: backendApi.getNovelSource,
     archive: backendApi.archiveNovelSource,
+    delete: backendApi.deleteNovelSource,
     getRevision: backendApi.getNovelSourceRevision,
     deleteRevision: backendApi.deleteNovelSourceRevision,
     getSection: backendApi.getNovelSourceSection,

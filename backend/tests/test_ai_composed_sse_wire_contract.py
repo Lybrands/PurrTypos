@@ -1150,7 +1150,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
         api_provider="openai",
         base_url="https://provider.test/v1",
         model="wire-model",
-        thinking_enabled=False,
+        thinking_enabled=None,
     )
     composition.provider_capabilities.mark_required_tool_choice_unsupported(
         capability_key
@@ -1548,7 +1548,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         ):
             judge_round += 1
             assert _options.get("tools") is None
-            assert _options["temperature"] == 0
+            assert "temperature" not in _options
             judge_payload = json.loads(messages[1]["content"])
             assert all(
                 item["outlineValue"] in item["outlineSourceExcerpt"]

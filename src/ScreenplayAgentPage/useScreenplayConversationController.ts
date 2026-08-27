@@ -29,6 +29,10 @@ export interface ScreenplayQueuedSubmission {
 export interface ScreenplayConversationBindings {
   project: ScreenplayProject
   sessions: AiSession[]
+  historySessions?: AiSession[]
+  historyLoading?: boolean
+  historyError?: string
+  deletingHistorySessionIds?: number[]
   activeSessionId: number | null
   conversationIdentity?: string
   messages: AgentConversationMessage[]
@@ -54,6 +58,9 @@ export interface ScreenplayConversationBindings {
     | 'createSession'
     | 'closeSession'
     | 'renameSession'
+    | 'loadSessionHistory'
+    | 'openHistorySession'
+    | 'deleteSession'
     | 'send'
     | 'abort'
     | 'resume'
@@ -95,6 +102,14 @@ export function createScreenplayConversationController(
       paused: bindings.paused,
       resuming: bindings.resuming,
       attachmentsVersion: bindings.attachmentsVersion,
+      history: {
+        sessions: (bindings.historySessions ?? []).map((session) => (
+          toAgentConversationSession(session, session.create_time)
+        )),
+        loading: bindings.historyLoading ?? false,
+        error: bindings.historyError,
+        deletingSessionIds: bindings.deletingHistorySessionIds,
+      },
     },
     composer: {
       value: bindings.prompt,

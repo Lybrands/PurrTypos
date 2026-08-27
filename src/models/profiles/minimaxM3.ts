@@ -15,15 +15,16 @@ const preset = {
   providerId: 'minimax',
   name: 'MiniMax-M3',
   label: 'MiniMax M3',
-  summary: '来自当前自定义配置',
+  summary: '1M 上下文，512K 最大输出，支持自适应思考',
   contextWindowOptions: ['32k', '256k', '1m'],
   contextWindow: '1m',
+  maxOutputTokens: 524_288,
   supportsThinking: true,
-  thinkingOnly: true,
+  thinkingOnly: false,
   thinkingEnabled: true,
   customizeTemperature: false,
-  temperatureThinking: 0.6,
-  temperatureNonThinking: 0.6,
+  temperatureThinking: 1,
+  temperatureNonThinking: 1,
   recommended: true,
 } as const
 
@@ -53,8 +54,11 @@ export const minimaxM3Profile: BuiltinModelProfile = {
       nickname: config.nickname === 'MiniMax M3.0' ? preset.label : config.nickname,
       supportsThinking: preset.supportsThinking,
       thinkingOnly: preset.thinkingOnly,
-      thinkingEnabled: preset.thinkingEnabled,
+      thinkingEnabled: config.thinkingEnabled,
       contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
+      customizeTemperature: preset.customizeTemperature,
+      temperatureThinking: preset.temperatureThinking,
+      temperatureNonThinking: preset.temperatureNonThinking,
     }
   },
 }

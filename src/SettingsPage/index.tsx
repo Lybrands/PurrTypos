@@ -103,9 +103,9 @@ export default function SettingsPage({
       apiProvider: config.apiProvider ?? 'openai',
       name: config.name,
       nickname: config.nickname ?? '',
-      supportsThinking: config.thinkingEnabled ?? config.thinkingOnly ?? false,
+      supportsThinking: config.supportsThinking,
       thinkingOnly: config.thinkingOnly,
-      thinkingEnabled: config.thinkingEnabled ?? config.thinkingOnly ?? false,
+      thinkingEnabled: config.thinkingEnabled,
       contextWindow: config.contextWindow ?? '128k',
       customizeTemperature: config.customizeTemperature ?? true,
       temperatureThinking: config.temperatureThinking ?? 0.6,
@@ -124,7 +124,9 @@ export default function SettingsPage({
       const nickname = (values.nickname ?? '').trim()
       const apiKey = (values.apiKey ?? '').trim()
       const baseUrl = (editingPresetProvider?.baseUrl ?? values.baseUrl ?? '').trim()
-      const thinkingEnabled = editingPreset?.thinkingOnly ? true : !!values.thinkingEnabled
+      const thinkingEnabled = values.thinkingEnabled === undefined
+        ? editingConfig?.thinkingEnabled
+        : values.thinkingEnabled === true
       const contextWindow = values.contextWindow ?? '128k'
       const customizeTemperature = !!values.customizeTemperature
       let temperatureNonThinking = editingConfig?.temperatureNonThinking ?? 0.6
@@ -132,7 +134,7 @@ export default function SettingsPage({
       if (customizeTemperature) {
         temperatureNonThinking =
           values.temperatureNonThinking != null ? Number(values.temperatureNonThinking) : 0.6
-        temperatureThinking = thinkingEnabled
+        temperatureThinking = thinkingEnabled === true
           ? (values.temperatureThinking != null ? Number(values.temperatureThinking) : 0.6)
           : (editingConfig?.temperatureThinking ?? 0.6)
       } else {
@@ -165,7 +167,7 @@ export default function SettingsPage({
                 name,
                 nickname: nickname || undefined,
                 supportsThinking: editingPreset?.supportsThinking
-                  ?? (thinkingEnabled || editingConfig.supportsThinking),
+                  ?? editingConfig.supportsThinking,
                 thinkingOnly: editingPreset?.thinkingOnly ?? editingConfig.thinkingOnly,
                 thinkingEnabled,
                 contextWindow,
@@ -186,7 +188,7 @@ export default function SettingsPage({
           apiProvider: prov,
           name,
           nickname: nickname || undefined,
-          supportsThinking: thinkingEnabled,
+          supportsThinking: thinkingEnabled === true,
           thinkingOnly: false,
           thinkingEnabled,
           contextWindow,
@@ -315,7 +317,9 @@ export default function SettingsPage({
                             模型输出上限 {displayModelOutputCapability(c)}
                           </span>
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                            {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
+                            {c.thinkingEnabled === undefined
+                              ? 'Thinking: Provider default'
+                              : c.thinkingEnabled ? 'Thinking' : 'Non-thinking'}
                           </span>
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
                             {builtinProvider?.name ?? (c.apiProvider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容')}
@@ -451,9 +455,9 @@ export default function SettingsPage({
                     name="thinkingEnabled"
                     valuePropName="checked"
                     label="Thinking"
-                    extra={editingConfig?.thinkingOnly ? '该模型使用思考模式，服务端不支持关闭。' : undefined}
+                    extra={editingConfig?.thinkingOnly ? '该模型服务端不支持关闭；不兼容的配置会明确报错，不会被自动改写。' : undefined}
                   >
-                    <PurrSwitch size='small' disabled={editingConfig?.thinkingOnly} />
+                    <PurrSwitch size='small' />
                   </PurrForm.Item>
                   <PurrForm.Item name="customizeTemperature" valuePropName="checked" label="自定义 Temperature">
                     <PurrSwitch size='small' />
