@@ -23,13 +23,17 @@ class ProviderCapabilityCache:
         api_provider: str,
         base_url: str | None,
         model: str,
-        thinking_enabled: bool,
+        thinking_enabled: bool | None,
     ) -> str:
         return "|".join((
             str(api_provider or "openai").strip().lower(),
             str(base_url or "").strip().lower().rstrip("/"),
             str(model or "").strip().lower(),
-            "thinking" if thinking_enabled else "non-thinking",
+            (
+                "default"
+                if thinking_enabled is None
+                else "thinking" if thinking_enabled else "non-thinking"
+            ),
         ))
 
     def required_tool_choice_is_unsupported(self, key: str) -> bool:

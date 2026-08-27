@@ -24,6 +24,7 @@ class ModelProfile:
     model_names: frozenset[str] = frozenset()
     base_urls: frozenset[str] = frozenset()
     native_anthropic_thinking = False
+    openai_output_token_parameter = "max_tokens"
     max_output_tokens: int | None = None
     thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
     supports_json_object_output = False
@@ -39,14 +40,28 @@ class ModelProfile:
             and _normalize_base_url(base_url) in self.base_urls
         )
 
-    def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
-        if self.reasoning_control is ReasoningControl.UNAVAILABLE:
+    def build_openai_extra_body(
+        self,
+        thinking_enabled: bool | None,
+    ) -> dict[str, Any]:
+        if (
+            self.reasoning_control is ReasoningControl.UNAVAILABLE
+            or thinking_enabled is None
+        ):
             return {}
         return {
             "thinking": {
                 "type": "enabled" if thinking_enabled else "disabled",
             },
         }
+
+    def apply_openai_output_limit(
+        self,
+        params: dict[str, Any],
+        max_tokens: int | None,
+    ) -> None:
+        if max_tokens is not None and max_tokens > 0:
+            params[self.openai_output_token_parameter] = max_tokens
 
     def protocol_capabilities(self) -> ModelProtocolCapabilities:
         return ModelProtocolCapabilities(

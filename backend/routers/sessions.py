@@ -9,6 +9,9 @@ from application.product_owner_deletion import (
     ProductOwnerActiveError,
     prepare_session_owner_deletion,
 )
+from database.crud.screenplay_session_deletion import (
+    delete_screenplay_session_rows,
+)
 from schemas.sessions import CreateSessionRequest, UpdateSessionTitleRequest
 
 router = APIRouter(tags=["sessions"])
@@ -79,6 +82,7 @@ async def delete_session(sessionId: int):
             await prepare_session_owner_deletion(db, [sessionId])
         except ProductOwnerActiveError as error:
             raise HTTPException(status_code=409, detail=error.message) from error
+        await delete_screenplay_session_rows(db, sessionId)
         await db.execute(
             "DELETE FROM ai_conversations WHERE session_id = ?",
             [sessionId],

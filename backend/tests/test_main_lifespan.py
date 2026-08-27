@@ -51,6 +51,28 @@ def _capture_database(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_lifespan_initializes_schema_only_on_primary_connection(
+    monkeypatch,
+    tmp_path,
+):
+    connection_type = database_connection.DatabaseConnection
+    original_init = connection_type.init
+    initialize_schema_calls = []
+
+    async def _recording_init(self, *, initialize_schema=True):
+        initialize_schema_calls.append(initialize_schema)
+        await original_init(self, initialize_schema=initialize_schema)
+
+    monkeypatch.setattr(connection_type, "init", _recording_init)
+    _capture_database(monkeypatch, tmp_path)
+
+    async with main.lifespan(_RecordingApplication()):
+        pass
+
+    assert initialize_schema_calls == [True, False]
+
+
+@pytest.mark.asyncio
 async def test_lifespan_shutdown_clears_composition_and_global_db(
     monkeypatch,
     tmp_path,

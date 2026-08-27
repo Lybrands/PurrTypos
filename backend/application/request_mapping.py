@@ -36,6 +36,8 @@ from infrastructure.models.profiles.registry import resolve_model_profile
 from application.model_runtime import reasoning_mode_from_options
 from purra.model_protocol import (
     FeatureRequirement,
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
     TaskCapabilityRequirements,
     preflight_capabilities,
     resolve_invocation_output_limit,
@@ -51,6 +53,7 @@ CONTEXT_WINDOW_TOKENS: dict[str, int] = {
     "300k": 300_000,
     "1m": 1_000_000,
 }
+WRITING_MAX_OUTPUT_TOKENS = 32_768
 
 
 class UnsupportedCallerToolContractError(ValueError):
@@ -203,6 +206,17 @@ def writing_run_options(
         request.model.capability_snapshot,
         request.model.options.get("max_tokens"),
     )
+    context_window = request.context_window or 200_000
+    workflow_output_cap = min(
+        WRITING_MAX_OUTPUT_TOKENS,
+        max(1_024, context_window // 4),
+    )
+    if output_limit.max_tokens > workflow_output_cap:
+        output_limit = InvocationOutputLimit(
+            max_tokens=workflow_output_cap,
+            source=InvocationOutputLimitSource.WORKFLOW_POLICY,
+            profile_max_tokens=output_limit.profile_max_tokens,
+        )
     response_constraints = writing_response_constraints(request)
     response_validators = writing_response_validators(request)
     judge_policies = tuple(response_judge_policies)
@@ -219,7 +233,7 @@ def writing_run_options(
             else None
         ),
         output_limit=output_limit,
-        default_context_window_tokens=request.context_window or 200_000,
+        default_context_window_tokens=context_window,
         force_planned_tool_choice=force_planned_tool_choice,
         reasoning_mode=reasoning_mode_from_options(provider_options),
         provenance=provenance,

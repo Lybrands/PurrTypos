@@ -111,16 +111,23 @@ def test_provider_receives_the_exact_profile_or_user_output_limit(
     reasoning_mode,
 ):
     snapshot = resolve_model_profile(
-        "deepseek:deepseek-v4-pro",
-        "deepseek-v4-pro",
+        "deepseek:deepseek-v4-flash",
+        "deepseek-v4-flash",
         "https://api.deepseek.com",
     ).capability_snapshot(context_window_tokens=1_000_000)
     invocation = ModelInvocation(
         request=ModelRequest(
             provider="openai",
-            model="deepseek-v4-pro",
+            model="deepseek-v4-flash",
             capability_snapshot=snapshot,
-            options={"baseURL": "https://api.deepseek.com"},
+            options={
+                "baseURL": "https://api.deepseek.com",
+                **(
+                    {"thinking": {"type": "disabled"}}
+                    if reasoning_mode is ReasoningMode.DISABLED
+                    else {}
+                ),
+            },
         ),
         output_limit=resolve_invocation_output_limit(
             snapshot,
@@ -215,6 +222,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
                     "access_token": "private-access-token",
                     "label": "writing",
                 },
+                "thinking": {"type": "disabled"},
                 "tools": [{"function": {"name": "caller-owned"}}],
             },
         ),
@@ -250,7 +258,6 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
             "model": "model",
             "model_profile": "profile",
             "max_tokens": 2_048,
-            "thinking_enabled": False,
             "thinking": {"type": "disabled"},
         },
         "maxOutputTokens": 2_048,
@@ -372,15 +379,15 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
         provider="anthropic",
         model="requested-model",
         capability_snapshot=resolve_model_profile(
-            "deepseek:deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek:deepseek-v4-flash",
+            "deepseek-v4-flash",
             "https://api.deepseek.com",
         ).capability_snapshot(context_window_tokens=1_000_000),
         options={
             "baseURL": "https://example.invalid",
             "tool_choice": "required",
             "max_tokens": 999_999,
-            "thinking_enabled": True,
+            "thinking": {"type": "disabled"},
             "temperature": 1.0,
             "metadata": {"tags": ["writing"]},
         },
@@ -447,15 +454,11 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     }]
     assert captured["options"]["model"] == "requested-model"
     assert captured["options"]["tools"][0]["function"]["name"] == "readThing"
-    assert captured["options"]["tool_choice"] == {
-        "type": "function",
-        "function": {"name": "readThing"},
-    }
+    assert captured["options"]["tool_choice"] == "required"
     assert captured["options"]["max_tokens"] == 2_048
-    assert captured["options"]["thinking_enabled"] is False
     assert captured["options"]["thinking"] == {"type": "disabled"}
-    assert captured["options"]["model_profile"] == "deepseek:deepseek-v4-pro"
-    assert "temperature" not in captured["options"]
+    assert captured["options"]["model_profile"] == "deepseek:deepseek-v4-flash"
+    assert captured["options"]["temperature"] == 1.0
     assert type(captured["options"]) is dict
     assert type(captured["options"]["metadata"]) is dict
     assert type(captured["options"]["metadata"]["tags"]) is list
@@ -465,7 +468,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert json.loads(json.dumps(captured["options"])) == captured["options"]
 
 
-def test_provider_options_pin_one_required_tool_and_keep_multi_tool_required():
+def test_provider_options_keep_required_tool_choice_provider_neutral():
     request = ModelRequest(provider="openai", model="requested-model")
     first = ToolSchema(
         name="readFirst",
@@ -489,10 +492,7 @@ def test_provider_options_pin_one_required_tool_and_keep_multi_tool_required():
         tool_choice=ToolChoiceMode.REQUIRED,
     ))
 
-    assert single["tool_choice"] == {
-        "type": "function",
-        "function": {"name": "readFirst"},
-    }
+    assert single["tool_choice"] == "required"
     assert multiple["tool_choice"] == "required"
 
 
@@ -669,6 +669,36 @@ async def test_provider_model_gateway_standardizes_completion_failures(monkeypat
     assert captured.value.code == "upstream_stream_interrupted"
     assert captured.value.retryable is True
     assert "private" not in str(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_provider_model_gateway_treats_wrapped_connection_errors_as_retryable(
+    monkeypatch,
+):
+    async def _complete(*_args, **_kwargs):
+        try:
+            raise httpx.ConnectError("private DNS or socket detail")
+        except httpx.ConnectError as cause:
+            raise RuntimeError("SDK connection wrapper") from cause
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _complete,
+    )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        await ProviderModelGateway("secret").complete(
+            [AgentMessage(role="user", content="hello")],
+            ModelInvocation(
+                request=ModelRequest(provider="openai", model="model"),
+                tool_choice=ToolChoiceMode.NONE,
+            ),
+        )
+
+    assert captured.value.code == "upstream_stream_interrupted"
+    assert captured.value.retryable is True
+    assert "private" not in str(captured.value)
+    assert "SDK" not in str(captured.value)
 
 
 @pytest.mark.asyncio

@@ -367,6 +367,55 @@ async def test_schema_backfills_historical_canonical_root_journal(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_root_journal_migration_receipt_skips_completed_recheck(
+    tmp_path: Path,
+    monkeypatch,
+):
+    original = DatabaseConnection(tmp_path)
+    await original.init()
+    runs = SqliteRunRepository(original)
+    run_id = await runs.create(RunCreateParams(
+        session_id=None,
+        prompt="receipted journal",
+        mode="agent",
+        requested_run_id="receipted-journal",
+    ))
+    repository = _repository(original, run_repository=runs)
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id=None,
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key="receipt:event",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={},
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    await original.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    assert await migrated.fetch_one(
+        "SELECT id FROM app_schema_migrations "
+        "WHERE id = 'agent-root-journal-v1'"
+    ) == {"id": "agent-root-journal-v1"}
+    await migrated.close()
+
+    import database.schema as schema
+
+    async def _unexpected_recheck(_db):
+        raise AssertionError("completed migration must not run again")
+
+    monkeypatch.setattr(schema, "_migrate_agent_root_journal", _unexpected_recheck)
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_schema_appends_missing_root_sequences_after_existing_journal(
     tmp_path: Path,
 ):

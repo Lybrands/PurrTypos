@@ -26,7 +26,6 @@ class ScreenplayPartContract:
     validation_kind: str | None
     tool_profile: str
     output_token_cap: int
-    reasoning_mode: ReasoningMode
 
 
 def _contract(
@@ -35,14 +34,12 @@ def _contract(
     validation_kind: str | None,
     tool_profile: str,
     output_token_cap: int,
-    reasoning_mode: ReasoningMode = ReasoningMode.DEFAULT,
 ) -> ScreenplayPartContract:
     return ScreenplayPartContract(
         key=key,
         validation_kind=validation_kind,
         tool_profile=tool_profile,
         output_token_cap=output_token_cap,
-        reasoning_mode=reasoning_mode,
     )
 
 
@@ -52,14 +49,12 @@ _CONTRACTS = {
         validation_kind="scene",
         tool_profile="draft_scene",
         output_token_cap=16_384,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "episode_metadata": _contract(
         "episode_metadata",
         validation_kind="episode_metadata",
         tool_profile="episode_metadata",
         output_token_cap=4_096,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "review_dimension": _contract(
         "review_dimension",
@@ -72,42 +67,36 @@ _CONTRACTS = {
         validation_kind="structure_episode_plan_index",
         tool_profile="episode_plan_index",
         output_token_cap=4_096,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "structure.episode_plan_fragment": _contract(
         "structure.episode_plan_fragment",
         validation_kind="structure_episode_plan_fragment",
         tool_profile="episode_plan_fragment",
         output_token_cap=16_384,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "structure.series_arc_index": _contract(
         "structure.series_arc_index",
         validation_kind="structure_series_arc_index",
         tool_profile="series_arc_index",
         output_token_cap=8_192,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "structure.series_arc_phase": _contract(
         "structure.series_arc_phase",
         validation_kind="structure_series_arc_phase",
         tool_profile="series_arc_phase",
         output_token_cap=8_192,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "structure.character_arcs_index": _contract(
         "structure.character_arcs_index",
         validation_kind="structure_character_arcs_index",
         tool_profile="character_arcs_index",
         output_token_cap=4_096,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "structure.character_arc_fragment": _contract(
         "structure.character_arc_fragment",
         validation_kind="structure_character_arc_fragment",
         tool_profile="character_arc_fragment",
         output_token_cap=8_192,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "scene_list_episode": _contract(
         "scene_list_episode",
@@ -120,7 +109,6 @@ _CONTRACTS = {
         validation_kind=None,
         tool_profile="final_response",
         output_token_cap=1_024,
-        reasoning_mode=ReasoningMode.DISABLED,
     ),
     "source_analysis.chapter_digest": _contract(
         "source_analysis.chapter_digest",
@@ -236,6 +224,7 @@ def resolve_screenplay_part_contract(
 
 def screenplay_task_budget_limits(
     recipe: ExecutionRecipe | Mapping[str, Any],
+    reasoning_mode: ReasoningMode,
 ) -> LongTaskBudgetLimits:
     contracts = [
         PART_CONTRACTS[key]
@@ -246,7 +235,7 @@ def screenplay_task_budget_limits(
         max_input_tokens=sum(
             (
                 _INPUT_TOKENS_WITHOUT_REASONING
-                if contract.reasoning_mode is ReasoningMode.DISABLED
+                if reasoning_mode is ReasoningMode.DISABLED
                 else _INPUT_TOKENS_WITH_REASONING
             )
             for contract in contracts
@@ -258,7 +247,7 @@ def screenplay_task_budget_limits(
         max_reasoning_tokens=max(1, sum(
             contract.output_token_cap * _MAX_INVOCATIONS_PER_PART
             for contract in contracts
-            if contract.reasoning_mode is not ReasoningMode.DISABLED
+            if reasoning_mode is not ReasoningMode.DISABLED
         )),
     )
 

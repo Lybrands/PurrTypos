@@ -76,7 +76,6 @@ from purra.contracts import (
     ModelFinishReason,
     ModelStream,
     ModelStreamChunk,
-    ReasoningMode,
     RunBinding,
     RunCreateParams,
     RunStatus,
@@ -320,7 +319,6 @@ class _ToolCallingUnitExecutor(_UnitExecutor):
             conversation_turn_id=self._turn_id,
             output_token_cap=16_384,
             bind_run=context.bind_run,
-            reasoning_mode=ReasoningMode.DISABLED,
             host_candidate_template={
                 "sceneId": scene_id,
             },
@@ -471,7 +469,6 @@ async def test_public_final_response_is_a_bound_model_run_with_public_output(
             expected_part_key="final-response",
             conversation_turn_id="turn-public-final-response",
             output_token_cap=1_024,
-            reasoning_mode=ReasoningMode.DISABLED,
             bind_run=lambda run_id: _capture_run(bound_runs, run_id),
         )
     finally:
@@ -2410,7 +2407,7 @@ async def test_incompatible_model_resume_keeps_operation_paused(screenplay_db):
             "options": {
                 "model": "kimi-k3",
                 "model_profile": "moonshot:kimi-k3",
-                "thinking": {"type": "enabled"},
+                "thinking": {"type": "disabled"},
             },
             "contextWindow": "1m",
         },

@@ -157,6 +157,95 @@ function rootTransportSnapshot() {
   }
 }
 
+test('batched Provider text is visible output and does not create an empty-response report', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const streamId = 'chat-batched-visible-output'
+  const runId = 'run-batched-visible-output'
+  const requestReceipt = {
+    requestId: streamId,
+    sessionId: 7,
+    status: 'run_bound',
+    runId,
+    cancelRequested: false,
+    rejectionCode: null,
+    revision: 2,
+  }
+  let errorReportPosts = 0
+  const delivered = []
+  globalThis.window = Object.assign(new EventTarget(), {
+    setTimeout: globalThis.setTimeout,
+  })
+  globalThis.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (url.includes(`/api/ai/chat/requests/${streamId}`)) {
+      return jsonResponse({ success: true, data: requestReceipt })
+    }
+    if (url.endsWith('/api/ai/chat/stream')) {
+      return new Response([
+        `data: ${JSON.stringify({ requestReceipt })}`,
+        `data: ${JSON.stringify({
+          eventId: 'batched-visible-output-1',
+          outputStreamId: 'batched-final',
+          runId,
+          turnId: 'turn-batched-visible-output',
+          invocationId: 'invocation-batched-visible-output',
+          sequence: 1,
+          source: 'provider',
+          kind: 'provider.delta_batch',
+          channel: 'final',
+          visibility: 'public',
+          payload: {
+            schemaVersion: 'purra.provider-delta-batch/v1',
+            entries: [{
+              sourceChunkIndex: 1,
+              sourcePartIndex: 0,
+              kind: 'provider.content_delta',
+              payload: { delta: '批量回答' },
+            }],
+          },
+          occurredAt: '2026-08-27T07:34:57Z',
+          emittedAt: '2026-08-27T07:34:57Z',
+        })}`,
+        `data: ${JSON.stringify({
+          done: true,
+          runResult: { runId, status: 'done', errorCode: null },
+        })}`,
+        '',
+      ].join('\n'), { status: 200 })
+    }
+    if (url.endsWith('/api/ai/error-reports')) {
+      errorReportPosts += 1
+      return jsonResponse({ success: true, data: { id: 'unexpected-error-report' } })
+    }
+    throw new Error(`unexpected URL ${url}`)
+  }
+  const unsubscribe = services.ai.onAiChunk(
+    (chunk) => delivered.push(chunk),
+    streamId,
+  )
+  try {
+    services.ai.aiChatStream({
+      streamId,
+      apiKey: 'test-key',
+      sessionId: 7,
+      messages: [{ role: 'user', content: '继续' }],
+      options: { model: 'test-model' },
+      chatAgentMode: 'agent',
+      enableAgentTools: true,
+    })
+    await waitUntil(() => delivered.some((chunk) => chunk.done))
+
+    assert.equal(errorReportPosts, 0)
+    assert.equal(delivered.at(-1)?.runResult?.status, 'done')
+  } finally {
+    unsubscribe()
+    services.ai.abortAiStream(streamId)
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+  }
+})
+
 test('bound backend transport recovers Root after foreign terminal envelopes', async () => {
   const originalFetch = globalThis.fetch
   const originalWindow = globalThis.window

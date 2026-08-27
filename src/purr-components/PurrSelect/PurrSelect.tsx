@@ -57,6 +57,7 @@ export interface PurrSelectProps<T extends string | number = string | number> {
   variant?: 'outlined' | 'borderless'
   optionRender?: (option: { value: T; label: React.ReactNode; data: PurrSelectOption<T> }) => React.ReactNode
   zIndex?: number
+  'aria-label'?: string
 }
 
 function TagsSelect<T extends string | number>({
@@ -147,6 +148,7 @@ export function PurrSelect<T extends string | number = string | number>(props: P
     variant = 'outlined',
     optionRender,
     zIndex,
+    'aria-label': ariaLabel,
   } = props
 
   if (mode === 'tags') return <TagsSelect {...props} />
@@ -175,6 +177,7 @@ export function PurrSelect<T extends string | number = string | number>(props: P
       onOpenChange={(nextOpen) => onOpenChange?.(nextOpen)}
     >
       <BaseSelect.Trigger
+        aria-label={ariaLabel}
         className={[
           'purr-select',
           multiple && 'purr-multi-select',

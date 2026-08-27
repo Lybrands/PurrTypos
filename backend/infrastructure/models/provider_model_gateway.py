@@ -18,13 +18,18 @@ from purra.contracts import (
     ToolCallDelta,
     ToolChoiceMode,
 )
-from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.errors import (
+    ContractViolationError,
+    ModelGatewayError,
+    UnsupportedModelFeatureError,
+)
 from purra.json_values import thaw_json_mapping, thaw_json_value
 from purra.model_call_parameters import build_model_call_parameters
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
 from purra.ports import CancellationSignal
 from purra.cancellation import raise_if_stopped
 from infrastructure.models import provider_router
+from infrastructure.models.capabilities import reasoning_mode_from_options
 from purra.stream_ownership import OwnedAsyncIterator, close_async_resource
 
 
@@ -155,6 +160,16 @@ def _provider_options(
             "selected reasoning mode is incompatible with model capabilities"
         )
     options = thaw_json_mapping(request.options)
+    configured_mode = reasoning_mode_from_options(options)
+    if not capabilities.reasoning_mode_is_supported(configured_mode):
+        raise UnsupportedModelFeatureError(
+            "configured reasoning mode is incompatible with model capabilities"
+        )
+    if configured_mode is not invocation.reasoning_mode:
+        raise ContractViolationError(
+            "provider options conflict with the Run reasoning mode",
+            code="model_configuration_conflict",
+        )
     options["model"] = request.model
     options.pop("model_profile", None)
     if request.profile_id is not None:
@@ -163,31 +178,11 @@ def _provider_options(
     options.pop("tool_choice", None)
     if invocation.max_output_tokens is not None:
         options["max_tokens"] = invocation.max_output_tokens
-    if (
-        invocation.reasoning_mode is ReasoningMode.DISABLED
-        and capabilities.reasoning_control is ReasoningControl.SELECTABLE
-    ):
-        caller_thinking = options.get("thinking")
-        caller_had_thinking_enabled = bool(
-            options.get("thinking_enabled") is True
-            or (
-                isinstance(caller_thinking, dict)
-                and caller_thinking.get("type") == "enabled"
-            )
-        )
-        # Provider adapters consume the normalized ``thinking`` shape.  The
-        # former ad-hoc flag was ignored and could leave Anthropic extended
-        # thinking enabled for the narrow 1,200-token planner request.
-        options["thinking_enabled"] = False
-        options["thinking"] = {"type": "disabled"}
-        # A caller-selected thinking temperature may be invalid after Core
-        # disables reasoning for a derived invocation. Omitting sampling lets
-        # each provider apply the correct non-thinking default.
-        if caller_had_thinking_enabled:
-            options.pop("temperature", None)
-    elif capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
+    if capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
         options.pop("thinking_enabled", None)
         options.pop("thinking", None)
+    else:
+        options.pop("thinking_enabled", None)
     if invocation.tools and invocation.tool_choice is not ToolChoiceMode.NONE:
         options["tools"] = [
             {
@@ -201,14 +196,7 @@ def _provider_options(
             for schema in invocation.tools
         ]
         if invocation.tool_choice is ToolChoiceMode.REQUIRED:
-            options["tool_choice"] = (
-                {
-                    "type": "function",
-                    "function": {"name": invocation.tools[0].name},
-                }
-                if len(invocation.tools) == 1
-                else "required"
-            )
+            options["tool_choice"] = "required"
     return options
 
 
@@ -450,11 +438,7 @@ def _provider_error_code(error: Exception) -> str:
             status = getattr(response, "status_code", None)
         if isinstance(status, int):
             statuses.append(status)
-        if isinstance(current, (
-            httpx.ReadError,
-            httpx.RemoteProtocolError,
-            httpx.TimeoutException,
-        )):
+        if isinstance(current, httpx.TransportError):
             return "upstream_stream_interrupted"
         current = current.__cause__ or current.__context__
     combined = " ".join(messages)

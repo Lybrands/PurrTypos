@@ -356,6 +356,8 @@ async def test_product_composition_registers_product_profiles(
         core = composition.create_core("key", agent_profile="screenplay")
         assert core._planner._result_validator is not None
         assert core._planner._limits.max_repair_attempts == 3
+        novel_core = composition.create_core("key", agent_profile="novel_analysis")
+        assert type(novel_core._planner).__name__ == "_NovelAnalysisPlanner"
     finally:
         await composition.shutdown()
 
@@ -468,8 +470,8 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
         apiKey="key",
         apiProvider="openai",
         options={
-            "model": "deepseek-v4-pro",
-            "model_profile": "deepseek:deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
             "thinking": {"type": "enabled"},
         },
         enableAgentTools=True,
@@ -482,7 +484,7 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     request = to_writing_agent_request(
         body,
         {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "baseURL": "https://api.deepseek.com",
         },
     )
@@ -492,14 +494,15 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     assert request.context_window == 64_000
     assert request.metadata["locale"] == "zh-Hans-CN"
     assert request.model.options["baseURL"] == "https://api.deepseek.com"
-    assert request.model.profile_id == "deepseek:deepseek-v4-pro"
+    assert request.model.profile_id == "deepseek:deepseek-v4-flash"
     assert "model_profile" not in request.model.options
     assert domain.book_id == "book-1"
     assert domain.chapter_id == "chapter-1"
     assert domain.selected_memory_ids == (1,)
     assert "max_tokens" not in request.model.options
     assert options.output_limit is not None
-    assert options.output_limit.max_tokens == 393_216
+    assert options.output_limit.max_tokens == 16_000
+    assert options.output_limit.source.value == "workflow_policy"
     assert options.context_claims[0].name == "writing_retrieval"
 
 
@@ -510,8 +513,8 @@ def test_writing_chat_stream_id_becomes_an_opaque_run_correlation_binding():
         apiKey="key",
         apiProvider="openai",
         options={
-            "model": "deepseek-v4-pro",
-            "model_profile": "deepseek:deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash",
         },
         sessionId=7,
         chatAgentMode="agent",
@@ -520,7 +523,7 @@ def test_writing_chat_stream_id_becomes_an_opaque_run_correlation_binding():
     request = to_writing_agent_request(
         body,
         {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "baseURL": "https://api.deepseek.com",
         },
     )
@@ -1148,14 +1151,20 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
         messages=[{"role": "user", "content": "执行一个足够长的写作任务"}],
         apiKey="key",
         apiProvider="openai",
-        options=_fixture_model_options(),
+        options={
+            "model": "glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash",
+            "max_tokens": 2_048,
+            "thinking": {"type": "enabled"},
+        },
         enableAgentTools=True,
         bookId="book-1",
         chatAgentMode="agent",
     )
     provider_options = {
-        "model": "model",
+        "model": "glm-5.3-flash",
         "baseURL": "https://example.test/v1",
+        "thinking": {"type": "enabled"},
     }
 
     first = [chunk async for chunk in _stream_composed_agent(
@@ -1174,8 +1183,8 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
     capability_key = composition.provider_capabilities.key(
         api_provider="openai",
         base_url="https://example.test/v1",
-        model="model",
-        thinking_enabled=False,
+        model="glm-5.3-flash",
+        thinking_enabled=True,
     )
     assert composition.provider_capabilities.required_tool_choice_is_unsupported(
         capability_key

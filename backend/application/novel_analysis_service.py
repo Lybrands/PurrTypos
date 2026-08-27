@@ -50,6 +50,47 @@ from infrastructure.persistence.sqlite_long_task_repository import (
 _ACTIVE_ANALYSES: dict[str, asyncio.Task[None]] = {}
 
 
+def _artifact_preview(title: str, kind: str, artifact: Mapping[str, object]) -> dict:
+    """Build a bounded public summary from a finalized, validated unit Artifact."""
+    facts = list(artifact.get("facts") or ())
+    cards = list(artifact.get("craftCards") or ())
+    highlights: list[str] = []
+    for fact in facts[:3]:
+        if not isinstance(fact, Mapping):
+            continue
+        value = json.dumps(
+            fact.get("value"), ensure_ascii=False, separators=(",", ":")
+        )
+        if len(value) > 72:
+            value = value[:69] + "…"
+        highlights.append(
+            " · ".join(filter(None, (
+                str(fact.get("subjectKey") or "").strip(),
+                str(fact.get("predicate") or "").strip(),
+                value,
+            )))
+        )
+    for card in cards[:max(0, 3 - len(highlights))]:
+        if isinstance(card, Mapping) and str(card.get("title") or "").strip():
+            highlights.append(f"写作技法：{str(card['title']).strip()}")
+
+    if kind == "coverage_report":
+        coverage = artifact.get("coverage")
+        ratio = coverage.get("ratio") if isinstance(coverage, Mapping) else None
+        summary = (
+            f"{title}完成，证据覆盖率 {float(ratio):.0%}。"
+            if isinstance(ratio, (int, float))
+            else f"{title}完成。"
+        )
+    elif kind == "build_review_artifact":
+        summary = f"分析结果已生成：{len(facts)} 条硬事实，{len(cards)} 张写作技法卡。"
+    elif facts or cards:
+        summary = f"{title}完成，识别 {len(facts)} 条事实和 {len(cards)} 个写作技法。"
+    else:
+        summary = f"{title}完成。"
+    return {"summary": summary, "highlights": highlights}
+
+
 class NovelAnalysisService:
     def __init__(self, db, composition=None) -> None:
         self._db = db
@@ -205,13 +246,15 @@ class NovelAnalysisService:
         rows = await self._db.fetch_all(
             "SELECT r.id AS run_id, r.status AS run_status, r.binding_command_id, "
             "r.binding_attributes_json, r.error, r.create_time, r.update_time, "
+            "r.provider_output_events, "
             "t.id AS task_id, t.status AS task_status, t.revision AS task_revision, "
             "t.total_units, t.completed_units, t.failed_units "
             "FROM ai_agent_runs AS r "
             "LEFT JOIN ai_agent_long_task_runs AS ltr ON ltr.run_id = r.id "
             "LEFT JOIN ai_agent_long_tasks AS t ON t.id = ltr.task_id "
             "WHERE r.binding_namespace = 'novel_source_analysis' "
-            "AND r.binding_aggregate_id = ? ORDER BY r.create_time DESC",
+            "AND r.binding_aggregate_id = ? "
+            "ORDER BY r.create_time DESC, r.rowid DESC LIMIT 1",
             [source_revision_id],
         )
         results: list[dict] = []
@@ -223,7 +266,18 @@ class NovelAnalysisService:
                 continue
             seen_tasks.add(key)
             final = None
+            units = ()
+            provider_output_events = int(row.get("provider_output_events") or 0)
             if task_id:
+                units = await self._long_tasks.list_units(task_id)
+                activity = await self._db.fetch_one(
+                    "SELECT COALESCE(SUM(r.provider_output_events), 0) AS count "
+                    "FROM ai_agent_long_task_runs AS binding "
+                    "JOIN ai_agent_runs AS r ON r.id = binding.run_id "
+                    "WHERE binding.task_id = ?",
+                    [task_id],
+                )
+                provider_output_events = int((activity or {}).get("count") or 0)
                 unit = await self._db.fetch_one(
                     "SELECT output_ref FROM ai_agent_long_task_units "
                     "WHERE task_id = ? AND unit_id = 'artifact:review' "
@@ -231,6 +285,35 @@ class NovelAnalysisService:
                     [task_id],
                 )
                 final = str((unit or {}).get("output_ref") or "") or None
+            preview_unit_ids = {
+                unit.id
+                for unit in tuple(
+                    item
+                    for item in units
+                    if item.status.value == "completed" and item.output_ref
+                )[-20:]
+            }
+            unit_views = []
+            for unit in units:
+                preview = None
+                if unit.id in preview_unit_ids and unit.output_ref:
+                    with suppress(Exception):
+                        preview = _artifact_preview(
+                            str(unit.metadata.get("displayTitle") or unit.id),
+                            str(unit.metadata.get("unitKind") or ""),
+                            await self._artifacts.require(unit.output_ref),
+                        )
+                unit_views.append({
+                    "unitId": unit.id,
+                    "title": str(unit.metadata.get("displayTitle") or unit.id),
+                    "kind": str(unit.metadata.get("unitKind") or ""),
+                    "status": unit.status.value,
+                    "attempt": unit.attempt,
+                    "maxAttempts": unit.max_attempts,
+                    "errorCode": unit.error_code,
+                    "updateTime": unit.update_time,
+                    **(preview or {}),
+                })
             results.append({
                 "runId": str(row["run_id"]),
                 "runStatus": str(row["run_status"]),
@@ -243,6 +326,8 @@ class NovelAnalysisService:
                 "failedUnits": int(row.get("failed_units") or 0),
                 "error": row.get("error"),
                 "artifactRef": final,
+                "providerOutputEvents": provider_output_events,
+                "units": unit_views,
                 "createTime": row.get("create_time"),
                 "updateTime": row.get("update_time"),
             })
@@ -510,7 +595,7 @@ class NovelAnalysisService:
     async def list_published(self, revision_id: str):
         rows = await self._db.fetch_all(
             "SELECT id FROM novel_source_analyses WHERE source_revision_id = ? "
-            "ORDER BY version_no DESC",
+            "ORDER BY version_no DESC LIMIT 1",
             [revision_id],
         )
         return [await self._analysis_mapping(str(row["id"])) for row in rows]

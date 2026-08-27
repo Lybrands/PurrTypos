@@ -73,6 +73,31 @@ function providerDelta(
   });
 }
 
+function providerDeltaBatch(
+  sequence: number,
+  runId: string,
+  channel: "commentary" | "final",
+  ...deltas: string[]
+): CanonicalOutputEvent {
+  return canonicalEvent(sequence, {
+    runId,
+    source: "provider",
+    kind: "provider.delta_batch",
+    channel,
+    outputStreamId: `${runId}-${channel}`,
+    invocationId: `${runId}-${channel}-invocation`,
+    payload: {
+      schemaVersion: "purra.provider-delta-batch/v1",
+      entries: deltas.map((delta, index) => ({
+        sourceChunkIndex: index + 1,
+        sourcePartIndex: 0,
+        kind: "provider.content_delta",
+        payload: { delta },
+      })),
+    },
+  });
+}
+
 test('diagnostics group multiple Runs under their conversation turn', () => {
   clearAiDebugRuns();
   const request = {
@@ -232,6 +257,46 @@ test('transport runResult controls the diagnostic terminal status', () => {
   const run = getAiDebugSnapshot().runs[0];
   assert.equal(run.status, 'failed');
   assert.equal(run.error, 'provider_unavailable');
+});
+
+test('diagnostics treat Provider delta batches as visible completed output', () => {
+  clearAiDebugRuns();
+  startAiDebugRun('batched-output', {
+    apiKey: 'key',
+    messages: [{ role: 'user', content: '继续' }],
+    options: { model: 'model' },
+  });
+  recordAiDebugChunk(
+    'batched-output',
+    providerDeltaBatch(1, 'run-batched-output', 'final', '批量', '回答'),
+  );
+  recordAiDebugChunk('batched-output', {
+    done: true,
+    runResult: {
+      runId: 'run-batched-output',
+      status: 'done',
+      errorCode: null,
+    },
+    errorReport: {
+      id: 'false-empty-report',
+      streamId: 'batched-output',
+      source: 'workspace_chat',
+      status: 'captured',
+      errorCode: 'empty_model_response',
+      errorMessage: '模型未返回可见内容。',
+      diagnostics: {},
+      createTime: '2026-08-27T07:34:58Z',
+      updateTime: '2026-08-27T07:34:58Z',
+    },
+  });
+
+  const run = getAiDebugSnapshot().runs[0];
+  assert.equal(run.status, 'completed');
+  assert.equal(run.output, '批量回答');
+  assert.equal(run.error, undefined);
+  assert.equal(run.errorReport, undefined);
+  assert.equal(run.events.at(-1)?.type, 'done');
+  assert.equal(run.events.some((event) => event.type === 'response'), true);
 });
 
 function persistedSnapshot(

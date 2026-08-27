@@ -1,5 +1,6 @@
 import { services } from '@/services'
 import React from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { PlusIcon, ArrowLeftIcon, DeleteIcon, EditIcon, ExportIcon } from '@/purr-components'
 import { PurrButton, PurrCheckbox, PurrInput, PurrModal, PurrTooltip } from '@/purr-components'
 import {
@@ -30,6 +31,12 @@ interface BookshelfPageProps {
   onBack: () => void
 }
 
+interface ContinuationSeed {
+  workId: string
+  revisionId: string
+  analysisId: string
+}
+
 export default function BookshelfPage({
   books,
   lastOpenedBookId,
@@ -43,6 +50,8 @@ export default function BookshelfPage({
   onBack,
 }: BookshelfPageProps) {
   const { message } = useAppFeedback()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [createModalOpen, setCreateModalOpen] = React.useState(false)
   const [createTitle, setCreateTitle] = React.useState('')
   const [createEnableVolume, setCreateEnableVolume] = React.useState(false)
@@ -111,13 +120,6 @@ export default function BookshelfPage({
     setExportModalOpen(true)
   }, [])
 
-  const openContinuationWizard = React.useCallback(async () => {
-    const result = await services.novelSources.list()
-    if (!result.success) return message.error(result.error || '读取来源库失败')
-    setContinuationSources(result.data ?? [])
-    setContinuationModalOpen(true)
-  }, [message])
-
   const chooseContinuationSource = React.useCallback(async (workId: string) => {
     setContinuationSourceWorkId(workId)
     setContinuationRevisionId('')
@@ -146,6 +148,28 @@ export default function BookshelfPage({
     setContinuationSections(revision.data.sections ?? [])
     setContinuationAnalyses(analyses.data ?? [])
   }, [message])
+
+  const openContinuationWizard = React.useCallback(async (seed?: ContinuationSeed) => {
+    const result = await services.novelSources.list()
+    if (!result.success) return message.error(result.error || '读取来源库失败')
+    setContinuationSources(result.data ?? [])
+    setContinuationModalOpen(true)
+    if (!seed) return
+    await chooseContinuationSource(seed.workId)
+    await chooseContinuationRevision(seed.revisionId)
+    setContinuationAnalysisId(seed.analysisId)
+  }, [chooseContinuationRevision, chooseContinuationSource, message])
+
+  const continuationSeed = (location.state as { createContinuationFrom?: ContinuationSeed } | null)?.createContinuationFrom
+  const handledContinuationSeed = React.useRef('')
+  React.useEffect(() => {
+    if (!continuationSeed) return
+    const key = `${continuationSeed.workId}:${continuationSeed.revisionId}:${continuationSeed.analysisId}`
+    if (handledContinuationSeed.current === key) return
+    handledContinuationSeed.current = key
+    void openContinuationWizard(continuationSeed)
+    navigate(location.pathname, { replace: true, state: null })
+  }, [continuationSeed, location.pathname, navigate, openContinuationWizard])
 
   const handleContinuationPrimary = React.useCallback(async () => {
     if (!continuationTitle.trim() || !continuationRevisionId || !continuationAnalysisId || !continuationForkSectionId) {

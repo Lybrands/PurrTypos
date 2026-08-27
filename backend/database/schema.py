@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 from utils.id_utils import short_id8
 
 
+_AGENT_ROOT_JOURNAL_MIGRATION_ID = "agent-root-journal-v1"
+
+
 async def _try_exec(db: DatabaseConnection, sql: str) -> None:
     """Execute DDL that may fail (e.g. column already exists)."""
     try:
@@ -401,13 +404,13 @@ async def _migrate_agent_run_scope(db: DatabaseConnection) -> None:
             )
 
 
-async def _migrate_agent_root_journal(db: DatabaseConnection) -> None:
+async def _migrate_agent_root_journal(db: DatabaseConnection) -> bool:
     canonical = await db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_run_events "
         "WHERE event_id IS NOT NULL"
     )
     if not int((canonical or {}).get("count") or 0):
-        return
+        return False
 
     async with db.transaction():
         mismatch = await db.fetch_one(
@@ -477,6 +480,21 @@ async def _migrate_agent_root_journal(db: DatabaseConnection) -> None:
                 WHERE ranked.id = ai_agent_run_events.id
             )
             WHERE event_id IS NOT NULL AND root_sequence IS NULL""")
+    return True
+
+
+async def _migrate_agent_root_journal_once(db: DatabaseConnection) -> None:
+    applied = await db.fetch_one(
+        "SELECT 1 AS applied FROM app_schema_migrations WHERE id = ?",
+        [_AGENT_ROOT_JOURNAL_MIGRATION_ID],
+    )
+    if applied is not None:
+        return
+    if await _migrate_agent_root_journal(db):
+        await db.execute(
+            "INSERT OR IGNORE INTO app_schema_migrations (id) VALUES (?)",
+            [_AGENT_ROOT_JOURNAL_MIGRATION_ID],
+        )
 
 
 async def _migrate_run_cancellation_receipts(db: DatabaseConnection) -> None:
@@ -595,6 +613,11 @@ def _legacy_character_profile_md(row: dict) -> str:
 
 
 async def init_schema(db: DatabaseConnection) -> None:
+    await db.execute("""CREATE TABLE IF NOT EXISTS app_schema_migrations (
+        id TEXT PRIMARY KEY NOT NULL,
+        applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     # ── books ────────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS books (
         id TEXT PRIMARY KEY NOT NULL,
@@ -1216,7 +1239,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         "DROP TRIGGER IF EXISTS ai_agent_run_events_canonical_immutable"
     )
     await _migrate_agent_lifecycle_events(db)
-    await _migrate_agent_root_journal(db)
+    await _migrate_agent_root_journal_once(db)
     await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
         idx_ai_agent_run_events_root_sequence
         ON ai_agent_run_events(root_run_id, root_sequence)

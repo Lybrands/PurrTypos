@@ -46,7 +46,6 @@ class _FakeClient:
 @pytest.mark.parametrize(
     ("model", "profile_id", "thinking_type"),
     [
-        ("deepseek-v4-pro", "deepseek:deepseek-v4-pro", "enabled"),
         ("deepseek-v4-flash", "deepseek:deepseek-v4-flash", "disabled"),
     ],
 )

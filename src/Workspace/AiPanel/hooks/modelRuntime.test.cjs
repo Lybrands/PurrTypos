@@ -157,6 +157,8 @@ test('renderer never sends its legacy output budget to PurrA', () => {
   })
 
   assert.equal(Object.hasOwn(configured.options, 'max_tokens'), false)
+  assert.equal(Object.hasOwn(configured.options, 'thinking'), false)
+  assert.equal(Object.hasOwn(configured.options, 'temperature'), false)
 })
 
 test('durable task progress stays out of the work log', () => {

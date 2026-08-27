@@ -670,6 +670,9 @@ export interface NovelSourcePickedFile {
   extension: '.txt' | '.md' | '.markdown';
   byteCount: number;
   content: string;
+  importKind: 'file' | 'folder' | 'archive';
+  documentCount: number;
+  skippedFileCount: number;
 }
 
 export interface NovelSourceSection {
@@ -703,6 +706,7 @@ export interface NovelSourceWork {
   status: 'active' | 'archived';
   metadata: Record<string, unknown>;
   revision_count?: number;
+  analysis_count?: number;
   latest_revision_id?: string | null;
   revisions?: NovelSourceRevision[];
   create_time: string;
@@ -712,6 +716,9 @@ export interface NovelSourceWork {
 export interface NovelSourceImportPreview {
   fileName: string;
   extension: '.txt' | '.md' | '.markdown';
+  importKind: 'file' | 'folder' | 'archive';
+  documentCount: number;
+  skippedFileCount: number;
   byteCount: number;
   characterCount: number;
   contentDigest: string;
@@ -778,8 +785,23 @@ export interface NovelAnalysisRun {
   totalUnits: number;
   completedUnits: number;
   failedUnits: number;
+  providerOutputEvents?: number;
+  units?: Array<{
+    unitId: string;
+    title: string;
+    kind: string;
+    status: string;
+    attempt: number;
+    maxAttempts: number;
+    errorCode?: string | null;
+    updateTime?: string | null;
+    summary?: string;
+    highlights?: string[];
+  }>;
   error?: string | null;
   artifactRef?: string | null;
+  createTime?: string | null;
+  updateTime?: string | null;
 }
 
 export interface PublishedNovelAnalysis {
@@ -1199,6 +1221,7 @@ export interface AiSession {
   scope?: 'chapter' | 'setting' | 'screenplay';
   title: string;
   create_time?: string;
+  closed?: number | boolean;
 }
 
 export interface AiFavorite {
@@ -2199,7 +2222,7 @@ export interface ElectronAPI {
   getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string } | null>>;
   saveStoryBackground: (data: { bookId: EntityId; content: string }) => Promise<ApiResult<void>>;
   openAndReadTextFile: () => Promise<ApiResult<string>>;
-  pickNovelSourceTextFile: () => Promise<ApiResult<NovelSourcePickedFile>>;
+  pickNovelSourceTextFile: (options?: { mode?: 'file' | 'folder' }) => Promise<ApiResult<NovelSourcePickedFile>>;
   pickStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
@@ -2241,6 +2264,7 @@ export interface ElectronAPI {
   listNovelSources: (data?: { includeArchived?: boolean }) => Promise<ApiResult<NovelSourceWork[]>>;
   getNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
   archiveNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
+  deleteNovelSource: (data: { workId: string }) => Promise<ApiResult<void>>;
   getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
   deleteNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<void>>;
   getNovelSourceSection: (data: { revisionId: string; sectionId: string }) => Promise<ApiResult<NovelSourceSection>>;
@@ -2482,6 +2506,13 @@ export interface ElectronAPI {
     prompt: string;
     apiProvider?: AiApiProvider;
     model?: string;
+    options?: {
+      model: string;
+      model_profile?: string;
+      temperature?: number;
+      thinking?: { type: 'disabled' | 'enabled' };
+      context_window: AiContextWindow;
+    };
   }) => Promise<ApiResult<string>>;
   listModels: (data: {
     apiKey: string;
