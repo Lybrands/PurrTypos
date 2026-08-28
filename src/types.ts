@@ -683,6 +683,18 @@ export interface NovelSourceSection {
   content_digest: string;
   locator: Record<string, unknown>;
   text_content?: string;
+  total_character_count?: number;
+  text_start_character?: number;
+  text_end_character?: number;
+  has_more_text?: boolean;
+}
+
+export interface NovelSourceSearchResult {
+  id: string;
+  ordinal: number;
+  title: string;
+  excerpt: string;
+  start_character: number;
 }
 
 export interface NovelSourceRevision {
@@ -741,6 +753,7 @@ export interface NovelAnalysisEvidence {
   sectionId: string;
   excerpt: string;
   sectionOrdinal?: number;
+  sectionTitle?: string;
   locator?: { start: number; end: number };
   excerptDigest?: string;
 }
@@ -779,6 +792,10 @@ export interface NovelAnalysisRun {
   runId: string;
   runStatus: string;
   commandId: string;
+  interactionKind?: 'analysis' | 'follow_up';
+  analysisArtifactRef?: string | null;
+  prompt?: string;
+  finalResponse?: string;
   taskId: string | null;
   taskStatus: string | null;
   taskRevision: number | null;
@@ -786,10 +803,30 @@ export interface NovelAnalysisRun {
   completedUnits: number;
   failedUnits: number;
   providerOutputEvents?: number;
+  analysisPlan?: {
+    title: string;
+    goal?: string;
+    taskSpec?: {
+      goal?: string;
+      operation?: string;
+      instruction?: string;
+      deliverable?: string;
+      constraints?: string[];
+    };
+    steps: Array<{
+      id: string;
+      title: string;
+      type: 'analyze' | 'review';
+      executor: 'model' | 'tool';
+      dependsOn: string[];
+      description?: string;
+    }>;
+  } | null;
   units?: Array<{
     unitId: string;
     title: string;
     kind: string;
+    plannerStepId?: string;
     status: string;
     attempt: number;
     maxAttempts: number;
@@ -2232,6 +2269,7 @@ export interface ElectronAPI {
   createWritingMethod: (data: { name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
   updateWritingMethodDraft: (data: { methodId: string; expectedDraftRevision: number; name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
   publishWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethodRevision>>;
+  publishWritingMethodBatch: (data: { methodIds: string[]; schemeIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevisions: WritingSchemeRevision[] }>>;
   copyWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
   setWritingMethodStatus: (data: { methodId: string; status: 'active' | 'archived' }) => Promise<ApiResult<WritingMethod>>;
   deleteWritingMethod: (data: { methodId: string }) => Promise<ApiResult<void>>;
@@ -2267,9 +2305,10 @@ export interface ElectronAPI {
   deleteNovelSource: (data: { workId: string }) => Promise<ApiResult<void>>;
   getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
   deleteNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<void>>;
-  getNovelSourceSection: (data: { revisionId: string; sectionId: string }) => Promise<ApiResult<NovelSourceSection>>;
-  searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<Array<{ id: string; ordinal: number; title: string; excerpt: string }>>>;
-  startNovelAnalysis: (data: { commandId: string; revisionId: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
+  getNovelSourceSection: (data: { revisionId: string; sectionId: string; startCharacter?: number; characterLimit?: number }) => Promise<ApiResult<NovelSourceSection>>;
+  searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<NovelSourceSearchResult[]>>;
+  startNovelAnalysis: (data: { commandId: string; revisionId: string; prompt?: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
+  followUpNovelAnalysis: (data: { commandId: string; revisionId: string; artifactId: string; prompt: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
   listNovelAnalysisRuns: (data: { revisionId: string }) => Promise<ApiResult<NovelAnalysisRun[]>>;
   pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisRun>>;
   resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; taskId: string; commandId: string }>>;
@@ -2278,6 +2317,7 @@ export interface ElectronAPI {
   reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[] }) => Promise<ApiResult<NovelAnalysisArtifact>>;
   publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
+  getPublishedNovelAnalysis: (data: { analysisId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   previewContinuationCanon: (data: { sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string }) => Promise<ApiResult<ContinuationCanonPreview>>;
   createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; enableVolume?: boolean; writingMethodBindings?: Array<{ bindingType: 'method' | 'scheme'; revisionId: string }> }) => Promise<ApiResult<ContinuationWorkspace>>;
   getContinuation: (data: { bookId: string }) => Promise<ApiResult<ContinuationWorkspace>>;

@@ -83,6 +83,35 @@ async def test_single_section_and_changed_content_require_explicit_reconfirmatio
         )
 
 
+async def test_source_section_window_is_bounded_and_search_locates_original_text(db):
+    service = NovelSourceService(db)
+    content = "# 第一章\n0123456789目标文字abcdefghij"
+    preview = service.preview_external_import(
+        file_name="window.md", extension=".md", content=content
+    )
+    revision = await service.confirm_external_import(
+        title="分段阅读", file_name="window.md", extension=".md", content=content,
+        expected_content_digest=preview["contentDigest"],
+        confirm_single_section=True, rights_confirmed=True,
+        model_data_boundary_confirmed=True,
+    )
+    section_id = revision["sections"][0]["id"]
+
+    window = await service.get_section(
+        revision["id"], section_id, start_character=8, character_limit=7
+    )
+    assert window["text_content"] == content[8:15]
+    assert window["total_character_count"] == len(content)
+    assert window["text_start_character"] == 8
+    assert window["text_end_character"] == 15
+    assert window["has_more_text"] is True
+
+    matches = await service.search_sections(revision["id"], "目标文字")
+    assert matches[0]["id"] == section_id
+    start = matches[0]["start_character"]
+    assert content[start:start + 4] == "目标文字"
+
+
 async def test_explicit_reimport_creates_version_two_without_automatic_snapshots(db):
     service = NovelSourceService(db)
     first = service.preview_external_import(
@@ -137,7 +166,7 @@ async def test_book_freeze_is_complete_and_survives_origin_deletion(db):
     assert section["text_content"] == "冻结正文"
 
 
-async def test_referenced_revision_is_delete_protected(db):
+async def test_referenced_revision_is_protected_but_confirmed_work_delete_is_allowed(db):
     service = NovelSourceService(db)
     preview = service.preview_external_import(
         file_name="source.txt", extension=".txt", content="原文"
@@ -159,8 +188,19 @@ async def test_referenced_revision_is_delete_protected(db):
     )
     with pytest.raises(NovelSourceConflictError, match="不能删除"):
         await service.delete_revision(revision["id"])
-    with pytest.raises(NovelSourceConflictError, match="不能删除"):
-        await service.delete_work(revision["work_id"])
+    await service.delete_work(revision["work_id"])
+
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM novel_source_works WHERE id = ?",
+        [revision["work_id"]],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT source_revision_id, canon_snapshot_id FROM continuation_bindings "
+        "WHERE target_book_id = 'target'"
+    ) == {
+        "source_revision_id": revision["id"],
+        "canon_snapshot_id": "snapshot",
+    }
 
 
 async def test_unused_source_work_can_be_deleted_with_all_revisions(db):
@@ -196,6 +236,111 @@ async def test_unused_source_work_can_be_deleted_with_all_revisions(db):
     ) == {"count": 0}
     assert await db.fetch_one(
         "SELECT COUNT(*) AS count FROM novel_source_sections"
+    ) == {"count": 0}
+
+
+async def test_source_work_with_writing_method_evidence_reference_must_be_archived(db):
+    service = NovelSourceService(db)
+    preview = service.preview_external_import(
+        file_name="evidence.md", extension=".md", content="# 第一章\n原文证据"
+    )
+    revision = await service.confirm_external_import(
+        title="证据来源", file_name="evidence.md", extension=".md",
+        content="# 第一章\n原文证据", expected_content_digest=preview["contentDigest"],
+        confirm_single_section=True, rights_confirmed=True,
+        model_data_boundary_confirmed=True,
+    )
+    await db.execute(
+        "INSERT INTO novel_source_analyses "
+        "(id, source_revision_id, version_no, coverage_end_ordinal, schema_version, "
+        "content_digest, summary_json) VALUES "
+        "('analysis-evidence', ?, 1, 0, 1, 'digest', '{}')",
+        [revision["id"]],
+    )
+    await db.execute(
+        "INSERT INTO writing_methods "
+        "(id, name, method_type, source_type, source_ref_json) VALUES "
+        "('method-evidence', '证据方法', 'technique', 'analysis_candidate', ?)",
+        [json.dumps({"analysisId": "analysis-evidence", "craftCardId": "craft-1"})],
+    )
+
+    with pytest.raises(NovelSourceConflictError, match="写作方法或方案引用"):
+        await service.delete_work(revision["work_id"])
+
+    archived = await service.archive_work(revision["work_id"])
+    assert archived["status"] == "archived"
+
+
+async def test_source_delete_cancels_and_removes_owned_analysis_runtime(db):
+    service = NovelSourceService(db)
+    preview = service.preview_external_import(
+        file_name="running.txt", extension=".txt", content="正在分析的原文"
+    )
+    revision = await service.confirm_external_import(
+        title="正在分析的来源", file_name="running.txt", extension=".txt",
+        content="正在分析的原文", expected_content_digest=preview["contentDigest"],
+        confirm_single_section=True, rights_confirmed=True,
+        model_data_boundary_confirmed=True,
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, binding_namespace, binding_aggregate_id, execution_owner_id) "
+        "VALUES ('analysis-run', 'running', 'novel_source_analysis', ?, 'worker')",
+        [revision["id"]],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_runs (id, status, execution_owner_id) "
+        "VALUES ('analysis-child-run', 'running', 'child-worker')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, total_units) "
+        "VALUES ('analysis-task', 'purrtypos.novel_analysis', 'analysis', ?, "
+        "'analysis-run', 1)",
+        [revision["id"]],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position) "
+        "VALUES ('analysis-task', 'unit-1', 'unit-1', 0)"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) "
+        "VALUES ('analysis-task', 'analysis-run', 'created')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) "
+        "VALUES ('analysis-task', 'analysis-child-run', 'worker')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_artifacts "
+        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
+        "created_by_run_id) VALUES ('analysis-artifact', "
+        "'purrtypos.novel_analysis', 'candidate', ?, 'task', 'analysis-task', "
+        "'analysis-run')",
+        [revision["id"]],
+    )
+
+    await service.delete_work(revision["work_id"])
+
+    run = await db.fetch_one(
+        "SELECT status, cancel_requested_at_ms, execution_owner_id "
+        "FROM ai_agent_runs WHERE id = 'analysis-run'"
+    )
+    assert run["status"] == "canceled"
+    assert run["cancel_requested_at_ms"] is not None
+    assert run["execution_owner_id"] is None
+    assert await db.fetch_one(
+        "SELECT status, execution_owner_id FROM ai_agent_runs "
+        "WHERE id = 'analysis-child-run'"
+    ) == {"status": "canceled", "execution_owner_id": None}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_tasks "
+        "WHERE id = 'analysis-task'"
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_artifacts "
+        "WHERE id = 'analysis-artifact'"
     ) == {"count": 0}
 
 

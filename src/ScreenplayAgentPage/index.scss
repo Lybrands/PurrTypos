@@ -2295,18 +2295,20 @@
 
 .screenplay-agent-studio__header {
   display: flex;
-  min-height: 82px;
-  padding: 14px 22px;
+  height: 40px;
+  padding: 6px 14px;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
   border-bottom: 1px solid var(--border-light);
+  background: var(--bg-surface);
+  flex: none;
 
-  h2 {
-    margin: 4px 0;
-    font-size: var(--font-size-h4);
+  span {
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-
 }
 
 .screenplay-agent-studio__body {
@@ -4106,11 +4108,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .screenplay-agent-studio__header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
 }
 
 @media (max-width: 640px) {
@@ -4362,10 +4359,6 @@
 
   .screenplay-project-progress {
     width: 100%;
-  }
-
-  .screenplay-agent-studio__header {
-    padding: 18px;
   }
 
   .screenplay-agent-result__title {

@@ -132,6 +132,7 @@ export const services = {
     createMethod: backendApi.createWritingMethod,
     updateMethodDraft: backendApi.updateWritingMethodDraft,
     publishMethod: backendApi.publishWritingMethod,
+    publishBatch: backendApi.publishWritingMethodBatch,
     copyMethod: backendApi.copyWritingMethod,
     setMethodStatus: backendApi.setWritingMethodStatus,
     deleteMethod: backendApi.deleteWritingMethod,
@@ -165,6 +166,7 @@ export const services = {
     getSection: backendApi.getNovelSourceSection,
     searchSections: backendApi.searchNovelSourceSections,
     startAnalysis: backendApi.startNovelAnalysis,
+    followUpAnalysis: backendApi.followUpNovelAnalysis,
     listAnalysisRuns: backendApi.listNovelAnalysisRuns,
     pauseAnalysis: backendApi.pauseNovelAnalysis,
     resumeAnalysis: backendApi.resumeNovelAnalysis,
@@ -173,6 +175,7 @@ export const services = {
     reviewAnalysisArtifact: backendApi.reviewNovelAnalysisArtifact,
     publishAnalysisArtifact: backendApi.publishNovelAnalysisArtifact,
     listPublishedAnalyses: backendApi.listPublishedNovelAnalyses,
+    getPublishedAnalysis: backendApi.getPublishedNovelAnalysis,
   },
   continuations: {
     previewCanon: backendApi.previewContinuationCanon,

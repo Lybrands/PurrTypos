@@ -11,7 +11,7 @@ from application.novel_source_service import NovelSourceService
 from application.writing_agent_profile import WritingAgentProfile
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
-from exceptions import AppError
+from exceptions import AppError, NotFoundError
 from domains.writing.context import (
     CONTINUATION_CANON_CONTEXT,
     WritingContextProvider,
@@ -272,6 +272,50 @@ async def test_source_update_does_not_change_existing_binding_and_delete_cleans_
         "SELECT COUNT(*) AS count FROM novel_source_revisions WHERE id = ?",
         [revision["id"]],
     ) == {"count": 1}
+
+
+async def test_source_delete_preserves_frozen_continuation_but_removes_source_archive(db):
+    revision = await _published_analysis(db)
+    service = ContinuationService(db)
+    preview = await service.preview_canon(
+        source_revision_id=revision["id"],
+        source_analysis_id="analysis-1",
+        fork_section_id=revision["sections"][0]["id"],
+    )
+    created = await service.create_continuation(
+        title="删除来源后仍可续写",
+        source_revision_id=revision["id"],
+        source_analysis_id="analysis-1",
+        fork_section_id=revision["sections"][0]["id"],
+        expected_snapshot_digest=preview["snapshotDigest"],
+    )
+    book_id = created["book"]["id"]
+
+    await NovelSourceService(db).delete_work(revision["work_id"])
+
+    persisted = await service.get_continuation(book_id)
+    writing_context = await ContinuationContextService(db).load_for_writing(book_id)
+    assert persisted["binding"]["sourceTitle"] == "已删除来源"
+    assert persisted["binding"]["forkSectionTitle"] == "原分叉章节已删除"
+    assert len(persisted["canonRecords"]) == 1
+    assert writing_context["binding"]["sourceRevisionId"] == revision["id"]
+    assert len(writing_context["canonRecords"]) == 1
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM continuation_bindings WHERE target_book_id = ?",
+        [book_id],
+    ) == {"count": 1}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM novel_source_works WHERE id = ?",
+        [revision["work_id"]],
+    ) == {"count": 0}
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM novel_source_analyses WHERE id = 'analysis-1'"
+    ) == {"count": 0}
+    with pytest.raises(NotFoundError, match="来源章节不存在"):
+        await ContinuationContextService(db).read_source_section(
+            book_id=book_id,
+            section_id=revision["sections"][0]["id"],
+        )
 
 
 async def test_original_profile_does_not_query_continuation_tables(db, monkeypatch):

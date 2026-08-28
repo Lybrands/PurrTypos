@@ -436,6 +436,7 @@ export const backendApi: BackendApi = {
     `/writing-methods/${data.methodId}/draft`, data,
   ),
   publishWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/publish`, {}),
+  publishWritingMethodBatch: (data) => apiPost('/writing-methods/publish-batch', data),
   copyWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/copy`, {}),
   setWritingMethodStatus: (data) => apiPut(`/writing-methods/${data.methodId}/status`, {
     status: data.status,
@@ -501,15 +502,26 @@ export const backendApi: BackendApi = {
   deleteNovelSourceRevision: (data) => apiDelete(
     `/novel-source-revisions/${data.revisionId}`,
   ),
-  getNovelSourceSection: (data) => apiGet(
-    `/novel-source-revisions/${data.revisionId}/sections/${data.sectionId}`,
-  ),
+  getNovelSourceSection: (data) => {
+    const params = new URLSearchParams()
+    if (data.startCharacter != null) params.set('startCharacter', String(data.startCharacter))
+    if (data.characterLimit != null) params.set('characterLimit', String(data.characterLimit))
+    const query = params.size ? `?${params.toString()}` : ''
+    return apiGet(
+      `/novel-source-revisions/${data.revisionId}/sections/${data.sectionId}${query}`,
+    )
+  },
   searchNovelSourceSections: (data) => apiGet(
     `/novel-source-revisions/${data.revisionId}/search?q=${encodeURIComponent(data.query)}&limit=${data.limit ?? 12}`,
   ),
   startNovelAnalysis: (data) => apiPostIdempotent(
     `/novel-source-revisions/${data.revisionId}/analyses`,
-    { runtime: data.runtime },
+    { runtime: data.runtime, prompt: data.prompt },
+    data.commandId,
+  ),
+  followUpNovelAnalysis: (data) => apiPostIdempotent(
+    `/novel-source-revisions/${data.revisionId}/analysis-follow-ups`,
+    { runtime: data.runtime, artifactId: data.artifactId, prompt: data.prompt },
     data.commandId,
   ),
   listNovelAnalysisRuns: (data) => apiGet(
@@ -542,6 +554,9 @@ export const backendApi: BackendApi = {
   ),
   listPublishedNovelAnalyses: (data) => apiGet(
     `/novel-source-revisions/${data.revisionId}/analyses`,
+  ),
+  getPublishedNovelAnalysis: (data) => apiGet(
+    `/novel-source-analyses/${data.analysisId}`,
   ),
   previewContinuationCanon: (data) => apiPost('/continuations/canon-preview', data),
   createContinuation: (data) => apiPost('/continuations', data),

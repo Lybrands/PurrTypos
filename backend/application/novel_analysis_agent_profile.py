@@ -12,6 +12,7 @@ from purra.contracts import (
     AgentRunRequest,
     ContextBlock,
     ContextBudget,
+    ContextBudgetClaim,
     ContextBundle,
     ExecutionPlan,
     ExecutionState,
@@ -23,11 +24,7 @@ from purra.contracts import (
     RuntimeLimits,
     StepExecutor,
     StepType,
-    TaskSpec,
     TaskContextRequest,
-    ToolRiskLevel,
-    WorkPlan,
-    WorkStep,
 )
 from purra.long_tasks import (
     DurableExecutorRegistry,
@@ -41,6 +38,8 @@ from purra.task_admission import ExecutionMode, TaskAdmissionDecision
 from purra.tools import InMemoryToolCatalog
 
 from application.novel_analysis_source import NovelAnalysisSourceReader
+from application.novel_analysis_artifacts import NovelAnalysisArtifactStore
+from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.novel_analysis import (
     NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
     NOVEL_ANALYSIS_SCHEMA_VERSION,
@@ -68,7 +67,13 @@ class _NovelAnalysisPlanningPolicy:
         capabilities: PlanningCapabilities,
     ) -> bool:
         del capabilities
-        return bool(request.latest_user_text().strip())
+        context = NovelAnalysisDomainContext.from_core_context(
+            request.domain_context
+        )
+        return bool(
+            context.interaction_kind == "analysis"
+            and request.latest_user_text().strip()
+        )
 
 
 class _NovelAnalysisExecutionStateFactory:
@@ -84,52 +89,54 @@ class _NovelAnalysisExecutionStateFactory:
         })
 
 
-class _NovelAnalysisPlanner:
-    """Select the fixed semantic operation without spending a model call."""
+def validate_novel_analysis_planning_result(
+    request: AgentRunRequest,
+    result: PlanningResult,
+) -> str | None:
+    """Keep model-authored analysis semantics inside the host safety envelope."""
 
-    async def create_plan(
-        self,
-        request,
-        capabilities,
-        signal=None,
-        *,
-        run_id=None,
-        turn_id=None,
-        reasoning_mode=None,
-    ):
-        del request, capabilities, signal, run_id, turn_id, reasoning_mode
-        step = WorkStep(
-            id="analyze-source",
-            title="分析来源",
-            type=StepType.ANALYZE,
-            executor=StepExecutor.MODEL,
-            risk_level=ToolRiskLevel.READ,
-        )
-        return PlanningResult(
-            kind=PlanningKind.PLANNED,
-            work_plan=WorkPlan(
-                title="来源分析",
-                goal="形成可审核的来源分析结果",
-                steps=(step,),
-                task_spec=TaskSpec(
-                    goal="分析已冻结的小说来源",
-                    operation="analyze",
-                    instruction="提取硬事实和有原文证据的写作技法",
-                    constraints=("只读取宿主绑定的来源章节",),
-                    deliverable="待审核来源分析",
-                ),
-            ),
-        )
+    context = NovelAnalysisDomainContext.from_core_context(
+        request.domain_context
+    )
+    if context.interaction_kind != "analysis":
+        return None
+    if result.kind is not PlanningKind.PLANNED:
+        return "来源分析必须返回一个可执行的语义计划"
+    task_spec = result.work_plan.task_spec
+    if task_spec is None:
+        return "来源分析计划必须包含 TaskSpec"
+    if task_spec.operation != "analyze":
+        return "TaskSpec.operation 必须是 analyze"
+    if task_spec.target:
+        return "TaskSpec.target 必须为空；来源范围由宿主绑定"
+    if not task_spec.instruction or not task_spec.deliverable:
+        return "TaskSpec 必须说明分析指令和待交付结果"
+    steps = result.work_plan.steps
+    if not 1 <= len(steps) <= 4:
+        return "来源分析只能包含 1 到 4 个非冗余语义步骤"
+    if not any(step.type is StepType.ANALYZE for step in steps):
+        return "来源分析计划至少需要一个 analyze 步骤"
+    for step in steps:
+        if step.executor is not StepExecutor.MODEL:
+            return "来源分析语义步骤必须由 model 执行，不能申请工具"
+        if step.type not in {StepType.ANALYZE, StepType.REVIEW}:
+            return "来源分析步骤类型只能是 analyze 或 review"
+        if step.capability_names:
+            return "来源分析计划不能申请工具或额外能力"
+    return None
 
 
 class _NovelAnalysisContextProvider:
+    def __init__(self, db=None) -> None:
+        self._artifacts = NovelAnalysisArtifactStore(db) if db is not None else None
+
     async def build_context(
         self,
         request: AgentRunRequest,
         budget: ContextBudget,
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
-        del budget, signal
+        del signal
         context = NovelAnalysisDomainContext.from_core_context(
             request.domain_context
         )
@@ -143,16 +150,56 @@ class _NovelAnalysisContextProvider:
                 "不得直接写入任何书籍、章节、Story Memory 或写作方法",
                 "逐节读取由宿主绑定，禁止整部来源直接进入单个 Prompt",
                 "正式结果必须等待用户审核和发布",
+                "为本次请求制定 1 到 4 个非冗余语义分析步骤",
+                "步骤只能描述分析或复核目标，不得描述读取工具、内部协议或持久化",
+                "TaskSpec.operation 必须为 analyze，target 必须为空",
             ],
         }
         text = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
-        return ContextBundle(
-            blocks=(ContextBlock(
+        progress_policy = build_agent_public_progress_policy()
+        blocks = [
+            ContextBlock(
+                name="agent_public_progress",
+                content=progress_policy,
+                token_count=estimate_json_tokens(progress_policy),
+                untrusted=False,
+            ),
+            ContextBlock(
                 name="novel_analysis_policy",
                 content=text,
                 token_count=estimate_json_tokens(policy),
                 untrusted=False,
-            ),),
+            ),
+        ]
+        if context.interaction_kind == "follow_up":
+            if self._artifacts is None or not context.analysis_artifact_ref:
+                raise ValueError("novel analysis follow-up context is unavailable")
+            artifact = await self._artifacts.require(
+                context.analysis_artifact_ref
+            )
+            if str(artifact.get("sourceRevisionId") or "") != context.source_revision_id:
+                raise ValueError("novel analysis follow-up Artifact scope conflicts")
+            allocation = (
+                budget.allocation_for("novel_analysis_follow_up")
+                or budget.context_pool_tokens
+            )
+            projection = _bounded_follow_up_projection(artifact, allocation)
+            blocks.append(ContextBlock(
+                name="novel_analysis_follow_up",
+                content=json.dumps(
+                    projection,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                token_count=estimate_json_tokens(projection),
+                untrusted=True,
+                host_metadata={
+                    "sourceRevisionId": context.source_revision_id,
+                    "artifactRef": context.analysis_artifact_ref,
+                },
+            ))
+        return ContextBundle(
+            blocks=tuple(blocks),
             diagnostics={"contextMode": "novel-analysis-bound"},
         )
 
@@ -175,7 +222,9 @@ class NovelAnalysisDomainAdapter:
     planning_policy: _NovelAnalysisPlanningPolicy = (
         _NovelAnalysisPlanningPolicy()
     )
-    planner: _NovelAnalysisPlanner = _NovelAnalysisPlanner()
+    planning_result_validator = staticmethod(
+        validate_novel_analysis_planning_result
+    )
     context_strategy: ContextStrategy = ContextStrategy.STAGED
     execution_state_factory: _NovelAnalysisExecutionStateFactory = (
         _NovelAnalysisExecutionStateFactory()
@@ -184,7 +233,11 @@ class NovelAnalysisDomainAdapter:
     context_provider: _NovelAnalysisContextProvider = (
         _NovelAnalysisContextProvider()
     )
-    planner_limits: PlannerLimits = PlannerLimits(max_repair_attempts=2)
+    planner_limits: PlannerLimits = PlannerLimits(
+        max_steps=4,
+        max_tool_steps=0,
+        max_repair_attempts=2,
+    )
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_model_rounds=4,
         max_progress_rounds=8,
@@ -203,7 +256,9 @@ class NovelAnalysisAgentProfile:
             f"novel-analysis-profile-{uuid4().hex}"
         )
         self._source = NovelAnalysisSourceReader(db)
-        self._adapter = NovelAnalysisDomainAdapter()
+        self._adapter = NovelAnalysisDomainAdapter(
+            context_provider=_NovelAnalysisContextProvider(db)
+        )
 
     @property
     def adapter(self):
@@ -240,6 +295,18 @@ class NovelAnalysisAgentProfile:
     def context_provider_factory(self):
         return None
 
+    def context_budget_claims(self, request: AgentRunRequest):
+        context = NovelAnalysisDomainContext.from_core_context(
+            request.domain_context
+        )
+        if context.interaction_kind != "follow_up":
+            return ()
+        return (ContextBudgetClaim(
+            "novel_analysis_follow_up",
+            desired_tokens=12_000,
+            maximum_tokens=12_000,
+        ),)
+
     def response_judge_policies(self, request):
         del request
         return ()
@@ -254,6 +321,13 @@ class NovelAnalysisAgentProfile:
         context = NovelAnalysisDomainContext.from_core_context(
             request.domain_context
         )
+        if context.interaction_kind == "follow_up":
+            return TaskAdmissionDecision(
+                mode=ExecutionMode.INLINE,
+                reason_code="novel_analysis_follow_up_inline",
+                estimated_units=1,
+                estimated_model_calls=1,
+            )
         plan_step_ids = tuple(step.id for step in plan.steps)
         recipe = compile_novel_analysis_recipe(
             section_ids=context.section_ids,
@@ -271,6 +345,23 @@ class NovelAnalysisAgentProfile:
                 "sectionIds": list(context.section_ids),
                 "analysisSchemaVersion": context.schema_version,
                 "commandId": context.command_id,
+                "prompt": request.latest_user_text(),
+                "analysisPlan": {
+                    "title": plan.title,
+                    "goal": plan.goal or plan.task_spec.goal,
+                    "taskSpec": plan.task_spec.to_mapping(),
+                    "steps": [{
+                        "id": step.id,
+                        "title": step.title,
+                        "type": step.type.value,
+                        "executor": step.executor.value,
+                        "dependsOn": list(step.depends_on),
+                        **(
+                            {"description": step.description}
+                            if step.description else {}
+                        ),
+                    } for step in plan.steps],
+                },
                 "failedResumeAttempts": int(
                     request.metadata.get("failedResumeAttempts") or 0
                 ),
@@ -299,6 +390,51 @@ class NovelAnalysisAgentProfile:
 
     def clear_active_executions(self) -> None:
         return None
+
+
+def _bounded_follow_up_projection(artifact, token_budget: int) -> dict:
+    budget = max(256, int(token_budget or 0))
+    max_items = max(1, min(60, budget // 160))
+
+    def clipped(value, limit: int = 1_200):
+        text = value if isinstance(value, str) else json.dumps(
+            value, ensure_ascii=False, separators=(",", ":")
+        )
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def evidence(items):
+        return [{
+            "sectionId": str(item.get("sectionId") or ""),
+            "excerpt": clipped(item.get("excerpt") or "", 480),
+        } for item in list(items or ())[:2] if isinstance(item, dict)]
+
+    facts = [{
+        "factKind": str(item.get("factKind") or ""),
+        "subjectKey": str(item.get("subjectKey") or ""),
+        "predicate": str(item.get("predicate") or ""),
+        "value": clipped(item.get("value")),
+        "evidence": evidence(item.get("evidence")),
+    } for item in list(artifact.get("facts") or ())[:max_items]
+        if isinstance(item, dict)]
+    cards = [{
+        "cardKind": str(item.get("cardKind") or ""),
+        "title": str(item.get("title") or ""),
+        "bodyMarkdown": clipped(item.get("bodyMarkdown") or ""),
+        "evidence": evidence(item.get("evidence")),
+    } for item in list(artifact.get("craftCards") or ())[:max_items]
+        if isinstance(item, dict)]
+    result = {
+        "sourceRevisionId": str(artifact.get("sourceRevisionId") or ""),
+        "facts": facts,
+        "craftCards": cards,
+        "scopeNotice": "这是当前分析快照，不是完整来源正文。",
+    }
+    while estimate_json_tokens(result) > budget and (len(facts) > 1 or len(cards) > 1):
+        if len(facts) >= len(cards) and len(facts) > 1:
+            facts.pop()
+        elif len(cards) > 1:
+            cards.pop()
+    return result
 
 
 class _NovelAnalysisDescriptorResolver:

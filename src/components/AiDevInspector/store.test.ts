@@ -397,7 +397,7 @@ test('persisted recovery restores Planner calls without duplicating cursors', ()
   });
 
   let run = getAiDebugSnapshot().runs[0];
-  assert.equal(run.id, 'screenplay-run-recovered');
+  assert.equal(run.id, 'persisted-run-recovered');
   assert.equal(run.agentRunId, 'run-recovered');
   assert.equal(run.modelCalls.length, 2);
   assert.deepEqual(
@@ -471,7 +471,7 @@ test('persisted recovery replaces a detached partial live diagnostic copy', () =
 
   const runs = getAiDebugSnapshot().runs;
   assert.equal(runs.length, 1);
-  assert.equal(runs[0].id, 'screenplay-run-recovered');
+  assert.equal(runs[0].id, 'persisted-run-recovered');
   assert.deepEqual(runs[0].modelCalls.map((call) => call.phase), ['model']);
 });
 
@@ -500,7 +500,7 @@ test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', (
   });
   const completed = getAiDebugSnapshot().runs[0];
   const finishedAt = completed.finishedAt;
-  assert.equal(completed.id, 'screenplay-run-terminal-race');
+  assert.equal(completed.id, 'persisted-run-terminal-race');
   assert.equal(completed.status, 'completed');
   assert.equal(completed.commentary, '实时片段');
   assert.ok(finishedAt);

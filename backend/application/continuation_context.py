@@ -33,8 +33,8 @@ class ContinuationContextService:
             "ss.title AS fork_section_title "
             "FROM continuation_bindings AS cb "
             "JOIN continuation_canon_snapshots AS cs ON cs.id = cb.canon_snapshot_id "
-            "JOIN novel_source_works AS sw ON sw.id = cb.source_work_id "
-            "JOIN novel_source_sections AS ss ON ss.id = cb.fork_section_id "
+            "LEFT JOIN novel_source_works AS sw ON sw.id = cb.source_work_id "
+            "LEFT JOIN novel_source_sections AS ss ON ss.id = cb.fork_section_id "
             "WHERE cb.target_book_id = ?",
             [book_id],
         )
@@ -50,9 +50,9 @@ class ContinuationContextService:
             "sourceWorkId": str(row["source_work_id"]),
             "sourceRevisionId": str(row["source_revision_id"]),
             "sourceAnalysisId": str(row["source_analysis_id"]),
-            "sourceTitle": str(row["source_title"]),
+            "sourceTitle": str(row["source_title"] or "已删除来源"),
             "forkSectionId": str(row["fork_section_id"]),
-            "forkSectionTitle": str(row["fork_section_title"]),
+            "forkSectionTitle": str(row["fork_section_title"] or "原分叉章节已删除"),
             "forkOrdinal": int(row["fork_ordinal"]),
             "canonSnapshotId": str(row["canon_snapshot_id"]),
             "canonSnapshotDigest": str(row["canon_snapshot_digest"]),

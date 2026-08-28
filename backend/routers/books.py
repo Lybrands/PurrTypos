@@ -55,8 +55,10 @@ async def get_book_word_count(bookId: str):
 async def get_books():
     db = get_db()
     rows = await db.fetch_all(
-        "SELECT b.*, sw.title AS continuation_source_title, "
-        "ss.title AS continuation_fork_section_title, "
+        "SELECT b.*, COALESCE(sw.title, CASE WHEN cb.id IS NOT NULL "
+        "THEN '已删除来源' END) AS continuation_source_title, "
+        "COALESCE(ss.title, CASE WHEN cb.id IS NOT NULL "
+        "THEN '原分叉章节已删除' END) AS continuation_fork_section_title, "
         "cb.fork_ordinal AS continuation_fork_ordinal, "
         "cb.source_revision_id AS continuation_source_revision_id, "
         "cb.canon_snapshot_id AS continuation_canon_snapshot_id "
