@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 
+from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.writing.continuity_validation import (
     ATOMIC_CONTINUITY_SINGLE_DIMENSION_GUIDANCE,
     ATOMIC_CONTINUITY_VISIBLE_ORDER_GUIDANCE,
@@ -75,8 +76,7 @@ def build_writing_agent_policy() -> str:
         "- 证据不足以安全继续时向用户澄清；完成用户目标后立即停止，不要额外扩写。\n"
         "- 正文改动只能形成候选稿或待应用结果；未经用户确认和现有应用流程，"
         "不得覆盖正式正文。\n"
-        "- 只公开简短、可验证的 commentary 进度说明；不得输出私有 reasoning、"
-        "chain-of-thought 或隐藏推理。"
+        + build_agent_public_progress_policy()
     )
 
 

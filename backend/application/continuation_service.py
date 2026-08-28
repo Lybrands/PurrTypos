@@ -242,8 +242,8 @@ class ContinuationService:
             "ss.title AS fork_section_title, cs.source_analysis_id, "
             "cs.content_digest AS canon_snapshot_digest "
             "FROM books AS b JOIN continuation_bindings AS cb "
-            "ON cb.target_book_id = b.id JOIN novel_source_works AS sw "
-            "ON sw.id = cb.source_work_id JOIN novel_source_sections AS ss "
+            "ON cb.target_book_id = b.id LEFT JOIN novel_source_works AS sw "
+            "ON sw.id = cb.source_work_id LEFT JOIN novel_source_sections AS ss "
             "ON ss.id = cb.fork_section_id JOIN continuation_canon_snapshots AS cs "
             "ON cs.id = cb.canon_snapshot_id WHERE b.id = ? "
             "AND b.creation_mode = 'continuation'",
@@ -268,9 +268,9 @@ class ContinuationService:
                 "sourceWorkId": row["source_work_id"],
                 "sourceRevisionId": row["source_revision_id"],
                 "sourceAnalysisId": row["source_analysis_id"],
-                "sourceTitle": row["source_title"],
+                "sourceTitle": row["source_title"] or "已删除来源",
                 "forkSectionId": row["fork_section_id"],
-                "forkSectionTitle": row["fork_section_title"],
+                "forkSectionTitle": row["fork_section_title"] or "原分叉章节已删除",
                 "forkOrdinal": row["fork_ordinal"],
                 "canonSnapshotId": row["canon_snapshot_id"],
                 "canonSnapshotDigest": row["canon_snapshot_digest"],

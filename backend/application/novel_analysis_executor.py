@@ -9,6 +9,7 @@ from typing import Any
 from purra.contracts import AgentMessage, MessageOrigin, MessageRole
 from purra.errors import ModelGatewayError
 from purra.long_tasks import DurableUnitExecutionContext, LongTaskUnitResult
+from purra.json_values import thaw_json_mapping
 from purra.model_protocol import (
     InvocationOutputLimit,
     InvocationOutputLimitSource,
@@ -34,6 +35,7 @@ from domains.novel_analysis import (
 
 
 _UNIT_ARTIFACT_KIND = "novel_source_analysis_unit"
+_NOVEL_ANALYSIS_OUTPUT_LIMIT = 32_768
 _MODEL_UNIT_KINDS = frozenset({
     "extract_section",
     "normalize_entities",
@@ -61,15 +63,7 @@ class NovelAnalysisModelCalls:
             request.capability_snapshot,
             request.options.get("max_tokens"),
         )
-        output_limit = (
-            resolved
-            if resolved.max_tokens <= 16_384
-            else InvocationOutputLimit(
-                max_tokens=16_384,
-                source=InvocationOutputLimitSource.WORKFLOW_POLICY,
-                profile_max_tokens=resolved.profile_max_tokens,
-            )
-        )
+        output_limit = _bounded_novel_analysis_output_limit(resolved)
         messages: tuple[AgentMessage, ...] = (
             AgentMessage(
                 role=MessageRole.SYSTEM,
@@ -120,6 +114,18 @@ class NovelAnalysisModelCalls:
         )
 
 
+def _bounded_novel_analysis_output_limit(
+    resolved: InvocationOutputLimit,
+) -> InvocationOutputLimit:
+    if resolved.max_tokens <= _NOVEL_ANALYSIS_OUTPUT_LIMIT:
+        return resolved
+    return InvocationOutputLimit(
+        max_tokens=_NOVEL_ANALYSIS_OUTPUT_LIMIT,
+        source=InvocationOutputLimitSource.WORKFLOW_POLICY,
+        profile_max_tokens=resolved.profile_max_tokens,
+    )
+
+
 class NovelAnalysisTaskUnitExecutor:
     def __init__(
         self,
@@ -147,6 +153,8 @@ class NovelAnalysisTaskUnitExecutor:
             metadata.get("analysisSchemaVersion")
             or NOVEL_ANALYSIS_SCHEMA_VERSION
         )
+        analysis_prompt = str(metadata.get("prompt") or "").strip()
+        analysis_strategy = _thaw_analysis_strategy(metadata.get("analysisPlan"))
         if not revision_id or not section_ids:
             raise RuntimeError("novel analysis task binding is incomplete")
         if schema_version != NOVEL_ANALYSIS_SCHEMA_VERSION:
@@ -174,6 +182,8 @@ class NovelAnalysisTaskUnitExecutor:
                 instruction=_EXTRACT_INSTRUCTION,
                 payload={
                     "analysisSchemaVersion": schema_version,
+                    "userAnalysisRequest": analysis_prompt,
+                    "analysisStrategy": analysis_strategy,
                     "sourceBinding": {
                         "sourceRevisionId": revision_id,
                         "sectionId": section_id,
@@ -195,6 +205,8 @@ class NovelAnalysisTaskUnitExecutor:
                 instruction=_NORMALIZE_INSTRUCTION,
                 payload={
                     "analysisSchemaVersion": schema_version,
+                    "userAnalysisRequest": analysis_prompt,
+                    "analysisStrategy": analysis_strategy,
                     "sectionCandidates": [
                         _candidate_projection(value) for value in dependencies
                     ],
@@ -210,6 +222,8 @@ class NovelAnalysisTaskUnitExecutor:
                 instruction=_AGGREGATE_INSTRUCTION,
                 payload={
                     "analysisSchemaVersion": schema_version,
+                    "userAnalysisRequest": analysis_prompt,
+                    "analysisStrategy": analysis_strategy,
                     "normalizedCandidates": _candidate_projection(dependencies[0]),
                 },
                 signal=signal,
@@ -379,6 +393,11 @@ def _normalize_candidates(
     }
 
 
+def _thaw_analysis_strategy(value: object) -> dict[str, Any]:
+    """Return a JSON-serializable copy of the frozen PurrA task metadata."""
+    return thaw_json_mapping(value) if isinstance(value, Mapping) else {}
+
+
 def _normalize_fact(value: object, *, default_section_id: str | None) -> dict:
     if not isinstance(value, Mapping):
         raise ValueError("novel analysis fact must be an object")
@@ -516,4 +535,5 @@ _AGGREGATE_INSTRUCTION = """
 __all__ = [
     "NovelAnalysisModelCalls",
     "NovelAnalysisTaskUnitExecutor",
+    "_thaw_analysis_strategy",
 ]

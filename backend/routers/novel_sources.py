@@ -12,6 +12,7 @@ from exceptions import AppError
 from schemas.novel_sources import (
     ArchiveSourceWorkRequest,
     ConfirmSourceImportRequest,
+    FollowUpNovelAnalysisRequest,
     FreezeBookSourceRequest,
     SourceFilePayload,
     PauseNovelAnalysisRequest,
@@ -117,8 +118,20 @@ async def delete_revision(revision_id: str):
 
 
 @router.get("/novel-source-revisions/{revision_id}/sections/{section_id}")
-async def get_section(revision_id: str, section_id: str):
-    return _ok(await _call(_service().get_section(revision_id, section_id)))
+async def get_section(
+    revision_id: str,
+    section_id: str,
+    start_character: int = Query(default=0, ge=0, alias="startCharacter"),
+    character_limit: int | None = Query(
+        default=None, ge=1, le=100_000, alias="characterLimit"
+    ),
+):
+    return _ok(await _call(_service().get_section(
+        revision_id,
+        section_id,
+        start_character=start_character,
+        character_limit=character_limit,
+    )))
 
 
 @router.get("/novel-source-revisions/{revision_id}/search")
@@ -138,6 +151,25 @@ async def start_analysis(
 ):
     return _ok(await _analysis_service().start(
         source_revision_id=revision_id,
+        command_id=idempotency_key,
+        prompt=body.prompt,
+        runtime=body.runtime,
+    ))
+
+
+@router.post(
+    "/novel-source-revisions/{revision_id}/analysis-follow-ups",
+    status_code=202,
+)
+async def follow_up_analysis(
+    revision_id: str,
+    body: FollowUpNovelAnalysisRequest,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+):
+    return _ok(await _analysis_service().follow_up(
+        source_revision_id=revision_id,
+        artifact_ref=NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + body.artifactId,
+        prompt=body.prompt,
         command_id=idempotency_key,
         runtime=body.runtime,
     ))

@@ -10,6 +10,10 @@ import {
 } from './taskPlan.ts'
 import { buildHistoryConverter } from './chatHistory.ts'
 import { calculateContextUsage } from './contextUsage.ts'
+import {
+  buildNovelAnalysisTaskPlan,
+  buildNovelAnalysisTiming,
+} from '../NovelSourcesPage/analysisTaskPlan.ts'
 test('task progress hides protocol Respond and uses sequential position', () => {
   const plan = {
     title: '任务',
@@ -440,4 +444,69 @@ test('completed task capsule exists only while the final answer is streaming', (
     ...conversations,
     { role: 'assistant', content: '新的历史消息' },
   ], true), undefined)
+})
+
+test('novel-analysis timing resumes the shared ticker and freezes terminal duration', () => {
+  const startedAt = Date.parse('2026-08-28T10:00:00Z')
+  const baseRun = {
+    runId: 'run-1', commandId: 'command-1', taskId: 'task-1', taskRevision: 1,
+    totalUnits: 1, completedUnits: 0, failedUnits: 0,
+    createTime: '2026-08-28 10:00:00',
+  }
+
+  assert.deepEqual(buildNovelAnalysisTiming({
+    ...baseRun, runStatus: 'running', taskStatus: 'running',
+  }, startedAt + 6500, 15000), { turnStartedAt: 8500 })
+  assert.deepEqual(buildNovelAnalysisTiming({
+    ...baseRun, runStatus: 'failed', taskStatus: 'failed',
+    updateTime: '2026-08-28 10:00:09.250',
+  }, startedAt + 20000, 30000), { durationMs: 9250 })
+})
+
+test('pending novel-analysis protocol units stay pending', () => {
+  const plan = buildNovelAnalysisTaskPlan({
+    runId: 'run-1', runStatus: 'running', commandId: 'command-1',
+    taskId: 'task-1', taskStatus: 'running', taskRevision: 1,
+    totalUnits: 2, completedUnits: 0, failedUnits: 0,
+    units: [{
+      unitId: 'extract', title: '分析章节', kind: 'extract_section',
+      status: 'running', attempt: 0, maxAttempts: 2,
+    }, {
+      unitId: 'review', title: '形成结果', kind: 'build_review_artifact',
+      status: 'pending', attempt: 0, maxAttempts: 1,
+    }],
+  })
+
+  assert.deepEqual(plan.steps.map((step) => step.status), ['running', 'pending'])
+})
+
+test('novel-analysis semantic steps aggregate mapped durable units', () => {
+  const plan = buildNovelAnalysisTaskPlan({
+    runId: 'run-1', runStatus: 'running', commandId: 'command-1',
+    taskId: 'task-1', taskStatus: 'running', taskRevision: 1,
+    totalUnits: 3, completedUnits: 2, failedUnits: 0,
+    analysisPlan: {
+      title: '人物与因果分析', goal: '核对事实链',
+      steps: [{
+        id: 'facts', title: '梳理事实链', type: 'analyze', executor: 'model',
+        dependsOn: [],
+      }, {
+        id: 'review', title: '复核证据', type: 'review', executor: 'model',
+        dependsOn: ['facts'],
+      }],
+    },
+    units: [{
+      unitId: 'extract', title: '分析章节', kind: 'extract_section',
+      plannerStepId: 'facts', status: 'completed', attempt: 1, maxAttempts: 2,
+    }, {
+      unitId: 'aggregate', title: '聚合事实', kind: 'aggregate_story',
+      plannerStepId: 'facts', status: 'completed', attempt: 1, maxAttempts: 2,
+    }, {
+      unitId: 'review', title: '形成结果', kind: 'build_review_artifact',
+      plannerStepId: 'review', status: 'running', attempt: 1, maxAttempts: 1,
+    }],
+  })
+
+  assert.equal(plan.title, '人物与因果分析')
+  assert.deepEqual(plan.steps.map((step) => step.status), ['done', 'running'])
 })

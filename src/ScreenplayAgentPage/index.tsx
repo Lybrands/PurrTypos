@@ -3417,7 +3417,7 @@ export default function ScreenplayAgentPage({
       <AppHeader
         title={(
           <span className="screenplay-agent-header-title">
-            <span className="app-title">剧本 Agent</span>
+            <span className="app-title">剧本创作 Agent</span>
             {stage !== 'source' && (
               <span className="screenplay-agent-stage">{stageLabel}</span>
             )}
@@ -4454,10 +4454,7 @@ export default function ScreenplayAgentPage({
 
               <section className={`screenplay-agent-studio ${openedProject.status === 'archived' ? 'is-readonly' : ''}`}>
                 <header className="screenplay-agent-studio__header">
-                  <div>
-                    <span className="screenplay-source-eyebrow">SCREENPLAY AGENT</span>
-                    <h2>与 Agent 继续创作</h2>
-                  </div>
+                  <span>续写、修订与整理当前剧本</span>
                 </header>
 
                 <div className="screenplay-agent-studio__body">

@@ -35,6 +35,17 @@ class ArchiveSourceWorkRequest(BaseModel):
 
 class StartNovelAnalysisRequest(BaseModel):
     runtime: ScreenplayAgentRuntimeRequest
+    prompt: str = Field(
+        default="分析这部小说的事实脉络和写作技法。",
+        min_length=1,
+        max_length=20_000,
+    )
+
+
+class FollowUpNovelAnalysisRequest(BaseModel):
+    runtime: ScreenplayAgentRuntimeRequest
+    artifactId: str = Field(min_length=1, max_length=300)
+    prompt: str = Field(min_length=1, max_length=20_000)
 
 
 class ResumeNovelAnalysisRequest(BaseModel):

@@ -26,12 +26,10 @@ from purra.json_values import thaw_json_mapping
 from purra.ports import CancellationSignal, ToolCatalog
 from purra.recovery import RecoveryPolicy
 
+from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.contracts import ScreenplayIntent
-from domains.screenplay_agent.prompts import (
-    build_screenplay_planning_policy,
-    build_screenplay_public_progress_policy,
-)
+from domains.screenplay_agent.prompts import build_screenplay_planning_policy
 
 
 ScreenplayPlanningContextLoader = Callable[
@@ -302,7 +300,7 @@ class ScreenplayHostContextProvider:
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
         del request, budget, signal
-        policy = build_screenplay_public_progress_policy()
+        policy = build_agent_public_progress_policy()
         return ContextBundle(
             blocks=(ContextBlock(
                 name=SCREENPLAY_PUBLIC_PROGRESS_CONTEXT,
@@ -349,7 +347,7 @@ class ScreenplayHostContextProvider:
             separators=(",", ":"),
             sort_keys=True,
         )
-        progress_policy = build_screenplay_public_progress_policy()
+        progress_policy = build_agent_public_progress_policy()
         return ContextBundle(
             blocks=(
                 ContextBlock(

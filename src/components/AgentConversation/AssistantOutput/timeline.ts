@@ -3,6 +3,7 @@ import type {
   ToolCallSegment,
 } from "../../../agent-runtime/contracts";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
+import { publicAgentProgressNarration } from "../../../agent-runtime/outputPresentation.ts";
 import {
   resolveLocalizedToolDisplayName,
   toolCallDisplayRow,
@@ -71,48 +72,6 @@ export interface BuildAssistantTimelineOptions {
   loading?: boolean;
   /** 子 Run 可显示已收到的普通文本；根回答始终保持终态原子提交。 */
   allowStreamingText?: boolean;
-}
-
-const INTERNAL_PROGRESS_TOKEN = /(?:\b(?:run|task|longtask|spaturn|turn|operation|invocation|output|artifact|revision|project|session|scene)[_-][a-z0-9-]+\b|\b(?:run|task|turn|operation|artifact|revision|project|session|scene)?ids?\b|\b[a-z]+(?:[A-Z][A-Za-z0-9]*)+\b|\b(?=[a-z0-9_-]{8,}\b)(?=[a-z0-9_-]*\d)[a-z0-9_-]+\b|\b[0-9a-f]{8}-[0-9a-f-]{27,}\b)/i;
-const PROTOCOL_PROGRESS_CONTENT = /(?:```|[{}\[\]]|https?:\/\/|file:\/\/|\/Users\/|Traceback|stack trace)/i;
-
-function publicProgressNarration(value: unknown): string {
-  const raw = typeof value === "string" ? value.trim() : "";
-  const text = /^\*\*[^*]+\*\*$/.test(raw)
-    ? raw.slice(2, -2).trim()
-    : raw;
-  if (
-    !text
-    || text.length > 60
-    || text.includes("\n")
-    || /^(?:[#>-]|\d+[.)])\s/.test(text)
-    || INTERNAL_PROGRESS_TOKEN.test(text)
-    || PROTOCOL_PROGRESS_CONTENT.test(text)
-  ) {
-    return "";
-  }
-  return text;
-}
-
-export function getAssistantProcessingLabel(
-  message: AgentConversationMessage,
-): string {
-  const canonical = message.canonicalOutput;
-  if (canonical) {
-    const activeOperation = [...canonical.operationOrder]
-      .reverse()
-      .map((operationId) => canonical.operations[operationId])
-      .find((operation) => operation?.status === "running");
-    const invocationId = activeOperation?.invocationId;
-    if (invocationId) {
-      const modelTitle = [...canonical.commentaryBlocks]
-        .reverse()
-        .find((block) => !block.aborted && block.invocationId === invocationId);
-      const title = publicProgressNarration(modelTitle?.text);
-      if (title) return title;
-    }
-  }
-  return "正在思考";
 }
 
 export function getOperationGroupProgress(
@@ -324,7 +283,7 @@ export function buildAssistantTimeline(
     canonicalOutput.commentaryBlocks
       .filter((block) => !block.aborted)
       .forEach((block) => {
-        const narration = publicProgressNarration(block.text);
+        const narration = publicAgentProgressNarration(block.text);
         if (!narration) return;
         canonicalParts.push({
           sequence: block.firstSequence,
@@ -375,7 +334,7 @@ export function buildAssistantTimeline(
     region: string,
   ) => {
     if (typeof blockIndex !== "number" || emittedBlocks.has(blockIndex)) return;
-    const md = publicProgressNarration(blocks[blockIndex]);
+    const md = publicAgentProgressNarration(blocks[blockIndex]);
     if (!md) return;
     emittedBlocks.add(blockIndex);
     parts.push({
@@ -431,7 +390,7 @@ export function buildAssistantTimeline(
   }
 
   if (isStreaming && message.commentary?.trim()) {
-    const narration = publicProgressNarration(message.commentary);
+    const narration = publicAgentProgressNarration(message.commentary);
     if (narration) {
       parts.push({
         type: "commentary",

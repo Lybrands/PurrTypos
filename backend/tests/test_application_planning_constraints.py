@@ -20,6 +20,7 @@ from purra.contracts import (
 )
 from purra.planner import build_planner_messages
 from application.planning_constraints import RequiredToolPlanningPolicy
+from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.screenplay_agent.adapter import (
     ScreenplayDomainAdapter,
     ScreenplayHostContextProvider,
@@ -426,6 +427,7 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     assert "面向用户的状态标题" in progress_content
     assert "不得包含 Run、Task、Turn" in progress_content
     assert "chain-of-thought" in progress_content
+    assert progress_content == build_agent_public_progress_policy()
     assert facts["project"]["id"] == "project-1"
     assert facts["stageCommand"] == stage_command
     assert facts["planningRules"] == [policy]

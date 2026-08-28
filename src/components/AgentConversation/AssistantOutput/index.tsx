@@ -6,6 +6,7 @@ import {
 } from '@/purr-components';
 import type { AgentConversationMessage } from "../../../agent-runtime";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
+import { getAgentProcessingLabel } from "../../../agent-runtime/outputPresentation.ts";
 import Markdown from "../../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import ToolApproval from "../ToolApproval";
@@ -19,7 +20,6 @@ import {
   buildAssistantTimeline,
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
-  getAssistantProcessingLabel,
   getCanonicalOperationStatusText,
   getOperationGroupProgress,
   groupConsecutiveWorkSteps,
@@ -256,7 +256,7 @@ function AssistantOutputInner({
     ),
     [executionLogParts, executionPanelLogKey],
   );
-  const processingLabel = getAssistantProcessingLabel(message);
+  const processingLabel = getAgentProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
     [timeline, processingLabel],

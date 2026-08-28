@@ -1,9 +1,6 @@
 export type ShortcutKey =
   | 'mod'
   | 'shift'
-  | 'plus'
-  | 'minus'
-  | 'zero'
   | 'enter'
   | 'tab'
   | 'escape'
@@ -24,14 +21,6 @@ export interface KeyboardShortcutGroup {
 }
 
 export const KEYBOARD_SHORTCUT_GROUPS: KeyboardShortcutGroup[] = [
-  {
-    title: '界面',
-    shortcuts: [
-      { label: '增大字体', keys: ['mod', 'plus'] },
-      { label: '减小字体', keys: ['mod', 'minus'] },
-      { label: '恢复默认字体', keys: ['mod', 'zero'] },
-    ],
-  },
   {
     title: '工作台',
     shortcuts: [
@@ -63,9 +52,6 @@ export function getShortcutKeyLabel(key: ShortcutKey, apple = isApplePlatform())
   const labels: Record<ShortcutKey, string> = {
     mod: apple ? '⌘' : 'Ctrl',
     shift: apple ? '⇧' : 'Shift',
-    plus: '+',
-    minus: '−',
-    zero: '0',
     enter: apple ? '↩' : 'Enter',
     tab: 'Tab',
     escape: 'Esc',

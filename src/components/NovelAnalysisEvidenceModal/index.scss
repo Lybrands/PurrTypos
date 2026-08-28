@@ -1,0 +1,36 @@
+.novel-evidence-state {
+  display: flex;
+  min-height: 180px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.novel-evidence-list { display: grid; gap: 10px; }
+.novel-evidence-list article {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.novel-evidence-list header {
+  display: flex;
+  margin-bottom: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.novel-evidence-list header > div { display: grid; gap: 2px; min-width: 0; }
+.novel-evidence-list header span { color: var(--text-muted); font-size: 11px; }
+.novel-evidence-list header strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.novel-evidence-list blockquote {
+  margin: 0;
+  padding: 11px 12px;
+  color: var(--text-secondary);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-elevated);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
