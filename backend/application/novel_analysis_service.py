@@ -6,20 +6,33 @@ import asyncio
 import json
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import replace
 from uuid import uuid4
 
-from purra.api import AgentCoreRunOptions
+from purra.api import (
+    AgentCoreRunOptions,
+    DurableTaskContinuation,
+    RunRecoverySnapshot,
+)
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageRole,
     RunBinding,
+    StepStatus,
 )
+from purra.long_tasks import LongTaskRunRelation
+from purra.json_values import thaw_json_mapping
 from purra.model_protocol import InvocationOutputLimit, resolve_invocation_output_limit
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
     ResponseTransactionPolicy,
+)
+from purra.task_admission import (
+    ExecutionMode,
+    LongTaskDispatchReceipt,
+    TaskAdmissionDecision,
 )
 
 from application.agent_cancellation_service import AgentCancellationService
@@ -40,14 +53,25 @@ from domains.novel_analysis import (
     NOVEL_ANALYSIS_SCHEMA_VERSION,
     NovelAnalysisDomainContext,
     canonical_digest,
+    compile_novel_analysis_recipe,
 )
 from exceptions import AppError, NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
+from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 
 
-_ACTIVE_ANALYSES: dict[str, asyncio.Task[None]] = {}
+_ACTIVE_ANALYSES: dict[str, tuple[str, asyncio.Task[None]]] = {}
+
+
+def _discard_active_analysis(
+    source_revision_id: str,
+    completed: asyncio.Task[None],
+) -> None:
+    active = _ACTIVE_ANALYSES.get(source_revision_id)
+    if active is not None and active[1] is completed:
+        _ACTIVE_ANALYSES.pop(source_revision_id, None)
 
 
 def _artifact_preview(title: str, kind: str, artifact: Mapping[str, object]) -> dict:
@@ -91,6 +115,45 @@ def _artifact_preview(title: str, kind: str, artifact: Mapping[str, object]) -> 
     return {"summary": summary, "highlights": highlights}
 
 
+class _NovelAnalysisContinuationLifecycle:
+    """Start one continuation without leaving a resumed task orphaned."""
+
+    def __init__(self, repository, *, task_id: str, retry_failed: bool) -> None:
+        self._repository = repository
+        self._task_id = task_id
+        self._retry_failed = retry_failed
+
+    async def validate(self) -> None:
+        task = await self._repository.load(self._task_id)
+        allowed = {"failed"} if self._retry_failed else {"paused"}
+        if task is None or task.status.value not in allowed:
+            raise AppError("来源分析任务状态不允许恢复", 409)
+
+    async def before_submit(self) -> None:
+        await self._repository.resume(
+            self._task_id,
+            additional_attempts=1 if self._retry_failed else 0,
+        )
+
+    async def on_run_started(self, run_id: str) -> None:
+        await self._repository.bind_run(
+            self._task_id,
+            run_id,
+            relation=LongTaskRunRelation.CONTINUATION,
+        )
+
+    async def on_run_finished(self, result) -> None:
+        del result
+
+    async def on_start_failed(self, code: str) -> None:
+        task = await self._repository.load(self._task_id)
+        if task is not None and task.status.value == "running":
+            await self._repository.pause(
+                self._task_id,
+                reason_code=str(code or "continuation_start_failed"),
+            )
+
+
 class NovelAnalysisService:
     def __init__(self, db, composition=None) -> None:
         self._db = db
@@ -99,6 +162,7 @@ class NovelAnalysisService:
         self._source = NovelAnalysisSourceReader(db)
         self._artifacts = NovelAnalysisArtifactStore(db)
         self._long_tasks = SqliteLongTaskRepository(db)
+        self._run_repository = SqliteRunRepository(db)
         self._cancellation = (
             AgentCancellationService(db, composition)
             if composition is not None else None
@@ -109,14 +173,31 @@ class NovelAnalysisService:
         *,
         source_revision_id: str,
         command_id: str,
+        prompt: str = "分析这部小说的事实脉络和写作技法。",
         runtime,
     ) -> dict:
         sections = await self._source.list_bound_sections(source_revision_id)
+        active = await self._long_tasks.find_active(
+            namespace=NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
+            owner_id=source_revision_id,
+            kind="novel_source_analysis",
+        )
+        if active is not None:
+            if active.metadata.get("idempotencyKey") != command_id:
+                raise AppError("已有来源分析尚未结束，请恢复或取消当前任务", 409)
+            return {
+                "status": "accepted",
+                "sourceRevisionId": source_revision_id,
+                "commandId": command_id,
+                "sectionCount": len(sections),
+                "dispatchActive": False,
+            }
         task = self.dispatch(
             source_revision_id=source_revision_id,
             section_ids=tuple(str(row["id"]) for row in sections),
             task_idempotency_key=command_id,
             run_command_id=command_id,
+            prompt=str(prompt or "").strip(),
             runtime=runtime,
             failed_resume_attempts=0,
         )
@@ -128,6 +209,46 @@ class NovelAnalysisService:
             "dispatchActive": not task.done(),
         }
 
+    async def follow_up(
+        self,
+        *,
+        source_revision_id: str,
+        artifact_ref: str,
+        prompt: str,
+        command_id: str,
+        runtime,
+    ) -> dict:
+        question = str(prompt or "").strip()
+        if not question:
+            raise AppError("请输入要追问的内容", 422)
+        if len(question) > 20_000:
+            raise AppError("追问内容过长", 422)
+        active = await self._long_tasks.find_active(
+            namespace=NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
+            owner_id=source_revision_id,
+            kind="novel_source_analysis",
+        )
+        if active is not None:
+            raise AppError("来源分析尚未结束，请先恢复或取消当前任务", 409)
+        artifact = await self._artifacts.require(artifact_ref)
+        if str(artifact.get("sourceRevisionId") or "") != source_revision_id:
+            raise AppError("追问所用分析结果不属于当前来源版本", 409)
+        sections = await self._source.list_bound_sections(source_revision_id)
+        task = self._dispatch_follow_up(
+            source_revision_id=source_revision_id,
+            section_ids=tuple(str(row["id"]) for row in sections),
+            artifact_ref=artifact_ref,
+            prompt=question,
+            command_id=command_id,
+            runtime=runtime,
+        )
+        return {
+            "status": "accepted",
+            "sourceRevisionId": source_revision_id,
+            "commandId": command_id,
+            "dispatchActive": not task.done(),
+        }
+
     def dispatch(
         self,
         *,
@@ -135,28 +256,76 @@ class NovelAnalysisService:
         section_ids: tuple[str, ...],
         task_idempotency_key: str,
         run_command_id: str,
+        prompt: str,
         runtime,
         failed_resume_attempts: int,
+        durable_continuation: DurableTaskContinuation | None = None,
+        run_binding_lifecycle=None,
     ) -> asyncio.Task[None]:
         if self._composition is None or self._runs is None:
             raise RuntimeError("novel analysis Agent composition is required")
         key = str(run_command_id or "").strip()
-        active = _ACTIVE_ANALYSES.get(key)
-        if active is not None and not active.done():
-            return active
+        active = _ACTIVE_ANALYSES.get(source_revision_id)
+        if active is not None and not active[1].done():
+            if active[0] == key:
+                return active[1]
+            raise AppError("已有来源分析正在启动，请稍后再试", 409)
         task = asyncio.create_task(self._execute(
             source_revision_id=source_revision_id,
             section_ids=section_ids,
             task_idempotency_key=task_idempotency_key,
             run_command_id=run_command_id,
+            prompt=prompt,
             runtime=runtime,
             failed_resume_attempts=failed_resume_attempts,
+            durable_continuation=durable_continuation,
+            run_binding_lifecycle=run_binding_lifecycle,
         ))
-        _ACTIVE_ANALYSES[key] = task
+        _ACTIVE_ANALYSES[source_revision_id] = (key, task)
         track = getattr(self._composition, "track_background_run", None)
         if callable(track):
             track(task)
-        task.add_done_callback(lambda _task: _ACTIVE_ANALYSES.pop(key, None))
+        task.add_done_callback(
+            lambda completed: _discard_active_analysis(
+                source_revision_id, completed
+            )
+        )
+        return task
+
+    def _dispatch_follow_up(
+        self,
+        *,
+        source_revision_id: str,
+        section_ids: tuple[str, ...],
+        artifact_ref: str,
+        prompt: str,
+        command_id: str,
+        runtime,
+    ) -> asyncio.Task[None]:
+        if self._composition is None or self._runs is None:
+            raise RuntimeError("novel analysis Agent composition is required")
+        active = _ACTIVE_ANALYSES.get(source_revision_id)
+        if active is not None and not active[1].done():
+            if active[0] == command_id:
+                return active[1]
+            raise AppError("已有来源分析交互正在进行，请稍后再试", 409)
+        task = asyncio.create_task(self._execute_follow_up(
+            source_revision_id=source_revision_id,
+            section_ids=section_ids,
+            artifact_ref=artifact_ref,
+            prompt=prompt,
+            command_id=command_id,
+            runtime=runtime,
+        ))
+        _ACTIVE_ANALYSES[source_revision_id] = (command_id, task)
+        track = getattr(self._composition, "track_background_run", None)
+        if callable(track):
+            track(task)
+        task.add_done_callback(
+            lambda completed: _discard_active_analysis(
+                source_revision_id, completed
+            )
+        )
         return task
 
     async def _execute(
@@ -166,8 +335,11 @@ class NovelAnalysisService:
         section_ids: tuple[str, ...],
         task_idempotency_key: str,
         run_command_id: str,
+        prompt: str,
         runtime,
         failed_resume_attempts: int,
+        durable_continuation: DurableTaskContinuation | None,
+        run_binding_lifecycle,
     ) -> None:
         context = NovelAnalysisDomainContext(
             source_revision_id=source_revision_id,
@@ -190,8 +362,7 @@ class NovelAnalysisService:
             messages=(AgentMessage(
                 role=MessageRole.USER,
                 content=(
-                    "按已绑定来源 revision 和 section 范围执行证据化逐章分析，"
-                    "生成待审核分析 Artifact。"
+                    prompt or "分析这部小说的事实脉络和写作技法。"
                 ),
             ),),
             model=model_request,
@@ -226,8 +397,10 @@ class NovelAnalysisService:
                         mode=ResponseTransactionMode.DIRECT_LIVE,
                         public_presentation=PublicPresentationMode.NONE,
                     ),
+                    durable_continuation=durable_continuation,
                 ),
                 signal=asyncio.Event(),
+                run_binding_lifecycle=run_binding_lifecycle,
                 long_task_executor=NovelAnalysisTaskUnitExecutor(
                     self._db,
                     composition=self._composition,
@@ -242,10 +415,81 @@ class NovelAnalysisService:
             # record. Avoid a parallel application-only status store.
             return
 
+    async def _execute_follow_up(
+        self,
+        *,
+        source_revision_id: str,
+        section_ids: tuple[str, ...],
+        artifact_ref: str,
+        prompt: str,
+        command_id: str,
+        runtime,
+    ) -> None:
+        context = NovelAnalysisDomainContext(
+            source_revision_id=source_revision_id,
+            command_id=command_id,
+            section_ids=section_ids,
+            interaction_kind="follow_up",
+            analysis_artifact_ref=artifact_ref,
+        )
+        model_request = model_request_from_runtime(runtime)
+        window = runtime_context_window_tokens(runtime)
+        output_limit = resolve_invocation_output_limit(
+            model_request.capability_snapshot,
+            model_request.options.get("max_tokens"),
+        )
+        if output_limit.max_tokens >= window:
+            output_limit = InvocationOutputLimit(
+                max_tokens=max(1_024, window // 4),
+                source=output_limit.source,
+                profile_max_tokens=output_limit.profile_max_tokens,
+            )
+        request = AgentRunRequest(
+            messages=(AgentMessage(role=MessageRole.USER, content=prompt),),
+            model=model_request,
+            domain_context=context.to_core_context(),
+            mode="novel_source_analysis_follow_up",
+            context_window=window,
+            tools_enabled=False,
+        )
+        try:
+            async for _update in self._runs.run(
+                request=request,
+                api_key=runtime.apiKey.get_secret_value(),
+                options=AgentCoreRunOptions(
+                    turn_id=f"novel-analysis-follow-up:{command_id}",
+                    output_limit=output_limit,
+                    default_context_window_tokens=window,
+                    force_planned_tool_choice=False,
+                    require_tool_call=False,
+                    reasoning_mode=reasoning_mode_from_options(runtime.options),
+                    binding=RunBinding(
+                        namespace="novel_source_analysis",
+                        aggregate_id=source_revision_id,
+                        command_id=command_id,
+                        attributes={
+                            "interactionKind": "follow_up",
+                            "analysisArtifactRef": artifact_ref,
+                        },
+                    ),
+                    response_transaction_policy=ResponseTransactionPolicy(
+                        mode=ResponseTransactionMode.DIRECT_LIVE,
+                        public_presentation=PublicPresentationMode.NONE,
+                    ),
+                ),
+                signal=asyncio.Event(),
+            ):
+                pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
     async def list_for_revision(self, source_revision_id: str) -> list[dict]:
         rows = await self._db.fetch_all(
             "SELECT r.id AS run_id, r.status AS run_status, r.binding_command_id, "
-            "r.binding_attributes_json, r.error, r.create_time, r.update_time, "
+            "r.binding_attributes_json, r.prompt, r.final_response, r.error, "
+            "r.create_time, r.update_time, "
             "r.provider_output_events, "
             "t.id AS task_id, t.status AS task_status, t.revision AS task_revision, "
             "t.total_units, t.completed_units, t.failed_units "
@@ -254,12 +498,19 @@ class NovelAnalysisService:
             "LEFT JOIN ai_agent_long_tasks AS t ON t.id = ltr.task_id "
             "WHERE r.binding_namespace = 'novel_source_analysis' "
             "AND r.binding_aggregate_id = ? "
-            "ORDER BY r.create_time DESC, r.rowid DESC LIMIT 1",
+            "ORDER BY CASE WHEN t.status IN ('pending', 'running', 'paused') "
+            "THEN 0 ELSE 1 END, r.create_time DESC, r.rowid DESC LIMIT 1",
             [source_revision_id],
         )
         results: list[dict] = []
         seen_tasks: set[str] = set()
         for row in rows:
+            try:
+                binding_attributes = json.loads(
+                    str(row.get("binding_attributes_json") or "{}")
+                )
+            except (TypeError, ValueError):
+                binding_attributes = {}
             task_id = str(row.get("task_id") or "")
             key = task_id or str(row["run_id"])
             if key in seen_tasks:
@@ -267,8 +518,14 @@ class NovelAnalysisService:
             seen_tasks.add(key)
             final = None
             units = ()
+            analysis_plan = None
             provider_output_events = int(row.get("provider_output_events") or 0)
             if task_id:
+                task = await self._long_tasks.load(task_id)
+                if task is not None:
+                    raw_plan = task.metadata.get("analysisPlan")
+                    if isinstance(raw_plan, Mapping):
+                        analysis_plan = thaw_json_mapping(raw_plan)
                 units = await self._long_tasks.list_units(task_id)
                 activity = await self._db.fetch_one(
                     "SELECT COALESCE(SUM(r.provider_output_events), 0) AS count "
@@ -307,6 +564,10 @@ class NovelAnalysisService:
                     "unitId": unit.id,
                     "title": str(unit.metadata.get("displayTitle") or unit.id),
                     "kind": str(unit.metadata.get("unitKind") or ""),
+                    **(
+                        {"plannerStepId": str(unit.metadata["plannerStepId"])}
+                        if unit.metadata.get("plannerStepId") else {}
+                    ),
                     "status": unit.status.value,
                     "attempt": unit.attempt,
                     "maxAttempts": unit.max_attempts,
@@ -318,6 +579,15 @@ class NovelAnalysisService:
                 "runId": str(row["run_id"]),
                 "runStatus": str(row["run_status"]),
                 "commandId": str(row.get("binding_command_id") or ""),
+                "interactionKind": str(
+                    binding_attributes.get("interactionKind") or "analysis"
+                ),
+                "analysisArtifactRef": (
+                    str(binding_attributes.get("analysisArtifactRef") or "")
+                    or None
+                ),
+                "prompt": str(row.get("prompt") or ""),
+                "finalResponse": str(row.get("final_response") or ""),
                 "taskId": task_id or None,
                 "taskStatus": str(row.get("task_status") or "") or None,
                 "taskRevision": row.get("task_revision"),
@@ -327,6 +597,7 @@ class NovelAnalysisService:
                 "error": row.get("error"),
                 "artifactRef": final,
                 "providerOutputEvents": provider_output_events,
+                "analysisPlan": analysis_plan,
                 "units": unit_views,
                 "createTime": row.get("create_time"),
                 "updateTime": row.get("update_time"),
@@ -374,13 +645,66 @@ class NovelAnalysisService:
         if task.status.value not in ({"failed"} if retry_failed else {"paused"}):
             raise AppError("来源分析任务状态不允许恢复", 409)
         metadata = dict(task.metadata)
+        source = await self._run_repository.get(task.created_by_run_id)
+        plan = source.execution_plan
+        if plan is None or plan.task_spec is None:
+            raise AppError("来源分析缺少可恢复的冻结计划", 409)
+        plan = replace(
+            plan,
+            steps=tuple(
+                step if step.status is StepStatus.DONE else replace(
+                    step,
+                    status=StepStatus.PENDING,
+                    result_summary=None,
+                    error=None,
+                )
+                for step in plan.steps
+            ),
+        )
+        recipe = compile_novel_analysis_recipe(
+            section_ids=tuple(metadata["sectionIds"]),
+            plan_step_ids=tuple(step.id for step in plan.steps),
+        )
+        admission = TaskAdmissionDecision(
+            mode=ExecutionMode.DURABLE,
+            reason_code="novel_analysis_durable_continuation",
+            estimated_units=len(recipe.steps),
+            estimated_model_calls=len(tuple(metadata["sectionIds"])) + 2,
+            covered_step_ids=tuple(step.id for step in plan.steps),
+            execution_recipe=recipe,
+        )
+        continuation = DurableTaskContinuation(
+            source=RunRecoverySnapshot(
+                run_id=source.run_id,
+                status=source.status,
+                execution_plan=plan,
+                agent_preset_snapshot=source.agent_preset_snapshot,
+            ),
+            continuation_command=run_command_id,
+            receipt=LongTaskDispatchReceipt(
+                task_id=task.id,
+                message="恢复已冻结的来源分析任务。",
+                admission=admission,
+            ),
+        )
+        lifecycle = _NovelAnalysisContinuationLifecycle(
+            self._long_tasks,
+            task_id=task.id,
+            retry_failed=retry_failed,
+        )
         self.dispatch(
             source_revision_id=str(metadata["sourceRevisionId"]),
             section_ids=tuple(metadata["sectionIds"]),
             task_idempotency_key=str(metadata["idempotencyKey"]),
             run_command_id=run_command_id,
+            prompt=str(
+                metadata.get("prompt")
+                or "分析这部小说的事实脉络和写作技法。"
+            ),
             runtime=runtime,
             failed_resume_attempts=1 if retry_failed else 0,
+            durable_continuation=continuation,
+            run_binding_lifecycle=lifecycle,
         )
         return {
             "status": "accepted",
@@ -623,7 +947,10 @@ class NovelAnalysisService:
             [analysis_id],
         )
         evidence = await self._db.fetch_all(
-            "SELECT * FROM novel_source_analysis_evidence WHERE analysis_id = ? ORDER BY id",
+            "SELECT e.*, s.ordinal AS section_ordinal, s.title AS section_title "
+            "FROM novel_source_analysis_evidence AS e "
+            "LEFT JOIN novel_source_sections AS s ON s.id = e.section_id "
+            "WHERE e.analysis_id = ? ORDER BY e.id",
             [analysis_id],
         )
         by_owner: dict[tuple[str, str], list[dict]] = {}
@@ -633,6 +960,8 @@ class NovelAnalysisService:
             ).append({
                 "id": item["id"],
                 "sectionId": item["section_id"],
+                "sectionOrdinal": item.get("section_ordinal"),
+                "sectionTitle": item.get("section_title"),
                 "excerpt": item["excerpt"],
                 "locator": json.loads(str(item["locator_json"])),
                 "excerptDigest": item["excerpt_digest"],

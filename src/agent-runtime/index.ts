@@ -73,3 +73,12 @@ export {
   AgentChunkReplay,
   type AgentChunkTurnSeed,
 } from './chunkReplay'
+export {
+  getAgentProcessingLabel,
+  publicAgentProgressNarration,
+} from './outputPresentation'
+export {
+  AgentRunSnapshotHydrationError,
+  loadCompleteAgentRunSnapshot,
+  replayAgentRunSnapshot,
+} from './runSnapshotHydration'

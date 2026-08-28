@@ -119,8 +119,20 @@ class NovelSourceService:
     async def get_revision(self, revision_id: str):
         return await self._repository.get_revision(revision_id)
 
-    async def get_section(self, revision_id: str, section_id: str):
-        return await self._repository.get_section(revision_id, section_id)
+    async def get_section(
+        self,
+        revision_id: str,
+        section_id: str,
+        *,
+        start_character: int = 0,
+        character_limit: int | None = None,
+    ):
+        return await self._repository.get_section(
+            revision_id,
+            section_id,
+            start_character=start_character,
+            character_limit=character_limit,
+        )
 
     async def search_sections(self, revision_id: str, query: str, *, limit: int = 12):
         return await self._repository.search_sections(revision_id, query, limit=limit)

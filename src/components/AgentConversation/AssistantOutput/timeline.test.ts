@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts.ts'
 import { initialCanonicalOutputState } from '../../../agent-runtime/canonicalOutput.ts'
+import { getAgentProcessingLabel } from '../../../agent-runtime/outputPresentation.ts'
 import {
   buildAssistantTimeline,
   executionPanelHasTerminalError,
-  getAssistantProcessingLabel,
   getCanonicalOperationStatusText,
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
@@ -741,7 +741,7 @@ test('runtime metadata falls back to model-neutral thinking copy', () => {
   ]
 
   for (const state of states) {
-    assert.equal(getAssistantProcessingLabel(state), '正在思考')
+    assert.equal(getAgentProcessingLabel(state), '正在思考')
   }
   assert.deepEqual(
     buildAssistantTimeline(states[3], { messageIndex: 0 }),
@@ -793,7 +793,7 @@ test('only model commentary from the current invocation becomes the standby titl
     },
   }
   assert.equal(
-    getAssistantProcessingLabel(safe),
+    getAgentProcessingLabel(safe),
     '正在梳理人物关系与关键冲突',
   )
   assert.deepEqual(
@@ -818,7 +818,7 @@ test('only model commentary from the current invocation becomes the standby titl
       ],
     },
   }
-  assert.equal(getAssistantProcessingLabel(unsafe), '正在思考')
+  assert.equal(getAgentProcessingLabel(unsafe), '正在思考')
   assert.deepEqual(
     buildAssistantTimeline(unsafe, { messageIndex: 0 })
       .filter((part) => part.type === 'commentary')
@@ -875,5 +875,5 @@ test('standby does not reuse a plan, previous invocation, or tool row title', ()
     }],
   }
 
-  assert.equal(getAssistantProcessingLabel(message), '正在思考')
+  assert.equal(getAgentProcessingLabel(message), '正在思考')
 })

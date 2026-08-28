@@ -21,6 +21,7 @@
 
 .writing-methods-toolbar,
 .writing-methods-tabs,
+.writing-methods-batch-toolbar,
 .writing-library-stage {
   width: 100%;
   max-width: 1180px;
@@ -64,6 +65,21 @@
 
 .writing-methods-tabs button.active { color: var(--text-primary); background: var(--bg-elevated); box-shadow: 0 2px 8px rgb(30 34 48 / 8%); }
 
+.writing-methods-batch-toolbar {
+  display: flex;
+  min-height: 48px;
+  padding: 8px 10px 8px 14px;
+  margin-bottom: 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+}
+.writing-methods-batch-toolbar > div { display: flex; gap: 8px; }
+
 .writing-library-stage {
   min-height: 0;
   padding-right: 4px;
@@ -76,6 +92,47 @@
 .writing-scheme-card-grid { display: grid; gap: 10px; }
 .writing-method-card-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .writing-scheme-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.writing-library-card-shell { position: relative; min-width: 0; }
+.writing-library-card-shell > .writing-method-card,
+.writing-library-card-shell > .writing-scheme-card { width: 100%; height: 100%; padding-right: 44px; }
+.writing-library-card-actions {
+  position: absolute;
+  z-index: 4;
+  top: 9px;
+  right: 9px;
+  display: flex;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: opacity var(--transition-base), transform var(--transition-base);
+}
+.writing-library-card-action {
+  display: flex;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-overlay);
+  box-shadow: var(--shadow-xs);
+  font-size: 12px;
+  backdrop-filter: blur(8px);
+}
+.writing-library-card-action.danger:hover {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 22%, transparent);
+  background: var(--danger-dim);
+}
+.writing-library-card-shell:hover .writing-library-card-actions,
+.writing-library-card-shell:focus-within .writing-library-card-actions { opacity: 1; transform: translateY(0); }
+.writing-library-card-select { position: absolute; z-index: 4; top: 13px; right: 13px; margin: 0; }
+.writing-library-card-select > span:last-child { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.writing-library-card-shell.is-selected > .writing-method-card,
+.writing-library-card-shell.is-selected > .writing-scheme-card { border-color: var(--accent); background: color-mix(in srgb, var(--accent-light) 55%, var(--bg-elevated)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent); }
+.writing-library-card-shell.is-batch-disabled { opacity: .56; }
+.writing-library-card-shell.is-batch-disabled > button { cursor: not-allowed; }
 
 .writing-method-card,
 .writing-scheme-card,
@@ -97,6 +154,8 @@
 .writing-method-card:hover,
 .writing-scheme-card:hover,
 .writing-library-add-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); transform: translateY(-1px); }
+.writing-library-card-shell:hover > .writing-method-card,
+.writing-library-card-shell:hover > .writing-scheme-card { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); transform: translateY(-1px); }
 .writing-method-card.active,
 .writing-scheme-card.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent-light) 55%, var(--bg-elevated)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent); }
 .writing-method-card::before,
@@ -137,6 +196,18 @@
 
 .writing-method-editor { display: flex; flex-direction: column; gap: 12px; }
 .writing-method-editor > p { margin: 0; color: var(--text-secondary); font-size: 12px; }
+.writing-method-evidence-ref {
+  display: flex;
+  min-height: 34px;
+  padding: 4px 6px 4px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  font-size: 11px;
+}
 .writing-method-editor-meta { display: flex; gap: 10px; align-items: center; }
 .writing-method-editor-meta input { flex: 1; font-size: 18px; font-weight: 600; }
 .writing-method-editor input,

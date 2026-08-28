@@ -1,14 +1,16 @@
 import React from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { services } from '@/services'
 import {
   ArrowLeftIcon,
+  ArrowRightIcon,
   BookIcon,
   DeleteIcon,
   FileTextIcon,
   HomeIcon,
   ImportIcon,
   InboxIcon,
+  SearchIcon,
   PurrButton,
   PurrCheckbox,
   PurrInput,
@@ -16,46 +18,73 @@ import {
   PurrSegmented,
   PurrSelect,
   PurrSpin,
+  PurrTabs,
   PurrTooltip,
   usePurrConfirm,
   usePurrToast,
 } from '@/purr-components'
 import AppHeader from '../components/AppHeader'
+import { hydrateAiDebugRunSnapshot } from '../components/AiDevInspector/store'
 import {
   AgentConversationPanel,
   type AgentConversationController,
   type AgentConversationExtensions,
 } from '../components/AgentConversation'
 import Markdown from '../components/Markdown'
+import NovelAnalysisEvidenceModal, {
+  NovelAnalysisEvidenceList,
+  type NovelSourceEvidenceTarget,
+} from '../components/NovelAnalysisEvidenceModal'
 import { buildStreamOptions } from '../agent-runtime/streamOptions'
-import type { AgentConversationMessage, AiTaskPlan } from '../agent-runtime'
+import {
+  loadCompleteAgentRunSnapshot,
+  replayAgentRunSnapshot,
+  type AgentConversationMessage,
+} from '../agent-runtime'
 import { normalizeApiProvider } from '../modelCatalog'
 import type {
   AiModelConfig,
   Book,
   NovelAnalysisArtifact,
+  NovelAnalysisEvidence,
   NovelAnalysisRun,
   NovelSourceImportPreview,
   NovelSourcePickedFile,
+  NovelSourceRevision,
+  NovelSourceSearchResult,
+  NovelSourceSection,
   NovelSourceWork,
   PublishedNovelAnalysis,
 } from '../types'
+import {
+  buildNovelAnalysisTaskPlan,
+  buildNovelAnalysisTiming,
+} from './analysisTaskPlan'
 import './index.scss'
 
 type SourceFilter = 'all' | 'external_text' | 'frozen_book'
 type ImportView = 'choose' | 'freeze'
 
+const SOURCE_TEXT_WINDOW_SIZE = 20_000
+const LONG_SOURCE_SECTION_CHARACTERS = 100_000
+
 const ACTIVE_ANALYSIS_STATUSES = new Set(['pending', 'running', 'claimed'])
+const BLOCKING_ANALYSIS_STATUSES = new Set([...ACTIVE_ANALYSIS_STATUSES, 'paused'])
 
 function isAnalysisRunActive(run: NovelAnalysisRun) {
   return ACTIVE_ANALYSIS_STATUSES.has(run.taskStatus || run.runStatus)
+}
+
+function isAnalysisRunBlocking(run: NovelAnalysisRun) {
+  return BLOCKING_ANALYSIS_STATUSES.has(run.taskStatus || run.runStatus)
 }
 
 function analysisErrorMessage(run: NovelAnalysisRun) {
   if ((run.taskStatus || run.runStatus) === 'canceled') return ''
   const code = run.error || (run.units || []).find((unit) => unit.errorCode)?.errorCode
   if (!code) return ''
-  if (code === 'planning_failed') return '任务在进入分析前中断。当前版本已移除前置模型规划，请重新开始分析。'
+  if (code === 'planning_failed') return '模型未能生成符合来源范围和安全约束的分析计划，请调整分析重点后重试。'
+  if (code === 'durable_task_scope_conflict') return '已有分析任务尚未结束，请恢复或取消当前任务。'
   if (code === 'upstream_stream_interrupted' || code === 'model_gateway_error') return '模型连接中断；系统会自动重试，仍未恢复时可手动重试。'
   if (code === 'provider_authentication_failed') return '模型凭据无效，请检查模型设置后重试。'
   if (code === 'provider_bad_request') return '模型拒绝了分析请求，请更换兼容模型或检查模型设置。'
@@ -71,45 +100,35 @@ function displayFactValue(value: unknown) {
   try { return JSON.stringify(value) } catch { return String(value) }
 }
 
-function analysisTaskPlan(run: NovelAnalysisRun): AiTaskPlan {
-  const status = run.taskStatus || run.runStatus
-  const planStatus: AiTaskPlan['status'] = status === 'completed' || status === 'done'
-    ? 'done'
-    : status === 'paused'
-      ? 'paused'
-      : status === 'failed'
-        ? 'failed'
-        : status === 'canceled'
-          ? 'canceled'
-          : 'running'
-  return {
-    runId: run.runId,
-    title: '来源分析',
-    goal: '形成可审核的事实脉络和写作技法',
-    status: planStatus,
-    steps: (run.units || []).map((unit) => ({
-      id: unit.unitId,
-      title: unit.title,
-      type: unit.kind === 'build_review_artifact' ? 'review' : 'analyze',
-      executor: unit.kind === 'validate_evidence' || unit.kind === 'coverage_report' ? 'tool' : 'model',
-      status: unit.status === 'completed'
-        ? 'done'
-        : unit.status === 'failed'
-          ? 'failed'
-          : ACTIVE_ANALYSIS_STATUSES.has(unit.status)
-            ? 'running'
-            : 'pending',
-      error: unit.errorCode || undefined,
-    })),
-  }
-}
-
 function analysisMessages(
   run: NovelAnalysisRun,
   modelName: string,
+  replayed?: AgentConversationMessage,
 ): AgentConversationMessage[] {
+  const timing = buildNovelAnalysisTiming(run)
+  const runtimeMessage = replayed?.agentRunId === run.runId
+    ? replayed
+    : undefined
+  if (run.interactionKind === 'follow_up') {
+    const error = analysisErrorMessage(run)
+    return [{
+      role: 'user',
+      content: run.prompt || '继续说明这份分析。',
+      sentAt: run.createTime || undefined,
+      clientTurnId: run.commandId,
+    }, {
+      ...runtimeMessage,
+      role: 'assistant',
+      content: runtimeMessage?.content || run.finalResponse || '',
+      sentAt: run.updateTime || undefined,
+      agentRunId: run.runId,
+      model: modelName,
+      isError: Boolean(error),
+      error: error || undefined,
+      ...timing,
+    }]
+  }
   const completed = (run.units || []).filter((unit) => unit.summary)
-  const current = (run.units || []).find((unit) => ACTIVE_ANALYSIS_STATUSES.has(unit.status))
   const error = analysisErrorMessage(run)
   const content = completed.map((unit) => [
     unit.summary,
@@ -118,16 +137,16 @@ function analysisMessages(
   const terminal = run.artifactRef
     ? '分析结果已经生成，可以检查并保存。'
     : ''
-  const plan = analysisTaskPlan(run)
+  const plan = buildNovelAnalysisTaskPlan(run)
   return [{
     role: 'user',
-    content: '分析这部小说的事实脉络和写作技法。',
+    content: run.prompt || '分析这部小说的事实脉络和写作技法。',
     sentAt: run.createTime || undefined,
     clientTurnId: run.commandId,
   }, {
+    ...runtimeMessage,
     role: 'assistant',
     content: [content, terminal].filter(Boolean).join('\n\n'),
-    streamingContent: current ? `正在${current.title}…` : undefined,
     sentAt: run.updateTime || undefined,
     agentRunId: run.runId,
     longTaskId: run.taskId || undefined,
@@ -135,7 +154,268 @@ function analysisMessages(
     taskPlan: plan,
     isError: Boolean(error),
     error: error || undefined,
+    ...timing,
   }]
+}
+
+function sourceSectionCharacterCount(section?: NovelSourceSection) {
+  if (!section) return null
+  const start = Number(section.locator.startCharacter)
+  const end = Number(section.locator.endCharacter)
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start
+    ? end - start
+    : null
+}
+
+function sourceTextWindowStart(characterOffset: number) {
+  const offset = Math.max(0, Number.isFinite(characterOffset) ? characterOffset : 0)
+  return Math.floor(offset / SOURCE_TEXT_WINDOW_SIZE) * SOURCE_TEXT_WINDOW_SIZE
+}
+
+function sourceEvidenceWindowStart(target: NovelSourceEvidenceTarget) {
+  const excerptLength = Math.min(target.excerpt.length, SOURCE_TEXT_WINDOW_SIZE)
+  return Math.max(0, target.start - Math.floor((SOURCE_TEXT_WINDOW_SIZE - excerptLength) / 2))
+}
+
+function highlightedSourceText(text: string, query: string, expectedIndex?: number) {
+  if (!query.trim()) return text
+  const expected = Number.isFinite(expectedIndex) ? Number(expectedIndex) : -1
+  const exactMatch = expected >= 0 && text.slice(expected, expected + query.length) === query
+  const index = exactMatch
+    ? expected
+    : text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase())
+  if (index < 0) return text
+  return <>{text.slice(0, index)}<mark>{text.slice(index, index + query.length)}</mark>{text.slice(index + query.length)}</>
+}
+
+function NovelSourceReader({
+  work,
+  revisionId,
+  target,
+  onRevisionChange,
+}: {
+  work: NovelSourceWork
+  revisionId: string
+  target?: NovelSourceEvidenceTarget | null
+  onRevisionChange(revisionId: string): void
+}) {
+  const appMessage = usePurrToast()
+  const [revision, setRevision] = React.useState<NovelSourceRevision | null>(null)
+  const [selectedSectionId, setSelectedSectionId] = React.useState('')
+  const [textWindowStart, setTextWindowStart] = React.useState(0)
+  const [sectionWindow, setSectionWindow] = React.useState<NovelSourceSection | null>(null)
+  const [revisionLoading, setRevisionLoading] = React.useState(false)
+  const [textLoading, setTextLoading] = React.useState(false)
+  const [searchDraft, setSearchDraft] = React.useState('')
+  const [searchedQuery, setSearchedQuery] = React.useState('')
+  const [searchResults, setSearchResults] = React.useState<NovelSourceSearchResult[]>([])
+  const [searchLoading, setSearchLoading] = React.useState(false)
+  const [highlightQuery, setHighlightQuery] = React.useState('')
+  const [highlightOffset, setHighlightOffset] = React.useState<number | null>(null)
+  const documentScrollRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    if (!revisionId) return
+    let current = true
+    setRevisionLoading(true)
+    setSearchDraft('')
+    setSearchedQuery('')
+    setSearchResults([])
+    setHighlightQuery('')
+    setHighlightOffset(null)
+    void services.novelSources.getRevision({ revisionId }).then((result) => {
+      if (!current) return
+      if (!result.success || !result.data) {
+        appMessage.error(result.error || '读取来源版本失败')
+        setRevision(null)
+        setSelectedSectionId('')
+        return
+      }
+      const sections = result.data.sections ?? []
+      const targeted = target?.revisionId === revisionId
+        && sections.some((section) => section.id === target.sectionId)
+      setRevision(result.data)
+      setSelectedSectionId(targeted ? target.sectionId : sections[0]?.id ?? '')
+      setTextWindowStart(targeted ? sourceEvidenceWindowStart(target) : 0)
+      setHighlightQuery(targeted ? target.excerpt : '')
+      setHighlightOffset(targeted ? target.start : null)
+    }).finally(() => {
+      if (current) setRevisionLoading(false)
+    })
+    return () => { current = false }
+  }, [appMessage, revisionId, target?.excerpt, target?.revisionId, target?.sectionId, target?.start])
+
+  React.useEffect(() => {
+    if (!revision || revision.id !== revisionId || !selectedSectionId) {
+      setSectionWindow(null)
+      return
+    }
+    let current = true
+    setTextLoading(true)
+    void services.novelSources.getSection({
+      revisionId,
+      sectionId: selectedSectionId,
+      startCharacter: textWindowStart,
+      characterLimit: SOURCE_TEXT_WINDOW_SIZE,
+    }).then((result) => {
+      if (!current) return
+      if (!result.success || !result.data) {
+        appMessage.error(result.error || '读取原文失败')
+        setSectionWindow(null)
+        return
+      }
+      setSectionWindow(result.data)
+    }).finally(() => {
+      if (current) setTextLoading(false)
+    })
+    return () => { current = false }
+  }, [appMessage, revision, revisionId, selectedSectionId, textWindowStart])
+
+  const searchSource = async (value: string) => {
+    const query = value.trim()
+    setSearchDraft(value)
+    setSearchedQuery(query)
+    setSearchResults([])
+    if (!query || !revisionId) return
+    setSearchLoading(true)
+    try {
+      const result = await services.novelSources.searchSections({
+        revisionId,
+        query,
+        limit: 20,
+      })
+      if (!result.success) throw new Error(result.error || '搜索原文失败')
+      setSearchResults(result.data ?? [])
+    } catch (error) {
+      appMessage.error((error as Error).message)
+    } finally {
+      setSearchLoading(false)
+    }
+  }
+
+  const openSection = (sectionId: string, characterOffset = 0, query = '') => {
+    setSelectedSectionId(sectionId)
+    setTextWindowStart(sourceTextWindowStart(characterOffset))
+    setHighlightQuery(query)
+    setHighlightOffset(query ? characterOffset : null)
+  }
+
+  const sections = revision?.sections ?? []
+  const selectedSection = sections.find((section) => section.id === selectedSectionId)
+  const totalCharacters = Number(sectionWindow?.total_character_count ?? sourceSectionCharacterCount(selectedSection ?? sections[0])) || 0
+  const currentStart = Number(sectionWindow?.text_start_character ?? textWindowStart)
+  const currentEnd = Number(sectionWindow?.text_end_character ?? currentStart)
+  const highlightIndex = highlightOffset == null ? undefined : highlightOffset - currentStart
+  const revisions = work.revisions ?? []
+
+  React.useEffect(() => {
+    const container = documentScrollRef.current
+    if (!container || textLoading || !highlightQuery || !sectionWindow) return
+    const frame = window.requestAnimationFrame(() => {
+      const mark = container.querySelector('mark')
+      if (!mark) return
+      const containerRect = container.getBoundingClientRect()
+      const markRect = mark.getBoundingClientRect()
+      const centeredTop = container.scrollTop + markRect.top - containerRect.top
+        - (container.clientHeight - markRect.height) / 2
+      container.scrollTo({ top: Math.max(0, centeredTop), behavior: 'auto' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [highlightIndex, highlightQuery, sectionWindow, textLoading])
+
+  return <section className="novel-source-reader">
+    <header className="novel-source-reader-toolbar">
+      <div>
+        <strong>只读原文</strong>
+        <span>{revision ? `${sections.length} 节 · ${revision.character_count.toLocaleString()} 字符` : '正在读取来源结构'}</span>
+      </div>
+      {revisions.length > 1 ? <PurrSelect
+        aria-label="来源版本"
+        value={revisionId || null}
+        options={revisions.map((item) => ({
+          value: item.id,
+          label: `版本 ${item.version_no} · ${item.character_count.toLocaleString()} 字符`,
+        }))}
+        onChange={(value) => onRevisionChange(String(value ?? ''))}
+      /> : <span className="novel-source-reader-version">版本 {revisions[0]?.version_no ?? 1}</span>}
+    </header>
+    <div className="novel-source-reader-body">
+      <aside className="novel-source-reader-sidebar">
+        <PurrInput.Search
+          aria-label="搜索原文"
+          value={searchDraft}
+          allowClear
+          prefix={<SearchIcon />}
+          placeholder="搜索原文"
+          enterButton="搜索"
+          loading={searchLoading}
+          onChange={(event) => {
+            setSearchDraft(event.target.value)
+            if (!event.target.value) {
+              setSearchedQuery('')
+              setSearchResults([])
+              setHighlightQuery('')
+              setHighlightOffset(null)
+            }
+          }}
+          onSearch={(value) => void searchSource(value)}
+        />
+        {searchedQuery ? <div className="novel-source-search-results">
+          <div><strong>搜索结果</strong><span>{searchResults.length} 节</span></div>
+          {searchResults.length ? searchResults.map((result) => <button
+            type="button"
+            key={`${result.id}:${result.start_character}`}
+            onClick={() => openSection(result.id, result.start_character, searchedQuery)}
+          >
+            <strong>{result.title}</strong>
+            <span>{result.excerpt}</span>
+          </button>) : !searchLoading ? <p>没有找到匹配原文。</p> : null}
+        </div> : null}
+        <nav className="novel-source-section-list" aria-label="原文章节目录">
+          <div><strong>章节目录</strong><span>{sections.length}</span></div>
+          {sections.map((section) => {
+            const characterCount = sourceSectionCharacterCount(section)
+            const isOnlySection = sections.length === 1
+            return <button
+              type="button"
+              key={section.id}
+              className={section.id === selectedSectionId ? 'is-active' : undefined}
+              aria-current={section.id === selectedSectionId ? 'location' : undefined}
+              onClick={() => openSection(section.id)}
+            >
+              <span>{String(section.ordinal + 1).padStart(2, '0')}</span>
+              <div><strong>{section.title}</strong><small>{characterCount == null ? '—' : `${characterCount.toLocaleString()} 字符`}</small></div>
+              {isOnlySection ? <em>单节</em> : characterCount != null && characterCount > LONG_SOURCE_SECTION_CHARACTERS ? <em>超长</em> : null}
+            </button>
+          })}
+        </nav>
+      </aside>
+      <article className="novel-source-document">
+        {revisionLoading ? <div className="novel-source-document-state"><PurrSpin /></div> : selectedSection ? <>
+          <header>
+            <div><span>第 {selectedSection.ordinal + 1} 节</span><h2>{selectedSection.title}</h2></div>
+            <span>{totalCharacters ? `${Math.min(currentStart + 1, totalCharacters).toLocaleString()}–${currentEnd.toLocaleString()} / ${totalCharacters.toLocaleString()} 字符` : '0 字符'}</span>
+          </header>
+          <div ref={documentScrollRef} className="novel-source-document-scroll">
+            {textLoading ? <div className="novel-source-document-state"><PurrSpin /></div> : <pre>{highlightedSourceText(sectionWindow?.text_content ?? '', highlightQuery, highlightIndex)}</pre>}
+          </div>
+          <footer>
+            <PurrButton
+              size="small"
+              disabled={textLoading || currentStart <= 0}
+              onClick={() => setTextWindowStart(Math.max(0, currentStart - SOURCE_TEXT_WINDOW_SIZE))}
+            >上一段</PurrButton>
+            <span>{totalCharacters > SOURCE_TEXT_WINDOW_SIZE ? '长章节已分段显示' : '完整章节'}</span>
+            <PurrButton
+              size="small"
+              disabled={textLoading || currentEnd >= totalCharacters}
+              onClick={() => setTextWindowStart(currentEnd)}
+            >下一段</PurrButton>
+          </footer>
+        </> : <div className="novel-source-document-state">这个版本没有可读取的原文章节。</div>}
+      </article>
+    </div>
+  </section>
 }
 
 export default function NovelSourcesPage({
@@ -151,11 +431,29 @@ export default function NovelSourcesPage({
 }) {
   const appMessage = usePurrToast()
   const confirmDialog = usePurrConfirm()
+  const location = useLocation()
   const navigate = useNavigate()
   const { workId } = useParams<{ workId?: string }>()
   const [works, setWorks] = React.useState<NovelSourceWork[]>([])
   const [detailWork, setDetailWork] = React.useState<NovelSourceWork | null>(null)
   const [sourceFilter, setSourceFilter] = React.useState<SourceFilter>('all')
+  const [sourceRevisionId, setSourceRevisionId] = React.useState('')
+  const [sourceReaderOpen, setSourceReaderOpen] = React.useState(false)
+  const [sourceReaderTarget, setSourceReaderTarget] = React.useState<NovelSourceEvidenceTarget | null>(null)
+  const [analysisResultOpen, setAnalysisResultOpen] = React.useState(false)
+  const [evidenceView, setEvidenceView] = React.useState<{
+    title: string
+    evidence: NovelAnalysisEvidence[]
+    origin: 'analysis' | 'method'
+    focus?: {
+      kind: 'fact' | 'craft'
+      heading: string
+      body: string
+    }
+  } | null>(null)
+  const [methodCandidateOpen, setMethodCandidateOpen] = React.useState(false)
+  const [selectedCraftCardIds, setSelectedCraftCardIds] = React.useState<string[]>([])
+  const [creatingMethodCandidates, setCreatingMethodCandidates] = React.useState(false)
   const [importOpen, setImportOpen] = React.useState(false)
   const [importView, setImportView] = React.useState<ImportView>('choose')
   const [picked, setPicked] = React.useState<NovelSourcePickedFile | null>(null)
@@ -168,13 +466,15 @@ export default function NovelSourcesPage({
   const [busy, setBusy] = React.useState(false)
   const [analysisRevisionId, setAnalysisRevisionId] = React.useState('')
   const [analysisModelId, setAnalysisModelId] = React.useState(modelConfigs[0]?.id ?? '')
+  const [analysisInput, setAnalysisInput] = React.useState('')
   const [analysisRuns, setAnalysisRuns] = React.useState<NovelAnalysisRun[]>([])
+  const [replayedAnalysis, setReplayedAnalysis] = React.useState<{
+    runId: string
+    message: AgentConversationMessage
+  } | null>(null)
   const [watchedAnalysisCommandId, setWatchedAnalysisCommandId] = React.useState('')
-  const [analysisLastUpdatedAt, setAnalysisLastUpdatedAt] = React.useState<number | null>(null)
   const [publishedAnalyses, setPublishedAnalyses] = React.useState<PublishedNovelAnalysis[]>([])
   const [analysisArtifact, setAnalysisArtifact] = React.useState<NovelAnalysisArtifact | null>(null)
-  const [factsJson, setFactsJson] = React.useState('[]')
-  const [cardsJson, setCardsJson] = React.useState('[]')
   const [publishedAnalysisId, setPublishedAnalysisId] = React.useState('')
 
   const reload = React.useCallback(async () => {
@@ -182,7 +482,7 @@ export default function NovelSourcesPage({
     if (result.success) setWorks(result.data ?? [])
   }, [])
 
-  const reloadAnalysis = React.useCallback(async (revisionId = analysisRevisionId) => {
+  const reloadAnalysis = React.useCallback(async (revisionId: string) => {
     if (!revisionId) return null
     const [runsResult, publishedResult] = await Promise.all([
       services.novelSources.listAnalysisRuns({ revisionId }),
@@ -195,20 +495,20 @@ export default function NovelSourcesPage({
     const nextRuns = runsResult.data ?? []
     setAnalysisRevisionId(revisionId)
     setAnalysisRuns(nextRuns)
-    setAnalysisLastUpdatedAt(Date.now())
     if (publishedResult.success) {
       const published = publishedResult.data ?? []
       setPublishedAnalyses(published)
       const latestPublished = published[0]
       const latestRun = nextRuns[0]
       const publishedCoversLatestRun = latestPublished && (
-        !latestRun?.createTime
+        latestRun?.interactionKind === 'follow_up'
+        || !latestRun?.createTime
         || Date.parse(latestPublished.createTime) >= Date.parse(latestRun.createTime)
       )
       setPublishedAnalysisId(publishedCoversLatestRun ? latestPublished.id : '')
     }
     return nextRuns
-  }, [analysisRevisionId, appMessage])
+  }, [appMessage])
 
   const loadDetail = React.useCallback(async (id: string) => {
     const result = await services.novelSources.get({ workId: id })
@@ -219,20 +519,56 @@ export default function NovelSourcesPage({
     }
     setDetailWork(result.data)
     const latestRevisionId = result.data.latest_revision_id || result.data.revisions?.[0]?.id || ''
+    setSourceReaderOpen(false)
+    setSourceReaderTarget(null)
+    setAnalysisResultOpen(false)
+    setEvidenceView(null)
+    setSourceRevisionId(latestRevisionId)
+    setAnalysisRevisionId(latestRevisionId)
+    setAnalysisRuns([])
+    setPublishedAnalyses([])
     setAnalysisArtifact(null)
     setPublishedAnalysisId('')
     if (latestRevisionId) void reloadAnalysis(latestRevisionId)
   }, [appMessage, navigate, reloadAnalysis])
 
+  const selectSourceRevision = React.useCallback((revisionId: string) => {
+    if (!revisionId) return
+    setSourceRevisionId(revisionId)
+    setSourceReaderTarget(null)
+    setAnalysisResultOpen(false)
+    setAnalysisRevisionId(revisionId)
+    setAnalysisRuns([])
+    setReplayedAnalysis(null)
+    setWatchedAnalysisCommandId('')
+    setPublishedAnalyses([])
+    setAnalysisArtifact(null)
+    setPublishedAnalysisId('')
+    void reloadAnalysis(revisionId)
+  }, [reloadAnalysis])
+
   React.useEffect(() => { void reload() }, [reload])
   React.useEffect(() => {
     if (workId) void loadDetail(workId)
-    else setDetailWork(null)
+    else {
+      setDetailWork(null)
+      setSourceRevisionId('')
+      setSourceReaderOpen(false)
+    }
   }, [loadDetail, workId])
+  React.useEffect(() => {
+    const target = (location.state as { sourceEvidenceTarget?: NovelSourceEvidenceTarget } | null)?.sourceEvidenceTarget
+    if (!detailWork || !target || detailWork.id !== workId) return
+    setSourceRevisionId(target.revisionId)
+    setSourceReaderTarget(target)
+    setSourceReaderOpen(true)
+    navigate(location.pathname, { replace: true, state: null })
+  }, [detailWork, location.pathname, location.state, navigate, workId])
   React.useEffect(() => {
     if (!analysisModelId && modelConfigs[0]) setAnalysisModelId(modelConfigs[0].id)
   }, [analysisModelId, modelConfigs])
   const hasActiveAnalysis = analysisRuns.some(isAnalysisRunActive)
+  const hasBlockingAnalysis = analysisRuns.some(isAnalysisRunBlocking)
   React.useEffect(() => {
     if (!analysisRevisionId || (!watchedAnalysisCommandId && !hasActiveAnalysis)) return
     let disposed = false
@@ -267,19 +603,23 @@ export default function NovelSourcesPage({
     }
   }, [analysisModelId, modelConfigs])
 
-  const startAnalysis = async (revisionId: string) => {
+  const startAnalysis = async (
+    revisionId: string,
+    prompt = '分析这部小说的事实脉络和写作技法。',
+  ) => {
     const decision = await confirmDialog({
       title: '开始来源分析',
       content: '分析时只会按任务需要，把对应章节片段发送给当前模型。',
       confirmText: '开始分析',
     })
-    if (decision !== 'confirm') return
+    if (decision !== 'confirm') return false
     const commandId = `novel-analysis-${crypto.randomUUID()}`
     setBusy(true)
     try {
       const result = await services.novelSources.startAnalysis({
         revisionId,
         commandId,
+        prompt,
         runtime: runtime(),
       })
       if (!result.success) throw new Error(result.error || '启动分析失败')
@@ -290,9 +630,37 @@ export default function NovelSourcesPage({
       setWatchedAnalysisCommandId(commandId)
       appMessage.success('任务已接收，正在准备分析')
       await reloadAnalysis(revisionId)
+      return true
     } catch (error) {
       setWatchedAnalysisCommandId('')
       appMessage.error((error as Error).message)
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const followUpAnalysis = async (prompt: string) => {
+    if (!analysisRevisionId || !analysisArtifact) return false
+    const commandId = `novel-analysis-follow-up-${crypto.randomUUID()}`
+    setBusy(true)
+    try {
+      const result = await services.novelSources.followUpAnalysis({
+        revisionId: analysisRevisionId,
+        artifactId: analysisArtifact.artifactId,
+        prompt,
+        commandId,
+        runtime: runtime(),
+      })
+      if (!result.success) throw new Error(result.error || '发送追问失败')
+      setWatchedAnalysisCommandId(commandId)
+      appMessage.success('追问已发送')
+      await reloadAnalysis(analysisRevisionId)
+      return true
+    } catch (error) {
+      setWatchedAnalysisCommandId('')
+      appMessage.error((error as Error).message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -303,12 +671,10 @@ export default function NovelSourcesPage({
     const result = await services.novelSources.getAnalysisArtifact({ artifactId })
     if (!result.success || !result.data) return appMessage.error(result.error || '读取分析结果失败')
     setAnalysisArtifact(result.data)
-    setFactsJson(JSON.stringify(result.data.facts, null, 2))
-    setCardsJson(JSON.stringify(result.data.craftCards, null, 2))
   }, [appMessage])
 
   React.useEffect(() => {
-    const reference = analysisRuns[0]?.artifactRef
+    const reference = analysisRuns[0]?.artifactRef || analysisRuns[0]?.analysisArtifactRef
     if (!reference || analysisArtifact) return
     void openArtifact(reference)
   }, [analysisArtifact, analysisRuns, openArtifact])
@@ -330,7 +696,7 @@ export default function NovelSourcesPage({
             })
       if (!result.success) throw new Error(result.error || '分析任务操作失败')
       if (action === 'resume') setWatchedAnalysisCommandId(resumeCommandId)
-      await reloadAnalysis()
+      await reloadAnalysis(analysisRevisionId)
     } catch (error) {
       appMessage.error((error as Error).message)
     } finally {
@@ -345,29 +711,51 @@ export default function NovelSourcesPage({
       const reviewed = await services.novelSources.reviewAnalysisArtifact({
         artifactId: analysisArtifact.artifactId,
         commandId: `novel-analysis-review-${crypto.randomUUID()}`,
-        facts: JSON.parse(factsJson),
-        craftCards: JSON.parse(cardsJson),
+        facts: analysisArtifact.facts,
+        craftCards: analysisArtifact.craftCards,
       })
       if (!reviewed.success || !reviewed.data) throw new Error(reviewed.error || '保存审核结果失败')
       const published = await services.novelSources.publishAnalysisArtifact({ artifactId: reviewed.data.artifactId })
       if (!published.success || !published.data) throw new Error(published.error || '保存分析失败')
       setAnalysisArtifact(reviewed.data)
       setPublishedAnalysisId(published.data.id)
-      await reloadAnalysis()
+      await reloadAnalysis(analysisRevisionId)
       appMessage.success('分析结果已保存')
     } catch (error) {
-      appMessage.error((error as Error).message || '审核 JSON 无效')
+      appMessage.error((error as Error).message || '保存分析失败')
     } finally {
       setBusy(false)
     }
   }
 
+  const methodCandidateCards = (
+    publishedAnalyses.find((analysis) => analysis.id === publishedAnalysisId)?.craftCards ?? []
+  ).filter((card) => Boolean(card.id))
+
+  const openMethodCandidateReview = () => {
+    if (!methodCandidateCards.length) return appMessage.info('当前分析没有可提炼的写作技法')
+    setSelectedCraftCardIds([])
+    setAnalysisResultOpen(false)
+    setMethodCandidateOpen(true)
+  }
+
   const createMethodCandidates = async () => {
-    if (!publishedAnalysisId) return
-    const result = await services.writingMethods.createCandidates({ analysisId: publishedAnalysisId })
-    if (!result.success) return appMessage.error(result.error || '生成候选写作方法失败')
-    appMessage.success('候选方法和方案已创建')
-    navigate('/writing-methods')
+    if (!publishedAnalysisId || !selectedCraftCardIds.length) return
+    setCreatingMethodCandidates(true)
+    try {
+      const result = await services.writingMethods.createCandidates({
+        analysisId: publishedAnalysisId,
+        craftCardIds: selectedCraftCardIds,
+      })
+      if (!result.success || !result.data) throw new Error(result.error || '生成候选写作方法失败')
+      setMethodCandidateOpen(false)
+      appMessage.success(`已创建 ${result.data.methods.length} 个候选草稿，尚未发布`)
+      navigate('/writing-methods')
+    } catch (error) {
+      appMessage.error((error as Error).message)
+    } finally {
+      setCreatingMethodCandidates(false)
+    }
   }
 
   const resetImport = () => {
@@ -437,8 +825,8 @@ export default function NovelSourcesPage({
   const deleteWork = async (work: NovelSourceWork) => {
     const decision = await confirmDialog({
       title: `删除“${work.title}”？`,
-      content: '将删除这部来源的全部未引用版本和正文。已经进入分析或续写的来源不能删除。',
-      confirmText: '删除来源',
+      content: '这会永久删除来源正文、全部冻结版本、分析结果和原文证据，无法恢复。续写与正史快照会保留；已被写作方法或方案引用的来源不能删除，可以改为归档。',
+      confirmText: '仍要删除',
       confirmVariant: 'danger',
     })
     if (decision !== 'confirm') return
@@ -451,6 +839,81 @@ export default function NovelSourcesPage({
 
   const filteredWorks = works.filter((work) => sourceFilter === 'all' || work.source_type === sourceFilter)
   const originalBooks = books.filter((book) => book.creation_mode !== 'continuation')
+  const diagnosticRunId = analysisRuns[0]?.runId
+  const diagnosticTurnId = analysisRuns[0]?.commandId
+  const diagnosticPrompt = analysisRuns[0]?.prompt
+  React.useEffect(() => {
+    if (!import.meta.env.DEV || !workId || !diagnosticRunId) return
+    let stopped = false
+    void (async () => {
+      let after = 0
+      while (!stopped) {
+        const result = await services.ai.getAgentRunSnapshot({
+          runId: diagnosticRunId,
+          after,
+          limit: 500,
+        })
+        if (!result.success || !result.data) return
+        hydrateAiDebugRunSnapshot({
+          snapshot: result.data,
+          turnId: diagnosticTurnId,
+          conversationRootRunId: diagnosticRunId,
+          prompt: diagnosticPrompt || '分析这部小说的事实脉络和写作技法。',
+          source: '小说来源分析',
+        })
+        if (result.data.nextCursor > after) {
+          after = result.data.nextCursor
+        } else if (result.data.hasMore) {
+          return
+        }
+        if (result.data.hasMore) continue
+        if (['done', 'failed', 'canceled', 'blocked'].includes(result.data.run.status)) return
+        await new Promise((resolve) => window.setTimeout(resolve, 200))
+      }
+    })().catch(() => undefined)
+    return () => {
+      stopped = true
+    }
+  }, [diagnosticPrompt, diagnosticRunId, diagnosticTurnId, workId])
+
+  const selectedAnalysisModel = modelConfigs.find((model) => model.id === analysisModelId)
+  const waitingForRun = Boolean(watchedAnalysisCommandId) && !analysisRuns.some((run) => run.commandId === watchedAnalysisCommandId)
+  const latestRun = analysisRuns[0]
+  React.useEffect(() => {
+    if (!latestRun) {
+      setReplayedAnalysis(null)
+      return
+    }
+    let current = true
+    void (async () => {
+      const snapshot = await loadCompleteAgentRunSnapshot(latestRun.runId, {
+        getRunSnapshot: (input) => services.ai.getAgentRunSnapshot(input),
+        pageSize: 500,
+        isCurrent: () => current,
+      })
+      if (!snapshot || !current) return
+      const message = replayAgentRunSnapshot({
+        snapshot,
+        prompt: latestRun.prompt || '分析这部小说的事实脉络和写作技法。',
+        turnId: `novel-analysis:${latestRun.commandId || latestRun.runId}`,
+        model: selectedAnalysisModel?.name || '',
+      })
+      if (current) setReplayedAnalysis({ runId: latestRun.runId, message })
+    })().catch(() => {
+      if (current) setReplayedAnalysis(null)
+    })
+    return () => {
+      current = false
+    }
+  }, [
+    latestRun?.commandId,
+    latestRun?.providerOutputEvents,
+    latestRun?.runId,
+    latestRun?.runStatus,
+    latestRun?.taskRevision,
+    latestRun?.updateTime,
+    selectedAnalysisModel?.name,
+  ])
 
   const importModal = <PurrModal
     open={importOpen}
@@ -529,12 +992,18 @@ export default function NovelSourcesPage({
     </div>
   }
 
-  const selectedAnalysisModel = modelConfigs.find((model) => model.id === analysisModelId)
-  const waitingForRun = Boolean(watchedAnalysisCommandId) && !analysisRuns.some((run) => run.commandId === watchedAnalysisCommandId)
-  const latestRun = analysisRuns[0]
-  const currentPlan = latestRun ? analysisTaskPlan(latestRun) : undefined
+  const selectedRevision = detailWork?.revisions?.find((item) => item.id === sourceRevisionId)
+  const currentPlan = latestRun && latestRun.interactionKind !== 'follow_up'
+    ? buildNovelAnalysisTaskPlan(latestRun)
+    : undefined
   const conversationMessages: AgentConversationMessage[] = latestRun
-    ? analysisMessages(latestRun, selectedAnalysisModel?.name || '')
+    ? analysisMessages(
+        latestRun,
+        selectedAnalysisModel?.name || '',
+        replayedAnalysis?.runId === latestRun.runId
+          ? replayedAnalysis.message
+          : undefined,
+      )
     : waitingForRun
       ? [{
           role: 'user',
@@ -543,26 +1012,72 @@ export default function NovelSourcesPage({
         }, {
           role: 'assistant',
           content: '',
-          streamingContent: '正在建立可恢复的来源分析任务…',
           model: selectedAnalysisModel?.name,
         }]
       : []
-  const resultPanel = analysisArtifact ? <section className="novel-analysis-result">
-    <div className="novel-analysis-result-head"><div><span>分析结果</span><h2>{analysisArtifact.facts.length} 条硬事实 · {analysisArtifact.craftCards.length} 个写作技法</h2></div>{publishedAnalysisId ? <em>已保存</em> : <em>待保存</em>}</div>
-    <div className="novel-analysis-result-grid">
-      <div><h3>事实脉络</h3>{analysisArtifact.facts.length ? <div className="novel-analysis-result-list">{analysisArtifact.facts.map((fact, index) => <article key={fact.id || `${fact.subjectKey}:${fact.predicate}:${index}`}><strong>{fact.subjectKey}</strong><p>{fact.predicate} · {displayFactValue(fact.value)}</p><small>{fact.evidence.length} 条原文证据</small></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的硬事实。</p>}</div>
-      <div><h3>写作技法</h3>{analysisArtifact.craftCards.length ? <div className="novel-analysis-result-list">{analysisArtifact.craftCards.map((card, index) => <article key={card.id || `${card.title}:${index}`}><strong>{card.title}</strong><Markdown>{card.bodyMarkdown}</Markdown><small>{card.evidence.length} 条原文证据</small></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的写作技法。</p>}</div>
+  const sendAnalysisMessage = async (content?: string) => {
+    const prompt = String(content ?? analysisInput).trim()
+    if (!prompt || !analysisRevisionId || hasBlockingAnalysis || waitingForRun) return
+    const sent = analysisArtifact
+      ? await followUpAnalysis(prompt)
+      : await startAnalysis(analysisRevisionId, prompt)
+    if (sent) setAnalysisInput('')
+  }
+  const resultPanel = analysisArtifact ? <section className="novel-analysis-result-summary">
+    <div className="novel-analysis-result-summary-copy">
+      <span>分析结果</span>
+      <strong>{analysisArtifact.facts.length} 条硬事实 · {analysisArtifact.craftCards.length} 个写作技法</strong>
     </div>
-    <details className="novel-analysis-raw"><summary>调整结构化结果</summary><div><label>硬事实 JSON<textarea value={factsJson} onChange={(event) => setFactsJson(event.target.value)} /></label><label>写作技法 JSON<textarea value={cardsJson} onChange={(event) => setCardsJson(event.target.value)} /></label></div></details>
-    <div className="novel-analysis-result-actions">
-      {publishedAnalysisId ? <PurrButton onClick={() => void createMethodCandidates()}>提炼为写作方法</PurrButton> : null}
-      {publishedAnalysisId ? <PurrButton onClick={() => navigate('/bookshelf', { state: { createContinuationFrom: { workId, revisionId: analysisRevisionId, analysisId: publishedAnalysisId } } })}>创建续写</PurrButton> : null}
-      <PurrButton type="primary" disabled={busy} onClick={() => void saveAnalysis()}>{publishedAnalysisId ? '保存修改' : '保存分析结果'}</PurrButton>
+    <div className="novel-analysis-result-summary-actions">
+      <em className={publishedAnalysisId ? 'is-saved' : ''}>{publishedAnalysisId ? '已保存' : '待保存'}</em>
+      <PurrButton size="small" onClick={() => setAnalysisResultOpen(true)}>查看分析结果</PurrButton>
     </div>
+  </section> : null
+  const showEvidence = (
+    title: string,
+    evidence: NovelAnalysisEvidence[],
+    origin: 'analysis' | 'method' = 'analysis',
+    focus?: { kind: 'fact' | 'craft'; heading: string; body: string },
+  ) => {
+    setEvidenceView({ title, evidence, origin, focus })
+  }
+  const locateEvidence = (target: NovelSourceEvidenceTarget) => {
+    setSourceRevisionId(target.revisionId)
+    setSourceReaderTarget(target)
+    if (evidenceView?.origin === 'method') setEvidenceView(null)
+    setSourceReaderOpen(true)
+  }
+  const analysisResultActions = analysisArtifact ? <div className="novel-analysis-result-actions">
+    {publishedAnalysisId ? <PurrButton onClick={openMethodCandidateReview}>提炼为写作方法</PurrButton> : null}
+    {publishedAnalysisId ? <PurrButton onClick={() => navigate('/bookshelf', { state: { createContinuationFrom: { workId, revisionId: analysisRevisionId, analysisId: publishedAnalysisId } } })}>创建续写</PurrButton> : null}
+    <PurrButton type="primary" disabled={busy} onClick={() => void saveAnalysis()}>{publishedAnalysisId ? '保存修改' : '保存分析结果'}</PurrButton>
+  </div> : null
+  const analysisResultDetail = analysisArtifact ? <section className="novel-analysis-result-detail">
+    <PurrTabs
+      className="novel-analysis-result-tabs"
+      defaultActiveKey="facts"
+      destroyOnHidden
+      items={[
+        {
+          key: 'facts',
+          label: `事实脉络（${analysisArtifact.facts.length}）`,
+          children: <section className="novel-analysis-result-tab">
+            {analysisArtifact.facts.length ? <div className="novel-analysis-result-list">{analysisArtifact.facts.map((fact, index) => <article key={fact.id || `${fact.subjectKey}:${fact.predicate}:${index}`}><strong>{fact.subjectKey}</strong><p>{fact.predicate} · {displayFactValue(fact.value)}</p><PurrButton type="text" size="small" aria-label={`查看 ${fact.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${fact.subjectKey} · 原文证据`, fact.evidence, 'analysis', { kind: 'fact', heading: fact.subjectKey, body: `${fact.predicate} · ${displayFactValue(fact.value)}` })}>原文证据 {fact.evidence.length}</PurrButton></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的硬事实。</p>}
+          </section>,
+        },
+        {
+          key: 'craft',
+          label: `写作技法（${analysisArtifact.craftCards.length}）`,
+          children: <section className="novel-analysis-result-tab">
+            {analysisArtifact.craftCards.length ? <div className="novel-analysis-result-list">{analysisArtifact.craftCards.map((card, index) => <article key={card.id || `${card.title}:${index}`}><strong>{card.title}</strong><Markdown>{card.bodyMarkdown}</Markdown><PurrButton type="text" size="small" aria-label={`查看 ${card.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${card.title} · 原文证据`, card.evidence, 'analysis', { kind: 'craft', heading: card.title, body: card.bodyMarkdown })}>原文证据 {card.evidence.length}</PurrButton></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的写作技法。</p>}
+          </section>,
+        },
+      ]}
+    />
   </section> : null
   const analysisController: AgentConversationController = {
     capabilities: {
-      inputDisabled: true,
+      inputDisabled: Boolean(hasBlockingAnalysis || waitingForRun),
       sessionNavigationDisabled: true,
       submitMode: 'send',
     },
@@ -581,11 +1096,13 @@ export default function NovelSourcesPage({
       attachmentsVersion: analysisArtifact?.artifactId || '',
     },
     composer: {
-      value: '',
-      setValue: () => undefined,
-      placeholder: '来源分析由宿主任务控制',
+      value: analysisInput,
+      setValue: setAnalysisInput,
+      placeholder: analysisArtifact
+        ? '继续追问这份分析，或说明你想调整的方向'
+        : '输入分析重点，或点击“快速分析”',
       ariaLabel: '来源分析',
-      submitDisabled: true,
+      submitDisabled: !analysisInput.trim() || busy || hasBlockingAnalysis || waitingForRun,
       selectedModel: selectedAnalysisModel || null,
       modelConfigs,
       selectModel: setAnalysisModelId,
@@ -597,8 +1114,17 @@ export default function NovelSourcesPage({
       createSession: () => undefined,
       closeSession: () => undefined,
       renameSession: () => undefined,
-      send: () => undefined,
-      abort: () => latestRun ? controlAnalysis(latestRun, 'cancel') : undefined,
+      send: sendAnalysisMessage,
+      abort: async () => {
+        if (!latestRun) return
+        if (latestRun.taskId) {
+          await controlAnalysis(latestRun, 'cancel')
+          return
+        }
+        const result = await services.ai.cancelAgentRun({ runId: latestRun.runId })
+        if (!result.success) appMessage.error(result.error || '停止追问失败')
+        await reloadAnalysis(analysisRevisionId)
+      },
       resume: () => latestRun ? controlAnalysis(latestRun, 'resume') : undefined,
       editMessage: () => undefined,
       resolveToolApproval: async () => ({ success: false, error: '来源分析不开放工具审批' }),
@@ -610,17 +1136,9 @@ export default function NovelSourcesPage({
     ),
   }
   const analysisPanel = <section className="novel-analysis-workspace">
-    <div className="novel-analysis-toolbar">
-      <div>
-        <strong>来源分析</strong>
-        <span>{hasActiveAnalysis || waitingForRun ? <><i />自动更新中</> : analysisLastUpdatedAt ? `更新于 ${new Date(analysisLastUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '选择模型后开始'}</span>
-      </div>
-      <PurrSelect aria-label="分析模型" value={analysisModelId || null} placeholder="选择分析模型" options={modelConfigs.map((model) => ({ value: model.id, label: model.nickname || model.name }))} onChange={(value) => setAnalysisModelId(String(value ?? ''))} />
-      <PurrButton type="primary" disabled={!analysisRevisionId || !modelConfigs.length || busy || hasActiveAnalysis || waitingForRun} onClick={() => void startAnalysis(analysisRevisionId)}>开始分析</PurrButton>
-      {latestRun?.taskStatus === 'running' || latestRun?.taskStatus === 'pending' ? <PurrButton onClick={() => void controlAnalysis(latestRun, 'pause')}>暂停</PurrButton> : null}
-      {latestRun?.taskStatus === 'paused' || latestRun?.taskStatus === 'failed' ? <PurrButton onClick={() => void controlAnalysis(latestRun, 'resume')}>{latestRun.taskStatus === 'failed' ? '重试' : '恢复'}</PurrButton> : null}
-      {latestRun?.taskStatus && !['completed', 'failed', 'canceled'].includes(latestRun.taskStatus) ? <PurrButton onClick={() => void controlAnalysis(latestRun, 'cancel')}>取消</PurrButton> : null}
-    </div>
+    <header className="novel-analysis-workspace-header">
+      <span>梳理原文中的事实脉络与写作技法</span>
+    </header>
     <AgentConversationPanel
       className="novel-analysis-agent-panel"
       controller={analysisController}
@@ -631,7 +1149,10 @@ export default function NovelSourcesPage({
 
   return <div className="novel-sources-page">
     <AppHeader
-      title={detailWork?.title || '来源详情'}
+      title={<span className="novel-source-header-title">
+        <span className="app-title">{detailWork?.title || '来源详情'}</span>
+        <span className="novel-source-header-capability">来源分析</span>
+      </span>}
       left={<div className="library-header-nav">
         <PurrTooltip title="返回首页"><PurrButton type="text" size="small" aria-label="返回首页" icon={<HomeIcon style={{ fontSize: 15 }} />} onClick={onHome} /></PurrTooltip>
         <PurrTooltip title="返回来源库"><PurrButton type="text" size="small" aria-label="返回来源库" icon={<ArrowLeftIcon style={{ fontSize: 14 }} />} onClick={() => navigate('/novel-sources')} /></PurrTooltip>
@@ -639,14 +1160,142 @@ export default function NovelSourcesPage({
       showActions
     />
     <main className="novel-source-detail-main">
-      {!detailWork ? <div className="novel-sources-loading"><PurrSpin /></div> : <>
-        <div className="novel-detail-heading">
-          <div><span>{detailWork.source_type === 'frozen_book' ? '原创冻结' : '本地导入'}</span><h1>{detailWork.title}</h1><p>{detailWork.revisions?.[0]?.character_count.toLocaleString() ?? '—'} 字符 · {publishedAnalyses.length ? '分析结果已保存' : '等待分析'} · 只读</p></div>
-          <PurrButton danger icon={<DeleteIcon />} onClick={() => void deleteWork(detailWork)}>删除来源</PurrButton>
-        </div>
+      {!detailWork ? <div className="novel-sources-loading"><PurrSpin /></div> : <section className="novel-source-analysis-layout">
+        <header className="novel-detail-heading">
+          <div><span>{detailWork.source_type === 'frozen_book' ? '原创冻结' : '本地导入'}</span><h1>{detailWork.title}</h1><p>{selectedRevision?.character_count.toLocaleString() ?? '—'} 字符 · 版本 {selectedRevision?.version_no ?? '—'} · 只读</p></div>
+          <div className="novel-detail-actions">
+            <PurrButton type="primary" disabled={!analysisRevisionId || !modelConfigs.length || busy || hasBlockingAnalysis || waitingForRun} onClick={() => void startAnalysis(analysisRevisionId)}>快速分析</PurrButton>
+            <PurrButton danger icon={<DeleteIcon />} onClick={() => void deleteWork(detailWork)}>删除来源</PurrButton>
+          </div>
+        </header>
         {analysisPanel}
-      </>}
+        <aside className="novel-source-context-card">
+          <div>
+            <span>ORIGINAL SOURCE</span>
+            <h2>来源原文</h2>
+            <p>分析所依据的只读版本，可按章节、关键词和位置查阅。</p>
+          </div>
+          <dl>
+            <div><dt>当前版本</dt><dd>版本 {selectedRevision?.version_no ?? '—'}</dd></div>
+            <div><dt>原文长度</dt><dd>{selectedRevision?.character_count.toLocaleString() ?? '—'} 字符</dd></div>
+            <div><dt>分析状态</dt><dd>{publishedAnalyses.length ? '已有保存结果' : hasBlockingAnalysis ? '分析进行中' : '等待分析'}</dd></div>
+          </dl>
+          <PurrButton icon={<BookIcon />} onClick={() => {
+            setSourceReaderTarget(null)
+            setSourceReaderOpen(true)
+          }}>查看原文</PurrButton>
+        </aside>
+      </section>}
     </main>
+    {detailWork ? <PurrModal
+      title={`${detailWork.title} · 原文`}
+      open={sourceReaderOpen}
+      width="min(1280px, calc(100vw - 48px))"
+      zIndex={1310}
+      footer={null}
+      onCancel={() => {
+        setSourceReaderOpen(false)
+        setSourceReaderTarget(null)
+      }}
+      className="novel-source-reader-modal"
+    >
+      {sourceReaderOpen ? <NovelSourceReader
+        work={detailWork}
+        revisionId={sourceRevisionId}
+        target={sourceReaderTarget}
+        onRevisionChange={selectSourceRevision}
+      /> : null}
+    </PurrModal> : null}
+    <NovelAnalysisEvidenceModal
+      open={evidenceView?.origin === 'method'}
+      title={evidenceView?.title ?? '原文证据'}
+      evidence={evidenceView?.evidence ?? []}
+      sourceRevisionId={analysisArtifact?.sourceRevisionId ?? analysisRevisionId}
+      onClose={() => setEvidenceView(null)}
+      onLocate={locateEvidence}
+    />
+    {analysisArtifact ? <PurrModal
+      title={`分析结果 · ${analysisArtifact.facts.length} 条硬事实 · ${analysisArtifact.craftCards.length} 个写作技法`}
+      open={analysisResultOpen}
+      width="min(1180px, calc(100vw - 48px))"
+      footer={analysisResultActions}
+      onCancel={() => {
+        setAnalysisResultOpen(false)
+        if (evidenceView?.origin === 'analysis') setEvidenceView(null)
+      }}
+      className="novel-analysis-result-modal"
+    >
+      <div className="novel-analysis-result-layout">
+        <div className={`novel-analysis-result-content${evidenceView?.origin === 'analysis' && evidenceView.focus ? ' is-hidden' : ''}`}>{analysisResultDetail}</div>
+        {evidenceView?.origin === 'analysis' && evidenceView.focus ? <section className="novel-analysis-evidence-focus">
+          <header>
+            <PurrButton type="text" size="small" icon={<ArrowLeftIcon />} onClick={() => setEvidenceView(null)}>返回全部分析</PurrButton>
+            <span>{evidenceView.focus.kind === 'fact' ? '事实脉络与原文证据' : '写作技法与原文证据'}</span>
+          </header>
+          <div className="novel-analysis-evidence-focus-body">
+            <article className="novel-analysis-evidence-context">
+              <span>{evidenceView.focus.kind === 'fact' ? '当前事实脉络' : '当前写作技法'}</span>
+              <h2>{evidenceView.focus.heading}</h2>
+              {evidenceView.focus.kind === 'craft'
+                ? <Markdown>{evidenceView.focus.body}</Markdown>
+                : <p>{evidenceView.focus.body}</p>}
+              <small>{evidenceView.evidence.length} 条原文证据支撑这项分析</small>
+            </article>
+            <aside className="novel-analysis-evidence-panel" aria-label={evidenceView.title}>
+              <header><strong>原文证据</strong><span>{evidenceView.evidence.length} 条</span></header>
+              <div className="novel-analysis-evidence-panel-body">
+                <NovelAnalysisEvidenceList
+                  evidence={evidenceView.evidence}
+                  sourceRevisionId={analysisArtifact.sourceRevisionId ?? analysisRevisionId}
+                  onLocate={locateEvidence}
+                />
+              </div>
+            </aside>
+          </div>
+        </section> : null}
+      </div>
+    </PurrModal> : null}
+    {analysisArtifact ? <PurrModal
+      title="选择要提炼的写作方法"
+      open={methodCandidateOpen}
+      width="min(720px, calc(100vw - 32px))"
+      okText={`创建 ${selectedCraftCardIds.length} 个候选草稿`}
+      cancelText="返回分析结果"
+      confirmLoading={creatingMethodCandidates}
+      okButtonProps={{ disabled: !selectedCraftCardIds.length }}
+      onOk={() => void createMethodCandidates()}
+      onCancel={() => {
+        setMethodCandidateOpen(false)
+        setAnalysisResultOpen(true)
+      }}
+      styles={{ body: { maxHeight: 'min(68vh, 640px)', overflowY: 'auto' } }}
+    >
+      <section className="novel-method-candidate-review">
+        <p>写作技法不会直接全部进入方法库。请先选择值得复用的内容；确认后只创建可编辑草稿，不会自动发布或绑定作品。</p>
+        <div className="novel-method-candidate-review-toolbar">
+          <span>已选择 {selectedCraftCardIds.length} / {methodCandidateCards.length}</span>
+          <div>
+            <PurrButton type="text" size="small" onClick={() => setSelectedCraftCardIds(methodCandidateCards.map((card) => card.id!))}>全选</PurrButton>
+            <PurrButton type="text" size="small" disabled={!selectedCraftCardIds.length} onClick={() => setSelectedCraftCardIds([])}>清空</PurrButton>
+          </div>
+        </div>
+        <div className="novel-method-candidate-review-list">
+          {methodCandidateCards.map((card) => <div key={card.id} className="novel-method-candidate-review-item">
+            <PurrCheckbox
+              checked={selectedCraftCardIds.includes(card.id!)}
+              onChange={(event) => setSelectedCraftCardIds((current) => event.target.checked
+                ? [...current, card.id!]
+                : current.filter((id) => id !== card.id))}
+            >
+              <strong>{card.title}</strong>
+              <small>{card.bodyMarkdown.replace(/[#*_>`\[\]()]/g, '').trim().slice(0, 140) || '暂无方法说明'}</small>
+              <em>{card.evidence.length} 条原文证据</em>
+            </PurrCheckbox>
+            <PurrButton type="text" size="small" onClick={() => showEvidence(`${card.title} · 原文证据`, card.evidence, 'method')}>查看证据</PurrButton>
+          </div>)}
+        </div>
+      </section>
+    </PurrModal> : null}
     {busy ? <div className="novel-source-busy"><PurrSpin /></div> : null}
   </div>
 }

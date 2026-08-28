@@ -1,9 +1,29 @@
 import React from 'react'
+import { useNavigate } from 'react-router-dom'
 import { services } from '@/services'
-import { ArrowLeftIcon, CopyIcon, HomeIcon, PlusIcon } from '@/purr-components'
-import { PurrButton, PurrCheckbox, PurrChoiceCard, PurrInput, PurrModal, PurrSelect, PurrSpin, PurrTooltip, usePurrToast } from '@/purr-components'
+import {
+  ArrowLeftIcon,
+  CopyIcon,
+  DeleteIcon,
+  HomeIcon,
+  PlusIcon,
+  PurrButton,
+  PurrCheckbox,
+  PurrChoiceCard,
+  PurrInput,
+  PurrModal,
+  PurrSelect,
+  PurrSpin,
+  PurrTooltip,
+  usePurrConfirm,
+  usePurrToast,
+} from '@/purr-components'
 import AppHeader from '../components/AppHeader'
+import NovelAnalysisEvidenceModal, {
+  type NovelSourceEvidenceTarget,
+} from '../components/NovelAnalysisEvidenceModal'
 import type {
+  NovelAnalysisEvidence,
   WritingMethod,
   WritingMethodRevision,
   WritingMethodType,
@@ -15,8 +35,23 @@ interface Props { onBack: () => void; onHome: () => void }
 
 type LibraryTab = 'methods' | 'schemes'
 
+function analysisSourceRef(method: WritingMethod) {
+  const draftSourceRef = method.draft_metadata?.sourceRef
+  const revisionSourceRef = method.revisions?.[0]?.metadata?.sourceRef
+  for (const value of [method.source_ref, draftSourceRef, revisionSourceRef]) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const sourceRef = value as Record<string, unknown>
+    const analysisId = String(sourceRef.analysisId ?? '')
+    const craftCardId = String(sourceRef.craftCardId ?? '')
+    if (analysisId && craftCardId) return { analysisId, craftCardId }
+  }
+  return null
+}
+
 export default function WritingMethodsPage({ onBack, onHome }: Props) {
   const appMessage = usePurrToast()
+  const confirm = usePurrConfirm()
+  const navigate = useNavigate()
   const [tab, setTab] = React.useState<LibraryTab>('methods')
   const [methods, setMethods] = React.useState<WritingMethod[]>([])
   const [schemes, setSchemes] = React.useState<WritingScheme[]>([])
@@ -34,6 +69,17 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
   const [schemeMethodQuery, setSchemeMethodQuery] = React.useState('')
   const [schemeMethodType, setSchemeMethodType] = React.useState<'all' | WritingMethodType>('all')
   const [creating, setCreating] = React.useState(false)
+  const [deletingKey, setDeletingKey] = React.useState('')
+  const [batchMode, setBatchMode] = React.useState(false)
+  const [batchSelection, setBatchSelection] = React.useState<string[]>([])
+  const [batchWorking, setBatchWorking] = React.useState<'publish' | 'delete' | ''>('')
+  const [evidenceView, setEvidenceView] = React.useState<{
+    title: string
+    evidence: NovelAnalysisEvidence[]
+    sourceWorkId: string
+    sourceRevisionId: string
+  } | null>(null)
+  const [evidenceLoading, setEvidenceLoading] = React.useState(false)
 
   const reload = React.useCallback(async () => {
     setLoading(true)
@@ -63,6 +109,170 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
     const result = await services.writingMethods.getScheme({ schemeId })
     if (result.success && result.data) setSelectedScheme(result.data)
   }, [])
+
+  const openMethodEvidence = React.useCallback(async (method: WritingMethod) => {
+    const sourceRef = analysisSourceRef(method)
+    if (!sourceRef) return appMessage.info('这个写作方法没有可追溯的来源分析证据')
+    setEvidenceLoading(true)
+    try {
+      const result = await services.novelSources.getPublishedAnalysis({
+        analysisId: sourceRef.analysisId,
+      })
+      if (!result.success || !result.data) throw new Error(result.error || '读取原文证据失败')
+      const revision = await services.novelSources.getRevision({
+        revisionId: result.data.sourceRevisionId,
+      })
+      if (!revision.success || !revision.data) throw new Error(revision.error || '来源原文已经不存在')
+      const card = result.data.craftCards.find((item) => item.id === sourceRef.craftCardId)
+      if (!card) throw new Error('来源分析中的写作技法已经不存在')
+      setEvidenceView({
+        title: `${method.name} · 原文证据`,
+        evidence: card.evidence,
+        sourceWorkId: revision.data.work_id,
+        sourceRevisionId: result.data.sourceRevisionId,
+      })
+    } catch (error) {
+      appMessage.error((error as Error).message)
+    } finally {
+      setEvidenceLoading(false)
+    }
+  }, [appMessage])
+
+  const locateMethodEvidence = React.useCallback((target: NovelSourceEvidenceTarget) => {
+    if (!evidenceView) return
+    navigate(`/novel-sources/${encodeURIComponent(evidenceView.sourceWorkId)}`, {
+      state: { sourceEvidenceTarget: target },
+    })
+  }, [evidenceView, navigate])
+
+  const deleteMethod = React.useCallback(async (method: WritingMethod) => {
+    const decision = await confirm({
+      title: `删除写作方法“${method.name}”？`,
+      content: '删除后将同时移除草稿和未被引用的已发布版本，且无法恢复。已被方案或作品引用的方法会被系统保护。',
+      confirmText: '确认删除',
+      confirmVariant: 'danger',
+    })
+    if (decision !== 'confirm') return
+    setDeletingKey(`method:${method.id}`)
+    try {
+      const result = await services.writingMethods.deleteMethod({ methodId: method.id })
+      if (!result.success) throw new Error(result.error || '删除失败')
+      setSelectedMethod((current) => current?.id === method.id ? null : current)
+      await reload()
+      appMessage.success('写作方法已删除')
+    } catch (error) {
+      appMessage.error((error as Error).message)
+    } finally {
+      setDeletingKey('')
+    }
+  }, [appMessage, confirm, reload])
+
+  const deleteScheme = React.useCallback(async (scheme: WritingScheme) => {
+    const decision = await confirm({
+      title: `删除写作方案“${scheme.name}”？`,
+      content: '删除后将同时移除方案草稿和未被作品引用的已发布版本，且无法恢复。已被作品引用的方案会被系统保护。',
+      confirmText: '确认删除',
+      confirmVariant: 'danger',
+    })
+    if (decision !== 'confirm') return
+    setDeletingKey(`scheme:${scheme.id}`)
+    try {
+      const result = await services.writingMethods.deleteScheme({ schemeId: scheme.id })
+      if (!result.success) throw new Error(result.error || '删除失败')
+      setSelectedScheme((current) => current?.id === scheme.id ? null : current)
+      await reload()
+      appMessage.success('写作方案已删除')
+    } catch (error) {
+      appMessage.error((error as Error).message)
+    } finally {
+      setDeletingKey('')
+    }
+  }, [appMessage, confirm, reload])
+
+  const batchSelectableIds = React.useMemo(() => (
+    tab === 'methods'
+      ? methods.filter((method) => !method.is_builtin).map((method) => method.id)
+      : schemes.filter((scheme) => !scheme.is_builtin).map((scheme) => scheme.id)
+  ), [methods, schemes, tab])
+  const selectedBatchIds = batchSelection.filter((id) => batchSelectableIds.includes(id))
+  const allBatchSelected = batchSelectableIds.length > 0 && selectedBatchIds.length === batchSelectableIds.length
+
+  const selectTab = (nextTab: LibraryTab) => {
+    setTab(nextTab)
+    setBatchSelection([])
+  }
+
+  const toggleBatchItem = (id: string) => {
+    setBatchSelection((current) => current.includes(id)
+      ? current.filter((item) => item !== id)
+      : [...current, id])
+  }
+
+  const publishBatch = async () => {
+    if (!selectedBatchIds.length) return
+    const candidateSchemes = tab === 'schemes'
+      ? schemes.filter((scheme) => selectedBatchIds.includes(scheme.id)
+        && scheme.source_type === 'analysis_candidate'
+        && !scheme.current_published_revision_id)
+      : []
+    if (candidateSchemes.length) return appMessage.info('来源分析候选方案需要进入详情逐项审核后发布')
+    const decision = await confirm({
+      title: `批量发布 ${selectedBatchIds.length} 项？`,
+      content: '系统会根据每项当前草稿生成新的不可变版本；任意一项失败时，本批次不会产生任何版本。',
+      confirmText: '确认发布',
+    })
+    if (decision !== 'confirm') return
+    setBatchWorking('publish')
+    try {
+      const result = await services.writingMethods.publishBatch({
+        methodIds: tab === 'methods' ? selectedBatchIds : [],
+        schemeIds: tab === 'schemes' ? selectedBatchIds : [],
+      })
+      if (!result.success) throw new Error(result.error || '批量发布失败')
+      setBatchSelection([])
+      await reload()
+      appMessage.success(`已发布 ${selectedBatchIds.length} 项`)
+    } catch (error) {
+      appMessage.error((error as Error).message)
+    } finally {
+      setBatchWorking('')
+    }
+  }
+
+  const deleteBatch = async () => {
+    if (!selectedBatchIds.length) return
+    const decision = await confirm({
+      title: `批量删除 ${selectedBatchIds.length} 项？`,
+      content: '删除后无法恢复。已被方案或作品引用的项目会被系统保留，因此本次操作可能部分成功。',
+      confirmText: '确认删除',
+      confirmVariant: 'danger',
+    })
+    if (decision !== 'confirm') return
+    setBatchWorking('delete')
+    const items = tab === 'methods'
+      ? methods.filter((method) => selectedBatchIds.includes(method.id)).map((method) => ({ id: method.id, name: method.name }))
+      : schemes.filter((scheme) => selectedBatchIds.includes(scheme.id)).map((scheme) => ({ id: scheme.id, name: scheme.name }))
+    const results = await Promise.all(items.map(async (item) => {
+      try {
+        const result = tab === 'methods'
+          ? await services.writingMethods.deleteMethod({ methodId: item.id })
+          : await services.writingMethods.deleteScheme({ schemeId: item.id })
+        return { ...item, success: result.success, error: result.error }
+      } catch (error) {
+        return { ...item, success: false, error: (error as Error).message }
+      }
+    }))
+    const deleted = results.filter((result) => result.success)
+    const failed = results.filter((result) => !result.success)
+    setBatchSelection(failed.map((result) => result.id))
+    if (deleted.length) await reload()
+    if (failed.length) {
+      appMessage.error(`已删除 ${deleted.length} 项，${failed.length} 项失败：${failed.slice(0, 2).map((item) => item.name).join('、')}`)
+    } else {
+      appMessage.success(`已删除 ${deleted.length} 项`)
+    }
+    setBatchWorking('')
+  }
 
   const createMethod = async () => {
     const name = createMethodName.trim()
@@ -139,6 +349,10 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
             <p>草稿自动保存；只有主动发布才生成不可变版本。</p>
           </div>
           <div className="writing-methods-header-actions">
+            <PurrButton onClick={() => {
+              setBatchMode((current) => !current)
+              setBatchSelection([])
+            }}>{batchMode ? '完成批量管理' : '批量管理'}</PurrButton>
             {tab === 'methods' ? (
               <PurrButton type="primary" icon={<PlusIcon />} onClick={() => { setCreateMethodMode('guided'); setCreateMethodOpen(true) }}>新建写作方法</PurrButton>
             ) : (
@@ -147,18 +361,50 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
           </div>
         </div>
         <nav className="writing-methods-tabs" aria-label="写作方法库分类">
-          <button className={tab === 'methods' ? 'active' : ''} onClick={() => setTab('methods')}>写作方法</button>
-          <button className={tab === 'schemes' ? 'active' : ''} onClick={() => setTab('schemes')}>写作方案</button>
+          <button className={tab === 'methods' ? 'active' : ''} onClick={() => selectTab('methods')}>写作方法</button>
+          <button className={tab === 'schemes' ? 'active' : ''} onClick={() => selectTab('schemes')}>写作方案</button>
         </nav>
+        {batchMode ? <div className="writing-methods-batch-toolbar">
+          <PurrCheckbox
+            checked={allBatchSelected}
+            indeterminate={selectedBatchIds.length > 0 && !allBatchSelected}
+            disabled={!batchSelectableIds.length || Boolean(batchWorking)}
+            onChange={(event) => setBatchSelection(event.target.checked ? batchSelectableIds : [])}
+          >已选择 {selectedBatchIds.length} / {batchSelectableIds.length}</PurrCheckbox>
+          <div>
+            <PurrButton disabled={!selectedBatchIds.length || Boolean(batchWorking)} loading={batchWorking === 'publish'} onClick={() => void publishBatch()}>批量发布</PurrButton>
+            <PurrButton danger disabled={!selectedBatchIds.length || Boolean(batchWorking)} loading={batchWorking === 'delete'} onClick={() => void deleteBatch()}>批量删除</PurrButton>
+          </div>
+        </div> : null}
         {loading ? <div className="writing-methods-loading"><PurrSpin /></div> : (
           <div className="writing-library-stage">
             {tab === 'methods' ? <>
               <section className="writing-method-card-grid" aria-label="写作方法">
-                {methods.map((method) => <MethodCard key={method.id} method={method} active={selectedMethod?.id === method.id} onClick={() => void openMethod(method.id)} />)}
+                {methods.map((method) => <MethodCard
+                  key={method.id}
+                  method={method}
+                  active={selectedMethod?.id === method.id}
+                  deleting={deletingKey === `method:${method.id}`}
+                  batchMode={batchMode}
+                  selected={batchSelection.includes(method.id)}
+                  onClick={() => void openMethod(method.id)}
+                  onDelete={() => void deleteMethod(method)}
+                  onSelect={() => toggleBatchItem(method.id)}
+                />)}
               </section>
             </> : <>
               <section className="writing-scheme-card-grid" aria-label="写作方案">
-                {schemes.map((scheme) => <SchemeCard key={scheme.id} scheme={scheme} active={selectedScheme?.id === scheme.id} onClick={() => void openScheme(scheme.id)} />)}
+                {schemes.map((scheme) => <SchemeCard
+                  key={scheme.id}
+                  scheme={scheme}
+                  active={selectedScheme?.id === scheme.id}
+                  deleting={deletingKey === `scheme:${scheme.id}`}
+                  batchMode={batchMode}
+                  selected={batchSelection.includes(scheme.id)}
+                  onClick={() => void openScheme(scheme.id)}
+                  onDelete={() => void deleteScheme(scheme)}
+                  onSelect={() => toggleBatchItem(scheme.id)}
+                />)}
               </section>
             </>}
           </div>
@@ -232,7 +478,10 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
           method={selectedMethod}
           onChange={setSelectedMethod}
           onReload={async () => { await reload(); await openMethod(selectedMethod.id) }}
-          onDeleted={async () => { setSelectedMethod(null); await reload() }}
+          deleting={deletingKey === `method:${selectedMethod.id}`}
+          evidenceLoading={evidenceLoading}
+          onViewEvidence={() => void openMethodEvidence(selectedMethod)}
+          onDelete={() => void deleteMethod(selectedMethod)}
         /> : null}
       </PurrModal>
       <PurrModal
@@ -250,40 +499,80 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
           methods={methods}
           onChange={setSelectedScheme}
           onReload={async () => { await reload(); await openScheme(selectedScheme.id) }}
-          onDeleted={async () => { setSelectedScheme(null); await reload() }}
+          deleting={deletingKey === `scheme:${selectedScheme.id}`}
+          onDelete={() => void deleteScheme(selectedScheme)}
         /></> : null}
       </PurrModal>
+      <NovelAnalysisEvidenceModal
+        open={Boolean(evidenceView)}
+        title={evidenceView?.title ?? '原文证据'}
+        evidence={evidenceView?.evidence ?? []}
+        sourceRevisionId={evidenceView?.sourceRevisionId}
+        onClose={() => setEvidenceView(null)}
+        onLocate={locateMethodEvidence}
+      />
     </div>
   )
 }
 
-function MethodCard({ method, active, onClick }: { method: WritingMethod; active: boolean; onClick(): void }) {
+function MethodCard({ method, active, deleting, batchMode, selected, onClick, onDelete, onSelect }: {
+  method: WritingMethod
+  active: boolean
+  deleting: boolean
+  batchMode: boolean
+  selected: boolean
+  onClick(): void
+  onDelete(): void
+  onSelect(): void
+}) {
   const latest = method.revisions?.[0]
   const versionLabel = latest ? `v${latest.version_no}` : method.current_published_revision_id ? '已发布' : '仅草稿'
-  return <button className={`writing-method-card ${method.method_type}${active ? ' active' : ''}`} onClick={onClick}>
-    <div><span className="writing-card-kind-text">{method.method_type === 'primary' ? '主风格' : '专项技法'}</span><span className={method.current_published_revision_id ? 'writing-card-status published' : 'writing-card-status'}>{method.current_published_revision_id ? '已发布' : '草稿'}</span></div>
-    <strong>{method.name}</strong>
-    <footer><span>{method.is_builtin ? '内置 · 只读' : method.source_type === 'copy' ? '我的副本' : '我的方法'}</span><span>{versionLabel}</span></footer>
-  </button>
+  const selectable = !method.is_builtin
+  return <article className={`writing-library-card-shell${selected ? ' is-selected' : ''}${batchMode && !selectable ? ' is-batch-disabled' : ''}`}>
+    <button className={`writing-method-card ${method.method_type}${active ? ' active' : ''}`} aria-pressed={batchMode && selectable ? selected : undefined} onClick={batchMode ? (selectable ? onSelect : undefined) : onClick}>
+      <div><span className="writing-card-kind-text">{method.method_type === 'primary' ? '主风格' : '专项技法'}</span><span className={method.current_published_revision_id ? 'writing-card-status published' : 'writing-card-status'}>{method.current_published_revision_id ? '已发布' : '草稿'}</span></div>
+      <strong>{method.name}</strong>
+      <footer><span>{method.is_builtin ? '内置 · 只读' : method.source_type === 'copy' ? '我的副本' : '我的方法'}</span><span>{versionLabel}</span></footer>
+    </button>
+    {batchMode && selectable ? <PurrCheckbox className="writing-library-card-select" checked={selected} onChange={onSelect}>选择写作方法：{method.name}</PurrCheckbox> : null}
+    {!batchMode && selectable ? <div className="writing-library-card-actions"><PurrTooltip title="删除写作方法"><button type="button" className="writing-library-card-action danger" disabled={deleting} aria-label={`删除写作方法：${method.name}`} onClick={onDelete}><DeleteIcon /></button></PurrTooltip></div> : null}
+  </article>
 }
 
-function SchemeCard({ scheme, active, onClick }: { scheme: WritingScheme; active: boolean; onClick(): void }) {
+function SchemeCard({ scheme, active, deleting, batchMode, selected, onClick, onDelete, onSelect }: {
+  scheme: WritingScheme
+  active: boolean
+  deleting: boolean
+  batchMode: boolean
+  selected: boolean
+  onClick(): void
+  onDelete(): void
+  onSelect(): void
+}) {
   const latest = scheme.revisions?.[0]
   const memberCount = latest?.members.length ?? scheme.draft_member_revision_ids.length
   const versionLabel = latest ? `v${latest.version_no}` : scheme.current_published_revision_id ? '已发布' : '仅草稿'
-  return <button className={`writing-scheme-card${active ? ' active' : ''}`} onClick={onClick}>
-    <div><span className="writing-card-kind-text">{memberCount} 个准确方法版本</span><span className={scheme.current_published_revision_id ? 'writing-card-status published' : 'writing-card-status'}>{scheme.current_published_revision_id ? '已发布' : '草稿'}</span></div>
-    <strong>{scheme.name}</strong>
-    <div className="writing-scheme-card-members">{latest?.members.slice(0, 2).map((member) => <span key={member.method_revision_id}>{member.name} v{member.version_no}</span>)}{memberCount > 2 ? <span>＋{memberCount - 2}</span> : null}{!latest?.members.length ? <span>{memberCount ? `${memberCount} 个版本 · 点击查看` : '尚未添加方法版本'}</span> : null}</div>
-    <footer><span>{scheme.is_builtin ? '内置 · 只读' : '我的方案'}</span><span>{versionLabel}</span></footer>
-  </button>
+  const selectable = !scheme.is_builtin
+  return <article className={`writing-library-card-shell${selected ? ' is-selected' : ''}${batchMode && !selectable ? ' is-batch-disabled' : ''}`}>
+    <button className={`writing-scheme-card${active ? ' active' : ''}`} aria-pressed={batchMode && selectable ? selected : undefined} onClick={batchMode ? (selectable ? onSelect : undefined) : onClick}>
+      <div><span className="writing-card-kind-text">{memberCount} 个准确方法版本</span><span className={scheme.current_published_revision_id ? 'writing-card-status published' : 'writing-card-status'}>{scheme.current_published_revision_id ? '已发布' : '草稿'}</span></div>
+      <strong>{scheme.name}</strong>
+      <div className="writing-scheme-card-members">{latest?.members.slice(0, 2).map((member) => <span key={member.method_revision_id}>{member.name} v{member.version_no}</span>)}{memberCount > 2 ? <span>＋{memberCount - 2}</span> : null}{!latest?.members.length ? <span>{memberCount ? `${memberCount} 个版本 · 点击查看` : '尚未添加方法版本'}</span> : null}</div>
+      <footer><span>{scheme.is_builtin ? '内置 · 只读' : '我的方案'}</span><span>{versionLabel}</span></footer>
+    </button>
+    {batchMode && selectable ? <PurrCheckbox className="writing-library-card-select" checked={selected} onChange={onSelect}>选择写作方案：{scheme.name}</PurrCheckbox> : null}
+    {!batchMode && selectable ? <div className="writing-library-card-actions"><PurrTooltip title="删除写作方案"><button type="button" className="writing-library-card-action danger" disabled={deleting} aria-label={`删除写作方案：${scheme.name}`} onClick={onDelete}><DeleteIcon /></button></PurrTooltip></div> : null}
+  </article>
 }
 
-function MethodEditor({ method, onChange, onReload, onDeleted }: {
+function MethodEditor({ method, deleting, evidenceLoading, onChange, onReload, onViewEvidence, onDelete }: {
   method: WritingMethod
+  deleting: boolean
+  evidenceLoading: boolean
   onChange: (method: WritingMethod) => void
   onReload: () => Promise<void>
-  onDeleted: () => Promise<void>
+  onViewEvidence: () => void
+  onDelete: () => void
 }) {
   const appMessage = usePurrToast()
   const [name, setName] = React.useState(method.name)
@@ -331,39 +620,37 @@ function MethodEditor({ method, onChange, onReload, onDeleted }: {
     await onReload()
   }
 
-  const remove = async () => {
-    if (!window.confirm('删除这个写作方法草稿？已发布且被引用的方法不能删除。')) return
-    const result = await services.writingMethods.deleteMethod({ methodId: method.id })
-    if (!result.success) return appMessage.error(result.error || '删除失败')
-    await onDeleted()
-  }
-
   return <div className="writing-method-editor">
     <div className="writing-method-editor-meta">
       <input value={name} disabled={!!method.is_builtin} onChange={(e) => setName(e.target.value)} aria-label="方法名称" />
       <PurrSelect<WritingMethodType> value={methodType} disabled={!!method.is_builtin} options={[{ value: 'primary', label: '主风格' }, { value: 'technique', label: '专项技法' }]} onChange={setMethodType} />
       <span>{saving ? '保存中…' : dirty ? '待保存' : `草稿 r${method.draft_revision}`}</span>
     </div>
-    {method.source_type === 'analysis_candidate' ? <p>来源分析候选 · 原文证据只保存在来源分析档案</p> : null}
+    {analysisSourceRef(method) ? <div className="writing-method-evidence-ref">
+      <span>来源分析提炼 · 证据保存在来源分析档案</span>
+      <PurrButton type="text" size="small" loading={evidenceLoading} onClick={onViewEvidence}>查看原文证据</PurrButton>
+    </div> : null}
     <input className="writing-method-description" value={description} disabled={!!method.is_builtin} onChange={(e) => setDescription(e.target.value)} placeholder="简短说明" />
     <textarea value={markdown} disabled={!!method.is_builtin} onChange={(e) => setMarkdown(e.target.value)} placeholder="自由 Markdown 正文" />
     <div className="writing-method-editor-actions">
       <PurrButton icon={<CopyIcon />} onClick={() => void copy()}>复制</PurrButton>
       {!method.is_builtin ? <PurrButton type="primary" disabled={!markdown.trim() || dirty || saving} onClick={() => void publish()}>主动发布</PurrButton> : null}
-      {!method.is_builtin ? <PurrButton type="text" onClick={() => void remove()}>删除</PurrButton> : null}
+      {!method.is_builtin ? <PurrButton type="text" danger loading={deleting} onClick={onDelete}>删除</PurrButton> : null}
     </div>
     <VersionHistory revisions={method.revisions ?? []} />
   </div>
 }
 
-function SchemeEditor({ scheme, methods, onChange, onReload, onDeleted }: {
+function SchemeEditor({ scheme, methods, deleting, onChange, onReload, onDelete }: {
   scheme: WritingScheme
   methods: WritingMethod[]
+  deleting: boolean
   onChange: (scheme: WritingScheme) => void
   onReload: () => Promise<void>
-  onDeleted: () => Promise<void>
+  onDelete: () => void
 }) {
   const appMessage = usePurrToast()
+  const confirm = usePurrConfirm()
   const [name, setName] = React.useState(scheme.name)
   const [description, setDescription] = React.useState(scheme.description)
   const [members, setMembers] = React.useState(scheme.draft_member_revision_ids)
@@ -409,7 +696,12 @@ function SchemeEditor({ scheme, methods, onChange, onReload, onDeleted }: {
 
   const publishCandidates = async () => {
     if (dirty) return appMessage.info('请等待方案草稿保存完成')
-    if (!window.confirm(`一次发布 ${candidateSelection.length} 个候选方法及完整方案？发布后仍不会绑定任何作品。`)) return
+    const decision = await confirm({
+      title: `发布 ${candidateSelection.length} 个候选方法？`,
+      content: '系统会同时生成完整方案，但不会自动绑定任何作品。',
+      confirmText: '确认发布',
+    })
+    if (decision !== 'confirm') return
     const result = await services.writingMethods.publishCandidateBatch({
       schemeId: scheme.id,
       methodIds: candidateSelection,
@@ -417,13 +709,6 @@ function SchemeEditor({ scheme, methods, onChange, onReload, onDeleted }: {
     if (!result.success) return appMessage.error(result.error || '候选方案原子发布失败')
     appMessage.success('候选方法和方案已发布；尚未绑定任何作品')
     await onReload()
-  }
-
-  const remove = async () => {
-    if (!window.confirm('删除这个写作方案草稿？已发布且被作品引用的方案不能删除。')) return
-    const result = await services.writingMethods.deleteScheme({ schemeId: scheme.id })
-    if (!result.success) return appMessage.error(result.error || '删除失败')
-    await onDeleted()
   }
 
   return <div className="writing-method-editor">
@@ -458,7 +743,7 @@ function SchemeEditor({ scheme, methods, onChange, onReload, onDeleted }: {
       <PurrButton icon={<CopyIcon />} onClick={() => void copy()}>复制</PurrButton>
       {!scheme.is_builtin && candidateMethodIds.length ? <PurrButton type="primary" disabled={!candidateSelection.length || dirty} onClick={() => void publishCandidates()}>确认并原子发布候选</PurrButton> : null}
       {!scheme.is_builtin && !candidateMethodIds.length ? <PurrButton type="primary" disabled={!members.length || dirty} onClick={() => void publish()}>主动发布方案</PurrButton> : null}
-      {!scheme.is_builtin ? <PurrButton type="text" onClick={() => void remove()}>删除</PurrButton> : null}
+      {!scheme.is_builtin ? <PurrButton type="text" danger loading={deleting} onClick={onDelete}>删除</PurrButton> : null}
     </div>
     <div className="writing-method-versions">
       <h3>已发布版本</h3>

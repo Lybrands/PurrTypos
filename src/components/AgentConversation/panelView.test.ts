@@ -17,6 +17,20 @@ test('panel shows queue mode and hides a terminal task capsule', () => {
   assert.equal(view.showTaskProgress, false)
 })
 
+test('panel hides an active task capsule until the planner provides visible steps', () => {
+  const view = buildAgentConversationPanelView({
+    running: true,
+    queuedCount: 0,
+    taskPlan: { title: '正在规划', status: 'running', steps: [] },
+    submitMode: 'send',
+    selectedModel: { id: 'configured' },
+    inputDisabled: true,
+    resuming: false,
+  })
+
+  assert.equal(view.showTaskProgress, false)
+})
+
 test('panel keeps sequential and parallel task labels in the shared selector', () => {
   const sequential = buildAgentConversationPanelView({
     running: true,

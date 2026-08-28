@@ -819,7 +819,7 @@ function persistedTimestamp(value: string | null | undefined, fallback: number):
 }
 
 function persistedDebugRunId(runId: string): string {
-  return `screenplay-${runId}`;
+  return `persisted-${runId}`;
 }
 
 /** Rebuild a debug entry from the canonical persisted Run event stream. */
@@ -995,7 +995,7 @@ export function recordScreenplayAiDebugChunk(data: {
 }): void {
   if (!DEBUG_STORE_ENABLED) return;
   const existing = state.runs.find((run) => run.agentRunId === data.runId);
-  const streamId = existing?.id ?? persistedDebugRunId(data.runId);
+  const streamId = existing?.id ?? `screenplay-${data.runId}`;
   if (!existing) {
     startAiDebugRun(streamId, {
       streamId,

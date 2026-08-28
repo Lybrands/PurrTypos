@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.writing.prompts import (
     build_writing_agent_policy,
     frame_untrusted_writing_context,
@@ -19,13 +20,15 @@ EXPECTED_WRITING_AGENT_POLICY = (
     "- 证据不足以安全继续时向用户澄清；完成用户目标后立即停止，不要额外扩写。\n"
     "- 正文改动只能形成候选稿或待应用结果；未经用户确认和现有应用流程，"
     "不得覆盖正式正文。\n"
-    "- 只公开简短、可验证的 commentary 进度说明；不得输出私有 reasoning、"
-    "chain-of-thought 或隐藏推理。"
 )
 
 
 def test_writing_agent_policy_defines_the_complete_dynamic_planning_contract():
-    assert build_writing_agent_policy() == EXPECTED_WRITING_AGENT_POLICY
+    assert build_writing_agent_policy() == (
+        EXPECTED_WRITING_AGENT_POLICY + build_agent_public_progress_policy()
+    )
+    assert "面向用户的状态标题" in build_writing_agent_policy()
+    assert "不得包含 Run、Task、Turn" in build_writing_agent_policy()
 
 
 def test_writing_agent_policy_does_not_embed_untrusted_user_or_story_material():

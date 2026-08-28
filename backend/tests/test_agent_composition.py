@@ -357,7 +357,10 @@ async def test_product_composition_registers_product_profiles(
         assert core._planner._result_validator is not None
         assert core._planner._limits.max_repair_attempts == 3
         novel_core = composition.create_core("key", agent_profile="novel_analysis")
-        assert type(novel_core._planner).__name__ == "_NovelAnalysisPlanner"
+        assert type(novel_core._planner).__name__ == "AgentPlanner"
+        assert novel_core._planner._result_validator is not None
+        assert novel_core._planner._limits.max_steps == 4
+        assert novel_core._planner._limits.max_tool_steps == 0
     finally:
         await composition.shutdown()
 

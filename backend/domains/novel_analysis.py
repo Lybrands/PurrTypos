@@ -24,6 +24,8 @@ class NovelAnalysisDomainContext:
     source_revision_id: str
     command_id: str
     section_ids: tuple[str, ...] = ()
+    interaction_kind: str = "analysis"
+    analysis_artifact_ref: str | None = None
     schema_version: int = NOVEL_ANALYSIS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -32,6 +34,8 @@ class NovelAnalysisDomainContext:
         section_ids = tuple(
             str(value or "").strip() for value in self.section_ids
         )
+        interaction_kind = str(self.interaction_kind or "analysis").strip()
+        artifact_ref = str(self.analysis_artifact_ref or "").strip() or None
         if not revision_id or not command_id:
             raise ValueError("novel analysis revision and command are required")
         if any(not value for value in section_ids):
@@ -40,9 +44,15 @@ class NovelAnalysisDomainContext:
             raise ValueError("novel analysis section ids must be unique")
         if int(self.schema_version) != NOVEL_ANALYSIS_SCHEMA_VERSION:
             raise ValueError("unsupported novel analysis schema version")
+        if interaction_kind not in {"analysis", "follow_up"}:
+            raise ValueError("unsupported novel analysis interaction kind")
+        if interaction_kind == "follow_up" and artifact_ref is None:
+            raise ValueError("novel analysis follow-up requires an Artifact")
         object.__setattr__(self, "source_revision_id", revision_id)
         object.__setattr__(self, "command_id", command_id)
         object.__setattr__(self, "section_ids", section_ids)
+        object.__setattr__(self, "interaction_kind", interaction_kind)
+        object.__setattr__(self, "analysis_artifact_ref", artifact_ref)
         object.__setattr__(self, "schema_version", int(self.schema_version))
 
     def to_core_context(self) -> DomainContext:
@@ -52,6 +62,8 @@ class NovelAnalysisDomainContext:
                 "sourceRevisionId": self.source_revision_id,
                 "commandId": self.command_id,
                 "sectionIds": list(self.section_ids),
+                "interactionKind": self.interaction_kind,
+                "analysisArtifactRef": self.analysis_artifact_ref,
                 "analysisSchemaVersion": self.schema_version,
             },
         )
@@ -68,6 +80,10 @@ class NovelAnalysisDomainContext:
             source_revision_id=str(payload.get("sourceRevisionId") or ""),
             command_id=str(payload.get("commandId") or ""),
             section_ids=tuple(section_ids),
+            interaction_kind=str(payload.get("interactionKind") or "analysis"),
+            analysis_artifact_ref=(
+                str(payload.get("analysisArtifactRef") or "").strip() or None
+            ),
             schema_version=int(
                 payload.get("analysisSchemaVersion")
                 or NOVEL_ANALYSIS_SCHEMA_VERSION

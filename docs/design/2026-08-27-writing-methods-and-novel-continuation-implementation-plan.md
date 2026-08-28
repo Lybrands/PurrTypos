@@ -459,9 +459,9 @@ enabled tool 集，返回目录元数据而不返回 Markdown，也没有任何�
 - [x] 在确认页显示来源大小、数据发送边界和使用权提示；不默认创建后续 revision。
 - [x] 实现从现有作品的事务内冻结。
 - [x] 实现来源列表、revision/section 只读 API、FTS 搜索和 LIKE fallback。
-- [x] 增加来源归档和删除保护；已有 continuation binding 引用的 revision 不可删除。
+- [x] 增加来源归档和删除语义；被 continuation binding 引用的单个 revision 不可独立删除，整部来源经风险确认后可硬删除。
 - [x] 来源库主页只保留类型筛选和来源操作；来源版本、分析与创建续写进入独立详情步骤。
-- [x] 支持删除整部未引用来源；已进入分析或续写证据链的来源拒绝删除。
+- [x] 支持二次确认后硬删除整部来源；同步删除正文、revision、分析档案和专属运行态，保留续写的冻结正史快照与绑定。
 
 实施门禁：新增独立 continuation/source schema，历史书籍幂等回填
 `creation_mode='original'`；确定性标题解析保留单节人工确认回退。预览只计算
@@ -470,6 +470,15 @@ enabled tool 集，返回目录元数据而不返回 Markdown，也没有任何�
 字节数和 UTF-8 正文，未改变旧 `openAndReadTextFile`。来源相关及数据库/生命周期/
 边界测试 63 个、Electron picker 2 个通过，`npm run typecheck` 和
 `git diff --check` 通过；未加入 EPUB、Obsidian 或向量库。
+
+2026-08-27 删除语义按产品确认调整：整部来源不再因已有正式分析、Agent Run 或
+续写绑定而永久锁死。危险确认会声明正文、冻结版本、分析结果和原文证据不可恢复；
+删除事务先终止该来源的分析运行，再清理 LongTask、Artifact、正式分析和来源正文。
+既有续写作品、binding、canon snapshot/records 保留，Writing 仍可使用冻结硬事实，
+但来源名称会标记为“已删除来源”，且原作片段读取返回不存在。单个被引用 revision
+仍禁止脱离整部来源单独删除，避免产生不明确的局部删除语义。调整后来源/分析/续写
+focused 后端 30 个、完整后端 1708 个、前端 unit 403 个、Agent 边界 53 个通过，
+`npm run typecheck` 与 `git diff --check` 通过。
 
 门禁：重复导入幂等策略明确；来源 section 不可经任何 Writing API 修改；删除原始书不影响已冻结来源；未确认前不向模型发送来源正文。
 
@@ -480,6 +489,16 @@ enabled tool 集，返回目录元数据而不返回 Markdown，也没有任何�
 - [x] 实现逐章提取、跨章归一、聚合、证据存在性校验和覆盖率报告。
 - [x] 实现审核/纠正工作流和正式分析 revision 原子发布。
 - [x] 验证暂停、恢复、取消、重试和应用重启后的任务一致性。
+- [x] 来源分析面板复用共享 Composer：首次输入作为分析重点，结果生成后可基于当前分析与证据继续追问。
+- [x] 按来源 revision 仲裁唯一未结束 Durable Task，当前暂停任务优先于更新但失败的 Run，避免 `durable_task_scope_conflict` 被 UI 遮蔽后重复启动。
+- [x] 改为受宿主约束的模型 Planner：模型制定 1–4 个语义分析步骤，宿主校验后冻结安全 Recipe、来源范围与证据边界。
+- [x] 将来源分析的持久化 Run 事件接入现有开发诊断面板，并在 Planner 尚未产生步骤时隐藏空任务胶囊。
+- [x] 使用 PurrA 正式 JSON 解冻接口恢复冻结的分析计划，保证逐章模型请求和分析列表读模型均可序列化。
+- [x] 将来源分析 Run 的创建/更新时间投影为共享对话消息计时，运行中持续累计，终态冻结实际耗时。
+- [x] 将“快速分析”提升为来源详情页主操作并移出 Composer，不再暴露暂停按钮。
+- [x] 删除“正在分析来源章节”这类宿主拼接的 Assistant 占位文案，只保留计划状态和真实模型输出。
+- [x] 将来源分析与追问接入公共 Agent 输出策略和 Run Snapshot 回放；页面不再自行编造进行中文案。
+- [x] 修正跨业务持久化 Run 被诊断面板误标为 `screenplay-*`；来源分析结构化调用采用 32K 工作流上限，为仅思考模型保留推理与完整 JSON 的共同预算，同时继续受模型 Profile 上限约束。
 
 实施门禁：独立 `novel_analysis` Profile 已注册到现有 Composition，仅暴露
 空的 Core 工具目录；实际来源读取通过宿主绑定的只读 section reader 完成，
@@ -512,6 +531,48 @@ LongTask 执行，不再为固定业务步骤额外调用一次模型。来源�
 `upstream_stream_interrupted`，分析模型 Unit 在剩余尝试次数内自动重试。相关 focused
 后端测试、401 个前端单测、TypeScript 类型检查和生产构建通过；Agent 边界代码测试
 52 个通过，完整边界命令仅因本机 PurrA 为相邻源码 editable 安装、不是正式外部分发包而失败。
+
+2026-08-27 后续数据库审计确认 `durable_task_scope_conflict` 不是模型错误：同一来源
+revision 仍保留 paused Durable Task，但旧读取模型只返回时间更新的失败 Run，页面因此
+误开放“开始分析”。修复后服务端在创建 Run 前按 revision 仲裁 active/paused Task，
+同一 command 幂等重放、不同 command 返回明确 409；读取模型优先返回未结束 Task。
+分析页不再隐藏共享 Composer，保留“快速分析”默认入口；首次自由输入会作为分析重点
+进入固定 Recipe，完成后可对当前 Artifact 及其中的原文证据进行普通 Agent 追问。
+追问只输出建议和解释，不会绕过审核自动改写或发布正式分析。当前正式安装的
+`purra==0.4.1` 下，来源/分析/续写 focused 后端 33 个、完整后端 1711 个、前端 unit
+403 个、Agent 边界 53 个通过，`npm run typecheck`、Python 编译检查和
+`git diff --check` 通过；未自动重放真实 Provider 分析，避免重复发送来源正文和产生费用。
+详情页使用单屏工作台布局，页面本身不滚动，长内容只在对话视口内滚动；重复的分析
+工具栏已删除；模型选择和停止沿用共享 Composer，“快速分析”与删除来源并列为页面操作，
+不再展示暂停入口，已暂停历史任务仍可通过既有恢复能力继续。
+
+2026-08-28 按产品复核将此前的确定性 Planner 调整为混合规划：PurrA 模型 Planner
+只负责生成 `analyze/review` 语义步骤和 TaskSpec，最多 4 步；Profile validator 禁止
+工具申请、来源 target 和写入操作，宿主继续按精确 section binding 编译并冻结
+extract → normalize → aggregate → validate → coverage → review Recipe。模型计划与
+TaskSpec 随 LongTask 元数据持久化，并作为受约束的分析策略进入逐章模型调用；页面
+按 `plannerStepId` 聚合底层 Unit 状态展示语义计划，旧任务回退显示协议进度。
+暂停/失败恢复通过 `DurableTaskContinuation` 复用原 Run 的冻结计划和 Recipe，不再次
+调用 Planner；恢复 Run 启动失败时任务回退到 paused，避免孤立的 running 状态。
+同时修正 `pending` Unit 被误标为 `running` 的前端映射，因此串行依赖不再显示成六步
+同时执行。来源分析/Composition focused 后端 17 个、完整后端 1713 个、完整前端
+unit 405 个、Agent 边界 53 个和 TypeScript 类型检查通过；真实 Provider 分析仍需在
+明确的数据发送确认后手动验证。
+
+2026-08-28 对最新失败 Run `run_17df59693d6f49c5` 的持久化证据复核确认：模型 Planner
+已成功生成 3 个语义步骤，首个逐章 Unit 在发起第二次模型调用前因嵌套
+`analysisPlan` 仍为 PurrA 冻结映射而触发 `TypeError`。宿主的执行器与列表读模型现均通过
+`thaw_json_mapping` 深度恢复正式 JSON 值，不再依赖顶层 `dict()` 浅拷贝；来源详情页
+同时轮询正式 Run Snapshot 并写入既有 DEV 诊断面板。共享对话视图只有存在真实计划
+步骤时才显示进度胶囊，规划阶段不再出现“执行中 · 0 个计划任务”。回归结果：来源分析
+focused 后端 17 个、任务视图 focused 前端 24 个、完整后端 1714 个、完整前端 unit
+406 个、Agent 边界 53 个和 TypeScript 类型检查通过；没有自动重发来源正文或重跑真实
+Provider 分析。
+
+来源分析消息现补齐共享 `AgentConversationMessage` 的 `turnStartedAt/durationMs`：运行中
+依据持久化 Run 创建时间恢复单调时钟起点，刷新页面后继续累计；暂停、失败、取消或完成
+后按 Run 创建/更新时间冻结耗时。未增加页面私有计时器。计时与共享时间线 focused 前端
+38 个、完整前端 unit 407 个及 TypeScript 类型检查通过。
 
 门禁：未完成 Artifact 不能发布；每个正式 fact/craft card 至少有一个合法来源证据；越界 section 和提示注入测试 fail closed。
 
@@ -583,6 +644,7 @@ digest、source revision 与 craft-card id/digest。技法卡的 evidence excerp
 - [x] 前端 unit tests 与 typecheck。
 - [x] 后端完整 pytest。
 - [x] Agent/PurrA 应用边界和持久化边界门禁。
+- [x] 将剧本 Agent 的公开步骤标题规则抽为产品中立公共策略，Writing、续写与 Novel Analysis 复用同一输入约束；小说历史恢复和来源分析统一通过共享 Run Snapshot 回放及 `agent-runtime` 输出呈现 API。
 - [ ] Web 实机：创建方法、发布方案、绑定、`/`、历史回放、来源导入、分析、快照、续写、重启恢复。（方法/方案/绑定/`/`/书架分区/重启已实机；外部模型分析后的链路因无配置模型与 Provider 凭据阻塞。）
 - [x] Electron 实机：TXT/Markdown 选择与同一业务 API 闭环。（文件夹与 ZIP 能力新增后由 IPC focused tests 覆盖，仍需补一次原生选择实机。）
 - [x] 导出/导入数据库后验证方法版本、来源 revision、快照和 Run binding 仍一致。
