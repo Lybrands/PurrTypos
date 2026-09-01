@@ -9,19 +9,21 @@ from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 from types import MappingProxyType
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
+
+from domains.writing.tools.contracts import ToolHandler, ToolResult
 
 if TYPE_CHECKING:
     from database.connection import DatabaseConnection
-    from domains.writing.tools.memory_repository import (
-        WritingToolMemoryRepository,
+    from application.memory_operations import MemoryApplicationService
+    from domains.writing.tools.source_repository import (
+        WritingSourceRepository,
     )
 
 
 logger = logging.getLogger(__name__)
 
 
-WritingToolHandler = Callable[[dict, dict, Callable[[dict], None] | None], Any]
 WritingToolOperation = Callable[
     [
         "WritingToolDependencies",
@@ -29,7 +31,7 @@ WritingToolOperation = Callable[
         dict,
         Callable[[dict], None] | None,
     ],
-    Awaitable[Any],
+    Awaitable[ToolResult],
 ]
 
 
@@ -38,7 +40,8 @@ class WritingToolDependencies:
     """Resources owned by one concrete Writing tool-catalog instance."""
 
     db: "DatabaseConnection"
-    memory: "WritingToolMemoryRepository"
+    sources: "WritingSourceRepository"
+    memories: "MemoryApplicationService"
 
 
 def bind_writing_tool_handlers(
@@ -46,7 +49,7 @@ def bind_writing_tool_handlers(
     dependencies: WritingToolDependencies,
     *,
     atomic_operation_names: frozenset[str] = frozenset(),
-) -> Mapping[str, WritingToolHandler]:
+) -> Mapping[str, ToolHandler]:
     """Return an immutable handler map bound to one dependency instance."""
 
     return MappingProxyType({
@@ -112,14 +115,14 @@ async def _run_atomically(
 
 
 class _AtomicOperationFailed(Exception):
-    def __init__(self, result: Any):
+    def __init__(self, result: ToolResult):
         super().__init__("Writing tool operation returned an error result")
         self.result = result
 
 
-def _tool_result_has_error(result: Any) -> bool:
+def _tool_result_has_error(result: ToolResult) -> bool:
     try:
-        payload = json.loads(str(getattr(result, "content", "") or ""))
+        payload = json.loads(result.content)
     except (TypeError, json.JSONDecodeError):
         return False
     return (
@@ -137,7 +140,6 @@ def _restore_context(ctx: dict, snapshot: dict) -> None:
 
 __all__ = [
     "WritingToolDependencies",
-    "WritingToolHandler",
     "WritingToolOperation",
     "bind_writing_tool_handlers",
 ]

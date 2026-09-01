@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 
+from purra.cancellation import OperationCanceled
 from purra.context_budget import allocate_context_budget
 from purra.contracts import (
     AgentMessage,
@@ -11,11 +13,14 @@ from purra.contracts import (
     TaskSpec,
 )
 from domains.writing.context import (
+    EmptyWritingContextSource,
     WRITING_RETRIEVAL_CONTEXT,
     WritingContextProvider,
     writing_context_claims,
 )
 from domains.writing.contracts import WritingDomainContext
+from application.writing_context_source import RepositoryWritingContextSource
+from domains.writing.memory_context import MemoryContextBlock
 
 
 def _request() -> AgentRunRequest:
@@ -41,30 +46,25 @@ def _request() -> AgentRunRequest:
 
 @pytest.mark.asyncio
 async def test_task_context_recall_uses_task_spec_and_required_blocks():
-    class _Source:
+    class _Source(EmptyWritingContextSource):
         def __init__(self) -> None:
             self.calls: list[tuple[str | None, str | None, str]] = []
 
-        async def build_memory_for_task(
+        async def build_memory(
             self,
             context,
             request,
             token_budget,
+            *,
             query,
-            task,
+            task=None,
             signal=None,
         ):
-            del request, token_budget, task, signal
+            assert task is not None
             self.calls.append((context.book_id, context.chapter_id, query))
-            return ""
-
-        async def build_memory(self, context, request, token_budget):
-            del context, request, token_budget
-            raise AssertionError("latest user text must not drive task recall")
-
-        async def build_associated(self, context, request, token_budget):
-            del context, request, token_budget
-            return ""
+            return await super().build_memory(
+                context, request, token_budget, query=query, task=task, signal=signal,
+            )
 
     request = _request()
     budget = allocate_context_budget(
@@ -105,3 +105,48 @@ async def test_task_context_recall_uses_task_spec_and_required_blocks():
     assert "book-evil" not in query
     assert "chapter-evil" not in query
     assert bundle.diagnostics["recallQuerySource"] == "taskSpec"
+
+
+@pytest.mark.parametrize("old_value", ["receiptless text", MemoryContextBlock(text="old block")])
+async def test_context_rejects_old_memory_result_formats(old_value):
+    class _Source(EmptyWritingContextSource):
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            return old_value
+
+    request = _request()
+    budget = allocate_context_budget(
+        window_tokens=request.context_window,
+        output_reserve_tokens=8_192,
+        claims=writing_context_claims(request),
+    )
+    with pytest.raises(TypeError, match="MemoryContextPack"):
+        await WritingContextProvider(_Source()).build_context(request, budget)
+
+
+async def test_optional_recall_failure_does_not_swallow_cancellation(monkeypatch):
+    from application.component_memory_context import (
+        ComponentWritingMemoryContextBuilder,
+    )
+    from application.memory_operations import MemoryOperationError
+
+    request = _request()
+    context = WritingDomainContext.from_core_context(request.domain_context)
+    class _EmptyStory:
+        async def search_current(self, *args, **kwargs):
+            return ()
+
+        async def get_current_by_ids(self, *args, **kwargs):
+            return ()
+
+    source = RepositoryWritingContextSource(
+        object(), object(), object(), _EmptyStory(), run_id="run-1"
+    )
+    signal = asyncio.Event()
+
+    async def stopped(self, *args, **kwargs):
+        signal.set()
+        raise MemoryOperationError("memory_cancelled")
+
+    monkeypatch.setattr(ComponentWritingMemoryContextBuilder, "build", stopped)
+    with pytest.raises(OperationCanceled):
+        await source.build_memory(context, request, 1_000, query="宿主章节", signal=signal)

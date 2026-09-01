@@ -1,5 +1,6 @@
 import type { AiAgentRunSnapshot } from '../../types.ts'
 import type { AiStreamChunk } from '../../agent-runtime/chunkHandlers/types.ts'
+import type { CanonicalOperation } from '../../agent-runtime/canonicalOutput.ts'
 
 type SnapshotResult = {
   success: boolean
@@ -87,14 +88,18 @@ export function createBookProposalProjectionReconciler(dependencies: {
   return { refresh, refreshFinal }
 }
 
-export function shouldRefreshBookProposalProjection(chunk: AiStreamChunk): boolean {
+const PROPOSAL_TOOLS = new Set(['updateCharacter', 'updateSettingEntity', 'editStoryBackground'])
+
+export function shouldRefreshBookProposalProjection(chunk: AiStreamChunk, operation?: CanonicalOperation): boolean {
   if (chunk.runResult?.runId) return true
   if (chunk.kind === 'tool.event') {
     const status = String(chunk.payload?.status || '')
-    return ['completed', 'succeeded', 'done'].includes(status)
+    return PROPOSAL_TOOLS.has(String(chunk.payload?.toolName || ''))
+      && ['completed', 'succeeded', 'done'].includes(status)
   }
   if (chunk.kind === 'operation.finished') {
     return chunk.payload?.status === 'succeeded'
+      && PROPOSAL_TOOLS.has(String(operation?.toolName || operation?.display.labelParams?.toolName || ''))
   }
   return false
 }

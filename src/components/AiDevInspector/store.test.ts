@@ -10,7 +10,7 @@ import {
   hydrateAiDebugRunSnapshot,
   recordAiDebugChunk,
   recordAiDebugRunEvent,
-  recordScreenplayAiDebugChunk,
+  recordAgentConversationDebugChunk,
   startAiDebugRun,
 } from "./store.ts";
 
@@ -132,7 +132,7 @@ test('conversation lifecycle follows the root Run instead of a child model finis
     prompt: '继续创作三集',
     model: 'model',
   };
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     ...input,
     runId: 'run-root-authority',
     chunk: canonicalEvent(1, {
@@ -141,7 +141,7 @@ test('conversation lifecycle follows the root Run instead of a child model finis
       payload: { status: 'running' },
     }),
   });
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     ...input,
     runId: 'run-child-model',
     chunk: canonicalEvent(2, {
@@ -153,7 +153,7 @@ test('conversation lifecycle follows the root Run instead of a child model finis
       },
     }),
   });
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     ...input,
     runId: 'run-child-model',
     chunk: canonicalEvent(3, {
@@ -169,7 +169,7 @@ test('conversation lifecycle follows the root Run instead of a child model finis
   assert.equal(lifecycle.endReason, '尚未结束');
   assert.equal(lifecycle.authoritativeRunId, 'run-root-authority');
 
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     ...input,
     runId: 'run-root-authority',
     chunk: canonicalEvent(4, {
@@ -187,7 +187,7 @@ test('conversation lifecycle follows the root Run instead of a child model finis
 
 test('conversation lifecycle preserves the root terminal error code', () => {
   clearAiDebugRuns();
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     runId: 'run-root-failed',
     turnId: 'turn-root-failed',
     conversationRootRunId: 'run-root-failed',
@@ -216,7 +216,7 @@ test('conversation lifecycle preserves the root terminal error code', () => {
 
 test('conversation stays open until its declared root Run is observed', () => {
   clearAiDebugRuns();
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     runId: 'run-child-first',
     turnId: 'turn-child-first',
     conversationRootRunId: 'run-root-later',
@@ -306,6 +306,8 @@ function persistedSnapshot(
     status?: AiAgentRunSnapshot['run']['status'];
     nextCursor?: number;
     hasMore?: boolean;
+    todos?: AiAgentRunSnapshot['todos'];
+    providerOutputEvents?: number;
   } = {},
 ): AiAgentRunSnapshot {
   const status = options.status ?? 'running';
@@ -325,12 +327,17 @@ function persistedSnapshot(
         attempt: 1,
         cancellationRequested: false,
       },
+      activity: {
+        modelAttemptCount: 0,
+        providerOutputEvents: options.providerOutputEvents ?? 0,
+        providerOutputBytes: 0,
+      },
       provenance: {
         modelProvider: 'openai',
         modelName: 'mimo-v2.5-pro',
       },
     },
-    todos: [],
+    todos: options.todos ?? [],
     events,
     delegations: {
       items: [],
@@ -345,6 +352,49 @@ function persistedSnapshot(
     hasMore: options.hasMore ?? false,
   };
 }
+
+test('persisted recovery merges todo updates without discarding the full plan', () => {
+  clearAiDebugRuns();
+  const steps = [{
+    id: 'overview', title: '梳理故事概览', status: 'pending',
+    type: 'analyze', executor: 'model', dependsOn: [],
+  }, {
+    id: 'facts', title: '梳理事实脉络', status: 'pending',
+    type: 'analyze', executor: 'model', dependsOn: [],
+  }] as AiAgentRunSnapshot['todos'];
+  const events: AiAgentRunSnapshot['events'] = [{
+    version: 1, cursor: 1, type: 'run.todos_updated', runId: 'run-plan', payload: {},
+    chunk: canonicalEvent(1, {
+      runId: 'run-plan',
+      payload: { eventType: 'run.todos_updated', data: { title: '小说分析', status: 'running', steps } },
+    }),
+  }, {
+    version: 1, cursor: 2, type: 'run.todo_updated', runId: 'run-plan', payload: {},
+    chunk: canonicalEvent(2, {
+      runId: 'run-plan',
+      payload: {
+        eventType: 'run.todo_updated',
+        data: { step_id: 'overview', step: { ...steps[0], status: 'failed' } },
+      },
+    }),
+  }];
+
+  hydrateAiDebugRunSnapshot({
+    snapshot: persistedSnapshot(events, {
+      runId: 'run-plan', status: 'failed', todos: steps, providerOutputEvents: 12,
+    }),
+    prompt: '分析小说',
+  });
+
+  const run = getAiDebugSnapshot().runs[0];
+  const plan = run.agentPlan as { status: string; steps: Array<{ id: string; status: string }> };
+  assert.equal(plan.status, 'failed');
+  assert.deepEqual(plan.steps.map((step) => [step.id, step.status]), [
+    ['overview', 'failed'],
+    ['facts', 'pending'],
+  ]);
+  assert.equal(run.providerOutputEvents, 12);
+});
 
 test('persisted recovery restores Planner calls without duplicating cursors', () => {
   clearAiDebugRuns();
@@ -484,7 +534,7 @@ test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', (
     prompt: '继续创作下一集',
     model: 'model',
   };
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     ...input,
     chunk: providerDelta(1, input.runId, 'commentary', '实时片段'),
   });
@@ -505,7 +555,7 @@ test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', (
   assert.equal(completed.commentary, '实时片段');
   assert.ok(finishedAt);
 
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     ...input,
     chunk: providerDelta(2, input.runId, 'final', '晚到的历史片段'),
   });
@@ -640,7 +690,8 @@ test("debug store identifies a durable screenplay chunk", () => {
 
 test("screenplay persisted SSE creates a live diagnostic Run", () => {
   clearAiDebugRuns();
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
+    source: '剧本 Agent',
     runId: "run-live-screenplay",
     turnId: "turn-live-screenplay",
     sessionId: 9,
@@ -652,7 +703,8 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
       payload: { status: "running" },
     }),
   });
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
+    source: '剧本 Agent',
     runId: "run-live-screenplay",
     turnId: "turn-live-screenplay",
     sessionId: 9,
@@ -667,13 +719,13 @@ test("screenplay persisted SSE creates a live diagnostic Run", () => {
   });
 
   const run = getAiDebugSnapshot().runs[0];
-  assert.equal(run.source, "剧本 Agent 对话");
-  assert.equal(run.taskType, "剧本 Agent 任务");
+  assert.equal(run.source, "剧本 Agent");
+  assert.equal(run.taskType, "剧本 Agent任务");
   assert.equal(run.agentRunId, "run-live-screenplay");
   assert.equal(run.turnId, "turn-live-screenplay");
   assert.equal(run.commentary, "先检查场景连续性");
 
-  recordScreenplayAiDebugChunk({
+  recordAgentConversationDebugChunk({
     runId: "run-live-screenplay-writer",
     turnId: "turn-live-screenplay",
     sessionId: 9,

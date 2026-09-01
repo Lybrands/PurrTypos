@@ -246,6 +246,46 @@ test('batched Provider text is visible output and does not create an empty-respo
   }
 })
 
+test('failed reconnect reports connection loss once without fabricating a Run terminal', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const streamId = 'chat-recovery-exhausted'
+  const receipt = { requestId: streamId, sessionId: 7, status: 'run_bound',
+    runId: 'root-transport', cancelRequested: false, rejectionCode: null, revision: 2 }
+  const delivered = []
+  let subscriptions = 0
+  let commands = 0
+  globalThis.window = Object.assign(new EventTarget(), { setTimeout: globalThis.setTimeout })
+  globalThis.fetch = async input => {
+    const url = String(input)
+    if (url.includes(`/chat/requests/${streamId}`)) return jsonResponse({ success: true, data: receipt })
+    if (url.endsWith('/chat/stream')) {
+      commands++
+      return new Response(`data: ${JSON.stringify({ requestReceipt: receipt })}\n\n`)
+    }
+    if (url.includes('/agent-runs/root-transport/events')) {
+      subscriptions++
+      return new Response('', { status: 404 })
+    }
+    throw new Error(`unexpected request ${url}`)
+  }
+  const unsubscribe = services.ai.onAiChunk(chunk => delivered.push(chunk), streamId)
+  try {
+    services.ai.aiChatStream({ streamId, apiKey: 'test-key', sessionId: 7,
+      messages: [{ role: 'user', content: '恢复测试' }], options: { model: 'test-model' },
+      chatAgentMode: 'agent', enableAgentTools: true, bookId: 'book-1' })
+    await waitUntil(() => delivered.some(chunk => chunk.transportError))
+    assert.equal(subscriptions, 1)
+    assert.equal(commands, 1)
+    assert.equal(delivered.filter(chunk => chunk.transportError).length, 1)
+    assert.equal(delivered.some(chunk => chunk.done || chunk.error || chunk.runResult), false)
+  } finally {
+    unsubscribe()
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+  }
+})
+
 test('bound backend transport recovers Root after foreign terminal envelopes', async () => {
   const originalFetch = globalThis.fetch
   const originalWindow = globalThis.window
@@ -319,7 +359,8 @@ test('bound backend transport recovers Root after foreign terminal envelopes', a
     }
     if (url.includes('/api/ai/agent-runs/root-transport')) {
       recoveryReads += 1
-      return jsonResponse({ success: true, data: rootTransportSnapshot() })
+      assert.ok(url.includes('/events?sessionId=7&after='))
+      return new Response(`data: ${JSON.stringify({ ...rootTransportSnapshot(), done: true })}\n\n`)
     }
     if (url.endsWith('/api/ai/error-reports')) {
       errorReportPosts += 1
@@ -794,7 +835,7 @@ test('production-shaped tool completion hydrates proposal identity before termin
       kind: 'tool.event',
       channel: 'operation',
       visibility: 'public',
-      payload: { toolCallId: 'tool-call-1', status: 'completed' },
+      payload: { toolCallId: 'tool-call-1', toolName: 'updateCharacter', status: 'completed' },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(snapshotReads, 1)

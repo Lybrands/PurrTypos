@@ -25,6 +25,19 @@ def new_run_id() -> str:
     return f"run_{uuid4().hex[:16]}"
 
 
+def runtime_limits_from_mapping(value):
+    from purra.contracts import RuntimeLimits
+    from purra.errors import ContractViolationError
+
+    try:
+        return RuntimeLimits(**value)
+    except (TypeError, ValueError) as error:
+        raise ContractViolationError(
+            "Run runtime limits require the PurrA 0.5.0 contract",
+            code="runtime_limits_invalid",
+        ) from error
+
+
 async def create_run(
     db: "DatabaseConnection",
     *,
@@ -49,7 +62,7 @@ async def create_run(
     if runtime_limits is None:
         from purra.contracts import RuntimeLimits
 
-        runtime_limits = RuntimeLimits()
+        runtime_limits = RuntimeLimits(max_run_output_tokens=None)
     runtime_limits_json = json.dumps(
         {
             item.name: getattr(runtime_limits, item.name)
@@ -263,6 +276,7 @@ async def get_run(
         "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "cancellation_epoch, "
+        "model_attempt_count, provider_output_events, provider_output_bytes, "
         "plan_title, plan_goal, task_spec_json, work_step_ids_json, "
         "execution_checkpoint_json, error, agent_preset_snapshot_json, "
         "final_response, create_time, update_time "

@@ -18,14 +18,18 @@ from purra.contracts import (
     ExecutionState,
     PlanningKind,
     PlanningResult,
-    PlannerLimits,
     PlanningCapabilities,
     PlanningConstraints,
     RuntimeLimits,
     StepExecutor,
     StepType,
+    TaskSpec,
     TaskContextRequest,
+    ToolExecutionLimits,
+    WorkPlan,
+    WorkStep,
 )
+from purra.cancellation import raise_if_stopped
 from purra.long_tasks import (
     DurableExecutorRegistry,
     DurableTaskDescriptor,
@@ -37,8 +41,12 @@ from purra.recovery import RecoveryPolicy
 from purra.task_admission import ExecutionMode, TaskAdmissionDecision
 from purra.tools import InMemoryToolCatalog
 
-from application.novel_analysis_source import NovelAnalysisSourceReader
+from application.novel_analysis_source import (
+    NovelAnalysisSourceReader,
+    analysis_source_token_budget,
+)
 from application.novel_analysis_artifacts import NovelAnalysisArtifactStore
+from application.novel_analysis_tools import build_novel_analysis_tool_catalog
 from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.novel_analysis import (
     NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
@@ -46,7 +54,74 @@ from domains.novel_analysis import (
     NovelAnalysisDomainContext,
     canonical_digest,
     compile_novel_analysis_recipe,
+    novel_analysis_model_call_count,
 )
+
+
+class _NovelAnalysisPlanner:
+    """Build the host-owned source-analysis plan without a Provider call."""
+
+    async def create_plan(
+        self,
+        request: AgentRunRequest,
+        capabilities: PlanningCapabilities,
+        signal: CancellationSignal | None = None,
+        **_scope,
+    ) -> PlanningResult:
+        del capabilities
+        raise_if_stopped(signal)
+        context = NovelAnalysisDomainContext.from_core_context(
+            request.domain_context
+        )
+        if context.interaction_kind != "analysis":
+            raise ValueError("novel analysis Planner only accepts analysis runs")
+        return PlanningResult(
+            kind=PlanningKind.PLANNED,
+            work_plan=WorkPlan(
+                title="小说综合分析",
+                goal="完成全局故事概览、事实脉络与写作技法分析",
+                task_spec=TaskSpec(
+                    goal="形成可审核的小说来源综合分析",
+                    operation="analyze",
+                    instruction=(
+                        "分析当前宿主绑定的小说来源，梳理全局故事概览、"
+                        "事实脉络与写作技法"
+                    ),
+                    constraints=(
+                        "仅分析宿主绑定的来源版本和章节范围",
+                        "结果仅供审核，不直接写入书稿或记忆",
+                    ),
+                    deliverable=(
+                        "包含全局故事概览、事实脉络与写作技法的结构化分析"
+                    ),
+                ),
+                steps=(
+                    WorkStep(
+                        id="story-overview",
+                        title="梳理全局故事概览",
+                        type=StepType.ANALYZE,
+                        executor=StepExecutor.MODEL,
+                        description="归纳剧情主线、人物关系和关键转折。",
+                    ),
+                    WorkStep(
+                        id="fact-thread",
+                        title="梳理事实脉络",
+                        type=StepType.ANALYZE,
+                        executor=StepExecutor.MODEL,
+                        depends_on=("story-overview",),
+                        description="校验人物、事件、时间线和来源证据。",
+                    ),
+                    WorkStep(
+                        id="writing-technique",
+                        title="分析写作技法",
+                        type=StepType.ANALYZE,
+                        executor=StepExecutor.MODEL,
+                        depends_on=("fact-thread",),
+                        description="提炼叙事结构、表达方式和可复用技法。",
+                    ),
+                ),
+            ),
+        )
 
 
 class _NovelAnalysisPlanningPolicy:
@@ -61,21 +136,6 @@ class _NovelAnalysisPlanningPolicy:
             allow_model_only_fallback=False,
         )
 
-    def should_plan(
-        self,
-        request: AgentRunRequest,
-        capabilities: PlanningCapabilities,
-    ) -> bool:
-        del capabilities
-        context = NovelAnalysisDomainContext.from_core_context(
-            request.domain_context
-        )
-        return bool(
-            context.interaction_kind == "analysis"
-            and request.latest_user_text().strip()
-        )
-
-
 class _NovelAnalysisExecutionStateFactory:
     def create(self, request: AgentRunRequest) -> ExecutionState:
         context = NovelAnalysisDomainContext.from_core_context(
@@ -84,46 +144,12 @@ class _NovelAnalysisExecutionStateFactory:
         return ExecutionState(domain={
             "sourceRevisionId": context.source_revision_id,
             "sectionIds": list(context.section_ids),
+            "segmentCount": len(context.segments),
             "analysisSchemaVersion": context.schema_version,
             "toolAccess": "source_read_only",
+            "interactionKind": context.interaction_kind,
+            "unitInput": context.unit_input,
         })
-
-
-def validate_novel_analysis_planning_result(
-    request: AgentRunRequest,
-    result: PlanningResult,
-) -> str | None:
-    """Keep model-authored analysis semantics inside the host safety envelope."""
-
-    context = NovelAnalysisDomainContext.from_core_context(
-        request.domain_context
-    )
-    if context.interaction_kind != "analysis":
-        return None
-    if result.kind is not PlanningKind.PLANNED:
-        return "来源分析必须返回一个可执行的语义计划"
-    task_spec = result.work_plan.task_spec
-    if task_spec is None:
-        return "来源分析计划必须包含 TaskSpec"
-    if task_spec.operation != "analyze":
-        return "TaskSpec.operation 必须是 analyze"
-    if task_spec.target:
-        return "TaskSpec.target 必须为空；来源范围由宿主绑定"
-    if not task_spec.instruction or not task_spec.deliverable:
-        return "TaskSpec 必须说明分析指令和待交付结果"
-    steps = result.work_plan.steps
-    if not 1 <= len(steps) <= 4:
-        return "来源分析只能包含 1 到 4 个非冗余语义步骤"
-    if not any(step.type is StepType.ANALYZE for step in steps):
-        return "来源分析计划至少需要一个 analyze 步骤"
-    for step in steps:
-        if step.executor is not StepExecutor.MODEL:
-            return "来源分析语义步骤必须由 model 执行，不能申请工具"
-        if step.type not in {StepType.ANALYZE, StepType.REVIEW}:
-            return "来源分析步骤类型只能是 analyze 或 review"
-        if step.capability_names:
-            return "来源分析计划不能申请工具或额外能力"
-    return None
 
 
 class _NovelAnalysisContextProvider:
@@ -140,6 +166,14 @@ class _NovelAnalysisContextProvider:
         context = NovelAnalysisDomainContext.from_core_context(
             request.domain_context
         )
+        if context.interaction_kind == "unit":
+            progress_policy = build_agent_public_progress_policy()
+            return ContextBundle(blocks=(ContextBlock(
+                name="agent_public_progress",
+                content=progress_policy,
+                token_count=estimate_json_tokens(progress_policy),
+                untrusted=False,
+            ),))
         policy = {
             "workflow": "novel_source_analysis",
             "analysisSchemaVersion": context.schema_version,
@@ -219,12 +253,13 @@ class _NovelAnalysisContextProvider:
 
 @dataclass(frozen=True, slots=True)
 class NovelAnalysisDomainAdapter:
+    # Unit inputs are already token-bounded before submission. The generic
+    # 64K-character tool ceiling is too small for a valid 24K-token segment.
+    tool_execution_limits: ToolExecutionLimits = ToolExecutionLimits(max_result_chars=200_000)
     planning_policy: _NovelAnalysisPlanningPolicy = (
         _NovelAnalysisPlanningPolicy()
     )
-    planning_result_validator = staticmethod(
-        validate_novel_analysis_planning_result
-    )
+    planner: _NovelAnalysisPlanner = _NovelAnalysisPlanner()
     context_strategy: ContextStrategy = ContextStrategy.STAGED
     execution_state_factory: _NovelAnalysisExecutionStateFactory = (
         _NovelAnalysisExecutionStateFactory()
@@ -233,17 +268,25 @@ class NovelAnalysisDomainAdapter:
     context_provider: _NovelAnalysisContextProvider = (
         _NovelAnalysisContextProvider()
     )
-    planner_limits: PlannerLimits = PlannerLimits(
-        max_steps=4,
-        max_tool_steps=0,
-        max_repair_attempts=2,
-    )
     runtime_limits: RuntimeLimits = RuntimeLimits(
+        max_run_output_tokens=None,
         max_model_rounds=4,
         max_progress_rounds=8,
-        provider_invocation_timeout_ms=300_000,
+        provider_invocation_timeout_ms=600_000,
+        root_run_timeout_ms=7_200_000,
     )
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
+
+
+class _NovelAnalysisDispatcher(RecipeLongTaskDispatcher):
+    async def execute(self, task_id, *, run_id, observer, signal=None):
+        result = await super().execute(
+            task_id, run_id=run_id, observer=observer, signal=signal,
+        )
+        # The shared recipe dispatcher supplies a canned completion response,
+        # including for resumed legacy recipes. Analysis has no model answer
+        # here: completion belongs to task state and the review Artifact.
+        return replace(result, final_response="")
 
 
 class NovelAnalysisAgentProfile:
@@ -257,7 +300,8 @@ class NovelAnalysisAgentProfile:
         )
         self._source = NovelAnalysisSourceReader(db)
         self._adapter = NovelAnalysisDomainAdapter(
-            context_provider=_NovelAnalysisContextProvider(db)
+            context_provider=_NovelAnalysisContextProvider(db),
+            tool_catalog=build_novel_analysis_tool_catalog(db),
         )
 
     @property
@@ -268,13 +312,26 @@ class NovelAnalysisAgentProfile:
         context = NovelAnalysisDomainContext.from_core_context(
             request.domain_context
         )
+        if context.interaction_kind == "unit":
+            return request
         sections = await self._source.list_bound_sections(
             context.source_revision_id,
             context.section_ids,
         )
+        input_token_budget = (
+            context.input_token_budget
+            or analysis_source_token_budget(request.context_window)
+        )
+        segments = context.segments or await self._source.build_segments(
+            source_revision_id=context.source_revision_id,
+            section_ids=tuple(str(row["id"]) for row in sections),
+            token_budget=input_token_budget,
+        )
         hydrated = replace(
             context,
             section_ids=tuple(str(row["id"]) for row in sections),
+            segments=segments,
+            input_token_budget=input_token_budget,
         )
         return replace(request, domain_context=hydrated.to_core_context())
 
@@ -285,6 +342,8 @@ class NovelAnalysisAgentProfile:
         binding = {
             "sourceRevisionId": context.source_revision_id,
             "sectionIds": list(context.section_ids),
+            "segments": [item.to_mapping() for item in context.segments],
+            "inputTokenBudget": context.input_token_budget,
             "analysisSchemaVersion": context.schema_version,
         }
         return {
@@ -331,18 +390,23 @@ class NovelAnalysisAgentProfile:
         plan_step_ids = tuple(step.id for step in plan.steps)
         recipe = compile_novel_analysis_recipe(
             section_ids=context.section_ids,
+            segments=context.segments,
             plan_step_ids=plan_step_ids,
         )
+        model_call_count = novel_analysis_model_call_count(recipe)
         return TaskAdmissionDecision(
             mode=ExecutionMode.DURABLE,
             reason_code="novel_analysis_requires_durable_execution",
             estimated_units=len(recipe.steps),
-            estimated_model_calls=len(context.section_ids) + 2,
+            estimated_model_calls=model_call_count,
             covered_step_ids=plan_step_ids,
             execution_recipe=recipe,
             metadata={
                 "sourceRevisionId": context.source_revision_id,
                 "sectionIds": list(context.section_ids),
+                "segments": [item.to_mapping() for item in context.segments],
+                "inputTokenBudget": context.input_token_budget,
+                "modelCallCount": model_call_count,
                 "analysisSchemaVersion": context.schema_version,
                 "commandId": context.command_id,
                 "prompt": request.latest_user_text(),
@@ -378,7 +442,7 @@ class NovelAnalysisAgentProfile:
             return None
         if long_task_repository is None:
             raise ValueError("novel analysis long task repository is required")
-        return RecipeLongTaskDispatcher(
+        return _NovelAnalysisDispatcher(
             long_task_repository=long_task_repository,
             descriptor_resolver=_NovelAnalysisDescriptorResolver(),
             executor_registry=DurableExecutorRegistry({
@@ -423,10 +487,23 @@ def _bounded_follow_up_projection(artifact, token_budget: int) -> dict:
         "evidence": evidence(item.get("evidence")),
     } for item in list(artifact.get("craftCards") or ())[:max_items]
         if isinstance(item, dict)]
+    raw_overview = artifact.get("storyOverview")
+    story_overview = (
+        {
+            "summaryMarkdown": clipped(
+                raw_overview.get("summaryMarkdown") or "",
+                2_400,
+            ),
+            "evidence": evidence(raw_overview.get("evidence")),
+        }
+        if isinstance(raw_overview, dict)
+        else None
+    )
     result = {
         "sourceRevisionId": str(artifact.get("sourceRevisionId") or ""),
         "facts": facts,
         "craftCards": cards,
+        **({"storyOverview": story_overview} if story_overview else {}),
         "scopeNotice": "这是当前分析快照，不是完整来源正文。",
     }
     while estimate_json_tokens(result) > budget and (len(facts) > 1 or len(cards) > 1):
@@ -452,7 +529,7 @@ class _NovelAnalysisDescriptorResolver:
             budget_limits=LongTaskBudgetLimits(
                 max_invocation_attempts=max(
                     3,
-                    len(metadata["sectionIds"]) + 3,
+                    int(metadata.get("modelCallCount") or 1) * 4,
                 ),
             ),
             metadata=metadata,

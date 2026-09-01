@@ -63,9 +63,10 @@ export async function readStableConversationProjection<T>(dependencies: {
   getRevision(): number | undefined
   read(): Promise<T>
   isSuccessful(value: T): boolean
-  wait(): Promise<void>
+  wait(delayMs?: number): Promise<void>
 }): Promise<{ value: T; revision: number | undefined } | undefined> {
-  while (dependencies.isCurrent()) {
+  for (let attempt = 0; dependencies.isCurrent(); attempt++) {
+    if (attempt >= 9) throw new Error('读取会话状态失败，请重新连接')
     const revisionBeforeRead = dependencies.getRevision()
     const value = await dependencies.read()
     if (
@@ -73,7 +74,7 @@ export async function readStableConversationProjection<T>(dependencies: {
       && dependencies.isSuccessful(value)
       && dependencies.getRevision() === revisionBeforeRead
     ) return { value, revision: revisionBeforeRead }
-    if (dependencies.isCurrent()) await dependencies.wait()
+    if (dependencies.isCurrent()) await dependencies.wait(Math.min(10_000, 250 * 2 ** attempt))
   }
   return undefined
 }
@@ -82,15 +83,15 @@ export async function retryCurrentConversationRead<T>(dependencies: {
   isCurrent(): boolean
   read(): Promise<T>
   isRetryable(error: unknown): boolean
-  wait(): Promise<void>
+  wait(delayMs?: number): Promise<void>
 }): Promise<T | undefined> {
-  while (dependencies.isCurrent()) {
+  for (let attempt = 0; dependencies.isCurrent(); attempt++) {
     try {
       return await dependencies.read()
     } catch (error) {
       if (!dependencies.isCurrent()) return undefined
-      if (!dependencies.isRetryable(error)) throw error
-      await dependencies.wait()
+      if (!dependencies.isRetryable(error) || attempt >= 8) throw error
+      await dependencies.wait(Math.min(10_000, 250 * 2 ** attempt))
     }
   }
   return undefined

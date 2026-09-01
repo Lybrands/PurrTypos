@@ -49,6 +49,7 @@ def create_agent_composition(
     writing_profile_factory = partial(
         build_writing_agent_profile,
         skills_dir=kwargs.pop("skills_dir", None),
+        memory_resource=kwargs.get("memory_resource"),
     )
     supplied_projector = kwargs.pop("run_commit_projector", None)
     supplied_cancellation_projectors = tuple(

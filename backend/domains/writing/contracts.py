@@ -22,6 +22,7 @@ class WritingDomainContext:
     associated_chapter_ids: tuple[str, ...] = ()
     associated_outline_ids: tuple[str, ...] = ()
     selected_memory_ids: tuple[Any, ...] = ()
+    selected_long_term_memory_ids: tuple[str, ...] = ()
     selected_foreshadowing_ids: tuple[Any, ...] = ()
     context_window_label: str | None = None
     writing_method_overrides: Mapping[str, Any] | None = None
@@ -37,6 +38,11 @@ class WritingDomainContext:
         object.__setattr__(self, "associated_chapter_ids", tuple(self.associated_chapter_ids))
         object.__setattr__(self, "associated_outline_ids", tuple(self.associated_outline_ids))
         object.__setattr__(self, "selected_memory_ids", tuple(self.selected_memory_ids))
+        object.__setattr__(
+            self,
+            "selected_long_term_memory_ids",
+            tuple(self.selected_long_term_memory_ids),
+        )
         object.__setattr__(self, "selected_foreshadowing_ids", tuple(self.selected_foreshadowing_ids))
         object.__setattr__(
             self,
@@ -70,6 +76,7 @@ class WritingDomainContext:
                 "associated_chapter_ids": self.associated_chapter_ids,
                 "associated_outline_ids": self.associated_outline_ids,
                 "selected_memory_ids": self.selected_memory_ids,
+                "selected_long_term_memory_ids": self.selected_long_term_memory_ids,
                 "selected_foreshadowing_ids": self.selected_foreshadowing_ids,
                 "context_window_label": self.context_window_label,
                 "writing_method_overrides": self.writing_method_overrides,
@@ -99,6 +106,9 @@ class WritingDomainContext:
             associated_chapter_ids=_text_tuple(payload.get("associated_chapter_ids")),
             associated_outline_ids=_text_tuple(payload.get("associated_outline_ids")),
             selected_memory_ids=_value_tuple(payload.get("selected_memory_ids")),
+            selected_long_term_memory_ids=_text_tuple(
+                payload.get("selected_long_term_memory_ids")
+            ),
             selected_foreshadowing_ids=_value_tuple(
                 payload.get("selected_foreshadowing_ids")
             ),

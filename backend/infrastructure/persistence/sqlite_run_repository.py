@@ -740,8 +740,7 @@ def _runtime_limits(row) -> RuntimeLimits:
     raw = _json_value((row or {}).get("runtime_limits_json"))
     if not isinstance(raw, dict):
         raw = {}
-    allowed = RuntimeLimits.__dataclass_fields__
-    return RuntimeLimits(**{key: value for key, value in raw.items() if key in allowed})
+    return run_store.runtime_limits_from_mapping(raw)
 
 
 def _run_budget_snapshot(row) -> RunBudgetSnapshot:
@@ -784,7 +783,7 @@ def _run_budget_violation(
         limit is not None
         for limit in (
             limits.max_input_tokens,
-            limits.max_output_tokens,
+            limits.max_run_output_tokens,
             limits.max_reasoning_tokens,
         )
     ):
@@ -795,7 +794,7 @@ def _run_budget_violation(
                 name
                 for name, value, limit in (
                     ("input_tokens", snapshot.input_tokens, limits.max_input_tokens),
-                    ("output_tokens", snapshot.output_tokens, limits.max_output_tokens),
+                    ("output_tokens", snapshot.output_tokens, limits.max_run_output_tokens),
                     (
                         "reasoning_tokens",
                         snapshot.reasoning_tokens,

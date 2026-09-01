@@ -46,12 +46,16 @@ class ChatStreamRequest(BaseModel):
     # 章节与大纲目录由后端根据 bookId 加载，不接受渲染进程快照。
     associatedChapterIds: Optional[List[str]] = None
     associatedOutlineIds: Optional[List[str]] = None
-    # 用户在 AiContextBar 勾选的设定/伏笔 id：后端前置 fetch 后注入 system，
-    # 前端不再自行拼接记忆文案。
+    # 用户在 AiContextBar 勾选的组件记忆、设定与伏笔 id。
+    selectedLongTermMemoryIds: Optional[List[str]] = Field(
+        default=None,
+        max_length=32,
+    )
     selectedMemoryIds: Optional[List[Any]] = None
     selectedForeshadowingIds: Optional[List[Any]] = None
     writingMethodOverrides: Optional[WritingMethodOverrides] = None
     chatAgentMode: Optional[str] = None
+    planningMode: Literal["reactive", "planned"] = "reactive"
     contextWindow: Optional[str] = None
     # Enhanced renderer history fence. These immutable IDs are part of the
     # request digest and are rechecked both when reserving and claiming.

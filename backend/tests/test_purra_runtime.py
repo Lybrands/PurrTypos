@@ -88,10 +88,11 @@ class ScriptedModelGateway:
                     raise chunk
                 yield chunk
 
-        return ModelStream(chunks=_chunks(), model="resolved-model")
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=_chunks(), model="resolved-model")
 
     async def complete(self, messages, invocation, signal=None):
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message=AgentMessage(role="assistant", content="unused"),
             model="resolved-model",
         )
@@ -247,7 +248,7 @@ def _request(
             capability_snapshot=replace(
                 generic_capability_snapshot(),
                 profile_id="test:model",
-                max_output_tokens=32_000,
+                max_call_output_tokens=32_000,
             ),
         ),
         domain_context=DomainContext(namespace="test"),
@@ -497,7 +498,7 @@ async def test_runtime_rejects_repeated_reasoning_only_responses():
     ])
     runtime = AgentRuntime(
         model_gateway=model,
-        limits=RuntimeLimits(max_model_rounds=4),
+        limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=4),
     )
 
     updates = await _collect(runtime)
@@ -606,7 +607,7 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
     assert usage_events[0].payload["actualOutputTokens"] == 56
     assert usage_events[0].payload["cachedInputTokens"] == 200
     assert usage_events[0].payload["usageSource"] == "provider"
-    assert usage_events[0].payload["requestedOutputTokens"] == 4_000
+    assert usage_events[0].payload["requestedCallOutputTokens"] == 4_000
     assert usage_events[0].payload["finishReason"] == "stop"
     assert usage_events[0].payload["outputLimit"]["maxTokens"] == 4_000
     usage_trace = next(
@@ -932,7 +933,7 @@ async def test_exact_item_constraint_rejects_an_extra_column_zero_item():
     updates = await _collect(
         AgentRuntime(
             model_gateway=model,
-            limits=RuntimeLimits(max_model_rounds=1),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
         ),
         response_constraints=ResponseConstraints(
             exact_top_level_item_count=2,
@@ -1031,6 +1032,7 @@ async def test_runtime_allows_dynamic_planner_to_recover_from_tool_failure():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_output_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=0,
             ),
@@ -1198,6 +1200,7 @@ async def test_partial_progress_unlocks_bounded_rounds_for_completion():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_output_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=1,
             ),
@@ -1254,6 +1257,7 @@ async def test_partial_progress_cannot_exceed_progress_round_cap():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_output_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=0,
             ),
@@ -1305,7 +1309,7 @@ async def test_runtime_replaces_unstructured_output_after_failed_tool_recovery(
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=2),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=2),
         ),
         request=_request(user_text="分析原作并生成正式提案"),
         tools=(_schema("proposeSourceAnalysis"),),
@@ -1803,7 +1807,7 @@ async def test_runtime_stops_consuming_model_stream_after_terminal_chunk():
                 finally:
                     stream_closed.set()
 
-            return ModelStream(chunks=_chunks(), model="resolved-model")
+            return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=_chunks(), model="resolved-model")
 
     model = FinishThenHangModelGateway()
     updates = await asyncio.wait_for(
@@ -1991,7 +1995,7 @@ async def test_runtime_never_reexecutes_completed_tool_during_repair_retry():
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=4),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=4),
         ),
         tools=(_schema("writeA"),),
         scope_tools_to_observer=True,
@@ -2074,7 +2078,7 @@ async def test_runtime_does_not_retry_interruption_without_an_outer_round_slot()
     updates = await _collect(AgentRuntime(
         model_gateway=model,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
     ))
 
     assert len(model.invocations) == 1
@@ -2096,7 +2100,7 @@ async def test_runtime_required_fallback_consumes_outer_slot_with_same_input():
         AgentRuntime(
             model_gateway=model,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=2),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=2),
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -2111,7 +2115,7 @@ async def test_runtime_required_fallback_consumes_outer_slot_with_same_input():
     assert second.tool_choice is ToolChoiceMode.AUTO
     assert first.request == second.request
     assert first.tools == second.tools
-    assert first.max_output_tokens == second.max_output_tokens
+    assert first.max_call_output_tokens == second.max_call_output_tokens
     terminal_traces = [
         trace for trace in observer.traces if trace.stage == "model_round"
     ]
@@ -2134,7 +2138,7 @@ async def test_runtime_treats_eof_without_finish_as_interruption_not_completion(
         AgentRuntime(
             model_gateway=model,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=2),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=2),
         ),
         response_constraints=ResponseConstraints(
             exact_top_level_item_count=1,
@@ -2171,7 +2175,7 @@ async def test_runtime_prefers_cancellation_when_signal_is_set_at_stream_eof():
                 if False:  # pragma: no cover - makes this an async generator
                     yield ModelStreamChunk()
 
-            return ModelStream(chunks=_chunks(), model="resolved-model")
+            return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=_chunks(), model="resolved-model")
 
     updates = await _collect(
         AgentRuntime(
@@ -2336,7 +2340,7 @@ async def test_runtime_does_not_schedule_missing_call_retry_without_round_budget
         AgentRuntime(
             model_gateway=ScriptedModelGateway([_answer("fake")]),
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=1),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -2884,7 +2888,7 @@ async def test_runtime_rejects_partial_raw_tool_batch_before_executing_valid_cal
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -3006,7 +3010,7 @@ async def test_runtime_rejects_conflicting_or_duplicate_call_ids(malformed_round
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -3194,6 +3198,7 @@ async def test_reasoning_only_truncation_fails_without_replaying_request():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_output_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=0,
             ),
@@ -3279,7 +3284,7 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=3, max_progress_rounds=0),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=3, max_progress_rounds=0),
         ),
         request=request,
         output_limit=_output_limit(),
@@ -3324,7 +3329,7 @@ async def test_runtime_never_executes_complete_looking_call_finished_by_length()
             model_gateway=ScriptedModelGateway([length_finished]),
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=1),
+            limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -3693,7 +3698,7 @@ async def test_runtime_does_not_execute_tools_on_the_last_model_round():
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_output_tokens=None, max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -3848,9 +3853,9 @@ async def test_runtime_passes_the_exact_output_limit_to_normal_invocation():
     )
 
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
-    assert model.invocations[0].max_output_tokens == 321
+    assert model.invocations[0].max_call_output_tokens == 321
     assert model.invocations[0].tools == (schema,)
-    assert model.invocations[1].max_output_tokens == 321
+    assert model.invocations[1].max_call_output_tokens == 321
     assert model.invocations[1].tools == ()
 
 
@@ -3886,7 +3891,7 @@ async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
         ToolChoiceMode.AUTO,
         ToolChoiceMode.NONE,
     ]
-    assert [item.max_output_tokens for item in model.invocations] == [
+    assert [item.max_call_output_tokens for item in model.invocations] == [
         257,
         257,
         257,
@@ -4148,7 +4153,7 @@ async def test_runtime_cancels_while_waiting_for_the_next_model_chunk():
                 finally:
                     finalized.set()
 
-            return ModelStream(chunks=_chunks(), model="resolved-model")
+            return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=_chunks(), model="resolved-model")
 
     model = BlockingChunkGateway()
     observer = RecordingObserver()

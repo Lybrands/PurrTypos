@@ -11,7 +11,7 @@ import {
 } from 'react-router-dom'
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiModelConfig, type EntityId } from './types'
+import { Book, type AiModelConfig, type EntityId, type MemoryEmbeddingConfig } from './types'
 import { applyModelRuntimeConfigPatch } from './modelCatalog'
 import './App.scss'
 
@@ -83,6 +83,8 @@ export default function App() {
     getStoredLastOpenedBookId,
   )
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
+  const [memoryModelId, setMemoryModelId] = React.useState('')
+  const [memoryEmbeddingConfig, setMemoryEmbeddingConfig] = React.useState<MemoryEmbeddingConfig | null>(null)
   const configuredModelConfigs = React.useMemo(
     () => modelConfigs.filter((config) => config.apiKey?.trim()),
     [modelConfigs],
@@ -96,12 +98,31 @@ export default function App() {
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
       }
+      setMemoryModelId(typeof res.data.memory_model_id === 'string' ? res.data.memory_model_id : '')
+      const embedding = res.data.memory_embedding_config
+      setMemoryEmbeddingConfig(
+        embedding && typeof embedding === 'object'
+          ? embedding as MemoryEmbeddingConfig
+          : null,
+      )
     })
   }, [])
 
   const saveModelConfigs = React.useCallback((configs: AiModelConfig[]) => {
     setModelConfigs(configs)
     services.settings.setSettings({ ai_model_configs: configs })
+  }, [])
+
+  const saveMemoryConfiguration = React.useCallback((
+    modelId: string,
+    embedding: MemoryEmbeddingConfig | null,
+  ) => {
+    setMemoryModelId(modelId)
+    setMemoryEmbeddingConfig(embedding)
+    void services.settings.setSettings({
+      memory_model_id: modelId,
+      memory_embedding_config: embedding,
+    })
   }, [])
 
   const updateModelConfig = React.useCallback((
@@ -320,6 +341,9 @@ export default function App() {
             <SettingsPage
               modelConfigs={modelConfigs}
               onSaveModelConfigs={saveModelConfigs}
+              memoryModelId={memoryModelId}
+              memoryEmbeddingConfig={memoryEmbeddingConfig}
+              onSaveMemoryConfiguration={saveMemoryConfiguration}
               onClose={handleCloseSettings}
               syncOutlineChapter={syncOutlineChapter}
               onSyncOutlineChapterChange={handleSyncOutlineChapterChange}

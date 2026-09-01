@@ -29,6 +29,7 @@ export async function loadCompleteAgentRunSnapshot(
     }): Promise<SnapshotResult>
     pageSize?: number
     isCurrent?(): boolean
+    initialSnapshot?: AiAgentRunSnapshot
   },
 ): Promise<AiAgentRunSnapshot | undefined> {
   const isCurrent = dependencies.isCurrent ?? (() => true)
@@ -37,11 +38,14 @@ export async function loadCompleteAgentRunSnapshot(
   let snapshot: AiAgentRunSnapshot | undefined
   const events: AiAgentRunSnapshot['events'] = []
   const seen = new Set<string>()
+  let initial = dependencies.initialSnapshot
 
   while (isCurrent()) {
     let result: SnapshotResult
     try {
-      result = await dependencies.getRunSnapshot({ runId, after, limit: pageSize })
+      result = initial ? { success: true, data: initial }
+        : await dependencies.getRunSnapshot({ runId, after, limit: pageSize })
+      initial = undefined
     } catch (error) {
       if (!isCurrent()) return undefined
       throw new AgentRunSnapshotHydrationError(
@@ -65,7 +69,7 @@ export async function loadCompleteAgentRunSnapshot(
     }
     if (!snapshot.hasMore) break
     const cursor = snapshot.nextCursor
-    if (!Number.isFinite(cursor) || cursor === after) {
+    if (!Number.isFinite(cursor) || cursor <= (after ?? 0)) {
       throw new AgentRunSnapshotHydrationError(
         'Run snapshot pagination did not advance',
         runId,
@@ -79,8 +83,20 @@ export async function loadCompleteAgentRunSnapshot(
   return { ...snapshot, events }
 }
 
+export function mergeAgentRunSnapshot(current: AiAgentRunSnapshot, page: AiAgentRunSnapshot): AiAgentRunSnapshot {
+  if (current.run.runId !== page.run.runId) throw new Error('不能合并不同 Run 的事件')
+  const events = new Map(current.events.map(event => [`${event.cursor}:${event.type}`, event]))
+  for (const event of page.events) events.set(`${event.cursor}:${event.type}`, event)
+  return {
+    ...page, nextCursor: Math.max(current.nextCursor, page.nextCursor),
+    events: [...events.values()].sort((a, b) => a.cursor - b.cursor),
+    productEvents: page.productEvents ?? current.productEvents,
+  }
+}
+
 export function replayAgentRunSnapshot(input: {
   snapshot: AiAgentRunSnapshot
+  relatedSnapshots?: AiAgentRunSnapshot[]
   prompt: string
   turnId: string
   sessionId?: number
@@ -106,8 +122,25 @@ export function replayAgentRunSnapshot(input: {
     baseUrl: '',
   }
 
-  for (const event of snapshot.events) {
-    if (event.chunk) replay.dispatch(seed, event.chunk as AiStreamChunk, { cfg })
+  const events = [snapshot, ...(input.relatedSnapshots ?? []).filter(
+    (related) => related.run.runId !== snapshot.run.runId,
+  )].flatMap((source) => source.events.map((event) => ({ source, event })))
+  // Sequence numbers are Run-local. Across bound units, journal timestamps
+  // order presentation while the reducer still deduplicates each Run.
+  if (input.relatedSnapshots?.length) {
+    events.sort((left, right) => (
+      String(left.event.createdAt || (left.event.chunk as { emittedAt?: string })?.emittedAt || '')
+        .localeCompare(String(right.event.createdAt || (right.event.chunk as { emittedAt?: string })?.emittedAt || ''))
+      || (left.source.run.runId === right.source.run.runId
+        ? left.event.cursor - right.event.cursor : 0)
+    ))
+  }
+  for (const { source, event } of events) {
+    if (event.chunk) replay.dispatch({
+      ...seed,
+      eventRunId: source.run.runId,
+      runRole: source.run.runId === snapshot.run.runId ? 'root' : 'unit',
+    }, event.chunk as AiStreamChunk, { cfg })
   }
   if (snapshot.run.status !== 'running') {
     replay.dispatch(seed, terminalChunk(snapshot), { cfg })

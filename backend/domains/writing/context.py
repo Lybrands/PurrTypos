@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Mapping, Protocol
 
+from purra.cancellation import raise_if_stopped
 from purra.context_budget import estimate_json_tokens
 from purra.contracts import (
     AgentRunRequest,
@@ -13,7 +14,6 @@ from purra.contracts import (
     ContextBudget,
     ContextBudgetClaim,
     ContextBundle,
-    MessageRole,
     TaskContextRequest,
 )
 from purra.json_values import thaw_json_mapping
@@ -26,11 +26,7 @@ from domains.writing.associated_context import (
     OutlineContextFact,
 )
 from domains.writing.contracts import WritingDomainContext
-from domains.writing.memory_context import (
-    MemoryContextBlock,
-    MemoryContextRequest,
-    unavailable_memory_context,
-)
+from domains.writing.memory_context import MemoryContextRequest
 from domains.writing.method_resolution import (
     WRITING_METHODS_CONTEXT,
     WRITING_METHOD_POLICY_CONTEXT,
@@ -38,7 +34,10 @@ from domains.writing.method_resolution import (
     writing_method_desired_tokens,
     writing_method_policy,
 )
-from domains.writing.unified_memory_context import MemoryContextPack
+from domains.writing.unified_memory_context import (
+    MemoryContextPack,
+    unavailable_memory_context_pack,
+)
 from domains.writing.prompts import (
     build_writing_agent_policy,
     build_writing_evidence_policy,
@@ -74,14 +73,18 @@ class WritingContextSource(Protocol):
         context: WritingDomainContext,
         request: AgentRunRequest,
         token_budget: int,
-    ) -> str | MemoryContextBlock | MemoryContextPack: ...
+        *,
+        query: str,
+        task: TaskContextRequest | None = None,
+        signal: CancellationSignal | None = None,
+    ) -> MemoryContextPack: ...
 
     async def build_associated(
         self,
         context: WritingDomainContext,
         request: AgentRunRequest,
         token_budget: int,
-    ) -> str | AssociatedContextResult: ...
+    ) -> AssociatedContextResult: ...
 
 
 class EmptyWritingContextSource:
@@ -90,18 +93,29 @@ class EmptyWritingContextSource:
         context: WritingDomainContext,
         request: AgentRunRequest,
         token_budget: int,
-    ) -> str:
-        del context, request, token_budget
-        return ""
+        *,
+        query: str,
+        task: TaskContextRequest | None = None,
+        signal: CancellationSignal | None = None,
+    ) -> MemoryContextPack:
+        del request, task
+        raise_if_stopped(signal)
+        return unavailable_memory_context_pack(MemoryContextRequest(
+            book_id=context.book_id,
+            user_prompt=query,
+            token_budget=token_budget,
+            selected_spark_idea_ids=context.selected_memory_ids,
+            selected_foreshadowing_ids=context.selected_foreshadowing_ids,
+        ))
 
     async def build_associated(
         self,
         context: WritingDomainContext,
         request: AgentRunRequest,
         token_budget: int,
-    ) -> str:
+    ) -> AssociatedContextResult:
         del context, request, token_budget
-        return ""
+        return AssociatedContextResult()
 
 
 class WritingContextProvider:
@@ -116,8 +130,7 @@ class WritingContextProvider:
         budget: ContextBudget,
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
-        del signal
-        return await self._build_context(request, budget)
+        return await self._build_context(request, budget, signal=signal)
 
     async def build_planning_context(
         self,
@@ -134,7 +147,7 @@ class WritingContextProvider:
 
         del signal
         context = WritingDomainContext.from_core_context(request.domain_context)
-        empty_memory = unavailable_memory_context(MemoryContextRequest(
+        empty_memory = unavailable_memory_context_pack(MemoryContextRequest(
             book_id=context.book_id,
             user_prompt="",
             token_budget=0,
@@ -257,6 +270,7 @@ class WritingContextProvider:
         task: TaskContextRequest | None = None,
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
+        raise_if_stopped(signal)
         context = WritingDomainContext.from_core_context(request.domain_context)
         allocated = budget.allocation_for(WRITING_RETRIEVAL_CONTEXT)
         desired = (
@@ -266,59 +280,30 @@ class WritingContextProvider:
         )
         memory_budget, associated_budget = _split_allocation(allocated, desired)
 
-        memory_request = MemoryContextRequest(
-            book_id=context.book_id,
-            user_prompt=request.latest_user_text(),
-            token_budget=memory_budget,
-            selected_spark_idea_ids=context.selected_memory_ids,
-            selected_foreshadowing_ids=context.selected_foreshadowing_ids,
-        )
-        memory_value: str | MemoryContextBlock | MemoryContextPack = ""
         if context.book_id and memory_budget > 0:
-            task_builder = getattr(self._source, "build_memory_for_task", None)
-            query_builder = getattr(self._source, "build_memory_for_query", None)
-            if (
-                recall_query is not None
-                and task is not None
-                and callable(task_builder)
-            ):
-                memory_value = await task_builder(
-                    context,
-                    request,
-                    memory_budget,
-                    recall_query,
-                    task,
-                    signal=signal,
-                )
-            elif recall_query is not None and callable(query_builder):
-                memory_value = await query_builder(
-                    context,
-                    request,
-                    memory_budget,
-                    recall_query,
-                )
-            else:
-                memory_request_value = (
-                    _request_with_latest_user_text(request, recall_query)
-                    if recall_query is not None
-                    else request
-                )
-                memory_value = await self._source.build_memory(
-                    context,
-                    memory_request_value,
-                    memory_budget,
-                )
-        if isinstance(memory_value, (MemoryContextBlock, MemoryContextPack)):
-            memory_result = memory_value
+            memory_result = await self._source.build_memory(
+                context,
+                request,
+                memory_budget,
+                query=recall_query if recall_query is not None else request.latest_user_text(),
+                task=task,
+                signal=signal,
+            )
         else:
-            memory_result = unavailable_memory_context(memory_request)
-            memory_result.text = str(memory_value or "")
-            memory_result.token_estimate = estimate_json_tokens(memory_result.text)
+            memory_result = unavailable_memory_context_pack(MemoryContextRequest(
+                book_id=context.book_id,
+                token_budget=memory_budget,
+                selected_spark_idea_ids=context.selected_memory_ids,
+                selected_foreshadowing_ids=context.selected_foreshadowing_ids,
+            ))
+        raise_if_stopped(signal)
+        if not isinstance(memory_result, MemoryContextPack):
+            raise TypeError("Writing retrieval must return MemoryContextPack")
         memory_block = memory_result.text
 
         memory_tokens = estimate_json_tokens(memory_block) if memory_block else 0
         unused_memory = max(0, memory_budget - memory_tokens)
-        associated_value = (
+        associated_result = (
             await self._source.build_associated(
                 context,
                 request,
@@ -328,13 +313,11 @@ class WritingContextProvider:
                 context.associated_chapter_ids
                 or context.associated_outline_ids
             )
-            else ""
+            else AssociatedContextResult()
         )
-        associated_result = (
-            associated_value
-            if isinstance(associated_value, AssociatedContextResult)
-            else AssociatedContextResult(text=str(associated_value or ""))
-        )
+        raise_if_stopped(signal)
+        if not isinstance(associated_result, AssociatedContextResult):
+            raise TypeError("Associated retrieval must return AssociatedContextResult")
         associated_block = associated_result.text
         retrieval = frame_untrusted_writing_context({
             "memory_context_pack": memory_block,
@@ -359,7 +342,7 @@ class WritingContextProvider:
                 untrusted=False,
                 host_metadata={
                     CONTEXT_EVIDENCE_RECEIPTS_KEY: [
-                        receipt.to_mapping() for receipt in canon_result["receipts"]
+                        _context_receipt_input(receipt) for receipt in canon_result["receipts"]
                     ],
                 },
             ))
@@ -384,7 +367,7 @@ class WritingContextProvider:
                 untrusted=True,
                 host_metadata={
                     CONTEXT_EVIDENCE_RECEIPTS_KEY: [
-                        receipt.to_mapping()
+                        _context_receipt_input(receipt)
                         for receipt in method_resolution["receipts"]
                     ],
                 },
@@ -420,6 +403,16 @@ class WritingContextProvider:
                 token_count=estimate_json_tokens(binding),
                 untrusted=False,
             ))
+
+        # Staged execution replaces the planning bundle; behavioral rules must
+        # be present here too, including after task-specific retrieval.
+        agent_policy = build_writing_agent_policy()
+        blocks.append(ContextBlock(
+            name=WRITING_AGENT_POLICY_CONTEXT,
+            content=agent_policy,
+            token_count=estimate_json_tokens(agent_policy),
+            untrusted=False,
+        ))
 
         response_contract = writing_response_contract_for_request(request)
         evidence_policy = build_writing_evidence_policy(
@@ -547,20 +540,6 @@ def _has_explicit_evidence(context: WritingDomainContext) -> bool:
     )
 
 
-def _request_with_latest_user_text(
-    request: AgentRunRequest,
-    text: str,
-) -> AgentRunRequest:
-    """Compatibility adapter for sources without query-aware retrieval."""
-
-    messages = list(request.messages)
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].role is MessageRole.USER:
-            messages[index] = replace(messages[index], content=str(text or ""))
-            return replace(request, messages=tuple(messages))
-    return request
-
-
 def writing_context_claims(request: AgentRunRequest) -> tuple[ContextBudgetClaim, ...]:
     """Describe writing retrieval demand without exposing it to PurrA."""
 
@@ -597,6 +576,17 @@ def writing_context_claims(request: AgentRunRequest) -> tuple[ContextBudgetClaim
             priority=110,
         ))
     return tuple(claims)
+
+
+def _context_receipt_input(receipt: ContextEvidenceReceipt) -> dict:
+    # Context input carries extra provenance at the top level.
+    return {
+        **receipt.metadata,
+        "evidenceId": receipt.evidence_id,
+        "source": receipt.source,
+        "itemId": receipt.item_id,
+        **({"version": receipt.version} if receipt.version is not None else {}),
+    }
 
 
 def _continuation_canon_context(
@@ -653,10 +643,8 @@ def _continuation_canon_context(
 
 def _canon_story_conflicts(
     context: WritingDomainContext,
-    memory: MemoryContextBlock | MemoryContextPack,
+    memory: MemoryContextPack,
 ) -> list[dict[str, str]]:
-    if not isinstance(memory, MemoryContextPack):
-        return []
     story_by_key = {item.memory_key: item for item in memory.story.included_items}
     conflicts: list[dict[str, str]] = []
     for record in context.inherited_canon_records:
@@ -723,7 +711,7 @@ def _fit_json_budget(text: str, token_budget: int) -> str:
 def build_host_planning_facts(
     *,
     current_chapter_bound: bool,
-    memory: MemoryContextBlock | MemoryContextPack | None,
+    memory: MemoryContextPack,
     associated: AssociatedContextResult,
     include_evidence_read_rules: bool = True,
 ) -> dict[str, object]:
@@ -736,7 +724,7 @@ def build_host_planning_facts(
             "singleChapterToolsMayOmitChapterId": True,
         }
     selected_memory_value: dict[str, object] | None = None
-    if memory is not None and memory.selected_fact is not None:
+    if memory.selected_fact is not None:
         selected_memory_value = memory.selected_fact.to_planning_value()
         facts["selectedMemories"] = selected_memory_value
     chapter_values: list[dict[str, str | int | bool]] = []

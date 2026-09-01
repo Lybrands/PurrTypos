@@ -35,6 +35,7 @@ from domains.writing.memory_context import (
     MemoryContextBlock,
     SelectedMemoryContextFact,
 )
+from domains.writing.unified_memory_context import MemoryContextPack, StoryMemoryContextBlock
 from domains.writing.policies import WRITING_TOOL_POLICIES
 from domains.writing.prompts import (
     build_writing_evidence_policy,
@@ -58,9 +59,19 @@ SKILL_ITEMS = tuple(
 )
 
 
+def _memory_pack(text: str, *, selected_fact=None) -> MemoryContextPack:
+    return MemoryContextPack(
+        text=text,
+        semantic=MemoryContextBlock(text=text, selected_fact=selected_fact),
+        story=StoryMemoryContextBlock(),
+        token_estimate=estimate_json_tokens(text),
+    )
+
+
 def _catalog(**overrides):
     return build_writing_tool_catalog(
         dependencies=WritingToolDependencies(
+            object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
         ),
@@ -382,11 +393,13 @@ async def test_writing_handler_adapter_translates_domain_effects(monkeypatch):
 @pytest.mark.asyncio
 async def test_writing_context_provider_honors_one_shared_retrieval_budget(monkeypatch):
     class _Source:
-        async def build_memory(self, context, request, token_budget):
-            return "记忆" * 1_000
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            assert query == request.latest_user_text()
+            assert task is None
+            return _memory_pack("记忆" * 1_000)
 
         async def build_associated(self, context, request, token_budget):
-            return "章节" * 2_000
+            return AssociatedContextResult(text="章节" * 2_000)
 
     request = _request()
     claims = writing_context_claims(request)
@@ -433,23 +446,25 @@ async def test_writing_staged_recall_uses_resolved_task_spec_query():
         def __init__(self):
             self.queries = []
 
-        async def build_memory(self, context, request, token_budget):
-            raise AssertionError("latest-user recall must not run for this task")
-
-        async def build_memory_for_query(
+        async def build_memory(
             self,
             context,
             request,
             token_budget,
+            *,
             query,
+            task=None,
+            signal=None,
         ):
+            assert request.latest_user_text() == "把刚才那个再改得压抑一点。"
+            assert task is not None
             del context, request, token_budget
             self.queries.append(query)
-            return "第二章雪夜见面场景的既有设定"
+            return _memory_pack("第二章雪夜见面场景的既有设定")
 
         async def build_associated(self, context, request, token_budget):
             del context, request, token_budget
-            return ""
+            return AssociatedContextResult()
 
     context = WritingDomainContext(
         book_id="book-1",
@@ -585,8 +600,8 @@ async def test_writing_context_provider_injects_trusted_summary_delivery_scope()
 @pytest.mark.asyncio
 async def test_writing_context_provider_revokes_complete_fact_after_outer_truncation():
     class _Source:
-        async def build_memory(self, context, request, token_budget):
-            return MemoryContextBlock(
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            return _memory_pack(
                 text="用户勾选记忆",
                 selected_fact=SelectedMemoryContextFact(
                     requested_count=1,
@@ -662,8 +677,8 @@ async def test_writing_context_provider_revokes_complete_fact_after_outer_trunca
 @pytest.mark.asyncio
 async def test_complete_selected_evidence_prevents_unrequested_discovery_planning():
     class _Source:
-        async def build_memory(self, context, request, token_budget):
-            return MemoryContextBlock(
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            return _memory_pack(
                 text="用户勾选记忆",
                 selected_fact=SelectedMemoryContextFact(
                     requested_count=1,

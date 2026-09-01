@@ -132,6 +132,69 @@ test('Provider delta batches replay as ordered public text', () => {
   assert.equal(state.finalStreamStatus, 'open')
 })
 
+test('Planner progress replays as typed intent without exposing private plan bytes', () => {
+  const state = replayCanonicalOutput([
+    event(1, {
+      kind: 'operation.started',
+      channel: 'operation',
+      payload: {
+        operationId: 'planning-1',
+        kind: 'planning',
+        startedAt: '2026-08-12T08:00:01+00:00',
+        display: {
+          labelKey: 'agent.operation.planning',
+          labelParams: { revision: 0 },
+        },
+      },
+    }),
+    event(2, {
+      source: 'provider',
+      kind: 'provider.content_delta',
+      channel: 'diagnostic',
+      visibility: 'private',
+      outputStreamId: 'planning-stream',
+      invocationId: 'planning-invocation',
+      payload: { delta: 'PRIVATE_PLAN_BYTES' },
+    }),
+    event(3, {
+      source: 'provider',
+      kind: 'planning.progress',
+      channel: 'commentary',
+      outputStreamId: 'planning-stream',
+      invocationId: 'planning-invocation',
+      payload: {
+        schemaVersion: 'purra.planning-stream/v1',
+        operationId: 'planning-1',
+        revision: 0,
+        attempt: 0,
+        recordIndex: 1,
+        sourceStart: 0,
+        sourceEnd: 64,
+        text: '先核对请求范围，再安排执行步骤。',
+      },
+    }),
+    event(4, {
+      source: 'runtime',
+      kind: 'planning.progress',
+      channel: 'commentary',
+      payload: {
+        schemaVersion: 'purra.planning-stream/v1',
+        operationId: 'planning-1',
+        revision: 0,
+        attempt: 0,
+        recordIndex: 2,
+        text: '这条不是 Provider 投影。',
+      },
+    }),
+  ])
+
+  assert.deepEqual(state.planningProgress.map((item) => item.text), [
+    '先核对请求范围，再安排执行步骤。',
+  ])
+  assert.equal(JSON.stringify(state).includes('PRIVATE_PLAN_BYTES'), false)
+  assert.equal(state.commentaryText, '')
+})
+
 test('terminal Root lifecycle restores its authoritative final response', () => {
   const state = replayCanonicalOutput([
     event(1, {
@@ -158,6 +221,90 @@ test('duplicates are ignored while private journal gaps stay hidden', () => {
   const first = reduceCanonicalOutput(initialCanonicalOutputState(), events[0])
   assert.equal(reduceCanonicalOutput(first, events[0]), first)
   assert.equal(reduceCanonicalOutput(first, events[2]).lastSequence, 3)
+})
+
+test('event identity deduplicates a replay even when its envelope sequence changes', () => {
+  const original = event(1, {
+    source: 'provider',
+    kind: 'planning.progress',
+    channel: 'commentary',
+    outputStreamId: 'planning-stream',
+    invocationId: 'planning-invocation',
+    payload: {
+      schemaVersion: 'purra.planning-stream/v1',
+      operationId: 'planning-operation',
+      revision: 0,
+      attempt: 0,
+      recordIndex: 1,
+      text: '先核对范围。',
+    },
+  })
+  const first = reduceCanonicalOutput(initialCanonicalOutputState(), original)
+  const replayed = reduceCanonicalOutput(first, { ...original, sequence: 2 })
+
+  assert.equal(replayed, first)
+  assert.equal(replayed.planningProgress.length, 1)
+})
+
+test('terminal Run rejects late planning progress without rewriting repair history', () => {
+  const firstAttempt = event(1, {
+    source: 'provider',
+    kind: 'planning.progress',
+    channel: 'commentary',
+    outputStreamId: 'planning-stream-1',
+    invocationId: 'planning-invocation-1',
+    payload: {
+      schemaVersion: 'purra.planning-stream/v1',
+      operationId: 'planning-operation',
+      revision: 0,
+      attempt: 0,
+      recordIndex: 1,
+      text: '先核对范围。',
+    },
+  })
+  const repairedAttempt = event(2, {
+    source: 'provider',
+    kind: 'planning.progress',
+    channel: 'commentary',
+    outputStreamId: 'planning-stream-2',
+    invocationId: 'planning-invocation-2',
+    payload: {
+      schemaVersion: 'purra.planning-stream/v1',
+      operationId: 'planning-operation',
+      revision: 0,
+      attempt: 1,
+      recordIndex: 1,
+      text: '正在修正规划约束。',
+    },
+  })
+  const canceled = event(3, {
+    kind: 'run.lifecycle',
+    payload: { status: 'canceled' },
+  })
+  const late = event(4, {
+    ...repairedAttempt,
+    eventId: 'late-progress',
+    sequence: 4,
+    payload: {
+      ...repairedAttempt.payload,
+      recordIndex: 2,
+      text: '迟到的说明。',
+    },
+  })
+  const state = [firstAttempt, repairedAttempt, canceled, late].reduce(
+    reduceCanonicalOutput,
+    initialCanonicalOutputState(),
+  )
+
+  assert.deepEqual(state.planningProgress.map((item) => [
+    item.invocationId,
+    item.attempt,
+    item.text,
+  ]), [
+    ['planning-invocation-1', 0, '先核对范围。'],
+    ['planning-invocation-2', 1, '正在修正规划约束。'],
+  ])
+  assert.equal(state.runStatus, 'canceled')
 })
 
 test('delegation status remains scoped to the owning Run', () => {

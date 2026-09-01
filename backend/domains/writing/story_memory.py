@@ -1,8 +1,7 @@
 """Versioned story-state contracts sourced from chapter evidence.
 
-Story memory is deliberately separate from the generic ``memory_items`` recall
-pool.  This module models authoritative project state and the chapter-scoped
-changes that produced it; recall integration happens at a later boundary.
+Story memory models authoritative project state and the chapter-scoped changes
+that produced it. General semantic recall is owned by the PurrA memory component.
 """
 
 from __future__ import annotations

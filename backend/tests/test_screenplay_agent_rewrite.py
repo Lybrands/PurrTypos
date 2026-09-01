@@ -15,6 +15,7 @@ import application.screenplay_structured_call as screenplay_structured_call
 import application.screenplay_tool_calling as screenplay_tool_calling
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
+    RuntimeLimits,
     AgentMessage,
     AgentRunResult,
     AgentRunRequest,
@@ -2763,10 +2764,7 @@ async def test_screenplay_child_part_context_never_generates_a_public_plan():
         tools_enabled=True,
     )
 
-    assert ScreenplayToolLoopPolicy().should_plan(
-        request,
-        PlanningCapabilities(),
-    ) is False
+    assert not hasattr(ScreenplayToolLoopPolicy(), "should_plan")
 
 
 async def test_screenplay_execution_state_preserves_every_host_bound_scope():
@@ -2860,6 +2858,7 @@ class _CoreComposition:
             ScreenplayHostContextProvider(),
         )
         return AgentCore(
+            runtime_limits=RuntimeLimits(max_run_output_tokens=None),
             model_gateway=self._gateway,
             run_repository=self._runs,
             planning_policy=ScreenplayToolLoopPolicy(),
@@ -3484,7 +3483,7 @@ async def test_compiled_recipe_persists_part_contracts_and_nonempty_budget():
     )
     assert limits.max_invocation_attempts is not None
     assert limits.max_input_tokens is not None
-    assert limits.max_output_tokens is not None
+    assert limits.max_run_output_tokens is not None
     assert limits.max_reasoning_tokens is not None
     assert limits.max_reasoning_tokens > 0
     assert limits.max_invocation_attempts > len(ai_steps) * 8
@@ -4158,7 +4157,7 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
     assert task is not None
     assert task.budget_limits.max_invocation_attempts is not None
     assert task.budget_limits.max_input_tokens is not None
-    assert task.budget_limits.max_output_tokens is not None
+    assert task.budget_limits.max_run_output_tokens is not None
     assert task.budget_limits.max_reasoning_tokens is not None
     assert thaw_json_mapping(task.metadata)["maxGeneratedUnits"] == len(
         decision.execution_recipe.steps
@@ -5690,12 +5689,13 @@ class _ModelGateway:
         async def chunks():
             yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
 
-        return ModelStream(chunks=chunks(), model=invocation.request.model)
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model=invocation.request.model)
 
     async def complete(self, messages, invocation, signal=None):
         del messages, signal
         self.invocations.append(invocation)
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message=AgentMessage(role="assistant", content="{}"),
             model=invocation.request.model,
             finish_reason=ModelFinishReason.STOP,
@@ -5717,7 +5717,7 @@ class _ScriptedModelGateway(_ModelGateway):
             for chunk in round_chunks:
                 yield chunk
 
-        return ModelStream(chunks=chunks(), model=invocation.request.model)
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model=invocation.request.model)
 
 
 

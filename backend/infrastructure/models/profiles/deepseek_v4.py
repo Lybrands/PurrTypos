@@ -15,7 +15,7 @@ class DeepSeekV4FlashProfile(ModelProfile):
         "https://api.deepseek.com",
         "https://api.deepseek.com/v1",
     })
-    max_output_tokens = 393_216
+    max_call_output_tokens = 393_216
     capability_source = "https://api-docs.deepseek.com/quick_start/pricing"
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
     supports_json_object_output = True

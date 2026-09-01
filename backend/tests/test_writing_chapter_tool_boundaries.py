@@ -103,7 +103,9 @@ async def test_chapter_tools_reject_cross_book_ids_even_when_catalog_and_cache_a
         chapter_id="chapter-b",
         chapter_text="另一书秘密正文",
     )
-    dependencies = WritingToolDependencies(chapter_db, object())  # type: ignore[arg-type]
+    dependencies = WritingToolDependencies(
+        chapter_db, object(), object()  # type: ignore[arg-type]
+    )
     context = {
         "bookId": "book-a",
         "writingChapters": [
@@ -194,7 +196,9 @@ async def test_empty_runtime_catalog_uses_database_book_scope_for_all_chapter_to
         chapter_id="chapter-a",
         chapter_text="数据库中的本书正文",
     )
-    dependencies = WritingToolDependencies(chapter_db, object())  # type: ignore[arg-type]
+    dependencies = WritingToolDependencies(
+        chapter_db, object(), object()  # type: ignore[arg-type]
+    )
     context = {"bookId": "book-a", "writingChapters": []}
 
     read_result = await chapter_tools._tool_get_chapter_content(
@@ -272,7 +276,9 @@ async def test_create_chapter_does_not_initialize_an_unknown_book(
     chapter_db: DatabaseConnection,
 ):
     result = await chapter_tools._tool_create_writing_chapter(
-        WritingToolDependencies(chapter_db, object()),  # type: ignore[arg-type]
+        WritingToolDependencies(
+            chapter_db, object(), object()  # type: ignore[arg-type]
+        ),
         {"bookId": "missing-book", "writingChapters": []},
         {},
         None,

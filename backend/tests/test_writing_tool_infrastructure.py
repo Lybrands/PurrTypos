@@ -33,6 +33,7 @@ def _catalog(*, db=None, **overrides):
         dependencies=WritingToolDependencies(
             resolved_db,  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
         ),
         skill_items=SKILL_ITEMS,
         **overrides,
@@ -43,11 +44,13 @@ def test_explicit_writing_capability_maps_are_closed_and_immutable():
     catalog = _catalog()
     registrations = tuple(catalog.registrations())
 
-    assert set(WRITING_TOOL_OPERATIONS) == set(WRITING_TOOL_POLICIES)
-    assert len(WRITING_TOOL_OPERATIONS) == 37
+    assert set(WRITING_TOOL_OPERATIONS) == set(WRITING_TOOL_POLICIES) - {
+        "searchMemories", "searchWritingMethods",
+    }
+    assert len(registrations) == 37
     assert len(WRITING_READ_CACHE_KEY_BUILDERS) == 11
     assert len(WRITING_CACHE_PROBES) == 13
-    assert {item.schema.name for item in registrations} == set(WRITING_TOOL_OPERATIONS)
+    assert {item.schema.name for item in registrations} == set(WRITING_TOOL_POLICIES)
     assert {
         item.schema.name
         for item in registrations
@@ -359,13 +362,13 @@ async def test_created_chapter_is_visible_to_later_tool_in_same_run(monkeypatch)
     }
 
     created = await chapter_tools._tool_create_writing_chapter(
-        WritingToolDependencies(database, object()),  # type: ignore[arg-type]
+        WritingToolDependencies(database, object(), object()),  # type: ignore[arg-type]
         context,
         {},
         events.append,
     )
     read_back = await chapter_tools._tool_get_chapter_content(
-        WritingToolDependencies(database, object()),  # type: ignore[arg-type]
+        WritingToolDependencies(database, object(), object()),  # type: ignore[arg-type]
         context,
         {},
         None,

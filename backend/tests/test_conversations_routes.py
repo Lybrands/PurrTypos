@@ -23,7 +23,17 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest_asyncio.fixture
-async def temp_db(tmp_path: Path):
+async def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from services import memory_deposition_service
+
+    async def skip_component_delivery(_db, _keys):
+        return ()
+
+    monkeypatch.setattr(
+        memory_deposition_service,
+        "deliver_recorded",
+        skip_component_delivery,
+    )
     db = DatabaseConnection(tmp_path)
     await db.init()
     set_db(db)
@@ -136,29 +146,9 @@ async def test_local_conversation_save_replays_by_client_turn_identity(
     ) == first_receipt
 
 
-async def test_local_conversation_replay_repairs_explicit_memory_deposition(
+async def test_local_conversation_replay_does_not_duplicate_memory_source_delivery(
     temp_db: DatabaseConnection,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    from services import memory_deposition_service
-
-    original_deposit = (
-        memory_deposition_service.deposit_explicit_memory_from_conversation
-    )
-    calls = 0
-
-    async def fail_once_then_deposit(**kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("simulated post-commit memory failure")
-        return await original_deposit(**kwargs)
-
-    monkeypatch.setattr(
-        memory_deposition_service,
-        "deposit_explicit_memory_from_conversation",
-        fail_once_then_deposit,
-    )
     request = SaveConversationRequest(
         sessionId=1,
         bookId="book-1",
@@ -170,21 +160,26 @@ async def test_local_conversation_replay_repairs_explicit_memory_deposition(
     )
 
     first = await save_conversation(request)
-    assert await temp_db.fetch_one(
-        "SELECT id FROM memory_items WHERE source_type = 'conversation' "
-        "AND source_id = ?",
-        [str(first["data"]["id"])],
-    ) is None
 
     replay = await save_conversation(request)
 
     assert replay["data"]["id"] == first["data"]["id"]
-    assert calls == 2
     assert await temp_db.fetch_one(
-        "SELECT content, status FROM memory_items "
-        "WHERE source_type = 'conversation' AND source_id = ?",
-        [str(first["data"]["id"])],
-    ) == {"content": "月门只能在雨夜开启", "status": "active"}
+        "SELECT revision, deleted FROM memory_source_heads "
+        "WHERE book_id = ? AND source_id = ?",
+        [
+            "book-1",
+            f"conversation:{first['data']['id']}#chunk:0001",
+        ],
+    ) == {"revision": 1, "deleted": 0}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM memory_source_deliveries "
+        "WHERE book_id = ? AND source_id = ?",
+        [
+            "book-1",
+            f"conversation:{first['data']['id']}#chunk:0001",
+        ],
+    ) == {"count": 1}
 
 
 async def test_legacy_local_turn_replay_canonicalizes_json_before_backfill(
@@ -322,10 +317,21 @@ async def test_agent_terminal_save_cannot_overwrite_server_projection(
     assert row["model"] == "server-model"
     assert json.loads(row["task_plan"])["title"] == "服务端计划"
     assert json.loads(row["agent_process"]) == {"serverOwned": {"kept": True}}
-    memories = await temp_db.fetch_all(
-        "SELECT book_id, content FROM memory_items WHERE source_type = 'conversation'"
+    source = await temp_db.fetch_one(
+        "SELECT book_id, source_id, revision, deleted FROM memory_source_heads"
     )
-    assert memories == [{"book_id": "book-1", "content": "服务端事实"}]
+    assert source == {
+        "book_id": "book-1",
+        "source_id": f"conversation:{conversation_id}#chunk:0001",
+        "revision": 1,
+        "deleted": 0,
+    }
+    delivery = await temp_db.fetch_one(
+        "SELECT payload_json FROM memory_source_deliveries "
+        "WHERE book_id = 'book-1' AND source_id = ?",
+        [f"conversation:{conversation_id}#chunk:0001"],
+    )
+    assert json.loads(delivery["payload_json"])["text"] == "服务端事实"
 
 
 async def test_durable_save_rejects_running_cross_session_and_deleted_session(
@@ -997,16 +1003,14 @@ async def test_truncating_history_retires_tail_run_from_latest_recovery(
         [tail],
     )
     await temp_db.execute(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, status, source_type, source_id) "
-        "VALUES ('book-1', 'instruction', '被截断的显式记忆', 'active', "
-        "'conversation', ?)",
-        [str(tail)],
+        "INSERT INTO memory_source_heads "
+        "(book_id, source_id, revision, deleted) VALUES (?, ?, 1, 0)",
+        ["book-1", f"conversation:{tail}#chunk:0001"],
     )
 
     result = await delete_after_turn("9", keepTurnCount=1)
 
-    assert result == {"success": True}
+    assert result["success"] is True
     assert await temp_db.fetch_one(
         "SELECT session_id, conversation_id FROM ai_agent_runs "
         "WHERE id = 'run-tail'"
@@ -1020,11 +1024,10 @@ async def test_truncating_history_retires_tail_run_from_latest_recovery(
         "WHERE id = 'report-tail'"
     ) == {"session_id": None, "conversation_id": None}
     assert await temp_db.fetch_one(
-        "SELECT status FROM memory_items "
-        "WHERE source_type = 'conversation_truncated' "
-        "AND source_id = ?",
-        [str(tail)],
-    ) == {"status": "archived"}
+        "SELECT revision, deleted FROM memory_source_heads "
+        "WHERE book_id = ? AND source_id = ?",
+        ["book-1", f"conversation:{tail}#chunk:0001"],
+    ) == {"revision": 2, "deleted": 1}
     from infrastructure.persistence.run_store import get_latest_run_for_session
 
     latest = await get_latest_run_for_session(temp_db, 9)
@@ -1096,7 +1099,7 @@ async def test_exact_truncation_retires_unmaterialized_fallback_without_new_rows
         expectedConversationIds=str(kept),
     )
 
-    assert result == {"success": True}
+    assert result["success"] is True
     assert await temp_db.fetch_one(
         "SELECT session_id FROM ai_agent_runs WHERE id = 'run-fallback-tail'"
     ) == {"session_id": None}
@@ -1234,8 +1237,8 @@ async def test_exact_truncation_replay_accepts_verified_post_state(
         "expectedRunIds": "run-replay-tail",
     }
 
-    assert await delete_after_turn("9", **kwargs) == {"success": True}
-    assert await delete_after_turn("9", **kwargs) == {"success": True}
+    assert (await delete_after_turn("9", **kwargs))["success"] is True
+    assert (await delete_after_turn("9", **kwargs))["success"] is True
 
 
 async def test_saved_local_turn_is_retired_with_idempotent_truncation(
@@ -1260,8 +1263,8 @@ async def test_saved_local_turn_is_retired_with_idempotent_truncation(
         "expectedRunIds": "",
     }
 
-    assert await delete_after_turn("1", **kwargs) == {"success": True}
-    assert await delete_after_turn("1", **kwargs) == {"success": True}
+    assert (await delete_after_turn("1", **kwargs))["success"] is True
+    assert (await delete_after_turn("1", **kwargs))["success"] is True
     receipt = await temp_db.fetch_one(
         "SELECT status, payload_digest, conversation_id, revision "
         "FROM ai_local_conversation_turn_receipts "
@@ -1451,19 +1454,23 @@ async def test_memory_deposition_and_truncation_are_transactionally_ordered(
     )
     deposit_started = asyncio.Event()
     release_deposit = asyncio.Event()
+    from services import memory_deposition_service
 
-    async def delayed_deposit(*, book_id, conversation_id, prompt):
+    original_record = memory_deposition_service.record_explicit_conversation_memory
+
+    async def delayed_deposit(db, *, book_id, conversation_id, prompt):
         deposit_started.set()
         await release_deposit.wait()
-        await temp_db.execute(
-            "INSERT INTO memory_items "
-            "(book_id, kind, content, status, source_type, source_id) "
-            "VALUES (?, 'canon', ?, 'active', 'conversation', ?)",
-            [book_id, prompt, str(conversation_id)],
+        return await original_record(
+            db,
+            book_id=book_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
         )
 
     monkeypatch.setattr(
-        "services.memory_deposition_service.deposit_explicit_memory_from_conversation",
+        memory_deposition_service,
+        "record_explicit_conversation_memory",
         delayed_deposit,
     )
     saving = asyncio.create_task(save_conversation(SaveConversationRequest(
@@ -1482,6 +1489,8 @@ async def test_memory_deposition_and_truncation_are_transactionally_ordered(
     assert saved["success"] is True
     assert deleted["success"] is True
     assert await temp_db.fetch_one(
-        "SELECT status FROM memory_items "
-        "WHERE source_type = 'conversation_truncated'"
-    ) == {"status": "archived"}
+        "SELECT revision, deleted FROM memory_source_heads"
+    ) == {"revision": 2, "deleted": 1}
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM memory_source_deliveries"
+    ) == {"count": 2}

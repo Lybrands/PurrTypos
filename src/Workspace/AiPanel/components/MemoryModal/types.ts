@@ -13,8 +13,13 @@ export interface MemoryModalProps {
   bookId: EntityId | null
   writingChapters?: WritingChapter[]
   selectedIds: MemoryId[]
+  selectedLongTermMemoryIds?: string[]
   selectedForeshadowingIds?: MemoryId[]
-  onSelectConfirm: (memoryIds: MemoryId[], foreshadowingIds: MemoryId[]) => void
+  onSelectConfirm: (
+    longTermMemoryIds: string[],
+    memoryIds: MemoryId[],
+    foreshadowingIds: MemoryId[],
+  ) => void
 }
 
 export interface SparkIdeaGroup {

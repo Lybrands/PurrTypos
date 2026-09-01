@@ -72,9 +72,11 @@ function createBoundRootHarness() {
   > = {
     lastSequence: 2,
     lastSequenceByRun: { 'root-run': 2 },
+    seenEventIds: {},
     finalText: 'Root response',
     commentaryText: '',
     commentaryBlocks: [],
+    planningProgress: [],
     operations: {},
     operationOrder: [],
     delegations: {},
@@ -136,9 +138,11 @@ test('snapshot-recovered terminal replaces partial canonical copy with final res
       canonicalOutput: {
         lastSequence: 1,
         lastSequenceByRun: { 'run-1': 1 },
+        seenEventIds: {},
         finalText: '半段',
         commentaryText: '',
         commentaryBlocks: [],
+        planningProgress: [],
         operations: {},
         operationOrder: [],
         delegations: {},
@@ -168,6 +172,59 @@ test('snapshot-recovered terminal replaces partial canonical copy with final res
   assert.equal(message?.content, '服务端完整终稿')
   assert.equal(message?.canonicalOutput?.finalText, '服务端完整终稿')
   assert.equal(message?.canonicalOutput?.finalStreamStatus, 'committed')
+})
+
+test('canonical planning lifecycle never sets the tool-calling UI state', () => {
+  const harness = createTestChunkContext([
+    { role: 'user', content: '问题' },
+    { role: 'assistant', content: '' },
+  ])
+  const event = (
+    sequence: number,
+    kind: 'operation.started' | 'operation.finished',
+    payload: Record<string, unknown>,
+  ) => ({
+    eventId: `event-${sequence}`,
+    outputStreamId: null,
+    runId: 'run-1',
+    turnId: null,
+    invocationId: null,
+    sequence,
+    source: 'runtime' as const,
+    kind,
+    channel: 'operation' as const,
+    visibility: 'public' as const,
+    payload,
+    occurredAt: '2026-09-02T00:00:00Z',
+    emittedAt: '2026-09-02T00:00:00Z',
+  })
+
+  dispatchAgentChunk(event(1, 'operation.started', {
+    operationId: 'planning-1',
+    kind: 'planning',
+    startedAt: '2026-09-02T00:00:00Z',
+    display: {
+      labelKey: 'agent.operation.planning',
+      labelParams: { revision: 0 },
+    },
+  }), harness.context)
+  assert.equal(harness.readMessages().at(-1)?.toolCalling, false)
+
+  dispatchAgentChunk(event(2, 'operation.started', {
+    operationId: 'tool-1',
+    kind: 'tool',
+    startedAt: '2026-09-02T00:00:01Z',
+    display: { labelParams: { toolName: 'readSource' } },
+  }), harness.context)
+  assert.equal(harness.readMessages().at(-1)?.toolCalling, true)
+
+  dispatchAgentChunk(event(3, 'operation.finished', {
+    operationId: 'tool-1',
+    status: 'succeeded',
+    finishedAt: '2026-09-02T00:00:02Z',
+    durationMs: 1000,
+  }), harness.context)
+  assert.equal(harness.readMessages().at(-1)?.toolCalling, false)
 })
 
 for (const status of ['failed', 'blocked'] as const) {

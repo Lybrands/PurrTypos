@@ -20,6 +20,7 @@ from uuid import uuid4
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
+    PlanningMode,
     MessageRole,
     AgentRunResult,
     RunBinding,
@@ -1078,6 +1079,7 @@ def _root_request(turn: Mapping[str, Any], runtime) -> AgentRunRequest:
             runtime.contextWindow or runtime.options.get("context_window")
         ),
         tools_enabled=True,
+        planning_mode=PlanningMode.PLANNED,
         metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
     )
 

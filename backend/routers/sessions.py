@@ -77,9 +77,10 @@ async def reopen_session(sessionId: int):
 @router.delete("/sessions/{sessionId}")
 async def delete_session(sessionId: int):
     db = get_db()
+    owner_rows = None
     async with db.transaction(cancellation_linearizable=True):
         try:
-            await prepare_session_owner_deletion(db, [sessionId])
+            owner_rows = await prepare_session_owner_deletion(db, [sessionId])
         except ProductOwnerActiveError as error:
             raise HTTPException(status_code=409, detail=error.message) from error
         await delete_screenplay_session_rows(db, sessionId)
@@ -88,7 +89,16 @@ async def delete_session(sessionId: int):
             [sessionId],
         )
         await db.execute("DELETE FROM ai_sessions WHERE id = ?", [sessionId])
-    return {"success": True}
+    from services.memory_deposition_service import deliver_recorded
+
+    deliveries = await deliver_recorded(
+        db,
+        owner_rows.memory_delivery_keys if owner_rows is not None else (),
+    )
+    return {
+        "success": True,
+        "memoryDelivery": [item.to_dict() for item in deliveries],
+    }
 
 
 @router.put("/sessions/{sessionId}/title")

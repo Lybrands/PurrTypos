@@ -1,7 +1,7 @@
 import React from 'react'
 import { ArrowLeftIcon, CheckIcon, CopyIcon, DeleteIcon, EditIcon, ExportIcon, ImportIcon, PlusIcon } from '@/purr-components'
-import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrModal, PurrRadio, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
-import type { AiModelConfig } from '../types'
+import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrInputNumber, PurrModal, PurrRadio, PurrSelect, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
+import type { AiModelConfig, MemoryEmbeddingConfig } from '../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
   getBuiltinProvider,
@@ -31,6 +31,12 @@ const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
 interface SettingsPageProps {
   modelConfigs: AiModelConfig[]
   onSaveModelConfigs: (configs: AiModelConfig[]) => void
+  memoryModelId: string
+  memoryEmbeddingConfig: MemoryEmbeddingConfig | null
+  onSaveMemoryConfiguration: (
+    modelId: string,
+    embedding: MemoryEmbeddingConfig | null,
+  ) => void
   onClose: () => void
   syncOutlineChapter: boolean
   onSyncOutlineChapterChange: (value: boolean) => void
@@ -39,6 +45,9 @@ interface SettingsPageProps {
 export default function SettingsPage({
   modelConfigs,
   onSaveModelConfigs,
+  memoryModelId,
+  memoryEmbeddingConfig,
+  onSaveMemoryConfiguration,
   onClose,
   syncOutlineChapter,
   onSyncOutlineChapterChange,
@@ -48,6 +57,16 @@ export default function SettingsPage({
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
+  const [memoryModelDraft, setMemoryModelDraft] = React.useState(memoryModelId)
+  const [memoryEmbeddingDraft, setMemoryEmbeddingDraft] = React.useState<MemoryEmbeddingConfig>(
+    memoryEmbeddingConfig ?? {
+      apiProvider: 'openai',
+      model: '',
+      apiKey: '',
+      baseUrl: '',
+      dimensions: 1536,
+    },
+  )
   const [form] = PurrForm.useForm<Omit<AiModelConfig, 'id'>>()
   const apiProviderWatch = PurrForm.useWatch('apiProvider', form)
   const thinkingEnabledWatch = PurrForm.useWatch('thinkingEnabled', form)
@@ -64,6 +83,17 @@ export default function SettingsPage({
   React.useEffect(() => {
     setModelConfigList(modelConfigs)
   }, [modelConfigs])
+
+  React.useEffect(() => {
+    setMemoryModelDraft(memoryModelId)
+    setMemoryEmbeddingDraft(memoryEmbeddingConfig ?? {
+      apiProvider: 'openai',
+      model: '',
+      apiKey: '',
+      baseUrl: '',
+      dimensions: 1536,
+    })
+  }, [memoryEmbeddingConfig, memoryModelId])
 
   /** 开启自定义 Temperature 且启用 Thinking 时，若尚未有思考温度则补默认值 */
   React.useEffect(() => {
@@ -229,6 +259,38 @@ export default function SettingsPage({
     setModelConfigList(next)
     onSaveModelConfigs(next)
     message.success('已复制配置')
+  }
+
+  const handleSaveMemoryConfiguration = () => {
+    const embedding = {
+      ...memoryEmbeddingDraft,
+      model: memoryEmbeddingDraft.model.trim(),
+      apiKey: memoryEmbeddingDraft.apiKey.trim(),
+      baseUrl: memoryEmbeddingDraft.baseUrl.trim(),
+    }
+    if (!embedding.model || !embedding.apiKey || !embedding.baseUrl) {
+      message.warning('请完整填写 Embedding 模型、API Key 和接口地址')
+      return
+    }
+    if (!Number.isInteger(embedding.dimensions) || embedding.dimensions < 1 || embedding.dimensions > 65536) {
+      message.warning('Embedding 维度必须是 1～65536 的整数')
+      return
+    }
+    onSaveMemoryConfiguration(memoryModelDraft, embedding)
+    message.success('记忆模型配置已保存，重启后生效')
+  }
+
+  const handleClearMemoryConfiguration = () => {
+    setMemoryModelDraft('')
+    setMemoryEmbeddingDraft({
+      apiProvider: 'openai',
+      model: '',
+      apiKey: '',
+      baseUrl: '',
+      dimensions: 1536,
+    })
+    onSaveMemoryConfiguration('', null)
+    message.success('记忆模型配置已清除，重启后生效')
   }
 
   const {
@@ -523,6 +585,68 @@ export default function SettingsPage({
                   )}
                 </PurrForm>
               </PurrModal>
+              <section className="settings-memory-models">
+                <h3>记忆组件模型</h3>
+                <p className="settings-field-desc">
+                  Embedding 只使用这里明确配置的 OpenAI 兼容接口，不会自动选择聊天模型或付费服务。修改向量维度需要单独重建存储；后端不会把不同维度写入同一集合。
+                </p>
+                <label className="settings-field">
+                  <span className="settings-field-label">提炼与评审模型</span>
+                  <PurrSelect
+                    value={memoryModelDraft || undefined}
+                    placeholder="未选择时不启用模型提炼与评审"
+                    allowClear
+                    options={modelConfigList
+                      .filter((config) => config.apiKey?.trim())
+                      .map((config) => ({ value: config.id, label: displayName(config) }))}
+                    onChange={(value) => setMemoryModelDraft(String(value || ''))}
+                  />
+                </label>
+                <div className="settings-memory-embedding-grid">
+                  <label className="settings-field">
+                    <span className="settings-field-label">Embedding 模型</span>
+                    <PurrInput
+                      value={memoryEmbeddingDraft.model}
+                      placeholder="如 text-embedding-3-small"
+                      onChange={(event) => setMemoryEmbeddingDraft((current) => ({ ...current, model: event.target.value }))}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span className="settings-field-label">向量维度</span>
+                    <PurrInputNumber
+                      value={memoryEmbeddingDraft.dimensions}
+                      min={1}
+                      max={65536}
+                      step={1}
+                      onChange={(value) => setMemoryEmbeddingDraft((current) => ({ ...current, dimensions: Number(value) }))}
+                    />
+                  </label>
+                  <label className="settings-field settings-memory-embedding-wide">
+                    <span className="settings-field-label">Embedding 接口地址</span>
+                    <PurrInput
+                      value={memoryEmbeddingDraft.baseUrl}
+                      placeholder="https://api.example.com/v1"
+                      onChange={(event) => setMemoryEmbeddingDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+                    />
+                  </label>
+                  <label className="settings-field settings-memory-embedding-wide">
+                    <span className="settings-field-label">Embedding API Key</span>
+                    <PurrInput.Password
+                      value={memoryEmbeddingDraft.apiKey}
+                      placeholder="sk-xxxxxxxxxxxxxxxx"
+                      onChange={(event) => setMemoryEmbeddingDraft((current) => ({ ...current, apiKey: event.target.value }))}
+                    />
+                  </label>
+                </div>
+                <div className="settings-field-actions">
+                  <PurrButton type="primary" onClick={handleSaveMemoryConfiguration}>保存记忆模型配置</PurrButton>
+                  {memoryEmbeddingConfig ? (
+                    <PurrButton danger onClick={() => {
+                      if (window.confirm('确定清除记忆模型配置？重启后记忆组件将不可用。')) handleClearMemoryConfiguration()
+                    }}>清除配置</PurrButton>
+                  ) : null}
+                </div>
+              </section>
             </div>
           )}
           {activeTab === 'shortcuts' && (
@@ -558,7 +682,7 @@ export default function SettingsPage({
           {activeTab === 'data' && (
             <div className="settings-section">
               <h2 className="settings-section-title">备份与恢复</h2>
-              <p className="settings-section-desc">导出完整数据库备份到本地文件，或从备份文件恢复数据。导入将覆盖当前全部数据并刷新应用。</p>
+              <p className="settings-section-desc">导出包含作品数据库与本地记忆组件的完整备份，或成套恢复数据。API 密钥不会写入备份；恢复会覆盖当前数据并要求重启后端。</p>
               <div className="settings-field" style={{ maxWidth: 820, marginBottom: 16 }}>
                 <div className="settings-field-label">当前数据库</div>
                 <div
@@ -594,7 +718,7 @@ export default function SettingsPage({
                   onClick={handleExportDatabase}
                   loading={exportingDb}
                 >
-                  导出数据库
+                  导出完整备份
                 </PurrButton>
                 <PurrButton
                   type="default"
@@ -603,7 +727,7 @@ export default function SettingsPage({
                   loading={importingDb}
                   danger
                 >
-                  导入数据库
+                  恢复完整备份
                 </PurrButton>
               </div>
             </div>

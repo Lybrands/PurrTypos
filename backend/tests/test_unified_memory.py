@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from application.story_memory_evolution import StoryMemoryEvolutionService
+from application.memory_operations import MemoryApplicationService, memory_metadata
 from application.unified_memory import UnifiedMemoryQueryService
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
@@ -19,6 +20,8 @@ from domains.writing.story_settings import (
 from infrastructure.persistence.writing.sqlite_story_memory_repository import (
     SqliteStoryMemoryRepository,
 )
+from infrastructure.memory import MemoryComponentResource, MemoryResourceConfiguration
+from purra_mem0 import EmbeddingResult
 from routers.memories import list_unified_memories
 
 
@@ -32,6 +35,29 @@ async def db(tmp_path: Path):
     finally:
         clear_db(connection)
         await connection.close()
+
+
+class _EmbeddingGateway:
+    async def embed(self, texts, signal):
+        return EmbeddingResult(
+            tuple((1.0, 0.0, 0.0, 0.0) for _ in texts),
+            input_tokens=sum(len(text) for text in texts),
+        )
+
+    async def close(self):
+        return None
+
+
+@pytest_asyncio.fixture
+async def memory(db: DatabaseConnection, tmp_path: Path):
+    resource = MemoryComponentResource(
+        MemoryResourceConfiguration(tmp_path / "component", 4),
+        embedding_gateway=_EmbeddingGateway(),
+    )
+    try:
+        yield MemoryApplicationService(db, resource)
+    finally:
+        await resource.close()
 
 
 async def _seed_book(db: DatabaseConnection) -> None:
@@ -64,19 +90,22 @@ def _change(setting, *, status=StoryMemoryStatus.CONFIRMED):
 
 
 @pytest.mark.asyncio
-async def test_unified_memory_page_combines_sources_and_suppresses_story_duplicate(db):
+async def test_unified_memory_page_combines_sources_and_suppresses_story_duplicate(
+    db,
+    memory,
+):
     await _seed_book(db)
-    await db.execute(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, fingerprint, status, source_type) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ["book-1", "style", "保持克制的叙事语气", "style-1", "active", "manual"],
+    await memory.create_manual(
+        book_id="book-1",
+        operation_key="style-1",
+        text="保持克制的叙事语气",
+        metadata=memory_metadata(kind="style"),
     )
-    await db.execute(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, fingerprint, status, source_type) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ["book-1", "character", "林墨的location：旧城区", "duplicate-1", "active", "manual"],
+    await memory.create_manual(
+        book_id="book-1",
+        operation_key="duplicate-1",
+        text="林墨的location：旧城区",
+        metadata=memory_metadata(kind="character"),
     )
     ledger = StoryMemoryLedger(SqliteStoryMemoryRepository(db))
     current = await ledger.stage_settings(
@@ -99,7 +128,7 @@ async def test_unified_memory_page_combines_sources_and_suppresses_story_duplica
     )
     await StoryMemoryEvolutionService(db).review_delta(candidate.id)
 
-    page = await UnifiedMemoryQueryService(db).list_items("book-1")
+    page = await UnifiedMemoryQueryService(db, memory).list_items("book-1")
 
     assert page.suppressed_duplicates == 1
     assert page.total == 3
@@ -120,14 +149,19 @@ async def test_unified_memory_page_combines_sources_and_suppresses_story_duplica
 
 
 @pytest.mark.asyncio
-async def test_unified_memory_api_filters_status_kind_and_query(db):
+async def test_unified_memory_api_filters_status_kind_and_query(
+    db,
+    memory,
+    monkeypatch,
+):
     await _seed_book(db)
-    await db.execute(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, fingerprint, status, source_type) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        ["book-1", "style", "保持克制的叙事语气", "style-1", "active", "manual"],
+    await memory.create_manual(
+        book_id="book-1",
+        operation_key="style-1",
+        text="保持克制的叙事语气",
+        metadata=memory_metadata(kind="style"),
     )
+    monkeypatch.setattr("routers.memories._memory_operations", lambda: memory)
 
     response = await list_unified_memories(
         "book-1",
@@ -144,7 +178,7 @@ async def test_unified_memory_api_filters_status_kind_and_query(db):
 
 
 @pytest.mark.asyncio
-async def test_unified_review_filters_and_limit_preserve_atomic_delta(db):
+async def test_unified_review_filters_and_limit_preserve_atomic_delta(db, memory):
     await _seed_book(db)
     ledger = StoryMemoryLedger(SqliteStoryMemoryRepository(db))
     candidate = await ledger.stage_settings(
@@ -158,7 +192,7 @@ async def test_unified_review_filters_and_limit_preserve_atomic_delta(db):
     )
     await StoryMemoryEvolutionService(db).review_delta(candidate.id)
 
-    page = await UnifiedMemoryQueryService(db).list_items(
+    page = await UnifiedMemoryQueryService(db, memory).list_items(
         "book-1",
         kinds=("world_fact",),
         sources=("story_candidate",),

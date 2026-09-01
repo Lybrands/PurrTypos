@@ -11,6 +11,11 @@ import pytest_asyncio
 
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from purra.api import (
+    PLANNING_STREAM_SCHEMA,
+    PlanningScope,
+    PlanningStreamParser,
+)
 from purra.contracts import (
     ModelFinishReason,
     RunBinding,
@@ -291,6 +296,11 @@ async def test_repository_implements_the_output_port_and_creates_schema(
         "invocation_id",
         "intent",
         "commit_mode",
+        "output_protocol",
+        "planning_run_id",
+        "planning_operation_id",
+        "planning_revision",
+        "planning_attempt",
         "status",
         "finish_reason",
     }.issubset(stream_columns)
@@ -322,6 +332,143 @@ async def test_sqlite_host_adapters_pass_the_shared_conformance_suite(output_db)
         outputs=_repository(db, run_repository=runs),
         publisher=InProcessAgentOutputPublisher(),
         session_id=7,
+    )
+
+
+@pytest.mark.asyncio
+async def test_planning_stream_identity_and_provider_progress_are_replayable(
+    output_db,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    operation_id = "planning-operation-1"
+    invocation_id = "planning-invocation-1"
+    stream_id = "planning-stream-1"
+    occurred_at = datetime.now(timezone.utc)
+
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key=f"operation:{operation_id}:started",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.OPERATION_STARTED,
+        channel=OutputChannel.OPERATION,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "operationId": operation_id,
+            "parentOperationId": None,
+            "kind": "planning",
+            "startedAt": occurred_at.isoformat(),
+            "display": {"labelKey": "agent.operation.planning"},
+        },
+        occurred_at=occurred_at,
+    ))
+    spec = OutputStreamSpec(
+        output_stream_id=stream_id,
+        run_id=run_id,
+        turn_id="turn-1",
+        invocation_id=invocation_id,
+        intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+        commit_mode=OutputCommitMode.PRIVATE,
+        output_protocol=PLANNING_STREAM_SCHEMA,
+        planning_scope=PlanningScope(
+            run_id=run_id,
+            operation_id=operation_id,
+            revision=2,
+        ),
+        planning_attempt=1,
+    )
+    await repository.open_stream(spec)
+    wire = (
+        '{"v":1,"type":"progress","text":"正在核对续写范围。"}\n'
+        '{"v":1,"type":"progress","text":"正在整理执行步骤。"}\n'
+        '{"v":1,"type":"plan","plan":{"needsTodos":false}}\n'
+    )
+    progress = PlanningStreamParser().feed(wire)
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key="provider:planning-invocation-1:chunk:1:part:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_CONTENT_DELTA,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={"delta": wire},
+        occurred_at=occurred_at,
+    ))
+    projected = await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key="planning:planning-invocation-1:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PLANNING_PROGRESS,
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "schemaVersion": PLANNING_STREAM_SCHEMA,
+            "operationId": operation_id,
+            "revision": 2,
+            "attempt": 1,
+            **progress[0].to_mapping(),
+        },
+        occurred_at=occurred_at,
+    ))
+    with pytest.raises(
+        ContractViolationError,
+        match="does not match Provider source",
+    ):
+        await repository.append_event(AgentOutputEventDraft(
+            run_id=run_id,
+            turn_id="turn-1",
+            output_stream_id=stream_id,
+            invocation_id=invocation_id,
+            source_event_key="planning:planning-invocation-1:2",
+            source=OutputSource.PROVIDER,
+            kind=OutputEventKind.PLANNING_PROGRESS,
+            channel=OutputChannel.COMMENTARY,
+            visibility=OutputVisibility.PUBLIC,
+            payload={
+                "schemaVersion": PLANNING_STREAM_SCHEMA,
+                "operationId": operation_id,
+                "revision": 2,
+                "attempt": 1,
+                **progress[1].to_mapping(),
+                "text": "已经完成执行。",
+            },
+            occurred_at=occurred_at,
+        ))
+
+    assert projected.payload["text"] == "正在核对续写范围。"
+    assert await db.fetch_one(
+        "SELECT output_protocol, planning_run_id, planning_operation_id, "
+        "planning_revision, planning_attempt FROM ai_agent_output_streams "
+        "WHERE id = ?",
+        [stream_id],
+    ) == {
+        "output_protocol": PLANNING_STREAM_SCHEMA,
+        "planning_run_id": run_id,
+        "planning_operation_id": operation_id,
+        "planning_revision": 2,
+        "planning_attempt": 1,
+    }
+    replay = await repository.list_session_events(
+        session_id=7,
+        after_cursor=0,
+    )
+    replayed_progress = [
+        event for _, event in replay
+        if event.kind is OutputEventKind.PLANNING_PROGRESS
+    ]
+    assert replayed_progress == [projected]
+    assert all(
+        event.payload.get("delta") != wire
+        for _, event in replay
     )
 
 

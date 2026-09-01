@@ -33,7 +33,7 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
     assert glm.protocol_capabilities().reasoning_control is (
         ReasoningControl.ALWAYS_ENABLED
     )
-    assert glm.output_capabilities().max_output_tokens == 131_072
+    assert glm.output_capabilities().max_call_output_tokens == 131_072
     assert resolve_model_profile(
         "deepseek:deepseek-v4-flash",
         "deepseek-v4-flash",
@@ -60,14 +60,14 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
         "https://api.xiaomimimo.com/v1",
     )
     assert mimo.profile_id == "mimo:mimo-v2.5-pro"
-    assert mimo.output_capabilities().max_output_tokens == 131_072
+    assert mimo.output_capabilities().max_call_output_tokens == 131_072
     generic = resolve_model_profile(
         None,
         "custom-model",
         "https://proxy.example/v1",
     )
     assert generic.profile_id == "generic"
-    assert generic.output_capabilities().max_output_tokens is None
+    assert generic.output_capabilities().max_call_output_tokens is None
 
 
 def test_minimax_profile_owns_reasoning_request_and_response_normalization():
@@ -111,7 +111,7 @@ def test_kimi_k3_profile_rejects_unsupported_reasoning_override():
         profile.build_openai_extra_body(False)
     snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
     assert snapshot.actionable is True
-    assert snapshot.max_output_tokens == 1_048_576
+    assert snapshot.max_call_output_tokens == 1_048_576
     assert snapshot.source == (
         "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart"
     )
@@ -196,7 +196,7 @@ def test_builtin_profiles_publish_stable_versioned_capability_snapshots():
         assert snapshot.digest() == second[profile_id].digest()
         assert len(snapshot.digest()) == 64
         if snapshot.actionable:
-            assert snapshot.max_output_tokens is not None
+            assert snapshot.max_call_output_tokens is not None
 
 
 @pytest.mark.parametrize(
@@ -220,7 +220,7 @@ def test_actionable_profile_output_limits_are_owned_by_each_profile(
     snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
 
     assert snapshot.actionable is True
-    assert snapshot.max_output_tokens == expected_max_output
+    assert snapshot.max_call_output_tokens == expected_max_output
 
 @pytest.mark.parametrize(
     ("profile_id", "expected_parameter"),

@@ -28,6 +28,7 @@ class _Gateway:
         del signal
         self.invocations.append((messages, invocation))
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
                 content=json.dumps({
@@ -68,7 +69,7 @@ def _model_request() -> ModelRequest:
         capability_snapshot=replace(
             generic_capability_snapshot(),
             profile_id="test:test-model",
-            max_output_tokens=4_096,
+            max_call_output_tokens=4_096,
         ),
     )
 

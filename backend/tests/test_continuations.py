@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from application.continuation_service import ContinuationService
+from application.agent_composition import (
+    clear_agent_composition,
+    set_agent_composition,
+)
 from application.continuation_context import ContinuationContextService
 from application.novel_source_service import NovelSourceService
 from application.writing_agent_profile import WritingAgentProfile
@@ -30,9 +35,12 @@ async def db(tmp_path):
     connection = DatabaseConnection(tmp_path)
     await connection.init()
     set_db(connection)
+    composition = SimpleNamespace(memory_resource=None)
+    set_agent_composition(composition)
     try:
         yield connection
     finally:
+        clear_agent_composition(composition)
         clear_db()
         await connection.close()
 
@@ -387,7 +395,7 @@ async def test_continuation_profile_freezes_binding_injects_canon_and_limits_sou
     bundle = await WritingContextProvider().build_context(prepared, budget)
     canon = next(block for block in bundle.blocks if block.name == CONTINUATION_CANON_CONTEXT)
     assert "甲" in canon.content and "红门" in canon.content
-    assert canon.host_metadata[CONTEXT_EVIDENCE_RECEIPTS_KEY][0]["metadata"][
+    assert canon.host_metadata[CONTEXT_EVIDENCE_RECEIPTS_KEY][0][
         "canonSnapshotId"
     ] == binding["canonSnapshotId"]
     assert bundle.diagnostics["continuationCanon"]["authority"] == (

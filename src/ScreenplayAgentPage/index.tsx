@@ -4,8 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import AppHeader from '../components/AppHeader'
 import { AgentConversationPanel } from '../components/AgentConversation'
 import {
-  hydrateAiDebugRunSnapshot,
-  recordScreenplayAiDebugChunk,
+  recordAgentConversationDebugChunk,
   type AiDebugChunk,
 } from '../components/AiDevInspector/store'
 import Markdown from '../components/Markdown'
@@ -105,7 +104,6 @@ import {
 import { ScreenplayConversationClient } from './conversationClient'
 import {
   isScreenplayOperationCancellable,
-  modelRunIds,
   screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
   type ScreenplayConversationState,
@@ -715,8 +713,6 @@ export default function ScreenplayAgentPage({
   const agentChunkReplayCaughtUpRef = React.useRef(true)
   const conversationPollErrorRef = React.useRef('')
   const reconciledConversationTurnRef = React.useRef({ scope: '', key: '' })
-  const diagnosticRunMonitorsRef = React.useRef(new Map<string, () => void>())
-  const completedDiagnosticRunIdsRef = React.useRef(new Set<string>())
   const conversationClient = React.useMemo(
     () => new ScreenplayConversationClient(services.screenplay),
     [],
@@ -873,85 +869,6 @@ export default function ScreenplayAgentPage({
     agentConversationStateRef.current = agentConversationState
   }, [agentConversationState])
 
-  const monitorDiagnosticRun = React.useCallback((input: {
-    runId: string
-    turnId: string
-    prompt: string
-    conversationRootRunId?: string
-  }) => {
-    if (
-      !import.meta.env.DEV
-      || !input.runId
-      || diagnosticRunMonitorsRef.current.has(input.runId)
-      || completedDiagnosticRunIdsRef.current.has(input.runId)
-    ) return
-    let stopped = false
-    let terminal = false
-    const cancel = () => {
-      stopped = true
-    }
-    diagnosticRunMonitorsRef.current.set(input.runId, cancel)
-    void (async () => {
-      let after = 0
-      while (!stopped) {
-        const result = await services.ai.getAgentRunSnapshot({
-          runId: input.runId,
-          after,
-          limit: 500,
-        })
-        if (!result.success || !result.data) {
-          throw new Error(result.error || '读取剧本 Agent 诊断失败')
-        }
-        hydrateAiDebugRunSnapshot({
-          snapshot: result.data,
-          turnId: input.turnId,
-          conversationRootRunId: input.conversationRootRunId,
-          prompt: input.prompt,
-          source: '剧本 Agent 对话',
-        })
-        if (result.data.nextCursor > after) {
-          after = result.data.nextCursor
-        } else if (result.data.hasMore) {
-          throw new Error('剧本 Agent 诊断事件游标没有前进')
-        }
-        if (result.data.hasMore) continue
-        terminal = ['done', 'failed', 'canceled', 'blocked'].includes(
-          result.data.run.status,
-        )
-        if (terminal) break
-        await new Promise((resolve) => window.setTimeout(resolve, 200))
-      }
-    })().catch(() => undefined).finally(() => {
-      if (diagnosticRunMonitorsRef.current.get(input.runId) === cancel) {
-        diagnosticRunMonitorsRef.current.delete(input.runId)
-      }
-      if (terminal) completedDiagnosticRunIdsRef.current.add(input.runId)
-    })
-  }, [])
-
-  React.useEffect(() => {
-    if (!import.meta.env.DEV) return
-    for (const turn of agentConversationState?.turns ?? []) {
-      const task = agentConversationState?.tasks.find((item) => item.turnId === turn.id)
-      const runIds = new Set([
-        turn.rootRunId,
-        ...modelRunIds(task),
-      ].filter((runId): runId is string => Boolean(runId?.trim())))
-      for (const runId of runIds) {
-        monitorDiagnosticRun({
-          runId,
-          turnId: turn.id,
-          conversationRootRunId: turn.rootRunId || undefined,
-          prompt: turn.userContent,
-        })
-      }
-    }
-  }, [agentConversationState, monitorDiagnosticRun])
-
-  React.useEffect(() => () => {
-    diagnosticRunMonitorsRef.current.forEach((cancel) => cancel())
-    diagnosticRunMonitorsRef.current.clear()
-  }, [agentSessionId])
 
   React.useEffect(() => {
     if (modelConfigs.length === 0) return
@@ -1898,6 +1815,7 @@ export default function ScreenplayAgentPage({
     let stopWatching: (() => void) | null = null
     let polling = false
     let rerun = false
+    let refreshFailures = 0
     const reconciliationScope = `${openedProjectId}:${agentSessionId}`
     if (reconciledConversationTurnRef.current.scope !== reconciliationScope) {
       reconciledConversationTurnRef.current = {
@@ -1936,6 +1854,7 @@ export default function ScreenplayAgentPage({
           : await conversationClient.load(openedProjectId, agentSessionId)
         if (stopped || activeAgentSessionRef.current !== agentSessionId) return
         conversationPollErrorRef.current = ''
+        refreshFailures = 0
         if (next !== current) {
           agentConversationStateRef.current = next
           setAgentConversationState(next)
@@ -1944,6 +1863,7 @@ export default function ScreenplayAgentPage({
           stopWatching = conversationClient.watch(next, {
             chunkAfter: agentChunkCursorRef.current,
             onInvalidate: wake,
+            onError: error => { if (!stopped) message.error(error.message) },
             onChunks: (page) => {
               if (stopped || activeAgentSessionRef.current !== agentSessionId) return
               let changed = false
@@ -1990,20 +1910,15 @@ export default function ScreenplayAgentPage({
                   appMessage: message,
                 })
                 if (import.meta.env.DEV && event.runId) {
-                  recordScreenplayAiDebugChunk({
+                  recordAgentConversationDebugChunk({
                     runId: event.runId,
+                    source: '剧本 Agent',
                     turnId: event.turnId,
                     conversationRootRunId: turn?.rootRunId || undefined,
                     sessionId: agentSessionId,
                     prompt: event.userContent || turn?.userContent || '',
                     model: modelName || undefined,
                     chunk: event.chunk as AiDebugChunk,
-                  })
-                  monitorDiagnosticRun({
-                    runId: event.runId,
-                    turnId: event.turnId,
-                    conversationRootRunId: turn?.rootRunId || undefined,
-                    prompt: event.userContent || turn?.userContent || '',
                   })
                 }
                 agentChunkCursorRef.current = event.cursor
@@ -2073,6 +1988,9 @@ export default function ScreenplayAgentPage({
             conversationPollErrorRef.current = errorMessage
             message.error(errorMessage)
           }
+          if (++refreshFailures <= 5) {
+            fallbackTimer = setTimeout(wake, Math.min(10_000, 500 * 2 ** refreshFailures))
+          }
         }
       } finally {
         polling = false
@@ -2080,20 +1998,6 @@ export default function ScreenplayAgentPage({
           if (rerun) {
             rerun = false
             wake()
-          } else {
-            const state = agentConversationStateRef.current
-            const active = state?.turns.some(
-              (turn) => turn.status === 'queued' || turn.status === 'planning',
-            ) || state?.operations.some(
-              (operation) => ['queued', 'running'].includes(operation.status)
-                || Boolean(
-                  operation.cancelRequestedAt && operation.status === 'paused',
-                ),
-            )
-            fallbackTimer = setTimeout(
-              () => void poll(),
-              active ? 2000 : 10000,
-            )
           }
         }
       }
@@ -2113,7 +2017,6 @@ export default function ScreenplayAgentPage({
     loadProjectWorkspace,
     message,
     modelConfigs,
-    monitorDiagnosticRun,
     openedProjectId,
     selectedModelId,
   ])

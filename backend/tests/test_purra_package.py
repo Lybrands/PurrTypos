@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import ast
+import inspect
+import json
 from importlib import metadata
 from pathlib import Path
 
 import purra
+import purra_mem0
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "0.4.1"
-PURRA_REQUIREMENT = f"purra=={PURRA_VERSION}"
+PURRA_VERSION = "0.5.0"
+PURRA_MEM0_VERSION = "0.5.0"
+PURRA_REQUIREMENTS = (
+    "-e ../purra",
+    "-e ../purra/integrations/mem0/python[managed]",
+)
+RUNTIME_CONSTRAINTS = {
+    "httpx>=0.28.0,<1",
+    "openai>=1.90.0,<3",
+    "pydantic>=2.9.0,<3",
+}
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
 }
@@ -35,10 +47,14 @@ PUBLIC_PURRA_HOST_MODULES = frozenset({
     "purra.model_protocol",
     "purra.normalization",
     "purra.observability",
+    # Narrow exported lifecycle contracts; do not import controller internals
+    # or reimplement operation state/timing in the host.
+    "purra.operations",
     "purra.orphan_recovery",
     "purra.output",
     "purra.ports",
     "purra.recovery",
+    "purra.retrieval",
     "purra.run_control",
     "purra.run_state",
     "purra.stream_ownership",
@@ -82,18 +98,101 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
-def test_purra_is_pinned_and_loaded_as_an_external_distribution():
-    requirement = (BACKEND_DIR / "requirements-purra.txt").read_text(
-        encoding="utf-8"
-    ).strip()
+def test_purra_is_loaded_from_the_local_editable_distribution():
+    requirements = tuple(
+        line.strip()
+        for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    )
     package_path = Path(purra.__file__).resolve()
 
-    assert requirement == PURRA_REQUIREMENT
+    assert requirements == PURRA_REQUIREMENTS
     assert metadata.version("purra") == PURRA_VERSION
-    assert metadata.distribution("purra").read_text("direct_url.json") is None
-    assert "/site-packages/purra/" in package_path.as_posix()
+    source = (ROOT_DIR.parent / "purra").resolve()
+    direct_url = json.loads(metadata.distribution("purra").read_text("direct_url.json"))
+    assert direct_url == {"url": source.as_uri(), "dir_info": {"editable": True}}
+    assert package_path == source / "src" / "purra" / "__init__.py"
     assert "/packages/purra/src/" not in package_path.as_posix()
     assert not (ROOT_DIR / "packages" / "purra").exists()
+
+
+def test_planning_mode_and_public_progress_contracts_come_from_sibling_purra():
+    from purra.contracts import AgentRunRequest, PlanningMode
+    from purra.output import AgentOutputEvent, OutputEventKind
+
+    source = (ROOT_DIR.parent / "purra" / "src" / "purra").resolve()
+    exported = (AgentRunRequest, PlanningMode, AgentOutputEvent, OutputEventKind)
+
+    assert all(
+        Path(inspect.getfile(contract)).resolve().is_relative_to(source)
+        for contract in exported
+    )
+    assert AgentRunRequest.__dataclass_fields__["planning_mode"].default is PlanningMode.REACTIVE
+    assert OutputEventKind.PLANNING_PROGRESS.value == "planning.progress"
+
+
+def test_product_code_has_no_removed_planning_policy_compatibility_layer():
+    forbidden = (
+        "ReactivePlanningPolicy",
+        "ToolPlanningPolicy",
+        "RequiredToolPlanningPolicy",
+        "should_plan",
+        "planning_policies",
+        "application.planning_constraints",
+    )
+    violations = [
+        f"{_relative(path)} contains {symbol}"
+        for path in _production_python_files()
+        for symbol in forbidden
+        if symbol in path.read_text(encoding="utf-8")
+    ]
+
+    assert not violations, "Removed planning compatibility remains:\n" + "\n".join(
+        violations
+    )
+
+
+def test_purra_mem0_is_loaded_from_the_local_editable_distribution():
+    package_path = Path(purra_mem0.__file__).resolve()
+    source = (ROOT_DIR.parent / "purra" / "integrations" / "mem0" / "python").resolve()
+
+    assert metadata.version("purra-mem0") == PURRA_MEM0_VERSION
+    direct_url = json.loads(
+        metadata.distribution("purra-mem0").read_text("direct_url.json")
+    )
+    assert direct_url == {"url": source.as_uri(), "dir_info": {"editable": True}}
+    assert package_path == source / "src" / "purra_mem0" / "__init__.py"
+
+
+def test_runtime_distribution_constrains_shared_provider_dependencies():
+    requirements = {
+        line.strip()
+        for line in (BACKEND_DIR / "requirements-runtime.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert RUNTIME_CONSTRAINTS <= requirements
+
+    script = (ROOT_DIR / "scripts" / "prepare-backend-resources.cjs").read_text(
+        encoding="utf-8"
+    )
+    assert "requirements-runtime.txt" in script
+    assert "'--no-deps'" not in script
+
+
+def test_product_code_never_imports_the_mem0_sdk_directly():
+    violations = [
+        _relative(path)
+        for path in _production_python_files()
+        if any(
+            module == "mem0" or module.startswith("mem0.")
+            for module in _imports(path)
+        )
+    ]
+    assert not violations, "Direct Mem0 SDK imports:\n" + "\n".join(violations)
 
 
 def test_product_code_imports_only_supported_purra_module_roots():
@@ -109,6 +208,17 @@ def test_product_code_imports_only_supported_purra_module_roots():
     assert not violations, "Private PurrA imports from product code:\n" + "\n".join(
         violations
     )
+
+
+def test_installed_operation_lifecycle_exports_support_shared_planning():
+    from purra import operations
+
+    required = {
+        "AgentOperationController", "OperationDisplay", "OperationKind",
+        "OperationScope", "OperationStarted", "OperationFinished",
+    }
+    assert required <= set(operations.__all__)
+    assert all(getattr(operations, name) is not None for name in required)
 
 
 def test_complete_agent_execution_uses_the_public_api():

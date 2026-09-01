@@ -17,124 +17,85 @@ export async function recoverDurableAgentStream(dependencies: {
   sessionId: number
   after: number
   getLatestRun(sessionId: number): Promise<LatestRunResult>
-  getRunSnapshot(input: {
+  subscribe(input: {
     runId: string
     after: number
-    limit: number
-  }): Promise<ApiResult<AiAgentRunSnapshot>>
-  wait(): Promise<void>
+    onEvent(snapshot: AiAgentRunSnapshot): Promise<void>
+  }): Promise<void>
+  wait(ms: number): Promise<void>
   isAborted(): boolean
   emit(chunk: RecoveryChunk): void | Promise<void>
 }): Promise<'terminal' | 'aborted'> {
   let runId = String(dependencies.runId || '').trim()
   let cursor = Math.max(0, Math.floor(dependencies.after || 0))
-  const seenEvents = new Set<number>()
-  const seenProposals = new Set<string>()
   let longTaskDispatched = false
-  let requestReceiptEmitted = false
-
-  while (!dependencies.isAborted()) {
-    let snapshot: AiAgentRunSnapshot | undefined
-    try {
-      if (!runId) {
-        const latest = await dependencies.getLatestRun(dependencies.sessionId)
-        const request = latest.success ? latest.data?.request : undefined
-        if (
-          request
-          && (request.status === 'rejected' || request.status === 'canceled')
-          && !latest.data?.snapshot
-        ) {
-          await dependencies.emit({
-            done: true,
-            requestResult: request,
-            ...(request.status === 'canceled' ? { aborted: true } : {}),
-            finalResponseExpected: false,
-          })
-          return 'terminal'
-        }
-        if (request?.runId && !requestReceiptEmitted) {
-          await dependencies.emit({ requestReceipt: request })
-          requestReceiptEmitted = true
-        }
-        if (latest.success && latest.data?.snapshot) {
-          const candidate = latest.data.snapshot
-          const exactReceiptOwnsCandidate = Boolean(
-            request?.runId
-            && request.runId === candidate.run.runId,
-          )
-          if (
-            candidate.run.runId !== dependencies.excludeRunId
-            || exactReceiptOwnsCandidate
-          ) {
-            runId = candidate.run.runId
-            snapshot = candidate
-          }
-        }
-      }
-      if (runId && !snapshot) {
-        const result = await dependencies.getRunSnapshot({
-          runId,
-          after: cursor,
-          limit: 500,
-        })
-        if (result.success) snapshot = result.data
-      }
-    } catch {
-      snapshot = undefined
+  let terminal = false
+  let initial: AiAgentRunSnapshot | undefined
+  const seenProposals = new Set<string>()
+  for (let attempt = 0; !runId && !dependencies.isAborted(); attempt++) {
+    if (attempt >= 9) throw new Error('无法恢复本次请求的执行归属，请重新连接')
+    let latest: LatestRunResult | undefined
+    try { latest = await dependencies.getLatestRun(dependencies.sessionId) } catch { /* bounded retry */ }
+    if (latest?.httpStatus && [400, 401, 403, 404].includes(latest.httpStatus)) {
+      throw new Error(latest.error || '当前会话不可读取')
     }
-
-    if (snapshot) {
-      for (const event of snapshot.events) {
-        if (event.cursor <= cursor || seenEvents.has(event.cursor)) continue
-        seenEvents.add(event.cursor)
-        const chunk = event.chunk as RecoveryChunk | undefined
-        if (chunk?.payload?.eventType === 'long_task.dispatched') {
-          longTaskDispatched = true
-        }
-        if (chunk) await dependencies.emit(chunk)
-        cursor = Math.max(cursor, event.cursor)
-      }
-      for (const event of snapshot.productEvents ?? []) {
-        if (!event.proposalId || seenProposals.has(event.proposalId)) continue
-        seenProposals.add(event.proposalId)
-        await dependencies.emit(event.chunk as RecoveryChunk)
-      }
-      if (snapshot.hasMore) {
-        const nextCursor = Number(snapshot.nextCursor)
-        if (Number.isSafeInteger(nextCursor) && nextCursor > cursor) {
-          cursor = nextCursor
-          continue
-        }
-        // Malformed/no-progress pagination is retryable, but must not spin.
-        await dependencies.wait()
-        continue
-      }
-      if (snapshot.run.status !== 'running') {
-        const errorCode = snapshotErrorCode(snapshot)
-        const dispatched = longTaskDispatched || snapshot.events.some((event) => {
-          const chunk = event.chunk as RecoveryChunk | undefined
-          return chunk?.payload?.eventType === 'long_task.dispatched'
-        })
-        await dependencies.emit({
-          done: true,
-          runId: snapshot.run.runId,
-          runResult: {
-            runId: snapshot.run.runId,
-            status: snapshot.run.status,
-            ...(errorCode ? { errorCode } : {}),
-          },
-          ...(snapshot.run.status === 'done' && !dispatched
-            ? { finalResponse: snapshot.run.finalResponse }
-            : {}),
-          ...(dispatched ? { finalResponseExpected: false } : {}),
-          model: snapshot.run.provenance.modelName || undefined,
-        })
-        return 'terminal'
-      }
+    const request = latest?.success ? latest.data?.request : undefined
+    if (request && ['rejected', 'canceled'].includes(request.status) && !latest?.data?.snapshot) {
+      await dependencies.emit({ done: true, requestResult: request,
+        ...(request.status === 'canceled' ? { aborted: true } : {}), finalResponseExpected: false })
+      return 'terminal'
     }
-    await dependencies.wait()
+    const candidate = latest?.success ? latest.data?.snapshot : undefined
+    if (candidate && (candidate.run.runId !== dependencies.excludeRunId
+      || request?.runId === candidate.run.runId)) {
+      runId = candidate.run.runId
+      initial = candidate
+      if (request?.runId) await dependencies.emit({ requestReceipt: request })
+    } else {
+      await dependencies.wait(Math.min(10_000, 250 * 2 ** attempt))
+    }
   }
-  return 'aborted'
+  const consume = async (snapshot: AiAgentRunSnapshot) => {
+    if (dependencies.isAborted()) return
+    if (snapshot.run.runId !== runId) throw new Error('恢复事件不属于当前 Run')
+    const previous = cursor
+    for (const event of snapshot.events) {
+      if (event.cursor <= cursor) continue
+      const chunk = event.chunk as RecoveryChunk | undefined
+      if (chunk?.payload?.eventType === 'long_task.dispatched') longTaskDispatched = true
+      if (chunk) await dependencies.emit(chunk)
+      cursor = Math.max(cursor, event.cursor)
+    }
+    cursor = Math.max(cursor, snapshot.nextCursor)
+    for (const event of snapshot.productEvents ?? []) {
+      if (!event.proposalId || seenProposals.has(event.proposalId)) continue
+      seenProposals.add(event.proposalId)
+      await dependencies.emit(event.chunk as RecoveryChunk)
+    }
+    if (snapshot.hasMore) {
+      if (cursor <= previous) throw new Error('恢复分页游标没有前进')
+      return
+    }
+    if (snapshot.run.status !== 'running') {
+      const errorCode = snapshotErrorCode(snapshot)
+      await dependencies.emit({
+        done: true, runId,
+        runResult: { runId, status: snapshot.run.status, ...(errorCode ? { errorCode } : {}) },
+        ...(snapshot.run.status === 'done' && !longTaskDispatched
+          ? { finalResponse: snapshot.run.finalResponse } : {}),
+        ...(longTaskDispatched ? { finalResponseExpected: false } : {}),
+        model: snapshot.run.provenance.modelName || undefined,
+      })
+      terminal = true
+    }
+  }
+  if (initial) await consume(initial)
+  if (!terminal && !dependencies.isAborted()) {
+    await dependencies.subscribe({ runId, after: cursor, onEvent: consume })
+  }
+  if (dependencies.isAborted()) return 'aborted'
+  if (!terminal) throw new Error('对话连接结束，但执行尚未收口，请重新连接')
+  return 'terminal'
 }
 
 function snapshotErrorCode(snapshot: AiAgentRunSnapshot): string | undefined {

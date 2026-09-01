@@ -14,6 +14,7 @@ import threading
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -37,6 +38,14 @@ logging.basicConfig(
 )
 
 _lifespan_owner: object | None = None
+
+
+def _set_memory_component_status(application, value: dict) -> None:
+    state = getattr(application, "state", None)
+    if state is None:
+        state = SimpleNamespace()
+        application.state = state
+    state.memory_component = value
 
 
 @asynccontextmanager
@@ -98,10 +107,43 @@ async def lifespan(application: FastAPI):
             if SKILLS_DIR and SKILLS_DIR != Path("")
             else Path(__file__).parent / "skills"
         )
+        from application.memory_component import (
+            MemoryComponentConfigurationError,
+            create_memory_component_resource,
+        )
+        from infrastructure.memory import MemoryResourceError
+
+        memory_resource = None
+        _set_memory_component_status(application, {"status": "unconfigured"})
+        try:
+            memory_resource = await create_memory_component_resource(
+                db,
+                data_dir=(data_dir or Path(".")),
+            )
+            if memory_resource is not None:
+                _set_memory_component_status(application, {
+                    "status": "ready",
+                    "embeddingDimensions": (
+                        memory_resource.configuration.embedding_dimensions
+                    ),
+                })
+        except (
+            MemoryComponentConfigurationError,
+            MemoryResourceError,
+        ) as error:
+            _set_memory_component_status(application, {
+                "status": "unavailable",
+                "code": error.code,
+            })
+            logging.getLogger(__name__).error(
+                "Memory component is unavailable: %s",
+                error.code,
+            )
         composition = create_agent_composition(
             db,
             execution_db=execution_db,
             skills_dir=skills_dir,
+            memory_resource=memory_resource,
         )
         recovered_long_tasks = await (
             composition.long_task_repository.recover_after_restart()
@@ -180,6 +222,23 @@ async def lifespan(application: FastAPI):
             )
 
         set_agent_composition(composition)
+        if memory_resource is not None:
+            from application.memory_delivery import MemoryDeliveryService
+            from application.memory_operations import MemoryApplicationService
+
+            recovered_memory_deliveries = await MemoryDeliveryService(
+                db,
+                MemoryApplicationService(db, memory_resource),
+            ).recover()
+            failed_memory_deliveries = tuple(
+                item for item in recovered_memory_deliveries
+                if item.status != "completed"
+            )
+            if failed_memory_deliveries:
+                logging.getLogger(__name__).warning(
+                    "Memory source delivery recovery left %s item(s) pending",
+                    len(failed_memory_deliveries),
+                )
 
         from infrastructure.persistence.orphan_run_monitor import (
             monitor_orphaned_runs,
@@ -285,6 +344,10 @@ async def lifespan(application: FastAPI):
                     finally:
                         if _lifespan_owner is owner:
                             _lifespan_owner = None
+                        _set_memory_component_status(
+                            application,
+                            {"status": "closed"},
+                        )
 
 
 app = FastAPI(title="PurrTypos Backend", version="0.5.2", lifespan=lifespan)
@@ -363,6 +426,11 @@ async def health():
     return {
         "status": "ok" if db_ok else "degraded",
         "db": "up" if db_ok else "down",
+        "memory": getattr(
+            app.state,
+            "memory_component",
+            {"status": "unconfigured"},
+        ),
     }
 
 

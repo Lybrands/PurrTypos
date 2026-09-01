@@ -243,7 +243,7 @@ async def test_runtime_aclose_closes_nested_tool_stream_and_gateway_by_next_tick
                     finish_reason=ModelFinishReason.TOOL_CALLS,
                 )
 
-            return ModelStream(chunks=chunks(), model="model")
+            return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="model")
 
         async def complete(self, messages, invocation, signal=None):
             raise AssertionError("runtime must use the streaming boundary")
@@ -290,7 +290,7 @@ async def test_runtime_aclose_closes_nested_tool_stream_and_gateway_by_next_tick
             capability_snapshot=replace(
                 generic_capability_snapshot(),
                 profile_id="test:model",
-                max_output_tokens=1_024,
+                max_call_output_tokens=1_024,
             ),
         ),
         domain_context=DomainContext(namespace="test"),
