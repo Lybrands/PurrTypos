@@ -44,7 +44,7 @@ def _snapshot(*, profile_id="generic", protocol=None):
     return replace(
         generic_capability_snapshot(),
         profile_id=profile_id,
-        max_output_tokens=393_216,
+        max_call_output_tokens=393_216,
         protocol=protocol or ModelProtocolCapabilities(),
     )
 
@@ -260,7 +260,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
             "max_tokens": 2_048,
             "thinking": {"type": "disabled"},
         },
-        "maxOutputTokens": 2_048,
+        "maxCallOutputTokens": 2_048,
         "reasoningMode": "disabled",
         "toolChoice": "auto",
         "toolNames": ["readThing"],
@@ -268,7 +268,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
         "messageRoles": ["user"],
             "profileId": "profile",
             "modelOutputCapabilities": {
-                "maxOutputTokens": 393_216,
+                "maxCallOutputTokens": 393_216,
                 "thinkingTokenAccounting": "unknown",
             },
             "outputLimit": {
@@ -355,7 +355,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
             "provider": provider,
             "signal": signal,
         })
-        return {"stream": _chunks(), "model": "resolved-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _chunks(), "model": "resolved-model"}
 
     async def _complete(key, messages, options, provider, signal):
         assert key == "secret"
@@ -364,6 +364,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
         assert provider == "anthropic"
         assert signal is None
         return {
+            "applied_output_limit": options.get("max_tokens"),
             "message": {"role": "assistant", "content": "complete"},
             "model": "resolved-model",
             "finish_reason": "stop",
@@ -502,6 +503,7 @@ async def test_provider_model_gateway_normalizes_non_stream_completion(monkeypat
         assert "tools" not in options
         assert "tool_choice" not in options
         return {
+            "applied_output_limit": options.get("max_tokens"),
             "message": {"role": "assistant", "content": "planned", "reasoning_content": "brief"},
             "model": "resolved-model",
             "usage": {
@@ -544,7 +546,7 @@ async def test_provider_model_gateway_maps_typed_tool_continuation_messages(monk
         async def _chunks():
             yield {"choices": [{"message": {"content": "fallback"}, "finish_reason": "stop"}]}
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_output_limit": _options.get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -628,7 +630,7 @@ async def test_provider_model_gateway_standardizes_upstream_stream_interruptions
             raise httpx.ReadError("connection contained secret details")
             yield  # pragma: no cover
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_output_limit": _args[2].get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -713,7 +715,7 @@ async def test_provider_model_gateway_recognizes_wrapped_stream_interruptions(
                 raise RuntimeError("SDK wrapper detail") from cause
             yield  # pragma: no cover
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_output_limit": _args[2].get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -740,7 +742,7 @@ async def test_provider_model_gateway_turns_cumulative_message_fallback_into_del
             yield {"choices": [{"delta": {"content": "a"}, "finish_reason": None}]}
             yield {"choices": [{"message": {"content": "ab"}, "finish_reason": "stop"}]}
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_output_limit": _args[2].get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -844,7 +846,7 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
         assert not received_signal.is_set()
         signal.set()
         assert received_signal.is_set()
-        return {"stream": raw_stream, "model": "resolved-model"}
+        return {"applied_output_limit": _options.get("max_tokens"), "stream": raw_stream, "model": "resolved-model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     runtime = AgentRuntime(model_gateway=ProviderModelGateway("secret"))
@@ -901,3 +903,65 @@ async def test_runtime_rejects_unknown_output_limit_before_provider_request(
     assert result.outcome is RuntimeOutcome.FAILED
     assert result.error_code == "model_output_limit_unknown"
     assert provider_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("applied,usage", [(None, 1), (4096, 1), (2048, 2049)])
+async def test_managed_provider_rejects_invalid_output_receipt_or_usage(
+    monkeypatch, streaming, applied, usage,
+):
+    from purra.errors import ContractViolationError
+    from purra.model_invocation import (
+        AgentModelCall, AgentModelInvocationManager, ModelInvocationContext,
+    )
+    from purra.output import AgentOutputIntent, OutputCommitMode
+
+    closed = False
+
+    class RawStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return {
+                "choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": usage},
+            }
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    async def provider(*args):
+        assert args[2]["max_tokens"] == 2048
+        result = {
+            "model": "model", "message": {"role": "assistant", "content": "answer"},
+            "finish_reason": "stop", "usage": {"prompt_tokens": 1, "completion_tokens": usage},
+            "stream": RawStream(),
+        }
+        if applied is not None:
+            result["applied_output_limit"] = applied
+        return result
+
+    monkeypatch.setattr(provider_model_gateway.provider_router, "create_chat_stream", provider)
+    monkeypatch.setattr(provider_model_gateway.provider_router, "create_chat_no_stream", provider)
+    manager = AgentModelInvocationManager(ProviderModelGateway("test-key"))
+    call = AgentModelCall(
+        request=ModelRequest(provider="openai", model="model", capability_snapshot=_snapshot()),
+        output_limit=_limit(2048),
+        output_intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+        commit_mode=OutputCommitMode.PRIVATE,
+    )
+    context = ModelInvocationContext(run_id="output-contract-test")
+    messages = (AgentMessage(role="user", content="hello"),)
+    with pytest.raises(ContractViolationError) as error:
+        if streaming:
+            result = await manager.stream(messages, call, context)
+            async for _ in result.chunks:
+                pass
+        else:
+            await manager.complete(messages, call, context)
+    assert error.value.code == "model_gateway_contract_violation"
+    if streaming:
+        assert closed

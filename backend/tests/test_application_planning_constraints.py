@@ -19,7 +19,6 @@ from purra.contracts import (
     WorkStep,
 )
 from purra.planner import build_planner_messages
-from application.planning_constraints import RequiredToolPlanningPolicy
 from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.screenplay_agent.adapter import (
     ScreenplayDomainAdapter,
@@ -31,67 +30,11 @@ from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.contracts import ScreenplayStageCommand
 
 
-class _Policy:
-    def should_plan(self, request, capabilities):
-        del request, capabilities
-        return True
-
-    def planning_constraints(self, request, capabilities):
-        del request, capabilities
-        return PlanningConstraints(
-            required_any_tool_names=frozenset({"existing"}),
-        )
-
-    def planning_constraints_for_task(
-        self,
-        request,
-        capabilities,
-        task_spec,
-    ):
-        del request, task_spec
-        return capabilities.constraints
-
-
 def test_screenplay_runtime_allows_long_model_generation_without_removing_bound():
     limits = ScreenplayDomainAdapter(tool_catalog=object()).runtime_limits
 
     assert limits.provider_invocation_timeout_ms == 300_000
     assert limits.root_run_timeout_ms == 900_000
-
-
-def test_required_tool_policy_narrows_request_and_task_constraints():
-    request = AgentRunRequest(
-        messages=(AgentMessage(role="user", content="执行"),),
-        model=ModelRequest(provider="fixture", model="model"),
-        domain_context=DomainContext(namespace="test"),
-    )
-    policy = RequiredToolPlanningPolicy(_Policy(), {"required"})
-    capabilities = PlanningCapabilities(
-        available_tool_names=frozenset({"existing", "required"}),
-    )
-
-    request_constraints = policy.planning_constraints(
-        request,
-        capabilities,
-    )
-    task_constraints = policy.planning_constraints_for_task(
-        request,
-        PlanningCapabilities(
-            available_tool_names=capabilities.available_tool_names,
-            constraints=request_constraints,
-        ),
-        TaskSpec(goal="执行"),
-    )
-
-    assert request_constraints.required_any_tool_names == frozenset({
-        "existing",
-        "required",
-    })
-    assert task_constraints.required_any_tool_names == frozenset({
-        "existing",
-        "required",
-    })
-    assert task_constraints.allow_model_only_fallback is False
 
 
 def _screenplay_request(
@@ -106,31 +49,14 @@ def _screenplay_request(
     )
 
 
-def test_screenplay_planning_policy_plans_only_non_empty_root_turns():
+def test_screenplay_planning_policy_only_constrains_explicit_planned_runs():
     policy = ScreenplayToolLoopPolicy()
     capabilities = PlanningCapabilities()
     root = ScreenplayAgentDomainContext(
         project_id="project-1",
         turn_id="turn-1",
     )
-    child = ScreenplayAgentDomainContext(
-        project_id="project-1",
-        task_id="task-1",
-        unit_id="unit-1",
-        target_role="sourceAnalysis",
-        expected_part_type="document",
-        expected_part_key="main",
-    )
-
-    assert policy.should_plan(
-        _screenplay_request(root, "分析原作范围"), capabilities
-    ) is True
-    assert policy.should_plan(
-        _screenplay_request(root, " \n"), capabilities
-    ) is False
-    assert policy.should_plan(
-        _screenplay_request(child, "生成素材分析"), capabilities
-    ) is False
+    assert not hasattr(policy, "should_plan")
     assert policy.planning_constraints(
         _screenplay_request(root, "分析原作范围"), capabilities
     ).allow_model_only_fallback is False

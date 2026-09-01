@@ -217,7 +217,7 @@ async def test_task_context_selects_technique_and_emits_durable_receipts(db):
     assert technique["id"] in method_block.content
     receipt_rows = method_block.host_metadata[CONTEXT_EVIDENCE_RECEIPTS_KEY]
     assert [item["itemId"] for item in receipt_rows] == [primary["id"], technique["id"]]
-    assert receipt_rows[1]["metadata"]["reason"] == "task_selected"
+    assert receipt_rows[1]["reason"] == "task_selected"
 
     store = RunEvidenceStore()
     store.record_context_messages((AgentMessage(
@@ -245,6 +245,8 @@ async def test_task_context_selects_technique_and_emits_durable_receipts(db):
         ),
         checkpoint=AgentExecutionCheckpoint.from_mapping(checkpoint.to_mapping()),
     )
+    assert history["actualUsageReceipts"][1]["metadata"]["reason"] == "task_selected"
+    assert "metadata" not in history["actualUsageReceipts"][1]["metadata"]
     assert history["bindingSnapshot"]["bindingSnapshotDigest"] == snapshot["bindingSnapshotDigest"]
     assert [item["itemId"] for item in history["actualUsageReceipts"]] == [
         primary["id"], technique["id"]

@@ -8,7 +8,7 @@ import logging
 from typing import Any, AsyncIterator
 
 import anyio
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from purra.contracts import (
@@ -655,6 +655,45 @@ async def get_agent_run_snapshot(
     if snapshot is None:
         return {"success": False, "error": "Agent Run 不存在"}
     return {"success": True, "data": snapshot}
+
+
+@router.get("/ai/agent-runs/{run_id}/events")
+async def stream_agent_run_events(
+    request: Request, run_id: str,
+    session_id: int = Query(alias="sessionId", ge=1),
+    after: int = Query(default=0, ge=0),
+):
+    from application.agent_composition import get_agent_composition
+    from application.agent_run_queries import AgentRunQueryService
+    from application.agent_event_stream import stream_agent_pages, projection_version
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
+
+    composition = get_agent_composition()
+    run = await get_run(get_db(), run_id)
+    if run is None or run.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Agent Run 不存在于当前会话")
+    query = AgentRunQueryService(composition.run_snapshot_reader, composition.output_repository)
+
+    async def read_page(cursor):
+        snapshot = await query.get_snapshot(run_id, after_event_id=cursor, limit=500)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Agent Run 不存在")
+        # Product bodies stay on their scoped query, not the public stream.
+        snapshot.pop("productEvents", None)
+        return {
+            **snapshot,
+            "projectionVersion": projection_version([
+                snapshot["run"]["status"], snapshot["run"]["execution"]["cancellationRequested"],
+                snapshot["todos"], snapshot["delegations"],
+            ]),
+            "done": snapshot["run"]["status"] != "running" and not snapshot["hasMore"],
+        }
+
+    return EventSourceResponse(stream_agent_pages(
+        request=request, read_page=read_page,
+        notifications=composition.output_notifications, after=after,
+    ))
 
 
 @router.get("/ai/agent-runtime-regressions")

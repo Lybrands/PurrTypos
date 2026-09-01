@@ -290,3 +290,37 @@ async def test_anthropic_cancellation_never_synthesizes_success(monkeypatch):
 
 async def _collect_stream(stream):
     return [chunk async for chunk in stream]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("requested,applied", [(64, 3072), (2048, 2048)])
+async def test_anthropic_receipt_reports_the_final_sdk_limit(
+    monkeypatch, streaming, requested, applied,
+):
+    from infrastructure.models.profiles.base import ModelProfile
+
+    captured = {}
+    monkeypatch.setattr(anthropic_chat, "resolve_model_profile", lambda *_: ModelProfile())
+
+    async def create(**params):
+        captured.update(params)
+        if not streaming:
+            return SimpleNamespace(content=[], model="model", stop_reason="end_turn", usage=None)
+
+        async def events():
+            yield SimpleNamespace(type="message_stop")
+        return events()
+
+    monkeypatch.setattr(anthropic_chat, "_create_client", lambda *_: SimpleNamespace(
+        messages=SimpleNamespace(create=create),
+    ))
+    chat = (anthropic_chat.chat_stream_as_openai_format if streaming
+            else anthropic_chat.chat_no_stream_as_openai_format)
+    result = await chat("test-key", [{"role": "user", "content": "hello"}], {
+        "model": "model", "thinking": {"type": "enabled"}, "max_tokens": requested,
+    })
+    assert result["applied_output_limit"] == captured["max_tokens"] == applied
+    assert captured["thinking"]["budget_tokens"] < applied
+    if streaming:
+        await result["stream"].aclose()

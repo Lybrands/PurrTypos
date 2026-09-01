@@ -295,12 +295,26 @@ export function buildAssistantTimeline(
           },
         });
     });
+    canonicalOutput.planningProgress.forEach((progress) => {
+      const narration = publicAgentProgressNarration(progress.text);
+      if (!narration) return;
+      canonicalParts.push({
+        sequence: progress.sequence,
+        part: {
+          type: "commentary",
+          md: narration,
+          startedAt: Date.parse(progress.occurredAt),
+          regionKey: `${messageIndex}-planning-progress-${progress.eventId}`,
+        },
+      });
+    });
     canonicalOutput.operationOrder.forEach((operationId) => {
       const operation = canonicalOutput.operations[operationId];
-      // Model lifecycle stays canonical for timing, cancellation and diagnostics,
-      // but it is not a user-facing execution step.
+      // Planning and model lifecycle remain canonical state. Their public
+      // narration is rendered as commentary, not as an executable work row.
       if (
         !operation
+        || operation.kind === "planning"
         || operation.kind === "model"
         || operation.kind === "validation"
         || (operation.kind === "context_compaction" && message.contextCompaction)

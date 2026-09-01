@@ -16,6 +16,7 @@ export interface QueuedChatSubmission {
   agentEnabled: boolean;
   associatedChapterIds: EntityId[];
   associatedOutlineIds: EntityId[];
+  selectedLongTermMemoryIds: string[];
   selectedMemoryIds: (number | string)[];
   selectedForeshadowingIds: (number | string)[];
   writingMethodOverrides: WritingMethodOverrides;

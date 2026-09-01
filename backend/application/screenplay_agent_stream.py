@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from application.sse_mapping import canonical_output_to_sse_chunk
+from application.agent_event_stream import projection_version
 from domains.screenplay_agent.tools.catalog import screenplay_tool_display_names
 from exceptions import NotFoundError
 
@@ -74,7 +75,28 @@ class ScreenplayCanonicalOutputQuery:
             "chunks": chunks,
             "nextCursor": int(page[-1][0]) if page else max(0, int(after)),
             "hasMore": len(rows) > limit,
+            "projectionVersion": await self.projection_version(session_id),
         }
+
+    async def projection_version(self, session_id: int) -> str:
+        # Exclude assistant text, usage and heartbeat timestamps: canonical
+        # text deltas must not invalidate the full business projection.
+        rows = await self._db.fetch_all(
+            "SELECT t.id, t.status, t.attempt, t.error_json, t.cancel_requested_at_ms, "
+            "t.operation_id, t.result_revision_id AS turn_result_revision_id, "
+            "r.id AS root_run_id, "
+            "o.id AS operation_id, o.revision, o.status AS operation_status, "
+            "o.result_revision_id, o.cancel_requested_at_ms, "
+            "task.revision AS task_revision "
+            "FROM screenplay_agent_turns t "
+            "LEFT JOIN ai_agent_runs r ON r.binding_namespace = 'screenplay.conversation_turn' "
+            "AND r.binding_aggregate_id = t.project_id AND r.binding_command_id = t.command_id "
+            "LEFT JOIN screenplay_agent_operations o ON o.turn_id = t.id "
+            "LEFT JOIN ai_agent_long_tasks task ON task.id = o.long_task_id "
+            "WHERE t.session_id = ? ORDER BY t.rowid, r.rowid",
+            [session_id],
+        )
+        return projection_version(rows)
 
     async def _turn_metadata(
         self,

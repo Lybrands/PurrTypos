@@ -389,6 +389,7 @@ async def chat_stream_as_openai_format(
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
+        "applied_output_limit": params["max_tokens"],
     }
 
 
@@ -495,6 +496,7 @@ async def chat_no_stream_as_openai_format(
         "model": getattr(msg, "model", None) or model,
         "finish_reason": getattr(msg, "stop_reason", None),
         "usage": _anthropic_usage_as_openai(native_usage),
+        "applied_output_limit": params["max_tokens"],
     }
 
 

@@ -17,6 +17,7 @@ from purra.contracts import (
     AgentRunResult,
     MessageOrigin,
     MessageRole,
+    PlanningMode,
     RunBinding,
     RunProvenance,
     RunStatus,
@@ -29,6 +30,7 @@ from purra.output import (
 )
 
 from application.agent_run_service import AgentRunService
+from application.durable_agent_run import run_durable_agent_unit
 from application.model_runtime import (
     model_request_from_runtime,
     reasoning_mode_from_options,
@@ -132,6 +134,7 @@ class ScreenplayToolCallingService:
             mode="screenplay_durable_unit",
             context_window=window,
             tools_enabled=True,
+            planning_mode=PlanningMode.REACTIVE,
             metadata={"locale": domain_context.locale},
         )
         command_id = f"{domain_context.task_id}:{domain_context.unit_id}"
@@ -197,26 +200,6 @@ class ScreenplayToolCallingService:
         )
 
 
-class _BindDurableUnitRun:
-    def __init__(self, bind_run: BindRun) -> None:
-        self._bind_run = bind_run
-
-    async def validate(self) -> None:
-        return None
-
-    async def before_submit(self) -> None:
-        return None
-
-    async def on_run_started(self, run_id: str) -> None:
-        await self._bind_run(run_id)
-
-    async def on_run_finished(self, result: AgentRunResult) -> None:
-        del result
-
-    async def on_start_failed(self, code: str) -> None:
-        del code
-
-
 async def run_screenplay_child(
     *,
     db,
@@ -227,49 +210,11 @@ async def run_screenplay_child(
     signal,
     bind_run: BindRun | None,
 ) -> AgentRunResult:
-    binding = options.binding
-    if binding is None:
-        raise ValueError("screenplay child Run requires a binding")
-    existing = await db.fetch_one(
-        "SELECT id, status, final_response, model_name "
-        "FROM ai_agent_runs WHERE binding_namespace = ? "
-        "AND binding_aggregate_id = ? AND binding_command_id = ? "
-        "ORDER BY rowid DESC LIMIT 1",
-        [binding.namespace, binding.aggregate_id, binding.command_id],
+    return await run_durable_agent_unit(
+        db=db, runs=runs, request=request, options=options,
+        api_key=api_key, signal=signal, bind_run=bind_run,
+        active_error_code="screenplay_child_run_active",
     )
-    if existing is not None and str(existing.get("status") or "") == "done":
-        run_id = str(existing["id"])
-        if bind_run is not None:
-            await bind_run(run_id)
-        return AgentRunResult(
-            run_id=run_id,
-            status=RunStatus.DONE,
-            final_response=str(existing.get("final_response") or ""),
-            model=str(existing.get("model_name") or request.model.model),
-        )
-    if existing is not None and str(existing.get("status") or "") == "running":
-        raise ModelGatewayError(
-            "the Durable unit already has an active model Run",
-            code="screenplay_child_run_active",
-            retryable=True,
-        )
-
-    terminal: AgentRunResult | None = None
-    async for update in runs.run(
-        request=request,
-        api_key=api_key,
-        options=options,
-        signal=signal or asyncio.Event(),
-        run_binding_lifecycle=(
-            _BindDurableUnitRun(bind_run) if bind_run is not None else None
-        ),
-        cancellation_reason=("durable_unit_canceled" if signal is not None else None),
-    ):
-        if isinstance(update, AgentRunResult):
-            terminal = update
-    if terminal is None:
-        raise RuntimeError("screenplay child Run completed without a result")
-    return terminal
 
 
 def screenplay_run_provenance(

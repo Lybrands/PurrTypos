@@ -1276,12 +1276,28 @@ async def init_schema(db: DatabaseConnection) -> None:
         invocation_id TEXT NOT NULL UNIQUE,
         intent TEXT NOT NULL,
         commit_mode TEXT NOT NULL,
+        output_protocol TEXT DEFAULT NULL,
+        planning_run_id TEXT DEFAULT NULL,
+        planning_operation_id TEXT DEFAULT NULL,
+        planning_revision INTEGER NOT NULL DEFAULT 0,
+        planning_attempt INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'open',
         finish_reason TEXT DEFAULT NULL,
         error_code TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    for column in (
+        "output_protocol TEXT DEFAULT NULL",
+        "planning_run_id TEXT DEFAULT NULL",
+        "planning_operation_id TEXT DEFAULT NULL",
+        "planning_revision INTEGER NOT NULL DEFAULT 0",
+        "planning_attempt INTEGER NOT NULL DEFAULT 0",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_output_streams ADD COLUMN {column}",
+        )
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_output_streams_run
         ON ai_agent_output_streams(run_id, create_time, id)
@@ -1295,7 +1311,12 @@ async def init_schema(db: DatabaseConnection) -> None:
             turn_id,
             invocation_id,
             intent,
-            commit_mode
+            commit_mode,
+            output_protocol,
+            planning_run_id,
+            planning_operation_id,
+            planning_revision,
+            planning_attempt
         ON ai_agent_output_streams
         BEGIN
             SELECT RAISE(ABORT, 'agent output stream identity is immutable');
@@ -1743,146 +1764,52 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
-    # ── memory_items：长期记忆统一召回面 ───────────────────────────
-    await db.execute("""CREATE TABLE IF NOT EXISTS memory_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    # Durable business-source delivery to purra-mem0. This is an outbox only;
+    # memory state/version/idempotency remain owned by the component journal.
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_source_heads (
         book_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        scope_type TEXT NOT NULL DEFAULT 'book',
-        scope_id TEXT DEFAULT NULL,
-        content TEXT NOT NULL DEFAULT '',
-        summary TEXT NOT NULL DEFAULT '',
-        keywords TEXT NOT NULL DEFAULT '',
-        importance INTEGER NOT NULL DEFAULT 3,
-        confidence REAL NOT NULL DEFAULT 1.0,
-        status TEXT NOT NULL DEFAULT 'active',
-        pinned INTEGER NOT NULL DEFAULT 0,
-        fingerprint TEXT NOT NULL DEFAULT '',
-        source_type TEXT NOT NULL DEFAULT 'manual',
-        source_id TEXT DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        source_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_used_at DATETIME DEFAULT NULL
+        PRIMARY KEY (book_id, source_id)
     )""")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN importance INTEGER NOT NULL DEFAULT 3")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN source_id TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN last_used_at DATETIME DEFAULT NULL")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_book_status "
-        "ON memory_items(book_id, status, kind)"
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_source "
-        "ON memory_items(source_type, source_id)"
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_scope "
-        "ON memory_items(book_id, scope_type, scope_id)"
-    )
-    await db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_fingerprint "
-        "ON memory_items(book_id, fingerprint) WHERE fingerprint != ''"
-    )
-
-    await db.execute("""CREATE TABLE IF NOT EXISTS memory_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_source_deliveries (
+        operation_key TEXT PRIMARY KEY NOT NULL,
         book_id TEXT NOT NULL,
-        from_memory_id INTEGER NOT NULL,
-        to_memory_id INTEGER NOT NULL,
-        relation TEXT NOT NULL,
-        note TEXT NOT NULL DEFAULT '',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        source_id TEXT NOT NULL,
+        source_revision TEXT DEFAULT NULL,
+        action TEXT NOT NULL CHECK (
+            action IN ('add', 'extract', 'revoke_revision', 'revoke_source')
+        ),
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'delivering', 'completed', 'failed')
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        receipt_json TEXT DEFAULT NULL,
+        error_code TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_links_book "
-        "ON memory_links(book_id, relation)"
-    )
-
-    await _try_exec(db, """CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
-        USING fts5(content, summary, keywords, tokenize=trigram, content=memory_items, content_rowid=id)""")
-    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_ai
-        AFTER INSERT ON memory_items BEGIN
-            INSERT INTO memory_items_fts(rowid, content, summary, keywords)
-            VALUES (new.id, new.content, new.summary, new.keywords);
-        END""")
-    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_au
-        AFTER UPDATE ON memory_items BEGIN
-            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, summary, keywords)
-                VALUES ('delete', old.id, old.content, old.summary, old.keywords);
-            INSERT INTO memory_items_fts(rowid, content, summary, keywords)
-                VALUES (new.id, new.content, new.summary, new.keywords);
-        END""")
-    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_ad
-        AFTER DELETE ON memory_items BEGIN
-            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, summary, keywords)
-                VALUES ('delete', old.id, old.content, old.summary, old.keywords);
-        END""")
-
-    # 非破坏式迁移：把旧「本书设定 / 伏笔」镜像进统一记忆池。
-    await _try_exec(db, """
-        INSERT INTO memory_items (
-            book_id, kind, scope_type, scope_id, content, importance, status,
-            fingerprint, source_type, source_id, create_time, update_time
-        )
-        SELECT
-            book_id,
-            'canon',
-            CASE
-                WHEN character_id IS NOT NULL THEN 'character'
-                WHEN chapter_id IS NOT NULL THEN 'chapter'
-                ELSE 'book'
-            END,
-            COALESCE(CAST(character_id AS TEXT), chapter_id),
-            content,
-            4,
-            'active',
-            'legacy:spark:' || id,
-            'spark_idea',
-            CAST(id AS TEXT),
-            create_time,
-            create_time
-        FROM ai_memories AS old
-        WHERE NOT EXISTS (
-            SELECT 1 FROM memory_items AS mi
-            WHERE mi.source_type = 'spark_idea' AND mi.source_id = CAST(old.id AS TEXT)
-        )
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_memory_source_deliveries_recovery
+        ON memory_source_deliveries(status, attempt_count, create_time)
     """)
-    await _try_exec(db, """
-        INSERT INTO memory_items (
-            book_id, kind, scope_type, scope_id, content, keywords, importance, status,
-            fingerprint, source_type, source_id, create_time, update_time
-        )
-        SELECT
-            book_id,
-            'foreshadowing',
-            'chapter',
-            chapter_id,
-            content,
-            type || ' ' || status,
-            4,
-            CASE WHEN status = '已回收' THEN 'archived' ELSE 'active' END,
-            'legacy:foreshadowing:' || id,
-            'foreshadowing',
-            CAST(id AS TEXT),
-            create_time,
-            update_time
-        FROM ai_foreshadowing AS old
-        WHERE NOT EXISTS (
-            SELECT 1 FROM memory_items AS mi
-            WHERE mi.source_type = 'foreshadowing' AND mi.source_id = CAST(old.id AS TEXT)
-        )
-    """)
-    await _try_exec(db, "INSERT INTO memory_items_fts(memory_items_fts) VALUES ('rebuild')")
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_book_deletions (
+        book_id TEXT PRIMARY KEY NOT NULL,
+        operation_key TEXT UNIQUE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'delivering', 'completed', 'failed')
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     # ── story_memory_*：章节溯源、可版本化的正式故事状态 ──────────
-    # memory_items 继续承担通用召回；这里保存可审计的项目级当前状态，
+    # Story Memory 保存可审计的项目级当前状态，
     # 以及每章带来的原子变化。两者在后续召回阶段通过适配器连接。
     await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_records (
         id TEXT PRIMARY KEY NOT NULL,

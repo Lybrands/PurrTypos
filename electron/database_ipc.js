@@ -3,28 +3,16 @@
 const fs = require('fs')
 const path = require('path')
 
-function removeDatabaseSidecars(dbPath, fsImpl = fs) {
-  for (const suffix of ['-wal', '-shm']) {
-    try { fsImpl.rmSync(`${dbPath}${suffix}`, { force: true }) } catch {}
-  }
-}
-
-function samePath(first, second, pathImpl = path) {
-  return pathImpl.resolve(first).toLowerCase() === pathImpl.resolve(second).toLowerCase()
-}
-
 function registerDatabaseIpcHandlers({
   ipcMain,
   dialog,
   shell,
-  app,
   backendProcess,
   getMainWindow,
   backendUrl = backendProcess.backendUrl,
   fsImpl = fs,
   pathImpl = path,
   fetchImpl = globalThis.fetch,
-  now = () => Date.now(),
   today = () => new Date().toISOString().slice(0, 10),
 } = {}) {
   ipcMain.handle('export-database', async () => {
@@ -36,9 +24,9 @@ function registerDatabaseIpcHandlers({
 
       const buffer = Buffer.from(await response.arrayBuffer())
       const result = await dialog.showSaveDialog(getMainWindow(), {
-        title: '导出数据库备份',
-        defaultPath: `purrtypos-backup-${today()}.db`,
-        filters: [{ name: '数据库文件', extensions: ['db'] }],
+        title: '导出完整项目备份',
+        defaultPath: `purrtypos-backup-${today()}.purrbackup`,
+        filters: [{ name: 'PurrTypos 完整备份', extensions: ['purrbackup'] }],
       })
       if (result.canceled || !result.filePath) {
         return { success: false, error: 'canceled' }
@@ -52,17 +40,10 @@ function registerDatabaseIpcHandlers({
 
   ipcMain.handle('import-database', async () => {
     try {
-      let beforeStats = null
-      try {
-        const before = await backendProcess.fetchDatabaseInfo()
-        if (before.success) beforeStats = before.data
-      } catch {}
-
       const result = await dialog.showOpenDialog(getMainWindow(), {
-        title: '选择要导入的数据库备份文件',
+        title: '选择要恢复的完整项目备份',
         filters: [
-          { name: '数据库文件', extensions: ['db'] },
-          { name: '全部', extensions: ['*'] },
+          { name: 'PurrTypos 完整备份', extensions: ['purrbackup'] },
         ],
         properties: ['openFile'],
       })
@@ -75,31 +56,28 @@ function registerDatabaseIpcHandlers({
         return { success: false, error: '备份文件不存在' }
       }
 
-      const dbPath = pathImpl.join(app.getPath('userData'), 'purrtypos.db')
-      if (samePath(sourcePath, dbPath, pathImpl)) {
-        return { success: false, error: '不能导入当前正在使用的数据库文件' }
+      const buffer = fsImpl.readFileSync(sourcePath)
+      const response = await fetchImpl(
+        `${backendUrl}/api/database/import?fileName=${encodeURIComponent(pathImpl.basename(sourcePath))}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: buffer,
+        },
+      )
+      const restored = await response.json()
+      if (!response.ok || !restored.success) {
+        return { success: false, error: restored.error || '恢复失败' }
       }
-
-      await backendProcess.stop()
-      fsImpl.mkdirSync(pathImpl.dirname(dbPath), { recursive: true })
-      if (fsImpl.existsSync(dbPath)) {
-        fsImpl.copyFileSync(dbPath, `${dbPath}.before-import-${now()}.bak`)
+      if (restored.data?.restartRequired) {
+        await backendProcess.stop()
+        backendProcess.start()
+        await backendProcess.waitUntilReady()
       }
-      fsImpl.copyFileSync(sourcePath, dbPath)
-      removeDatabaseSidecars(dbPath, fsImpl)
-
-      backendProcess.start()
-      await backendProcess.waitUntilReady()
-
-      let afterStats = null
-      try {
-        const after = await backendProcess.fetchDatabaseInfo()
-        if (after.success) afterStats = after.data
-      } catch {}
 
       const mainWindow = getMainWindow()
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.reload()
-      return { success: true, data: { beforeStats, afterStats } }
+      return restored
     } catch (error) {
       try {
         if (!backendProcess.isRunning()) {
@@ -129,6 +107,4 @@ function registerDatabaseIpcHandlers({
 
 module.exports = {
   registerDatabaseIpcHandlers,
-  removeDatabaseSidecars,
-  samePath,
 }

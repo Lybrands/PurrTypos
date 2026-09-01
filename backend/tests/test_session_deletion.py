@@ -19,7 +19,17 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest_asyncio.fixture
-async def temp_db(tmp_path: Path):
+async def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from services import memory_deposition_service
+
+    async def skip_component_delivery(_db, _keys):
+        return ()
+
+    monkeypatch.setattr(
+        memory_deposition_service,
+        "deliver_recorded",
+        skip_component_delivery,
+    )
     db = DatabaseConnection(tmp_path)
     await db.init()
     set_db(db)
@@ -80,7 +90,7 @@ async def test_delete_session_removes_local_turn_receipts(
         [conversation_id],
     )
 
-    assert await delete_session(41) == {"success": True}
+    assert (await delete_session(41))["success"] is True
     assert await temp_db.fetch_one(
         "SELECT session_id FROM ai_local_conversation_turn_receipts "
         "WHERE session_id = 41"
@@ -140,7 +150,7 @@ async def test_delete_screenplay_session_removes_conversation_runtime_rows(
         "'completed', 'sha256:input')"
     )
 
-    assert await delete_session(43) == {"success": True}
+    assert (await delete_session(43))["success"] is True
 
     assert await temp_db.fetch_one(
         "SELECT id FROM ai_sessions WHERE id = 43"
@@ -285,7 +295,7 @@ async def test_delete_unlinks_durable_audit_rows_and_removes_product_rows(
 
     result = await delete_session(41)
 
-    assert result == {"success": True}
+    assert result["success"] is True
     for table in (
         "ai_sessions",
         "ai_conversations",
@@ -313,26 +323,28 @@ async def test_delete_unlinks_durable_audit_rows_and_removes_product_rows(
     assert json.loads(task["metadata_json"]) == {"kept": True}
 
 
-async def test_delete_archives_conversation_sourced_memory_before_removing_rows(
+async def test_delete_records_component_source_revocation_before_removing_rows(
     temp_db: DatabaseConnection,
 ):
     conversation_id = await seed_session(temp_db, 42)
     await temp_db.execute(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, status, source_type, source_id) "
-        "VALUES ('book-1', 'canon', '应随会话归档', 'active', "
-        "'conversation', ?)",
-        [str(conversation_id)],
+        "INSERT INTO memory_source_heads "
+        "(book_id, source_id, revision, deleted) VALUES (?, ?, 1, 0)",
+        ["book-1", f"conversation:{conversation_id}#chunk:0001"],
     )
 
     await delete_session(42)
 
     assert await temp_db.fetch_one(
-        "SELECT status FROM memory_items "
-        "WHERE source_type = 'conversation_truncated' "
-        "AND source_id = ?",
-        [str(conversation_id)],
-    ) == {"status": "archived"}
+        "SELECT revision, deleted FROM memory_source_heads "
+        "WHERE book_id = ? AND source_id = ?",
+        ["book-1", f"conversation:{conversation_id}#chunk:0001"],
+    ) == {"revision": 2, "deleted": 1}
+    assert await temp_db.fetch_one(
+        "SELECT action FROM memory_source_deliveries "
+        "WHERE book_id = ? AND source_id = ?",
+        ["book-1", f"conversation:{conversation_id}#chunk:0001"],
+    ) == {"action": "revoke_source"}
 
 
 async def test_delete_uses_same_active_ownership_predicate_as_unlink(

@@ -1,1 +1,2 @@
-purra==0.4.1
+-e ../purra
+-e ../purra/integrations/mem0/python[managed]

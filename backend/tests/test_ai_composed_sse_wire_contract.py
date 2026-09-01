@@ -30,6 +30,7 @@ from tests.support.canonical_wire import (
     project_wire_event_for_legacy_assertion,
     project_wire_events_for_legacy_assertions,
 )
+from tests.support.planning_stream import route_planning_stream
 
 
 FAILED_MESSAGE = "Agent 计划格式无效，已安全停止。"
@@ -77,12 +78,14 @@ def _chat_request(prompt: str) -> dict[str, Any]:
         "enableAgentTools": True,
         "bookId": "book-wire",
         "chatAgentMode": "agent",
+        "planningMode": "planned",
         "contextWindow": "200k",
     }
 
 
 async def _planned_character_delete(*_args, **_kwargs):
     return {
+        "applied_output_limit": _args[2].get("max_tokens"),
         "message": {
             "role": "assistant",
             "content": json.dumps({
@@ -236,6 +239,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
 
     async def _semantic_plan(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -276,7 +280,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": _args[2].get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -284,7 +288,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_semantic_plan, _runtime),
     )
 
     live = start_asgi_request(
@@ -497,32 +501,19 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
 
     assert public_plan == {
         "title": "续写故事",
-        "goal": "理解原作后完成续写",
         "status": "running",
         "steps": [
             {
                 "id": "understand-source",
                 "title": "理解原作",
                 "type": "analyze",
-                "executor": "model",
                 "status": "running",
-                "risk_level": "read",
-                "depends_on": [],
-                "description": None,
-                "result_summary": None,
-                "error": None,
             },
             {
                 "id": "draft-continuation",
                 "title": "撰写续篇",
                 "type": "write",
-                "executor": "model",
                 "status": "pending",
-                "risk_level": "write",
-                "depends_on": [],
-                "description": None,
-                "result_summary": None,
-                "error": None,
             },
         ],
     }
@@ -531,7 +522,24 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert "校验候选稿" not in encoded_plan
     assert "发布候选稿" not in encoded_plan
     assert "plannerStepId" not in encoded_plan
-    assert live_plans[1] == checkpoint_plan
+    assert live_plans[1] == {
+        "title": "续写故事",
+        "status": "running",
+        "steps": [
+            {
+                "id": "understand-source",
+                "title": "理解原作",
+                "type": "analyze",
+                "status": "done",
+            },
+            {
+                "id": "draft-continuation",
+                "title": "依据检查点证据撰写续篇",
+                "type": "write",
+                "status": "running",
+            },
+        ],
+    }
     assert "Recipe" not in json.dumps(checkpoint_plan, ensure_ascii=False)
     assert next(
         event["payload"]["data"]
@@ -583,7 +591,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
             "eventType": "conversation.compaction.completed",
             "data": compaction_payload,
         },
-        {"eventType": "run.todos_updated", "data": checkpoint_plan},
+        {"eventType": "run.todos_updated", "data": live_plans[1]},
     ]
     encoded_public_replay = json.dumps(replay_snapshot, ensure_ascii=False)
     replay_dispatch = next(
@@ -639,6 +647,7 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
                 }],
             }
         return {
+            "applied_output_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -714,7 +723,7 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -722,7 +731,7 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
 
     live = start_asgi_request(
@@ -868,7 +877,7 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -876,10 +885,11 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _direct_response,
+        route_planning_stream(_planner_must_not_run, _direct_response),
     )
     request_body = _chat_request("请直接解释这个概念，不需要调用工具。")
     request_body["chatAgentMode"] = "ask"
+    request_body["planningMode"] = "reactive"
     request_body["enableAgentTools"] = enable_agent_tools
     if book_id is None:
         request_body.pop("bookId")
@@ -957,7 +967,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -965,12 +975,13 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _refuse,
+        route_planning_stream(_planner_must_not_run, _refuse),
     )
     request_body = _chat_request(
         "读取当前章节，找出两处不一致并给出最小修改建议。"
     )
     request_body["chatAgentMode"] = "ask"
+    request_body["planningMode"] = "reactive"
     request_body["enableAgentTools"] = enable_agent_tools
     if book_id is None:
         request_body.pop("bookId")
@@ -1002,6 +1013,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
 
     async def _invalid_plan(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {"role": "assistant", "content": "not-json"},
             "model": "planner-model",
             "finish_reason": "stop",
@@ -1020,7 +1032,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1028,7 +1040,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_fallback,
+        route_planning_stream(_invalid_plan, _model_fallback),
     )
 
     live = start_asgi_request(
@@ -1056,7 +1068,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
         "agentRunCompleted",
         "done",
     ]
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["executor"] == "model"
+    assert events[1]["agentRunTodosUpdated"]["steps"][0]["executor"] is None
     assert events[1]["agentRunTodosUpdated"]["steps"][0]["suggestedTools"] == []
     assert events[3] == {"delta": "计划格式异常，先提供安全说明。"}
     _assert_terminal_exclusive(
@@ -1084,6 +1096,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
 
     async def _planned_read(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1136,7 +1149,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1144,7 +1157,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _skip_planned_tool,
+        route_planning_stream(_planned_read, _skip_planned_tool),
     )
     capability_key = composition.provider_capabilities.key(
         api_provider="openai",
@@ -1236,6 +1249,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
 
     async def _planned_read(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1425,7 +1439,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1433,7 +1447,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_stream,
+        route_planning_stream(_planned_read, _model_stream),
     )
     request_body = _chat_request(user_prompt)
     request_body.update({
@@ -1624,6 +1638,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     },
                 ]
             return {
+                "applied_output_limit": _options.get("max_tokens"),
                 "message": {
                     "role": "assistant",
                     "content": json.dumps({
@@ -1721,6 +1736,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                 }],
             }
         return {
+            "applied_output_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -1877,7 +1893,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1885,7 +1901,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_stream,
+        route_planning_stream(_planned_compare, _model_stream),
     )
     request_body = _chat_request(user_prompt)
     request_body.update({
@@ -2030,6 +2046,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
 
     async def _planned_delete(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -2184,7 +2201,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2192,7 +2209,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_stream,
+        route_planning_stream(_planned_delete, _model_stream),
     )
 
     live = start_asgi_request(
@@ -2382,8 +2399,12 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planned_character_delete,
+    )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
         _direct_response,
@@ -2392,6 +2413,7 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
     request_body.update({
         "sessionId": 9,
         "chatAgentMode": "ask",
+        "planningMode": "reactive",
         "enableAgentTools": False,
     })
     live = start_asgi_request(
@@ -2513,7 +2535,7 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2521,7 +2543,10 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _request_dangerous_tool,
+        route_planning_stream(
+            _planned_character_delete,
+            _request_dangerous_tool,
+        ),
     )
 
     live = start_asgi_request(
@@ -2685,16 +2710,15 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_output_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(character_tools, "delete_character", _record_delete)
     monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_no_stream",
-        _planned_character_delete,
-    )
-    monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _request_dangerous_tool,
+        route_planning_stream(
+            _planned_character_delete,
+            _request_dangerous_tool,
+        ),
     )
     monkeypatch.setattr(
         _AgentEventSourceResponse,

@@ -16,7 +16,7 @@ class MiniMaxM3Profile(ModelProfile):
         "https://api.minimaxi.com/anthropic",
     })
     native_anthropic_thinking = True
-    max_output_tokens = 524_288
+    max_call_output_tokens = 524_288
     capability_source = "https://platform.minimaxi.com/docs/api-reference/text-chat-openai"
     supports_json_object_output = True
     reasoning_replay = ReasoningReplayPolicy.REQUIRED

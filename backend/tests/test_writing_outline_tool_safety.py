@@ -26,7 +26,7 @@ async def temp_db(tmp_path: Path):
 
 
 def _dependencies(db: DatabaseConnection) -> WritingToolDependencies:
-    return WritingToolDependencies(db, object())  # type: ignore[arg-type]
+    return WritingToolDependencies(db, object(), object())  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio

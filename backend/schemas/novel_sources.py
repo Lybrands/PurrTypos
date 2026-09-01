@@ -16,6 +16,12 @@ class SourceFilePayload(BaseModel):
     skippedFileCount: int = Field(default=0, ge=0, le=100_000)
 
 
+class SourceSectionLayoutRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    startCharacter: int = Field(ge=0, le=10_000_000)
+    endCharacter: int = Field(gt=0, le=10_000_000)
+
+
 class ConfirmSourceImportRequest(SourceFilePayload):
     title: str = Field(default="", max_length=300)
     workId: str | None = Field(default=None, max_length=200)
@@ -23,6 +29,7 @@ class ConfirmSourceImportRequest(SourceFilePayload):
     confirmSingleSection: bool = False
     rightsConfirmed: bool
     modelDataBoundaryConfirmed: bool
+    sections: list[SourceSectionLayoutRequest] | None = Field(default=None, max_length=100_000)
 
 
 class FreezeBookSourceRequest(BaseModel):
@@ -36,7 +43,7 @@ class ArchiveSourceWorkRequest(BaseModel):
 class StartNovelAnalysisRequest(BaseModel):
     runtime: ScreenplayAgentRuntimeRequest
     prompt: str = Field(
-        default="分析这部小说的事实脉络和写作技法。",
+        default="分析这部小说的全局故事概览、事实脉络和写作技法。",
         min_length=1,
         max_length=20_000,
     )
@@ -60,6 +67,8 @@ class PauseNovelAnalysisRequest(BaseModel):
 class NovelAnalysisEvidenceRequest(BaseModel):
     sectionId: str = Field(min_length=1, max_length=200)
     excerpt: str = Field(min_length=1, max_length=20_000)
+    segmentStartCharacter: int | None = Field(default=None, ge=0, le=10_000_000)
+    segmentEndCharacter: int | None = Field(default=None, gt=0, le=10_000_000)
 
 
 class NovelAnalysisFactRequest(BaseModel):
@@ -78,6 +87,12 @@ class NovelAnalysisCraftCardRequest(BaseModel):
     evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
 
 
+class NovelAnalysisStoryOverviewRequest(BaseModel):
+    summaryMarkdown: str = Field(min_length=1, max_length=100_000)
+    evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
+
+
 class ReviewNovelAnalysisRequest(BaseModel):
     facts: list[NovelAnalysisFactRequest]
     craftCards: list[NovelAnalysisCraftCardRequest]
+    storyOverview: NovelAnalysisStoryOverviewRequest | None = None

@@ -357,10 +357,10 @@
 .novel-analysis-result-summary-actions { display: flex; flex: none; align-items: center; gap: 8px; }
 .novel-analysis-result-summary-actions > em { padding: 3px 7px; color: #a26442; border-radius: 999px; background: color-mix(in srgb, #a26442 12%, transparent); font-size: 9px; font-style: normal; line-height: 1.4; white-space: nowrap; }
 .novel-analysis-result-summary-actions > em.is-saved { color: #4f846f; background: color-mix(in srgb, #4f846f 12%, transparent); }
-.novel-analysis-result-modal { height: min(820px, calc(100vh - 48px)); max-height: calc(100vh - 48px); }
-.novel-analysis-result-modal .purr-dialog__body { display: flex; min-height: 0; padding: 0; overflow: hidden; }
+.novel-analysis-result-modal { max-height: calc(100vh - 48px); }
+.novel-analysis-result-modal .purr-dialog__body { display: flex; min-height: 0; max-height: min(720px, calc(100vh - 156px)); padding: 0; overflow: hidden; }
 .novel-analysis-result-modal .purr-dialog__footer > .novel-analysis-result-actions { width: 100%; }
-.novel-analysis-result-layout { display: flex; width: 100%; min-width: 0; min-height: 0; }
+.novel-analysis-result-layout { display: flex; width: 100%; min-width: 0; min-height: 0; max-height: min(720px, calc(100vh - 156px)); }
 .novel-analysis-result-content { min-width: 0; overflow: auto; flex: 1; }
 .novel-analysis-result-content.is-hidden { display: none; }
 .novel-analysis-evidence-focus { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; }
@@ -420,6 +420,13 @@
 .novel-analysis-result-detail { padding: 0 clamp(18px, 4vw, 42px) 24px; }
 .novel-analysis-result-tabs > .purr-tabs__bar { position: sticky; z-index: 2; top: 0; padding-top: 12px; background: var(--bg-elevated); }
 .novel-analysis-result-tab { padding-top: 18px; }
+.novel-analysis-result-overview { max-width: 760px; color: var(--text-secondary); font-size: 12px; line-height: 1.75; }
+.novel-analysis-result-overview .agent-markdown > :first-child { margin-top: 0; }
+.novel-analysis-tab-context-action { display: flex; min-height: 58px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--bg-surface); align-items: center; justify-content: space-between; gap: 16px; }
+.novel-analysis-tab-context-action > div { display: grid; min-width: 0; gap: 3px; }
+.novel-analysis-tab-context-action strong { font-size: 11px; }
+.novel-analysis-tab-context-action span { color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.novel-analysis-tab-context-action > small { color: var(--text-muted); font-size: 10px; white-space: nowrap; }
 .novel-analysis-result-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .novel-analysis-result-head span { color: var(--accent); font-size: 10px; font-weight: 600; }
 .novel-analysis-result-head h2 { margin: 4px 0 0; font-size: 19px; }
@@ -490,8 +497,14 @@
 .novel-source-sections { display: grid; max-height: 280px; overflow: auto; gap: 8px; }
 .novel-source-sections article { display: grid; padding: 11px; border: 1px solid var(--border); border-radius: var(--radius-md); gap: 4px; }
 .novel-source-sections article > div { display: flex; justify-content: space-between; gap: 12px; }
+.novel-source-sections .novel-source-section-edit-heading { align-items: center; }
+.novel-source-section-edit-heading .purr-input-affix-wrapper,
+.novel-source-section-edit-heading > .purr-input { min-width: 0; flex: 1; }
 .novel-source-sections article span { color: var(--text-muted); font-size: 11px; }
 .novel-source-sections p { margin: 0; color: var(--text-secondary); white-space: pre-wrap; }
+.novel-source-sections .novel-source-section-edit-actions { justify-content: flex-start; gap: 4px; }
+.novel-source-sections .novel-source-section-split { display: grid; padding: 10px; border-radius: var(--radius-sm); background: var(--bg-hover); gap: 8px; }
+.novel-source-section-split > div { display: flex; justify-content: flex-end; gap: 8px; }
 .novel-source-boundary { padding: 10px 12px; color: var(--text-secondary); border-radius: var(--radius-md); background: var(--bg-hover); font-size: 12px; }
 .novel-source-confirmations { display: grid; gap: 8px; }
 .novel-source-preview-actions { display: flex; justify-content: flex-end; gap: 10px; }

@@ -92,6 +92,7 @@ class ProviderModelGateway:
         return ModelStream(
             chunks=_normalize_openai_stream(result["stream"]),
             model=str(result.get("model") or request.model),
+            applied_output_limit=result.get("applied_output_limit"),
         )
 
     async def complete(
@@ -126,6 +127,7 @@ class ProviderModelGateway:
             model=str(result.get("model") or request.model),
             finish_reason=_normalize_finish_reason(result.get("finish_reason")),
             usage=_normalize_model_usage(result.get("usage")),
+            applied_output_limit=result.get("applied_output_limit"),
         )
 
     def _request_error(
@@ -176,8 +178,8 @@ def _provider_options(
         options["model_profile"] = request.profile_id
     options.pop("tools", None)
     options.pop("tool_choice", None)
-    if invocation.max_output_tokens is not None:
-        options["max_tokens"] = invocation.max_output_tokens
+    if invocation.max_call_output_tokens is not None:
+        options["max_tokens"] = invocation.max_call_output_tokens
     if capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
         options.pop("thinking_enabled", None)
         options.pop("thinking", None)

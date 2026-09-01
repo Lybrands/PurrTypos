@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 
 from database.connection import DatabaseConnection
+from application.agent_composition import (
+    clear_agent_composition,
+    set_agent_composition,
+)
 from dependencies import clear_db, set_db
 from domains.writing.story_memory import (
     StoryMemoryDeltaStatus,
@@ -26,9 +31,12 @@ async def db(tmp_path: Path):
     connection = DatabaseConnection(tmp_path)
     await connection.init()
     set_db(connection)
+    composition = SimpleNamespace(memory_resource=None)
+    set_agent_composition(composition)
     try:
         yield connection
     finally:
+        clear_agent_composition(composition)
         clear_db(connection)
         await connection.close()
 

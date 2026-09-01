@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+from uuid import uuid4
 
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     ContextBudgetClaim,
     ModelRequest,
+    PlanningMode,
     RunBinding,
     RunProvenance,
 )
@@ -117,6 +119,9 @@ def to_writing_agent_request(
         associated_chapter_ids=tuple(body.associatedChapterIds or ()),
         associated_outline_ids=tuple(body.associatedOutlineIds or ()),
         selected_memory_ids=tuple(body.selectedMemoryIds or ()),
+        selected_long_term_memory_ids=tuple(
+            body.selectedLongTermMemoryIds or ()
+        ),
         selected_foreshadowing_ids=tuple(body.selectedForeshadowingIds or ()),
         context_window_label=str(window_label) if window_label else None,
         writing_method_overrides=(
@@ -169,6 +174,7 @@ def to_writing_agent_request(
         mode=body.chatAgentMode,
         context_window=selected_context_window,
         tools_enabled=bool(body.enableAgentTools and body.bookId),
+        planning_mode=PlanningMode(body.planningMode),
         metadata={
             "locale": body.locale,
             **({"streamId": body.streamId} if body.streamId else {}),
@@ -202,6 +208,7 @@ def writing_run_options(
     provenance: RunProvenance | None = None,
     response_judge_policies: Sequence[ResponseJudgePolicy] = (),
 ) -> AgentCoreRunOptions:
+    context = WritingDomainContext.from_core_context(request.domain_context)
     output_limit = resolve_invocation_output_limit(
         request.model.capability_snapshot,
         request.model.options.get("max_tokens"),
@@ -225,6 +232,19 @@ def writing_run_options(
         or response_validators
         or judge_policies
     )
+    binding = None
+    if request.session_id is not None and request.metadata.get("streamId"):
+        binding = RunBinding(
+            namespace="writing.chat.request",
+            aggregate_id=str(request.session_id),
+            command_id=str(request.metadata["streamId"]),
+        )
+    elif context.book_id:
+        binding = RunBinding(
+            namespace="writing.context",
+            aggregate_id=context.book_id,
+            command_id=str(request.metadata.get("streamId") or uuid4().hex),
+        )
     return AgentCoreRunOptions(
         context_claims=writing_context_claims(request),
         turn_id=(
@@ -237,15 +257,7 @@ def writing_run_options(
         force_planned_tool_choice=force_planned_tool_choice,
         reasoning_mode=reasoning_mode_from_options(provider_options),
         provenance=provenance,
-        binding=(
-            RunBinding(
-                namespace="writing.chat.request",
-                aggregate_id=str(request.session_id),
-                command_id=str(request.metadata["streamId"]),
-            )
-            if request.session_id is not None and request.metadata.get("streamId")
-            else None
-        ),
+        binding=binding,
         response_constraints=response_constraints,
         response_validators=response_validators,
         response_judge_policies=judge_policies,

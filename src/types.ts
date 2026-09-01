@@ -541,6 +541,17 @@ export interface ScreenplayAgentChunkPage {
   chunks: ScreenplayAgentChunkEvent[];
   nextCursor: number;
   hasMore: boolean;
+  projectionVersion?: string;
+}
+
+export interface NovelAnalysisStreamPage {
+  kind: 'analysis_events';
+  chunks: Array<{ cursor: number; runId: string; chunk: Record<string, unknown>; createdAt: string }>;
+  runs?: NovelAnalysisRun[];
+  publishedId?: string | null;
+  projectionVersion: string;
+  nextCursor: number;
+  hasMore: boolean;
 }
 
 export type ScreenplayConversationStreamEvent = ScreenplayAgentChunkPage;
@@ -746,12 +757,16 @@ export interface NovelSourceImportPreview {
     title: string;
     characterCount: number;
     preview: string;
+    startCharacter: number;
+    endCharacter: number;
   }>;
 }
 
 export interface NovelAnalysisEvidence {
   sectionId: string;
   excerpt: string;
+  segmentStartCharacter?: number;
+  segmentEndCharacter?: number;
   sectionOrdinal?: number;
   sectionTitle?: string;
   locator?: { start: number; end: number };
@@ -776,6 +791,12 @@ export interface NovelAnalysisCraftCard {
   evidence: NovelAnalysisEvidence[];
 }
 
+export interface NovelAnalysisStoryOverview {
+  summaryMarkdown: string;
+  evidence: NovelAnalysisEvidence[];
+  contentDigest?: string;
+}
+
 export interface NovelAnalysisArtifact {
   artifactId: string;
   artifactKind: string;
@@ -783,6 +804,7 @@ export interface NovelAnalysisArtifact {
   sectionIds: string[];
   facts: NovelAnalysisFact[];
   craftCards: NovelAnalysisCraftCard[];
+  storyOverview?: NovelAnalysisStoryOverview | null;
   coverage: Record<string, unknown>;
   conflicts: unknown[];
   reviewStatus: 'pending' | 'reviewed';
@@ -803,6 +825,7 @@ export interface NovelAnalysisRun {
   completedUnits: number;
   failedUnits: number;
   providerOutputEvents?: number;
+  relatedRuns?: Array<{ runId: string; status: string }>;
   analysisPlan?: {
     title: string;
     goal?: string;
@@ -832,8 +855,6 @@ export interface NovelAnalysisRun {
     maxAttempts: number;
     errorCode?: string | null;
     updateTime?: string | null;
-    summary?: string;
-    highlights?: string[];
   }>;
   error?: string | null;
   artifactRef?: string | null;
@@ -850,6 +871,7 @@ export interface PublishedNovelAnalysis {
   contentDigest: string;
   facts: NovelAnalysisFact[];
   craftCards: NovelAnalysisCraftCard[];
+  storyOverview?: NovelAnalysisStoryOverview | null;
   summary: Record<string, unknown>;
   createTime: string;
 }
@@ -1351,7 +1373,7 @@ export interface AiContextBudgetState {
   actualUsageRound?: number;
   inputTokenEstimateAtUsage?: number;
   usageSource?: "provider";
-  requestedOutputTokens?: number;
+  requestedCallOutputTokens?: number;
   finishReason?: string;
   outputBudget?: AiOutputBudgetState;
 }
@@ -1418,6 +1440,11 @@ export interface AiAgentRunSnapshot {
       leaseExpiresAtMs?: number | null;
       heartbeatAtMs?: number | null;
       cancellationRequested: boolean;
+    };
+    activity?: {
+      modelAttemptCount: number;
+      providerOutputEvents: number;
+      providerOutputBytes: number;
     };
     provenance: {
       modelProvider?: string | null;
@@ -1533,33 +1560,76 @@ export type MemoryKind =
   | 'style'
   | 'summary';
 
-export type MemoryStatus = 'pending' | 'active' | 'archived' | 'superseded';
-export type MemoryScopeType = 'book' | 'chapter' | 'character' | 'outline' | 'session';
+export type MemoryScopeType = 'book' | 'chapter' | 'character' | 'outline';
 
-export interface MemoryItem {
-  id: number;
-  book_id: EntityId;
-  kind: MemoryKind;
-  scope_type: MemoryScopeType;
-  scope_id?: string | null;
-  content: string;
-  summary: string;
-  keywords: string;
-  importance: number;
-  confidence: number;
-  status: MemoryStatus;
-  pinned: number;
-  fingerprint: string;
-  source_type: string;
-  source_id?: string | null;
-  create_time?: string;
-  update_time?: string;
-  last_used_at?: string | null;
-  deduped?: boolean;
+export interface ComponentMemoryRecord {
+  id: string;
+  version: number;
+  state: 'active' | 'pending' | 'disabled';
+  text: string;
+  source: { id: string; revision: string };
+  inferred: boolean;
+  expiresAt: string | null;
+  metadata: {
+    kind: MemoryKind;
+    scopeType: MemoryScopeType;
+    scopeId: string | null;
+    summary: string;
+    keywords: string;
+    importance: number;
+    confidence: number;
+    pinned: boolean;
+  };
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolutionKey: string | null;
 }
 
 export type UnifiedMemorySource = 'semantic' | 'story_state' | 'story_candidate';
 export type UnifiedMemoryStatus = 'active' | 'pending' | 'conflict' | 'stale' | 'archived' | 'rejected';
+
+export interface ComponentMemoryRef {
+  id: string;
+  version: number;
+}
+
+export interface ComponentMemoryResolution {
+  kind: 'independent' | 'duplicate' | 'supersede' | 'conflict';
+  items: ComponentMemoryRef[];
+  keep: string | null;
+  reviewKey: string | null;
+}
+
+export interface ComponentMemoryOperation {
+  key: string;
+  state: string;
+  ids: string[];
+  review: null | {
+    key: string;
+    candidate: ComponentMemoryRef;
+    epoch: number;
+    matches: Array<{
+      item: ComponentMemoryRef;
+      kind: 'duplicate' | 'supersede' | 'conflict' | 'related';
+    }>;
+    proposal: ComponentMemoryResolution | null;
+  };
+  resolution: ComponentMemoryResolution | null;
+}
+
+export interface ComponentMemoryLinkPage {
+  items: Array<{
+    key: string;
+    from: ComponentMemoryRef;
+    to: ComponentMemoryRef;
+    relation: 'supersedes' | 'contradicts' | 'supports' | 'relates_to';
+    note: string;
+    valid: boolean;
+  }>;
+  next: string | null;
+  epoch: number;
+}
 
 export interface UnifiedMemoryItem {
   id: string;
@@ -1587,7 +1657,7 @@ export interface UnifiedMemoryItem {
   recommendation?: StoryMemoryEvolutionDecision['recommendation'] | null;
   risk?: StoryMemoryEvolutionDecision['risk'] | null;
   resolution?: StoryMemoryEvolutionDecision['resolution'] | null;
-  actions: Array<'activate' | 'edit' | 'pin' | 'archive' | 'accept' | 'reject' | 'view_history'>;
+  actions: Array<'activate' | 'edit' | 'pin' | 'archive' | 'review' | 'delete' | 'view_history' | 'view_links' | 'accept' | 'reject'>;
   create_time?: string | null;
   update_time?: string | null;
 }
@@ -1598,24 +1668,13 @@ export interface UnifiedMemoryPage {
   suppressedDuplicates: number;
 }
 
-export interface MemoryContextDiagnostics {
-  forced: number;
-  recalled: number;
-  included: number;
-  deferred: number;
-  suppressed: number;
-  conflicts: number;
-  relationExpanded: number;
-  characterCount: number;
-}
-
 export interface MemoryContextBlock {
   text: string;
-  includedIds: number[];
-  deferredIds: number[];
-  suppressedIds: number[];
+  includedIds: string[];
+  deferredIds: string[];
+  missingIds: string[];
   tokenEstimate: number;
-  diagnostics: MemoryContextDiagnostics;
+  diagnostics: Record<string, unknown>;
 }
 
 export interface XmindTopic {
@@ -1904,6 +1963,7 @@ export interface ElectronAPI {
   importDatabase: () => Promise<ApiResult<{
     beforeStats: { books: number; outlineChapters: number; articles: number };
     afterStats: { books: number; outlineChapters: number; articles: number };
+    restartRequired?: boolean;
   }>>;
   getDatabaseInfo: () => Promise<ApiResult<{ dbPath: string; books: number; outlineChapters: number; articles: number }>>;
   openDatabaseDirectory: () => Promise<ApiResult<void>>;
@@ -1954,6 +2014,7 @@ export interface ElectronAPI {
     sessionId: number;
     chunkAfter?: number;
     onEvent: (event: ScreenplayConversationStreamEvent) => void;
+    onError?: (error: Error) => void;
   }) => () => void;
   cancelScreenplayConversationTurn: (data: {
     commandId: string;
@@ -2297,6 +2358,7 @@ export interface ElectronAPI {
     confirmSingleSection: boolean;
     rightsConfirmed: boolean;
     modelDataBoundaryConfirmed: boolean;
+    sections?: Array<{ title: string; startCharacter: number; endCharacter: number }>;
   }) => Promise<ApiResult<NovelSourceRevision>>;
   freezeBookAsNovelSource: (data: { bookId: EntityId }) => Promise<ApiResult<NovelSourceRevision>>;
   listNovelSources: (data?: { includeArchived?: boolean }) => Promise<ApiResult<NovelSourceWork[]>>;
@@ -2314,7 +2376,7 @@ export interface ElectronAPI {
   resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; taskId: string; commandId: string }>>;
   cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisRun>>;
   getNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<NovelAnalysisArtifact>>;
-  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[] }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null }) => Promise<ApiResult<NovelAnalysisArtifact>>;
   publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
   getPublishedNovelAnalysis: (data: { analysisId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
@@ -2468,10 +2530,9 @@ export interface ElectronAPI {
   reorderPromptTemplates: (data: { ids: number[] }) => Promise<ApiResult<void>>;
   // 本书设定（五层）
   addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
-  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
-  deleteSparkIdea: (data: { id: number | string }) => Promise<ApiResult<void>>;
+  updateSparkIdea: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
+  deleteSparkIdea: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getSparkIdeasByBook: (data: { bookId: EntityId; layer?: SparkIdeaLayer }) => Promise<ApiResult<AiSparkIdea[]>>;
-  getSparkIdeasByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiSparkIdea[]>>;
   getSparkIdeasForPrompt: (data: {
     bookId: EntityId;
     query?: string;
@@ -2479,40 +2540,48 @@ export interface ElectronAPI {
   }) => Promise<ApiResult<AiSparkIdea[]>>;
   // 伏笔记忆
   addForeshadowing: (data: { bookId: EntityId; chapterId: EntityId; content: string; type?: string; expectedChapterId?: EntityId | null }) => Promise<ApiResult<AiForeshadowing>>;
-  updateForeshadowing: (data: { id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
-  deleteForeshadowing: (data: { id: number | string }) => Promise<ApiResult<void>>;
+  updateForeshadowing: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
+  deleteForeshadowing: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
-  getForeshadowingByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiForeshadowing[]>>;
   getForeshadowingForPrompt: (data: { bookId: EntityId; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
   // 长期记忆
   createMemory: (data: {
     bookId: EntityId;
     kind: MemoryKind;
-    content: string;
+    text: string;
+    operationKey: string;
     scopeType?: MemoryScopeType;
     scopeId?: string | null;
     summary?: string;
     keywords?: string;
     importance?: number;
     confidence?: number;
-    status?: MemoryStatus;
+    state?: 'active' | 'pending';
     pinned?: boolean;
-    sourceType?: string;
-    sourceId?: string | null;
-  }) => Promise<ApiResult<MemoryItem>>;
-  updateMemory: (data: { id: number | string; data: Partial<MemoryItem> }) => Promise<ApiResult<MemoryItem>>;
-  archiveMemory: (data: { id: number | string }) => Promise<ApiResult<MemoryItem>>;
-  searchMemories: (data: {
+  }) => Promise<ApiResult<ComponentMemoryRecord>>;
+  updateMemory: (data: {
+    id: string;
     bookId: EntityId;
-    query?: string;
-    options?: {
-      statuses?: MemoryStatus[];
-      kinds?: MemoryKind[];
-      scopeType?: MemoryScopeType;
-      scopeId?: string;
-      limit?: number;
-    };
-  }) => Promise<ApiResult<MemoryItem[]>>;
+    version: number;
+    operationKey: string;
+    text?: string;
+    kind?: MemoryKind;
+    scopeType?: MemoryScopeType;
+    scopeId?: string | null;
+    summary?: string;
+    keywords?: string;
+    importance?: number;
+    confidence?: number;
+    pinned?: boolean;
+  }) => Promise<ApiResult<ComponentMemoryRecord>>;
+  setMemoryState: (data: {
+    id: string;
+    bookId: EntityId;
+    version: number;
+    operationKey: string;
+    state: 'active' | 'pending' | 'disabled';
+    reason: string;
+  }) => Promise<ApiResult<ComponentMemoryRecord>>;
   listUnifiedMemories: (data: {
     bookId: EntityId;
     query?: string;
@@ -2521,16 +2590,47 @@ export interface ElectronAPI {
     sources?: UnifiedMemorySource[];
     limit?: number;
   }) => Promise<ApiResult<UnifiedMemoryPage>>;
-  getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<MemoryItem[]>>;
   linkMemories: (data: {
     bookId: EntityId;
-    fromMemoryId: number;
-    toMemoryId: number;
+    operationKey: string;
+    fromMemory: { id: string; version: number };
+    toMemory: { id: string; version: number };
     relation: 'supersedes' | 'contradicts' | 'supports' | 'relates_to';
     note?: string;
   }) => Promise<ApiResult<unknown>>;
+  reviewMemory: (data: {
+    id: string;
+    bookId: EntityId;
+    version: number;
+    operationKey: string;
+  }) => Promise<ApiResult<ComponentMemoryOperation>>;
+  resolveMemories: (data: {
+    bookId: EntityId;
+    operationKey: string;
+    kind: ComponentMemoryResolution['kind'];
+    items: ComponentMemoryRef[];
+    keep?: string | null;
+    reviewKey?: string | null;
+  }) => Promise<ApiResult<ComponentMemoryOperation>>;
+  deleteMemory: (data: {
+    id: string;
+    bookId: EntityId;
+    version: number;
+    operationKey: string;
+  }) => Promise<ApiResult<ComponentMemoryOperation>>;
+  getMemoryHistory: (data: {
+    id: string;
+    bookId: EntityId;
+  }) => Promise<ApiResult<Array<Record<string, unknown>>>>;
+  getMemoryLinks: (data: {
+    id: string;
+    bookId: EntityId;
+    limit?: number;
+    after?: string;
+  }) => Promise<ApiResult<ComponentMemoryLinkPage>>;
   buildMemoryContext: (data: {
     bookId: EntityId;
+    operationKey: string;
     userPrompt?: string;
     mode?: string;
     selectedLongTermMemoryIds?: (number | string)[];
@@ -2564,6 +2664,18 @@ export interface ElectronAPI {
     after?: number;
     limit?: number;
   }) => Promise<ApiResult<AiAgentRunSnapshot>>;
+  consumeAgentRunEvents: (data: {
+    runId: string;
+    sessionId: number;
+    after?: number;
+    signal: AbortSignal;
+    onEvent: (snapshot: AiAgentRunSnapshot) => void | Promise<void>;
+  }) => Promise<void>;
+  consumeNovelAnalysisEvents: (data: {
+    revisionId: string;
+    signal: AbortSignal;
+    onEvent: (page: NovelAnalysisStreamPage) => void | Promise<void>;
+  }) => Promise<void>;
   getAgentRunDiagnostics: (data: {
     runId: string;
   }) => Promise<ApiResult<AiAgentRunDiagnostics>>;
@@ -2647,10 +2759,12 @@ export interface ElectronAPI {
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
     /** AiContextBar 勾选的设定/伏笔 id，后端前置 fetch 后注入 system */
+    selectedLongTermMemoryIds?: string[];
     selectedMemoryIds?: (number | string)[];
     selectedForeshadowingIds?: (number | string)[];
     writingMethodOverrides?: WritingMethodOverrides;
     chatAgentMode?: ChatAgentMode;
+    planningMode?: 'reactive' | 'planned';
     contextWindow?: AiContextWindow;
     /** Immutable durable history frontier for request reservation/claim. */
     expectedConversationIds?: number[];
@@ -2660,6 +2774,8 @@ export interface ElectronAPI {
   onAiChunk: (
     callback: (chunk: {
       streamId?: string;
+      /** Local connection failure, not a Run failure or Assistant reply. */
+      transportError?: string;
       /** Raw canonical PurrA output event. Transport adds only streamId. */
       eventId?: string;
       outputStreamId?: string | null;
@@ -2769,6 +2885,10 @@ export interface GeneralSettings {
   sync_outline_chapter: boolean;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
+  /** PurrA memory extraction/review model. Empty means model-assisted memory is unavailable. */
+  memory_model_id?: string;
+  /** Explicit OpenAI-compatible Embedding endpoint used by the PurrA memory component. */
+  memory_embedding_config?: MemoryEmbeddingConfig | null;
   /** 开启后，AI 接受的改动会尝试用模型提炼待确认的长期记忆候选。 */
   memory_intelligence_enabled?: boolean;
   /** 可选：指定用于记忆提炼的模型配置 id；为空时使用第一个可用模型配置。 */
@@ -2783,6 +2903,14 @@ export interface GeneralSettings {
   story_memory_auto_apply_min_confidence?: number;
   /** 自动应用允许的 Story Memory 类型白名单。 */
   story_memory_auto_apply_kinds?: Array<StoryMemoryEvolutionDecision['kind']>;
+}
+
+export interface MemoryEmbeddingConfig {
+  apiProvider: 'openai';
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  dimensions: number;
 }
 
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';

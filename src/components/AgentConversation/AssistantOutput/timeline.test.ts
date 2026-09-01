@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts.ts'
-import { initialCanonicalOutputState } from '../../../agent-runtime/canonicalOutput.ts'
+import { initialCanonicalOutputState, reduceCanonicalOutput, type CanonicalOutputEvent } from '../../../agent-runtime/canonicalOutput.ts'
 import { getAgentProcessingLabel } from '../../../agent-runtime/outputPresentation.ts'
 import {
   buildAssistantTimeline,
@@ -13,6 +13,84 @@ import {
   groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
 } from './timeline.ts'
+
+test('planning uses public narration instead of an executable operation row', () => {
+  for (const phase of ['planning', 'replanning']) {
+    for (const status of ['succeeded', 'failed', 'canceled']) {
+      const started: CanonicalOutputEvent = {
+        eventId: 'planning-start', runId: 'run-1', turnId: null,
+        invocationId: 'planning-invocation', outputStreamId: null, sequence: 1,
+        source: 'runtime', kind: 'operation.started', channel: 'operation', visibility: 'public',
+        occurredAt: '2026-08-31T08:34:20Z', emittedAt: '2026-08-31T08:34:20Z',
+        payload: {
+          operationId: 'planning-1', kind: 'planning', startedAt: '2026-08-31T08:34:20Z',
+          display: {
+            labelKey: 'agent.operation.planning',
+            labelParams: { revision: phase === 'planning' ? 0 : 1 },
+          },
+        },
+      }
+      const progress: CanonicalOutputEvent = {
+        ...started,
+        eventId: 'planning-progress',
+        outputStreamId: 'planning-public',
+        sequence: 2,
+        source: 'provider',
+        kind: 'planning.progress',
+        channel: 'commentary',
+        payload: {
+          schemaVersion: 'purra.planning-stream/v1',
+          operationId: 'planning-1',
+          revision: phase === 'planning' ? 0 : 1,
+          attempt: 0,
+          recordIndex: 1,
+          text: '正在梳理任务目标与执行顺序',
+        },
+      }
+      const privateJson: CanonicalOutputEvent = {
+        ...started, eventId: 'private-json', sequence: 3, source: 'provider',
+        kind: 'provider.content_delta', channel: 'final', visibility: 'private',
+        payload: { delta: '{"privatePlan": "PRIVATE_MARKER"}' },
+      }
+      const finished: CanonicalOutputEvent = {
+        ...started, eventId: 'planning-end', sequence: 4, kind: 'operation.finished',
+        occurredAt: '2026-08-31T08:36:07Z', emittedAt: '2026-08-31T08:36:07Z',
+        payload: {
+          operationId: 'planning-1', status, finishedAt: '2026-08-31T08:36:07Z', durationMs: 106486,
+          ...(status === 'succeeded' ? {} : { errorCode: 'planning_failed' }),
+        },
+      }
+      let output = reduceCanonicalOutput(initialCanonicalOutputState(), started)
+      const message: AgentConversationMessage = { role: 'assistant', content: '', canonicalOutput: output }
+      const live = buildAssistantTimeline(message, { messageIndex: 0, isStreaming: true })
+      assert.deepEqual(live, [])
+      const label = phase === 'planning' ? '制定计划' : '调整计划'
+      assert.equal(getAgentProcessingLabel(message), `正在${label}`)
+      output = reduceCanonicalOutput(output, progress)
+      output = reduceCanonicalOutput(output, privateJson)
+      output = reduceCanonicalOutput(output, finished)
+      output = reduceCanonicalOutput(output, finished)
+      const restored = [started, progress, privateJson, finished].reduce(
+        reduceCanonicalOutput,
+        initialCanonicalOutputState(),
+      )
+      assert.deepEqual(output, restored)
+      const timeline = buildAssistantTimeline({ ...message, canonicalOutput: restored }, { messageIndex: 0 })
+      assert.equal(timeline.length, 1)
+      const row = timeline[0]
+      assert.equal(row.type, 'commentary')
+      if (row.type !== 'commentary') assert.fail('planning must use public narration')
+      assert.equal(row.md, '正在梳理任务目标与执行顺序')
+      assert.equal(timeline.some((part) => part.type === 'operation'), false)
+      assert.equal(getExecutionPanelPresentation(timeline, { isStreaming: false }).stepCount, 0)
+      assert.equal(restored.operations['planning-1'].status, status)
+      assert.equal(restored.operations['planning-1'].durationMs, 106486)
+      assert.equal(JSON.stringify(timeline).includes('PRIVATE_MARKER'), false)
+      assert.equal(output.finalText, '')
+      assert.equal(output.commentaryText, '')
+    }
+  }
+})
 
 test('canonical timeline filters model operations, localizes tools, and groups consecutive work once', () => {
   const base = initialCanonicalOutputState()

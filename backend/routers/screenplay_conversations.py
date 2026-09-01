@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-
 from fastapi import APIRouter, Header, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
@@ -13,6 +10,7 @@ from application.screenplay_agent_task_executor import (
 )
 from application.screenplay_agent_service import ScreenplayAgentService
 from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
+from application.agent_event_stream import stream_agent_pages
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from dependencies import get_db
 from schemas.screenplay_agent import (
@@ -22,39 +20,8 @@ from schemas.screenplay_agent import (
 
 
 router = APIRouter()
-_STREAM_POLL_SECONDS = 0.04
 
 
-def _chunk_delivery_pages(page):
-    """Deliver committed canonical events without host-side buffering."""
-
-    pages = tuple({
-        "kind": "agent_chunks",
-        "chunks": [item],
-        "nextCursor": int(item["cursor"]),
-        "hasMore": bool(
-            page["hasMore"] or index < len(page["chunks"]) - 1
-        ),
-    } for index, item in enumerate(page["chunks"]))
-    if pages or int(page["nextCursor"]) <= 0:
-        return pages
-    return ({
-        "kind": "agent_chunks",
-        "chunks": [],
-        "nextCursor": int(page["nextCursor"]),
-        "hasMore": bool(page["hasMore"]),
-    },)
-
-
-def _chunk_replay_page(page):
-    """Hydrate persisted history in one UI-neutral batch per database page."""
-
-    return {
-        "kind": "agent_chunks",
-        "chunks": list(page["chunks"]),
-        "nextCursor": int(page["nextCursor"]),
-        "hasMore": bool(page["hasMore"]),
-    }
 
 
 def _service() -> ScreenplayAgentService:
@@ -115,60 +82,28 @@ async def stream_screenplay_conversation_events(
 ):
     from application.agent_composition import get_agent_composition
 
+    composition = get_agent_composition()
     chunks = ScreenplayCanonicalOutputQuery(
         get_db(),
-        output_repository=get_agent_composition().output_journal,
+        output_repository=composition.output_journal,
     )
-    async def events():
-        chunk_cursor = int(chunk_after)
-        chunk_replay_announced = False
-        while not await request.is_disconnected():
-            emitted = False
-            chunk_page = await chunks.list_chunks(
-                project_id=project_id,
-                session_id=session_id,
-                after=chunk_cursor,
-                limit=limit,
-            )
-            delivered_chunk_page = False
-            if chunk_page["nextCursor"] > chunk_cursor:
-                delivery_pages = (
-                    (_chunk_replay_page(chunk_page),)
-                    if not chunk_replay_announced
-                    else _chunk_delivery_pages(chunk_page)
-                )
-                for delivery_page in delivery_pages:
-                    chunk_cursor = int(delivery_page["nextCursor"])
-                    yield {
-                        "data": json.dumps(
-                            delivery_page,
-                            ensure_ascii=False,
-                        ),
-                    }
-                    emitted = True
-                    delivered_chunk_page = True
-            if not chunk_replay_announced and not chunk_page["hasMore"]:
-                # The client keeps the restored conversation hidden until the
-                # persisted Agent chunk backlog is fully replayed.  Sessions
-                # without chunks still need an explicit catch-up marker;
-                # otherwise their loading state could never settle.
-                if not delivered_chunk_page:
-                    yield {
-                        "data": json.dumps({
-                            "kind": "agent_chunks",
-                            "chunks": [],
-                            "nextCursor": chunk_cursor,
-                            "hasMore": False,
-                        }, ensure_ascii=False),
-                    }
-                    emitted = True
-                chunk_replay_announced = True
-            if chunk_page["hasMore"]:
-                continue
-            if not emitted:
-                await asyncio.sleep(_STREAM_POLL_SECONDS)
+    first = await chunks.list_chunks(
+        project_id=project_id, session_id=session_id, after=chunk_after, limit=limit,
+    )
+    async def read_page(after):
+        nonlocal first
+        if first is not None:
+            page, first = first, None
+            return {"kind": "agent_chunks", **page}
+        page = await chunks.list_chunks(
+            project_id=project_id, session_id=session_id, after=after, limit=limit,
+        )
+        return {"kind": "agent_chunks", **page}
 
-    return EventSourceResponse(events())
+    return EventSourceResponse(stream_agent_pages(
+        request=request, read_page=read_page,
+        notifications=composition.output_notifications, after=chunk_after,
+    ))
 
 
 @router.post("/conversation/turns/{turn_id}/cancel")

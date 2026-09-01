@@ -26,6 +26,7 @@ async def save_conversation(body: SaveConversationRequest):
     memory_book_id: str | None = None
     memory_prompt = body.prompt
     deposit_memory = True
+    delivery_keys: tuple[str, ...] = ()
     async with db.transaction(cancellation_linearizable=True):
         session = await db.fetch_one(
             "SELECT id, book_id, chapter_id FROM ai_sessions WHERE id = ?",
@@ -264,26 +265,30 @@ async def save_conversation(body: SaveConversationRequest):
                             conversation_id,
                         ],
                     )
+        if deposit_memory:
+            from services import memory_deposition_service
 
-    try:
-        if not deposit_memory:
-            return {"success": True, "data": {"id": conversation_id}}
-        from services import memory_deposition_service
-        async with db.transaction(cancellation_linearizable=True):
             source = await db.fetch_one(
                 "SELECT id FROM ai_conversations WHERE id = ? AND session_id = ?",
                 [conversation_id, body.sessionId],
             )
             if source is not None:
-                await memory_deposition_service.deposit_explicit_memory_from_conversation(
+                delivery_keys = await memory_deposition_service.record_explicit_conversation_memory(
+                    db,
                     book_id=memory_book_id,
                     conversation_id=conversation_id,
                     prompt=memory_prompt,
                 )
-    except Exception:
-        # 对话保存是主路径；记忆沉淀失败不应影响历史记录。
-        pass
-    return {"success": True, "data": {"id": conversation_id}}
+    from services import memory_deposition_service
+
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {
+        "success": True,
+        "data": {
+            "id": conversation_id,
+            "memoryDelivery": [item.to_dict() for item in deliveries],
+        },
+    }
 
 
 def _json_object(value: object) -> dict[str, Any]:
@@ -477,6 +482,7 @@ async def delete_after_turn(
     retireClientTurnIds: str | None = None,
 ):
     db = get_db()
+    memory_delivery_keys = ()
     async with db.transaction(cancellation_linearizable=True):
         exact_boundary = (
             retireConversationIds is not None
@@ -765,25 +771,31 @@ async def delete_after_turn(
             )
         if ids_to_delete:
             placeholders = ",".join("?" for _ in ids_to_delete)
+            from services.memory_deposition_service import (
+                record_deleted_conversation_sources,
+            )
+
+            memory_delivery_keys = await record_deleted_conversation_sources(
+                db,
+                ids_to_delete,
+            )
             await db.execute(
                 f"DELETE FROM ai_conversations WHERE id IN ({placeholders}) "
                 "AND session_id = ?",
                 [*ids_to_delete, sessionId],
-            )
-            await db.execute(
-                "UPDATE memory_items SET status = 'archived', "
-                "source_type = 'conversation_truncated', "
-                "update_time = CURRENT_TIMESTAMP "
-                "WHERE source_type = 'conversation' "
-                f"AND source_id IN ({placeholders}) AND status <> 'archived'",
-                [str(conversation_id) for conversation_id in ids_to_delete],
             )
         if ids_to_delete or tail_run_ids or retired_turn_ids:
             await db.execute(
                 "DELETE FROM ai_conversation_summaries WHERE session_id = ?",
                 [sessionId],
             )
-    return {"success": True}
+    from services.memory_deposition_service import deliver_recorded
+
+    deliveries = await deliver_recorded(db, memory_delivery_keys)
+    return {
+        "success": True,
+        "memoryDelivery": [item.to_dict() for item in deliveries],
+    }
 
 
 def _csv_text(value: str | None) -> list[str]:

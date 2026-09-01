@@ -25,7 +25,7 @@ class ModelProfile:
     base_urls: frozenset[str] = frozenset()
     native_anthropic_thinking = False
     openai_output_token_parameter = "max_tokens"
-    max_output_tokens: int | None = None
+    max_call_output_tokens: int | None = None
     thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
     supports_json_object_output = False
     reasoning_control = ReasoningControl.SELECTABLE
@@ -77,7 +77,7 @@ class ModelProfile:
 
     def output_capabilities(self) -> ModelOutputCapabilities:
         return ModelOutputCapabilities(
-            max_output_tokens=self.max_output_tokens,
+            max_call_output_tokens=self.max_call_output_tokens,
             thinking_token_accounting=self.thinking_token_accounting,
         )
 
@@ -91,7 +91,7 @@ class ModelProfile:
             profile_id=self.profile_id,
             provider_protocol=self.provider_protocol,
             context_window_tokens=context_window_tokens,
-            max_output_tokens=self.max_output_tokens,
+            max_call_output_tokens=self.max_call_output_tokens,
             thinking_token_accounting=self.thinking_token_accounting,
             protocol=self.protocol_capabilities(),
             actionable=self.actionable,

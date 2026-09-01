@@ -11,6 +11,7 @@ const root = path.join(__dirname, '..')
 const outDir = path.join(root, 'build-resources', 'backend')
 const backendSrc = path.join(root, 'backend')
 const purraRequirements = path.join(backendSrc, 'requirements-purra.txt')
+const runtimeRequirements = path.join(backendSrc, 'requirements-runtime.txt')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
 
@@ -65,22 +66,42 @@ function findPackagingPython() {
   })
 }
 
+function localPurraRequirements() {
+  return fs.readFileSync(purraRequirements, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+#.*$/, '').trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^-e\s+(.+?)(\[[^\]]+\])?$/)
+      if (!match) {
+        throw new Error(`Only local editable PurrA requirements are allowed: ${line}`)
+      }
+      const source = path.resolve(root, match[1])
+      if (!fs.existsSync(source)) {
+        throw new Error(`Local PurrA dependency does not exist: ${source}`)
+      }
+      return `${source}${match[2] || ''}`
+    })
+}
+
 function vendorPurra(dest) {
   const python = findPackagingPython()
   if (!python) {
-    throw new Error('Python with pip is required to install PurrA')
+    throw new Error('Python with pip is required to install PurrA dependencies')
   }
+  const requirements = localPurraRequirements()
   const result = spawnSync(
     python.command,
     [
       ...python.prefix,
-      '-m', 'pip', 'install', '--no-deps', '--target', dest,
-      '-r', purraRequirements,
+      '-m', 'pip', 'install', '--no-build-isolation', '--target', dest,
+      '-r', runtimeRequirements,
+      ...requirements,
     ],
     { cwd: root, stdio: 'inherit' },
   )
   if (result.status !== 0) {
-    throw new Error('Failed to install the pinned PurrA dependency')
+    throw new Error('Failed to package the local PurrA dependencies')
   }
 }
 
@@ -99,5 +120,5 @@ if (process.platform === 'win32' && fs.existsSync(frozenExe)) {
   }
   copyDirFiltered(backendSrc, outDir)
   vendorPurra(outDir)
-  console.log('[prepare-backend-resources] Copied backend and installed pinned PurrA →', outDir)
+  console.log('[prepare-backend-resources] Copied backend and installed local PurrA dependencies →', outDir)
 }

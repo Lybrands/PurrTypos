@@ -148,6 +148,11 @@ async def _seed_run(db: DatabaseConnection) -> str:
 
 async def test_run_snapshot_pages_events_with_a_stable_cursor(temp_db):
     run_id = await _seed_run(temp_db)
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET model_attempt_count = 2, "
+        "provider_output_events = 12, provider_output_bytes = 3456 WHERE id = ?",
+        [run_id],
+    )
     service = _queries(temp_db)
 
     first = await service.get_snapshot(run_id, limit=2)
@@ -155,6 +160,11 @@ async def test_run_snapshot_pages_events_with_a_stable_cursor(temp_db):
     assert first["version"] == 1
     assert first["run"]["runId"] == run_id
     assert first["run"]["status"] == "running"
+    assert first["run"]["activity"] == {
+        "modelAttemptCount": 2,
+        "providerOutputEvents": 12,
+        "providerOutputBytes": 3456,
+    }
     assert "prompt" not in first["run"]
     assert first["todos"][0]["id"] == "read"
     assert first["todos"][0]["type"] == "read"

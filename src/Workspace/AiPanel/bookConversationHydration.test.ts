@@ -623,7 +623,7 @@ test('latest terminal fallback exhausts journal pages before committing read mod
     },
   })
 
-  assert.deepEqual(reads, [undefined, 500])
+  assert.deepEqual(reads, [500])
   assert.equal(hydrated.messages[1].content, '服务端终稿')
   assert.equal(
     hydrated.messages[1].canonicalOutput?.operations['operation-after-500']?.status,

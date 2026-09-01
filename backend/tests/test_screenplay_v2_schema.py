@@ -479,12 +479,6 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
         [conversation_id],
     )
     await first.execute(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, status, source_type, source_id) VALUES "
-        "('legacy-book', 'canon', '旧记忆', 'active', 'conversation', ?)",
-        [str(conversation_id)],
-    )
-    await first.execute(
         "INSERT INTO ai_writing_chat_requests "
         "(request_id, session_id, request_digest, status) VALUES "
         "('legacy-active-request', 9701, 'sha256:legacy', 'accepted')"
@@ -571,10 +565,6 @@ async def test_startup_retires_active_legacy_project_without_using_delete_guard(
         assert await reopened.fetch_one(
             "SELECT id FROM ai_favorites WHERE session_id = 9701"
         ) is None
-        assert await reopened.fetch_one(
-            "SELECT status, source_type FROM memory_items WHERE source_id = ?",
-            [str(conversation_id)],
-        ) == {"status": "archived", "source_type": "conversation_truncated"}
         retained_task = await reopened.fetch_one(
             "SELECT metadata_json FROM ai_agent_long_tasks "
             "WHERE id = 'native-kept-task'"

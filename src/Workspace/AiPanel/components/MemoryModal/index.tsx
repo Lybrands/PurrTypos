@@ -15,6 +15,7 @@ export default function MemoryModal({
   bookId,
   writingChapters = [],
   selectedIds,
+  selectedLongTermMemoryIds = [],
   selectedForeshadowingIds = [],
   onSelectConfirm,
 }: MemoryModalProps) {
@@ -24,6 +25,7 @@ export default function MemoryModal({
     bookId,
     writingChapters,
     selectedIds,
+    selectedLongTermMemoryIds,
     selectedForeshadowingIds,
     onSelectConfirm,
   })
@@ -39,7 +41,7 @@ export default function MemoryModal({
       footer={
         controller.activeTab === 'select' ? (
           <PurrButton type="primary" onClick={controller.handleSelectOk}>
-            本轮带上（{controller.checkedIds.length + controller.checkedForeshadowingIds.length} 条）
+            本轮带上（{controller.checkedLongTermMemoryIds.length + controller.checkedIds.length + controller.checkedForeshadowingIds.length} 条）
           </PurrButton>
         ) : null
       }

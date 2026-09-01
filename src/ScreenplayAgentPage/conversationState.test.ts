@@ -626,7 +626,7 @@ test('screenplay client refreshes canonical snapshot after cursor events', async
   assert.equal(resumed.revision, 2)
 })
 
-test('screenplay SSE uses canonical Agent chunks as its only invalidation', () => {
+test('screenplay SSE only invalidates changed business projections, not text pages', () => {
   let onEvent: ((event: ScreenplayConversationStreamEvent) => void) | undefined
   let closed = false
   const client = new ScreenplayConversationClient({
@@ -680,12 +680,15 @@ test('screenplay SSE uses canonical Agent chunks as its only invalidation', () =
     chunks: [],
     nextCursor: 21,
     hasMore: false,
+    projectionVersion: 'business-1',
   }
   onEvent?.(chunkPage)
   onEvent?.(chunkPage)
+  onEvent?.({ ...chunkPage, nextCursor: 22 })
+  onEvent?.({ ...chunkPage, nextCursor: 22, projectionVersion: 'business-2' })
   stop()
 
-  assert.equal(invalidations, 1)
-  assert.equal(chunkPages.length, 1)
+  assert.equal(invalidations, 2)
+  assert.equal(chunkPages.length, 3)
   assert.equal(closed, true)
 })

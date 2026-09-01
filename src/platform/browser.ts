@@ -209,7 +209,7 @@ export const browserPlatformApi: PlatformApi = {
     const result = await downloadBackendFile(
       '/api/database/export',
       { method: 'POST' },
-      `purrtypos-backup-${new Date().toISOString().slice(0, 10)}.db`,
+      `purrtypos-backup-${new Date().toISOString().slice(0, 10)}.purrbackup`,
     )
     return result.success
       ? { success: true, data: undefined }
@@ -217,7 +217,7 @@ export const browserPlatformApi: PlatformApi = {
   },
 
   importDatabase: async () => {
-    const [file] = await chooseFiles('.db,application/x-sqlite3')
+    const [file] = await chooseFiles('.purrbackup,application/zip')
     if (!file) return failure('canceled')
     try {
       const response = await fetch(
@@ -235,7 +235,7 @@ export const browserPlatformApi: PlatformApi = {
   },
 
   openDatabaseDirectory: async () =>
-    failure<void>('浏览器无法打开数据库目录，可以使用“导出数据库”下载备份'),
+    failure<void>('浏览器无法打开数据目录，可以使用“导出完整备份”下载数据'),
 
   openAndReadTextFile: async () => {
     const [file] = await chooseFiles('.txt,.md,.markdown,text/plain,text/markdown')

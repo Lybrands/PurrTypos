@@ -20,6 +20,7 @@ class ProductOwnerActiveError(AppError):
 class SessionOwnerRows:
     session_ids: tuple[int, ...]
     conversation_ids: tuple[int, ...]
+    memory_delivery_keys: tuple[str, ...] = ()
 
 
 async def prepare_session_owner_deletion(
@@ -39,7 +40,7 @@ async def prepare_session_owner_deletion(
     projects = tuple(sorted({str(value) for value in screenplay_project_ids if value}))
     books = tuple(sorted({str(value) for value in book_ids if value}))
     if not sessions and not projects and not books:
-        return SessionOwnerRows((), ())
+        return SessionOwnerRows((), (), ())
     session_marks = _marks(sessions)
     conversations = await db.fetch_all(
         f"SELECT id FROM ai_conversations WHERE session_id IN ({session_marks})",
@@ -162,14 +163,15 @@ async def prepare_session_owner_deletion(
                 list(sessions),
             )
     if conversation_ids:
-        await db.execute(
-            "UPDATE memory_items SET status = 'archived', "
-            "source_type = 'conversation_truncated', "
-            "update_time = CURRENT_TIMESTAMP "
-            "WHERE source_type = 'conversation' "
-            f"AND source_id IN ({conversation_marks}) AND status <> 'archived'",
-            [str(value) for value in conversation_ids],
+        from services.memory_deposition_service import (
+            record_deleted_conversation_sources,
         )
+        memory_delivery_keys = await record_deleted_conversation_sources(
+            db,
+            conversation_ids,
+        )
+    else:
+        memory_delivery_keys = ()
     if books:
         book_marks = _marks(books)
         namespaces = ["purrtypos.writing", "writing.book"]
@@ -198,7 +200,7 @@ async def prepare_session_owner_deletion(
                 f"WHERE id IN ({artifact_marks})",
                 list(artifact_ids),
             )
-    return SessionOwnerRows(sessions, conversation_ids)
+    return SessionOwnerRows(sessions, conversation_ids, memory_delivery_keys)
 
 
 async def _delete_owned_run_cancellations(db, owned_run_ids) -> None:

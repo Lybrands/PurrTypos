@@ -93,6 +93,7 @@ class _Gateway:
         if isinstance(response, Exception):
             raise response
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
                 content=response,
@@ -150,7 +151,7 @@ def _request(
             capability_snapshot=replace(
                 generic_capability_snapshot(),
                 profile_id="test:model",
-                max_output_tokens=4_096,
+                max_call_output_tokens=4_096,
             ),
         ),
         domain_context=DomainContext(namespace="test"),

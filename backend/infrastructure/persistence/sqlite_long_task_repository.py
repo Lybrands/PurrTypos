@@ -1418,12 +1418,23 @@ def _aggregate_usage(row: Mapping[str, Any] | None) -> LongTaskUsage:
 
 
 def _budget_limits(value: Mapping[str, Any]) -> LongTaskBudgetLimits:
-    return LongTaskBudgetLimits(
-        max_invocation_attempts=value.get("maxInvocationAttempts"),
-        max_input_tokens=value.get("maxInputTokens"),
-        max_output_tokens=value.get("maxOutputTokens"),
-        max_reasoning_tokens=value.get("maxReasoningTokens"),
-    )
+    fields = {
+        "maxInvocationAttempts": "max_invocation_attempts",
+        "maxInputTokens": "max_input_tokens",
+        "maxRunOutputTokens": "max_run_output_tokens",
+        "maxReasoningTokens": "max_reasoning_tokens",
+    }
+    if set(value) - fields.keys():
+        raise ContractViolationError(
+            "Unknown long task budget fields",
+            code="runtime_limits_invalid",
+        )
+    try:
+        return LongTaskBudgetLimits(**{fields[key]: limit for key, limit in value.items()})
+    except (TypeError, ValueError) as error:
+        raise ContractViolationError(
+            "Invalid long task budget limits", code="runtime_limits_invalid",
+        ) from error
 
 
 def _deadline_elapsed(
@@ -1447,7 +1458,7 @@ def _task_budget_exhaustion(
         limit is not None
         for limit in (
             limits.max_input_tokens,
-            limits.max_output_tokens,
+            limits.max_run_output_tokens,
             limits.max_reasoning_tokens,
         )
     ):
@@ -1457,7 +1468,7 @@ def _task_budget_exhaustion(
     for kind, value, limit in (
         ("model_attempts", usage.invocation_count, limits.max_invocation_attempts),
         ("input_tokens", usage.input_tokens, limits.max_input_tokens),
-        ("output_tokens", usage.output_tokens, limits.max_output_tokens),
+        ("output_tokens", usage.output_tokens, limits.max_run_output_tokens),
         ("reasoning_tokens", usage.reasoning_tokens, limits.max_reasoning_tokens),
     ):
         if limit is not None and value is not None and (

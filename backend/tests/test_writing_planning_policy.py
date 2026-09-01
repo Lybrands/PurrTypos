@@ -47,70 +47,8 @@ def _request(
     )
 
 
-@pytest.mark.parametrize(
-    ("text", "book_id", "mode", "tools_enabled", "expected"),
-    [
-        ("", "book-1", "agent", True, False),
-        ("       ", "book-1", "agent", True, False),
-        ("续写", None, "agent", True, False),
-        ("续写", "book-1", "agent", True, True),
-        ("续写", "book-1", "agent", False, True),
-        ("续写", "book-1", "ask", False, False),
-        ("续写", "book-1", "ask", True, True),
-        ("续写", "book-1", None, False, False),
-        ("续写", "book-1", None, True, True),
-        ("续写", "book-1", "other", False, False),
-        ("续写", "book-1", "other", True, True),
-        ("续写", "book-1", " AGENT ", False, True),
-    ],
-)
-def test_writing_policy_applies_the_planning_eligibility_gate(
-    text: str,
-    book_id: str | None,
-    mode: str | None,
-    tools_enabled: bool,
-    expected: bool,
-):
-    request = _request(
-        text,
-        book_id=book_id,
-        mode=mode,
-        tools_enabled=tools_enabled,
-    )
-    capabilities = PlanningCapabilities(available_tool_names=frozenset())
-
-    actual = WritingPlanningPolicy().should_plan(request, capabilities)
-
-    assert actual is expected
-
-
-@pytest.mark.parametrize(
-    ("mode", "tools_enabled", "expected"),
-    [
-        ("ask", True, True),
-        ("ask", False, False),
-        ("other", False, False),
-    ],
-)
-def test_writing_policy_does_not_infer_tools_enabled_from_catalog_contents(
-    mode: str,
-    tools_enabled: bool,
-    expected: bool,
-):
-    request = _request(
-        "续写",
-        mode=mode,
-        tools_enabled=tools_enabled,
-    )
-    empty = PlanningCapabilities(available_tool_names=frozenset())
-    populated = PlanningCapabilities(
-        available_tool_names=frozenset({"getSomething"}),
-    )
-
-    policy = WritingPlanningPolicy()
-
-    assert policy.should_plan(request, empty) is expected
-    assert policy.should_plan(request, populated) is expected
+def test_writing_policy_has_no_planner_enablement_hook():
+    assert not hasattr(WritingPlanningPolicy(), "should_plan")
 
 
 def _bound_chapter_capabilities(

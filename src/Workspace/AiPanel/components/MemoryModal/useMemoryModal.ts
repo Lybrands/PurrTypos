@@ -7,6 +7,7 @@ import type {
   Character,
   EntityId,
   SparkIdeaLayer,
+  UnifiedMemoryItem,
 } from '../../../../types'
 import {
   SparkIdeaLayerFour,
@@ -23,8 +24,9 @@ import {
 } from './utils'
 
 interface UseMemoryModalOptions
-  extends Omit<MemoryModalProps, 'writingChapters' | 'selectedForeshadowingIds'> {
+  extends Omit<MemoryModalProps, 'writingChapters' | 'selectedForeshadowingIds' | 'selectedLongTermMemoryIds'> {
   writingChapters: WritingChapter[]
+  selectedLongTermMemoryIds: string[]
   selectedForeshadowingIds: MemoryId[]
 }
 
@@ -34,15 +36,20 @@ export function useMemoryModal({
   bookId,
   writingChapters,
   selectedIds,
+  selectedLongTermMemoryIds,
   selectedForeshadowingIds,
   onSelectConfirm,
 }: UseMemoryModalOptions) {
   const [activeTab, setActiveTab] = React.useState<string>('select')
   const [sparkIdeas, setSparkIdeas] = React.useState<AiSparkIdea[]>([])
+  const [longTermMemories, setLongTermMemories] = React.useState<UnifiedMemoryItem[]>([])
   const [foreshadowing, setForeshadowing] = React.useState<AiForeshadowing[]>([])
   const [characters, setCharacters] = React.useState<Character[]>([])
   const [loading, setLoading] = React.useState(false)
   const [checkedIds, setCheckedIds] = React.useState<MemoryId[]>(selectedIds)
+  const [checkedLongTermMemoryIds, setCheckedLongTermMemoryIds] = React.useState<string[]>(
+    selectedLongTermMemoryIds
+  )
   const [checkedForeshadowingIds, setCheckedForeshadowingIds] = React.useState<MemoryId[]>(
     selectedForeshadowingIds
   )
@@ -71,12 +78,19 @@ export function useMemoryModal({
     if (!open || bookId == null) return
     setLoading(true)
     setCheckedIds(selectedIds)
+    setCheckedLongTermMemoryIds(selectedLongTermMemoryIds)
     setCheckedForeshadowingIds(selectedForeshadowingIds)
     Promise.all([
       services.memories.getSparkIdeasByBook({ bookId }),
       services.memories.getForeshadowingByBook({ bookId }),
       services.characters.getCharacters({ bookId }),
-    ]).then(([memoryResponse, foreshadowingResponse, characterResponse]) => {
+      services.memories.listUnifiedMemories({
+        bookId,
+        statuses: ['active'],
+        sources: ['semantic'],
+        limit: 100,
+      }),
+    ]).then(([memoryResponse, foreshadowingResponse, characterResponse, longTermResponse]) => {
       setLoading(false)
       if (memoryResponse.success && Array.isArray(memoryResponse.data)) {
         setSparkIdeas(memoryResponse.data)
@@ -93,13 +107,28 @@ export function useMemoryModal({
       } else {
         setCharacters([])
       }
+      if (longTermResponse.success && Array.isArray(longTermResponse.data?.items)) {
+        setLongTermMemories(longTermResponse.data.items)
+      } else {
+        setLongTermMemories([])
+      }
     })
-  }, [open, bookId, selectedIds, selectedForeshadowingIds])
+  }, [open, bookId, selectedIds, selectedLongTermMemoryIds, selectedForeshadowingIds])
 
   const handleSelectOk = React.useCallback(() => {
-    onSelectConfirm(checkedIds, checkedForeshadowingIds)
+    onSelectConfirm(
+      checkedLongTermMemoryIds,
+      checkedIds,
+      checkedForeshadowingIds,
+    )
     onCancel()
-  }, [checkedIds, checkedForeshadowingIds, onSelectConfirm, onCancel])
+  }, [checkedLongTermMemoryIds, checkedIds, checkedForeshadowingIds, onSelectConfirm, onCancel])
+
+  const handleToggleLongTermMemory = React.useCallback((id: string, checked: boolean) => {
+    setCheckedLongTermMemoryIds((previous) =>
+      checked ? [...previous, id] : previous.filter((candidate) => candidate !== id)
+    )
+  }, [])
 
   const handleToggle = React.useCallback((id: MemoryId, checked: boolean) => {
     setCheckedIds((previous) =>
@@ -152,10 +181,11 @@ export function useMemoryModal({
   }, [])
 
   const handleDelete = React.useCallback(async (id: MemoryId) => {
-    await services.memories.deleteSparkIdea({ id })
+    if (bookId == null) return
+    await services.memories.deleteSparkIdea({ bookId, id })
     setSparkIdeas((previous) => previous.filter((memory) => memory.id !== id))
     setCheckedIds((previous) => previous.filter((candidate) => candidate !== id))
-  }, [])
+  }, [bookId])
 
   const handleEditStart = React.useCallback((memory: AiSparkIdea) => {
     setEditingId(memory.id)
@@ -179,7 +209,7 @@ export function useMemoryModal({
   }, [])
 
   const handleEditSave = React.useCallback(async () => {
-    if (editingId == null) return
+    if (bookId == null || editingId == null) return
     const trimmedContent = editingContent.trim()
     if (!trimmedContent) {
       purrToast.warning('设定内容不能为空')
@@ -201,6 +231,7 @@ export function useMemoryModal({
 
     setEditSaving(true)
     const response = await services.memories.updateSparkIdea({
+      bookId,
       id: editingId,
       data: {
         content: trimmedContent,
@@ -221,6 +252,7 @@ export function useMemoryModal({
     }
   }, [
     editingId,
+    bookId,
     editingContent,
     editingLayer,
     editingChapterId,
@@ -245,9 +277,10 @@ export function useMemoryModal({
   }, [bookId, foreshadowChapterId, foreshadowContent, foreshadowType])
 
   const handleDeleteForeshadowing = React.useCallback(async (id: MemoryId) => {
-    await services.memories.deleteForeshadowing({ id })
+    if (bookId == null) return
+    await services.memories.deleteForeshadowing({ bookId, id })
     setForeshadowing((previous) => previous.filter((item) => item.id !== id))
-  }, [])
+  }, [bookId])
 
   const handleUpdateForeshadowingStatus = React.useCallback(
     async (
@@ -255,7 +288,9 @@ export function useMemoryModal({
       status: AiForeshadowing['status'],
       resolvedChapterId?: EntityId | null
     ) => {
+      if (bookId == null) return
       const response = await services.memories.updateForeshadowing({
+        bookId,
         id,
         data: { status, resolved_chapter_id: resolvedChapterId ?? undefined },
       })
@@ -267,7 +302,7 @@ export function useMemoryModal({
         )
       }
     },
-    []
+    [bookId]
   )
 
   const chapterTitleById = React.useMemo(
@@ -287,11 +322,13 @@ export function useMemoryModal({
     activeTab,
     setActiveTab,
     sparkIdeas,
+    longTermMemories,
     sparkIdeasByLayer,
     foreshadowing,
     characters,
     loading,
     checkedIds,
+    checkedLongTermMemoryIds,
     checkedForeshadowingIds,
     addLayer,
     addContent,
@@ -321,6 +358,7 @@ export function useMemoryModal({
     characterNameById,
     handleSelectOk,
     handleToggle,
+    handleToggleLongTermMemory,
     handleToggleForeshadowing,
     handleAdd,
     handleAddLayerChange,

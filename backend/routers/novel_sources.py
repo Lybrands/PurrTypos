@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, Query
+from fastapi import APIRouter, Header, Query, Request
+from sse_starlette.sse import EventSourceResponse
 
 from application.novel_analysis_service import NovelAnalysisService
 from application.novel_source_service import NovelSourceService
@@ -76,6 +77,11 @@ async def confirm_import(body: ConfirmSourceImportRequest):
         confirm_single_section=body.confirmSingleSection,
         rights_confirmed=body.rightsConfirmed,
         model_data_boundary_confirmed=body.modelDataBoundaryConfirmed,
+        section_layout=(
+            [item.model_dump(mode="json") for item in body.sections]
+            if body.sections is not None
+            else None
+        ),
         work_id=body.workId,
     )))
 
@@ -178,6 +184,37 @@ async def follow_up_analysis(
 @router.get("/novel-source-revisions/{revision_id}/analysis-runs")
 async def list_analysis_runs(revision_id: str):
     return _ok(await _analysis_service().list_for_revision(revision_id))
+
+
+@router.get("/novel-source-revisions/{revision_id}/analysis-events")
+async def stream_analysis_events(
+    request: Request, revision_id: str,
+    after: int = Query(default=0, ge=0), limit: int = Query(default=500, ge=1, le=500),
+):
+    from application.agent_composition import get_agent_composition
+    from application.agent_event_stream import stream_agent_pages
+    from application.novel_analysis_stream import NovelAnalysisStreamQuery
+
+    composition = get_agent_composition()
+    query = NovelAnalysisStreamQuery(
+        get_db(), output_repository=composition.output_journal,
+        analysis_service=_analysis_service(),
+    )
+    # Validate scope before opening the response so a deleted source is a 404,
+    # not an endless sequence of failed SSE reconnections.
+    first = await query.read_page(revision_id, after=after, limit=limit)
+
+    async def read_page(cursor):
+        nonlocal first
+        if first is not None:
+            page, first = first, None
+            return page
+        return await query.read_page(revision_id, after=cursor, limit=limit)
+
+    return EventSourceResponse(stream_agent_pages(
+        request=request, read_page=read_page,
+        notifications=composition.output_notifications, after=after,
+    ))
 
 
 @router.post("/novel-analysis-tasks/{task_id}/pause")

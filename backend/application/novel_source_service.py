@@ -7,6 +7,7 @@ from typing import Any
 
 from domains.novel_sources import (
     NovelSourceConflictError,
+    apply_source_section_layout,
     parse_source_sections,
     validate_source_text,
 )
@@ -49,6 +50,8 @@ class NovelSourceService:
                 "title": section.title,
                 "characterCount": len(section.text),
                 "preview": section.text.strip()[:240],
+                "startCharacter": section.start_character,
+                "endCharacter": section.end_character,
             } for section in sections],
             "estimatedAdditionalStorageBytes": metadata["byteCount"],
             "rightsNotice": "请只导入你有权使用的作品。",
@@ -72,6 +75,7 @@ class NovelSourceService:
         confirm_single_section: bool,
         rights_confirmed: bool,
         model_data_boundary_confirmed: bool,
+        section_layout: list[dict[str, object]] | None = None,
         work_id: str | None = None,
     ) -> dict[str, Any]:
         preview = self.preview_external_import(
@@ -84,11 +88,15 @@ class NovelSourceService:
         )
         if preview["contentDigest"] != str(expected_content_digest or "").strip():
             raise NovelSourceConflictError("来源正文已变化，请重新预览后再确认")
-        if preview["requiresSingleSectionConfirmation"] and not confirm_single_section:
+        sections = (
+            apply_source_section_layout(content, section_layout)
+            if section_layout is not None
+            else parse_source_sections(content)
+        )
+        if len(sections) == 1 and not confirm_single_section:
             raise NovelSourceConflictError("未识别到可靠章节结构，请确认按单节来源导入")
         if not rights_confirmed or not model_data_boundary_confirmed:
             raise NovelSourceConflictError("必须确认使用权和外部模型数据边界")
-        sections = parse_source_sections(content)
         return await self._repository.create_external_revision(
             title=str(title or "").strip() or preview["suggestedTitle"],
             sections=sections,
@@ -103,6 +111,7 @@ class NovelSourceService:
                 "skippedFileCount": preview["skippedFileCount"],
                 "rightsConfirmed": True,
                 "modelDataBoundaryConfirmed": True,
+                "sectionLayout": "reviewed" if section_layout is not None else "detected",
             },
             work_id=work_id,
         )

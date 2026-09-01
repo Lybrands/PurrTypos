@@ -12,7 +12,7 @@ class KimiK26Profile(ModelProfile):
         "https://api.moonshot.ai/v1",
         "https://api.moonshot.cn/v1",
     })
-    max_output_tokens = 262_144
+    max_call_output_tokens = 262_144
     capability_source = "https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart"
     supports_json_object_output = True
     reasoning_replay = ReasoningReplayPolicy.REQUIRED

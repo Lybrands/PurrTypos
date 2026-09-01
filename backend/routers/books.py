@@ -94,7 +94,18 @@ async def create_book(body: CreateBookRequest):
 async def delete_book(bookId: str):
     db = get_db()
     attachment_paths: list[str] = []
+    from application.memory_delivery import (
+        MemoryDeliveryService,
+        record_book_deletion,
+    )
+    from application.memory_operations import MemoryApplicationService
+    from application.agent_composition import get_agent_composition
+
     async with db.transaction(cancellation_linearizable=True):
+        book = await db.fetch_one("SELECT id FROM books WHERE id = ?", [bookId])
+        if book is None:
+            return {"success": False, "error": "书籍不存在"}
+        memory_operation_key = await record_book_deletion(db, book_id=bookId)
         continuation = await db.fetch_one(
             "SELECT canon_snapshot_id FROM continuation_bindings "
             "WHERE target_book_id = ?",
@@ -168,8 +179,6 @@ async def delete_book(bookId: str):
 
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
-        await db.execute("DELETE FROM memory_links WHERE book_id = ?", [bookId])
-        await db.execute("DELETE FROM memory_items WHERE book_id = ?", [bookId])
         await db.execute(
             "DELETE FROM story_memory_versions WHERE book_id = ?",
             [bookId],
@@ -243,9 +252,18 @@ async def delete_book(bookId: str):
         )
         await db.execute("DELETE FROM books WHERE id = ?", [bookId])
 
+    composition = get_agent_composition()
+    memory_delivery = await MemoryDeliveryService(
+        db,
+        MemoryApplicationService(db, composition.memory_resource),
+    ).deliver_book_deletion(memory_operation_key)
     for stored_path in attachment_paths:
         safe_unlink_stored_file(stored_path, DATA_DIR)
-    return {"success": True, "data": {"attachmentPaths": attachment_paths}}
+    return {
+        "success": True,
+        "data": {"attachmentPaths": attachment_paths},
+        "memoryDelivery": memory_delivery.to_dict(),
+    }
 
 
 @router.put("/books/{bookId}/rename")

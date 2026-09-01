@@ -41,20 +41,25 @@ async def save_story_background(bookId: str, body: SaveStoryBackgroundRequest):
     db = get_db()
     before_row = await story_background_crud.get_story_background(db, bookId)
     before_content = (before_row.get("content") if before_row else None) or ""
-    await story_background_crud.save_story_background(db, bookId, body.content)
-    await bg_hist_crud.insert_story_background_history(
-        db,
-        book_id=bookId,
-        before_content=before_content,
-        after_content=body.content,
-        source="user",
-    )
-    try:
-        from services import memory_deposition_service
-        await memory_deposition_service.deposit_manual_background_memory(bookId, body.content)
-    except Exception:
-        pass
-    return {"success": True}
+    from services import memory_deposition_service
+
+    async with db.transaction(cancellation_linearizable=True):
+        await story_background_crud.save_story_background(db, bookId, body.content)
+        await bg_hist_crud.insert_story_background_history(
+            db,
+            book_id=bookId,
+            before_content=before_content,
+            after_content=body.content,
+            source="user",
+        )
+        delivery_keys = await memory_deposition_service.record_manual_background(
+            db, bookId, body.content
+        )
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {
+        "success": True,
+        "memoryDelivery": [item.to_dict() for item in deliveries],
+    }
 
 
 @router.get("/story-background/{bookId}/attachments")

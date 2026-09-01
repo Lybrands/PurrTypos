@@ -20,6 +20,7 @@ from purra.contracts import (
     ApprovalStatus,
     DomainContext,
     ModelRequest,
+    PlanningMode,
     ResponseConstraints,
     RuntimeLimits,
     RunStatus,
@@ -31,6 +32,7 @@ from purra.api import AgentModelTaskRunner
 from purra.api import AgentCoreRunOptions
 from purra.api import DelegationPolicy
 from purra.model_invocation import ModelInvocationContext
+from purra.model_protocol import InvocationOutputLimit, InvocationOutputLimitSource
 from purra.tools import InMemoryApprovalGateway
 from purra.tools import InMemoryToolCatalog
 from purra.recovery import RecoveryPolicy
@@ -57,7 +59,7 @@ from application.sse_mapping import core_update_to_sse_chunk
 from database.connection import DatabaseConnection
 from dependencies import set_db
 from domains.writing.context import WritingContextProvider
-from domains.writing.context_source import RepositoryWritingContextSource
+from application.writing_context_source import RepositoryWritingContextSource
 from domains.writing.contracts import WritingDomainContext
 from routers.ai import (
     _stream_composed_agent,
@@ -69,6 +71,7 @@ from tests.support.canonical_wire import (
     assert_raw_canonical_wire,
     project_wire_events_for_legacy_assertions,
 )
+from tests.support.planning_stream import route_planning_stream
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -91,7 +94,7 @@ class _FakeAgentProfile:
             execution_state_factory=None,
             tool_catalog=InMemoryToolCatalog(()),
             context_provider=None,
-            runtime_limits=RuntimeLimits(),
+            runtime_limits=RuntimeLimits(max_run_output_tokens=None),
             recovery_policy=RecoveryPolicy(),
         )
 
@@ -247,6 +250,94 @@ async def test_composition_create_core_requires_an_explicit_profile(
 
 
 @pytest.mark.asyncio
+async def test_explicit_planned_run_without_planner_fails_closed_before_provider(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    provider_calls = 0
+
+    async def provider_must_not_run(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("planning_unavailable must fail before Provider")
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        provider_must_not_run,
+    )
+    context_calls = 0
+
+    class ContextProvider:
+        async def build_context(self, request, budget, signal=None):
+            nonlocal context_calls
+            del request, budget, signal
+            context_calls += 1
+            raise AssertionError("planning_unavailable must fail before context")
+
+    profile = _FakeAgentProfile({})
+    profile.context_factory = lambda _model_tasks: ContextProvider()
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(
+            lambda **_dependencies: profile,
+        ),
+    )
+    core = composition.create_core("key", agent_profile="fake")
+    try:
+        request = replace(
+            _fake_request(),
+            planning_mode=PlanningMode.PLANNED,
+        )
+
+        result = await (await core.submit(
+            request,
+            options=AgentCoreRunOptions(output_limit=InvocationOutputLimit(
+                max_tokens=256,
+                source=InvocationOutputLimitSource.WORKFLOW_POLICY,
+                profile_max_tokens=256,
+            )),
+        )).wait()
+
+        assert result.status is RunStatus.FAILED
+        assert result.error == "planning_unavailable"
+        assert provider_calls == 0
+        assert context_calls == 0
+        assert core._planning_enabled is False
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_composition_closes_the_lifespan_memory_resource_after_cores(
+    temp_db: DatabaseConnection,
+):
+    closed = []
+
+    class MemoryResource:
+        async def close(self):
+            closed.append("memory")
+
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(
+            lambda **dependencies: _FakeAgentProfile(dependencies),
+        ),
+        memory_resource=MemoryResource(),
+    )
+    core = composition.create_core("key", agent_profile="fake")
+    original_close = core.close
+
+    async def close_core():
+        closed.append("core")
+        await original_close()
+
+    core.close = close_core
+    await composition.shutdown()
+
+    assert closed == ["core", "memory"]
+
+
+@pytest.mark.asyncio
 async def test_static_profile_defaults_have_no_side_effects(
     temp_db: DatabaseConnection,
 ):
@@ -333,9 +424,8 @@ async def test_writing_profile_owns_product_capabilities(
         )
         assert isinstance(provider, WritingContextProvider)
         assert isinstance(provider._source, RepositoryWritingContextSource)
-        reranker = provider._source._memory._semantic._reranker
+        reranker = provider._source._memory_reranker
         assert isinstance(reranker, ModelBackedMemoryReranker)
-        assert provider._source._memory._story._reranker is reranker
         assert profile.task_admission() is None
         assert profile.create_long_task_dispatcher() is None
     finally:
@@ -357,10 +447,7 @@ async def test_product_composition_registers_product_profiles(
         assert core._planner._result_validator is not None
         assert core._planner._limits.max_repair_attempts == 3
         novel_core = composition.create_core("key", agent_profile="novel_analysis")
-        assert type(novel_core._planner).__name__ == "AgentPlanner"
-        assert novel_core._planner._result_validator is not None
-        assert novel_core._planner._limits.max_steps == 4
-        assert novel_core._planner._limits.max_tool_steps == 0
+        assert type(novel_core._planner).__name__ == "_NovelAnalysisPlanner"
     finally:
         await composition.shutdown()
 
@@ -1062,8 +1149,9 @@ async def test_custom_tools_fail_closed_without_calling_the_model(
             tools=custom_tools,
             enableAgentTools=True,
             bookId="book-1",
-            chatAgentMode="agent",
-            contextWindow="200k",
+                chatAgentMode="agent",
+                planningMode="planned",
+                contextWindow="200k",
         ),
     )
     events = await _collect(response)
@@ -1224,6 +1312,7 @@ async def test_composed_route_uses_complete_purra(
 
     async def _create_plan(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1258,7 +1347,7 @@ async def test_composed_route_uses_complete_purra(
                 }],
             }
 
-        return {"stream": _stream(), "model": "model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1266,7 +1355,7 @@ async def test_composed_route_uses_complete_purra(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _create_chat_stream,
+        route_planning_stream(_create_plan, _create_chat_stream),
     )
     set_agent_composition(_writing_composition(temp_db))
 
@@ -1280,6 +1369,7 @@ async def test_composed_route_uses_complete_purra(
             enableAgentTools=True,
             bookId="book-1",
             chatAgentMode="agent",
+            planningMode="planned",
             contextWindow="200k",
         ),
     )
@@ -1379,6 +1469,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }],
             }
         return {
+            "applied_output_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -1426,7 +1517,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }],
             }
 
-        return {"stream": _stream(), "model": "model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1434,7 +1525,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
     set_agent_composition(_writing_composition(temp_db))
 
@@ -1448,6 +1539,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         chapterId="chapter-replan",
         currentChapterTitle="第一章：弄堂",
         chatAgentMode="agent",
+        planningMode="planned",
         contextWindow="200k",
     ))
     events = await _collect(response)
@@ -1502,6 +1594,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 
     async def _create_plan(*_args, **_kwargs):
         return {
+            "applied_output_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1584,7 +1677,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
                     }],
                 }
 
-        return {"stream": _stream(), "model": "model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1592,7 +1685,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _create_chat_stream,
+        route_planning_stream(_create_plan, _create_chat_stream),
     )
     set_agent_composition(_writing_composition(temp_db))
     body = ChatStreamRequest(
@@ -1603,6 +1696,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
         enableAgentTools=True,
         bookId="book-1",
         chatAgentMode="agent",
+        planningMode="planned",
         contextWindow="200k",
     )
 

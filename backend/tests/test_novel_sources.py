@@ -6,7 +6,11 @@ import pytest
 
 from application.novel_source_service import NovelSourceService
 from database.connection import DatabaseConnection
-from domains.novel_sources import NovelSourceConflictError, parse_source_sections
+from domains.novel_sources import (
+    NovelSourceConflictError,
+    apply_source_section_layout,
+    parse_source_sections,
+)
 
 
 @pytest.fixture
@@ -27,6 +31,47 @@ def test_parser_is_deterministic_and_keeps_single_section_fallback():
     assert [item.title for item in first] == ["前言", "第一章 起点", "第二章 变化"]
     assert "正文 B" in first[-1].text
     assert parse_source_sections("没有章节标题的全文")[0].title == "全文"
+
+
+def test_reviewed_section_layout_must_cover_source_contiguously():
+    content = "序章正文\n第二部分正文"
+    sections = apply_source_section_layout(content, [
+        {"title": "序章", "startCharacter": 0, "endCharacter": 5},
+        {"title": "第二章", "startCharacter": 5, "endCharacter": len(content)},
+    ])
+    assert [item.title for item in sections] == ["序章", "第二章"]
+    assert "".join(item.text for item in sections) == content
+
+    with pytest.raises(NovelSourceConflictError, match="连续覆盖"):
+        apply_source_section_layout(content, [
+            {"title": "序章", "startCharacter": 0, "endCharacter": 4},
+            {"title": "第二章", "startCharacter": 5, "endCharacter": len(content)},
+        ])
+
+
+async def test_confirm_import_persists_reviewed_section_layout(db):
+    service = NovelSourceService(db)
+    content = "没有标题的第一段。\n这里开始第二段。"
+    preview = service.preview_external_import(
+        file_name="source.txt", extension=".txt", content=content
+    )
+    split = content.index("这里")
+    revision = await service.confirm_external_import(
+        title="手动分章",
+        file_name="source.txt",
+        extension=".txt",
+        content=content,
+        expected_content_digest=preview["contentDigest"],
+        confirm_single_section=False,
+        rights_confirmed=True,
+        model_data_boundary_confirmed=True,
+        section_layout=[
+            {"title": "第一章", "startCharacter": 0, "endCharacter": split},
+            {"title": "第二章", "startCharacter": split, "endCharacter": len(content)},
+        ],
+    )
+    assert [item["title"] for item in revision["sections"]] == ["第一章", "第二章"]
+    assert revision["source_metadata"]["sectionLayout"] == "reviewed"
 
 
 async def test_preview_writes_nothing_and_confirmation_creates_one_immutable_revision(db):

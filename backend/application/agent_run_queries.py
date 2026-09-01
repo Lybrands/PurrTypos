@@ -136,6 +136,11 @@ def _run_view(
                 run.get("cancel_requested_at_ms") is not None
             ),
         },
+        "activity": {
+            "modelAttemptCount": int(run.get("model_attempt_count") or 0),
+            "providerOutputEvents": int(run.get("provider_output_events") or 0),
+            "providerOutputBytes": int(run.get("provider_output_bytes") or 0),
+        },
         "provenance": {
             "modelProvider": run.get("model_provider"),
             "modelName": run.get("model_name"),

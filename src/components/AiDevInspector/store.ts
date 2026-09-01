@@ -139,6 +139,7 @@ export interface AiDebugRun {
   errorReport?: AiErrorReport;
   abortRequested?: boolean;
   persistedEventCursor?: number;
+  providerOutputEvents?: number;
 }
 
 interface AiDebugState {
@@ -733,6 +734,36 @@ function canonicalRuntimeData(event: CanonicalOutputEvent | null): {
   return { eventType, data: data as Record<string, unknown> };
 }
 
+function mergeDebugAgentPlan(
+  current: unknown,
+  runtimeData: ReturnType<typeof canonicalRuntimeData>,
+): unknown {
+  if (!runtimeData) return current;
+  if (runtimeData.eventType === 'run.todos_updated') return runtimeData.data;
+  if (runtimeData.eventType !== 'run.todo_updated') return current;
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
+  const plan = current as Record<string, unknown>;
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const step = runtimeData.data.step;
+  if (!step || typeof step !== 'object' || Array.isArray(step)) return current;
+  const update = step as Record<string, unknown>;
+  const stepId = String(runtimeData.data.step_id || update.id || '');
+  return {
+    ...plan,
+    steps: steps.map((item) => (
+      item && typeof item === 'object' && !Array.isArray(item)
+        && String((item as Record<string, unknown>).id || '') === stepId
+        ? { ...(item as Record<string, unknown>), ...update }
+        : item
+    )),
+  };
+}
+
+function debugAgentPlanStatus(plan: unknown, status: string): unknown {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return plan;
+  return { ...(plan as Record<string, unknown>), status };
+}
+
 function canonicalModel(event: CanonicalOutputEvent | null): string | undefined {
   if (event?.kind !== "operation.started" || event.payload.kind !== "model") {
     return undefined;
@@ -755,6 +786,7 @@ export function startAiDebugRun(
     turnId?: string;
     conversationId?: number;
     conversationRootRunId?: string;
+    source?: string;
   } = {},
 ): void {
   if (!DEBUG_STORE_ENABLED) return;
@@ -770,8 +802,8 @@ export function startAiDebugRun(
     conversationRootRunId: context.conversationRootRunId,
     sessionId: request.sessionId,
     conversationId: context.conversationId,
-    source: sourceLabel(streamId),
-    taskType: initialTaskType(streamId, request),
+    source: context.source || sourceLabel(streamId),
+    taskType: context.source ? `${context.source}任务` : initialTaskType(streamId, request),
     status: "starting",
     startedAt: now,
     updatedAt: now,
@@ -785,7 +817,7 @@ export function startAiDebugRun(
       id: ++eventSequence,
       at: now,
       type: "request",
-      label: `开始 ${sourceLabel(streamId)}`,
+      label: `开始 ${context.source || sourceLabel(streamId)}`,
       payload: { messages, ...sanitized },
     }],
     eventCount: 1,
@@ -885,6 +917,7 @@ export function hydrateAiDebugRunSnapshot(data: {
       delegationActivities: [],
       approvals: [],
       persistedEventCursor: 0,
+      providerOutputEvents: snapshot.run.activity?.providerOutputEvents,
     };
     // Snapshot monitoring starts only after the live stream is detached. At
     // that boundary the persisted event stream is authoritative, so replace
@@ -925,6 +958,11 @@ export function hydrateAiDebugRunSnapshot(data: {
       finishedAt: terminal
         ? persistedTimestamp(snapshot.run.updatedAt, run.updatedAt)
         : run.finishedAt,
+      agentPlan: terminal
+        ? debugAgentPlanStatus(run.agentPlan, snapshot.run.status)
+        : run.agentPlan,
+      providerOutputEvents: snapshot.run.activity?.providerOutputEvents
+        ?? run.providerOutputEvents,
       persistedEventCursor: Math.max(nextCursor, snapshot.nextCursor),
     };
   });
@@ -969,9 +1007,7 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
         ? runtimeData.data
         : run.contextCompaction,
       agentRunId: runId || run.agentRunId,
-      agentPlan: runtimeData?.eventType.startsWith("run.todo")
-        ? runtimeData.data
-        : run.agentPlan,
+      agentPlan: mergeDebugAgentPlan(run.agentPlan, runtimeData),
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,
@@ -983,19 +1019,20 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
   });
 }
 
-/** Feed the screenplay persisted SSE into the same live diagnostic store. */
-export function recordScreenplayAiDebugChunk(data: {
+/** Observe the conversation's existing SSE reader, without a diagnostic poller. */
+export function recordAgentConversationDebugChunk(data: {
   runId: string;
-  turnId: string;
+  turnId?: string;
   conversationRootRunId?: string;
-  sessionId: number;
+  sessionId?: number;
+  source?: string;
   prompt: string;
   model?: string;
   chunk: AiDebugChunk;
 }): void {
   if (!DEBUG_STORE_ENABLED) return;
   const existing = state.runs.find((run) => run.agentRunId === data.runId);
-  const streamId = existing?.id ?? `screenplay-${data.runId}`;
+  const streamId = existing?.id ?? `agent-${data.runId}`;
   if (!existing) {
     startAiDebugRun(streamId, {
       streamId,
@@ -1009,6 +1046,7 @@ export function recordScreenplayAiDebugChunk(data: {
     }, {
       turnId: data.turnId,
       conversationRootRunId: data.conversationRootRunId,
+      source: data.source || 'Agent 对话',
     });
   } else if (
     data.conversationRootRunId
@@ -1020,6 +1058,7 @@ export function recordScreenplayAiDebugChunk(data: {
     }));
   }
   recordAiDebugChunk(streamId, data.chunk);
+  if (data.source) replaceRun(streamId, run => ({ ...run, source: data.source! }));
 }
 
 /**
@@ -1080,9 +1119,7 @@ export function recordAiDebugRunEvent(
         : run.contextCompaction,
       // Canonical events never replace the owning Run identity.
       agentRunId: rootAgentRunId,
-      agentPlan: runtimeData?.eventType.startsWith("run.todo")
-        ? runtimeData.data
-        : run.agentPlan,
+      agentPlan: mergeDebugAgentPlan(run.agentPlan, runtimeData),
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,
