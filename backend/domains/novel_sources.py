@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 
@@ -78,6 +79,43 @@ def parse_source_sections(content: str) -> tuple[ParsedSourceSection, ...]:
     return tuple(result)
 
 
+def apply_source_section_layout(
+    content: str,
+    layout: Sequence[Mapping[str, object]],
+) -> tuple[ParsedSourceSection, ...]:
+    """Validate a user-reviewed layout without changing or dropping source text."""
+
+    if not layout:
+        raise NovelSourceConflictError("章节结构不能为空")
+    result: list[ParsedSourceSection] = []
+    expected_start = 0
+    for ordinal, raw in enumerate(layout):
+        title = str(raw.get("title") or "").strip()
+        try:
+            start = int(raw.get("startCharacter"))
+            end = int(raw.get("endCharacter"))
+        except (TypeError, ValueError) as error:
+            raise NovelSourceConflictError("章节位置无效，请重新预览") from error
+        if not title or len(title) > 300:
+            raise NovelSourceConflictError("章节标题不能为空且不能超过 300 个字符")
+        if start != expected_start or end <= start or end > len(content):
+            raise NovelSourceConflictError("章节必须按顺序连续覆盖完整原文")
+        text = content[start:end]
+        if not text.strip():
+            raise NovelSourceConflictError("章节正文不能为空")
+        result.append(ParsedSourceSection(
+            ordinal=ordinal,
+            title=title,
+            text=text,
+            start_character=start,
+            end_character=end,
+        ))
+        expected_start = end
+    if expected_start != len(content):
+        raise NovelSourceConflictError("章节结构没有覆盖完整原文")
+    return tuple(result)
+
+
 def sha256_text(value: str) -> str:
     return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
@@ -85,6 +123,6 @@ def sha256_text(value: str) -> str:
 __all__ = [
     "MAX_SOURCE_BYTES", "MAX_SOURCE_CHARACTERS", "NovelSourceConflictError",
     "NovelSourceError", "NovelSourceNotFoundError", "PARSER_VERSION",
-    "ParsedSourceSection", "SUPPORTED_SOURCE_EXTENSIONS", "parse_source_sections",
-    "sha256_text", "validate_source_text",
+    "ParsedSourceSection", "SUPPORTED_SOURCE_EXTENSIONS", "apply_source_section_layout",
+    "parse_source_sections", "sha256_text", "validate_source_text",
 ]

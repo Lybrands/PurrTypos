@@ -14,13 +14,14 @@ router = APIRouter(tags=["chapter-diff"])
 async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
     """落盘：把 ``content`` 写入 articles，并将本次 diff 写入历史表。"""
     db = get_db()
-    await save_article(db, chapterId, body.content)
-    book_id = None
-    try:
-        from services.memory_deposition_service import resolve_book_id_for_chapter
-        from services.story_memory_analysis_service import invalidate_saved_chapter
+    from services import memory_deposition_service
+    from services.story_memory_analysis_service import invalidate_saved_chapter
 
-        book_id = await resolve_book_id_for_chapter(db, chapterId)
+    async with db.transaction(cancellation_linearizable=True):
+        await save_article(db, chapterId, body.content)
+        book_id = await memory_deposition_service.resolve_book_id_for_chapter(
+            db, chapterId
+        )
         if book_id:
             await invalidate_saved_chapter(
                 db,
@@ -28,20 +29,16 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
                 chapter_id=chapterId,
                 content=body.content,
             )
-    except Exception:
-        pass
-    diff_id = await diff_crud.insert_diff_history(
-        db,
-        chapter_id=chapterId,
-        before_text=body.before_text,
-        after_text=body.after_text,
-        source=body.source,
-        accepted_segments=body.accepted_segments,
-        rejected_segments=body.rejected_segments,
-    )
-    try:
-        from services import memory_deposition_service
-        await memory_deposition_service.deposit_chapter_diff_candidate(
+        diff_id = await diff_crud.insert_diff_history(
+            db,
+            chapter_id=chapterId,
+            before_text=body.before_text,
+            after_text=body.after_text,
+            source=body.source,
+            accepted_segments=body.accepted_segments,
+            rejected_segments=body.rejected_segments,
+        )
+        delivery_keys = await memory_deposition_service.record_chapter_diff_candidate(
             db,
             chapter_id=chapterId,
             diff_id=diff_id,
@@ -50,9 +47,7 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
             source=body.source,
             accepted_segments=body.accepted_segments,
         )
-    except Exception:
-        # 记忆候选沉淀失败不应阻断正文落库。
-        pass
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
     story_memory_analysis = None
     if int(body.accepted_segments or 0) > 0:
         try:
@@ -78,6 +73,7 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
         "data": {
             "id": diff_id,
             "storyMemoryAnalysis": story_memory_analysis,
+            "memoryDelivery": [item.to_dict() for item in deliveries],
         },
     }
 

@@ -12,11 +12,13 @@ description: 当需要标记两条长期记忆之间的覆盖、冲突、佐证�
   "type": "object",
   "properties": {
     "bookId": { "type": "string", "description": "当前书籍 ID；宿主通常会自动注入" },
-    "fromMemoryId": { "type": "number", "description": "发起关系的记忆 ID" },
-    "toMemoryId": { "type": "number", "description": "目标记忆 ID" },
+    "fromMemoryId": { "type": "string", "description": "发起关系的记忆 ID" },
+    "fromVersion": { "type": "integer", "minimum": 1, "description": "发起记忆的当前版本" },
+    "toMemoryId": { "type": "string", "description": "目标记忆 ID" },
+    "toVersion": { "type": "integer", "minimum": 1, "description": "目标记忆的当前版本" },
     "relation": { "type": "string", "enum": ["supersedes", "contradicts", "supports", "relates_to"], "description": "关系类型" },
     "note": { "type": "string", "description": "可选。关系说明" }
   },
-  "required": ["bookId", "fromMemoryId", "toMemoryId", "relation"]
+  "required": ["bookId", "fromMemoryId", "fromVersion", "toMemoryId", "toVersion", "relation"]
 }
 ```

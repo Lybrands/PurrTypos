@@ -181,6 +181,7 @@ async def test_run_model_budget_is_idempotent_and_records_overage(run_db):
         prompt="budgeted run",
         mode="agent",
         runtime_limits=RuntimeLimits(
+            max_run_output_tokens=None,
             max_model_invocation_attempts=1,
             max_input_tokens=5,
         ),
@@ -1217,3 +1218,58 @@ async def test_sqlite_repository_commit_rolls_back_steps_terminal_and_outbox_tog
     assert todos[0]["status"] == "running"
     assert todos[0].get("resultSummary") is None
     assert events_after == events_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [None, 3])
+async def test_new_run_output_budget_persists_and_settles_across_calls(run_db, limit):
+    repository = SqliteRunRepository(run_db)
+    run_id = await repository.create(RunCreateParams(
+        session_id=None, prompt="output budget", mode="agent",
+        runtime_limits=RuntimeLimits(max_run_output_tokens=limit),
+    ))
+    row = await run_db.fetch_one("SELECT runtime_limits_json FROM ai_agent_runs WHERE id = ?", [run_id])
+    stored = json.loads(row["runtime_limits_json"])
+    assert stored["max_run_output_tokens"] == limit
+    assert "max_output_tokens" not in stored
+    await repository.reserve_model_attempt(run_id, "first")
+    await repository.settle_model_attempt(run_id, "first", ModelTokenUsage(input_tokens=1, output_tokens=2))
+    await repository.reserve_model_attempt(run_id, "second")
+    if limit is None:
+        await repository.settle_model_attempt(run_id, "second", ModelTokenUsage(input_tokens=1, output_tokens=2))
+    else:
+        with pytest.raises(ContractViolationError) as error:
+            await repository.settle_model_attempt(run_id, "second", ModelTokenUsage(input_tokens=1, output_tokens=2))
+        assert error.value.code == "runtime_budget_exceeded"
+        assert error.value.details["budgetKind"] == "output_tokens"
+    row = await run_db.fetch_one("SELECT output_tokens FROM ai_agent_runs WHERE id = ?", [run_id])
+    assert row["output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_old_run_budget_cannot_silently_become_unlimited(run_db):
+    await run_db.execute(
+        "INSERT INTO ai_agent_runs (id, status, prompt, root_run_id, runtime_limits_json) "
+        "VALUES (?, 'running', 'old run', ?, ?)",
+        ["old-run", "old-run", json.dumps({"max_output_tokens": 1})],
+    )
+    repository = SqliteRunRepository(run_db)
+    with pytest.raises(ContractViolationError) as error:
+        await repository.reserve_model_attempt("old-run", "first")
+    assert error.value.code == "runtime_limits_invalid"
+    row = await run_db.fetch_one("SELECT model_attempt_count FROM ai_agent_runs WHERE id = 'old-run'")
+    assert row["model_attempt_count"] == 0
+
+
+@pytest.mark.parametrize("value", [
+    {"maxOutputTokens": 1},
+    {"max_run_output_tokens": 1},
+    {"maxRunOutputToken": 1},
+    {"maxRunOutputTokens": -1},
+])
+def test_invalid_long_task_budget_cannot_silently_become_unlimited(value):
+    from infrastructure.persistence.sqlite_long_task_repository import _budget_limits
+
+    with pytest.raises(ContractViolationError) as error:
+        _budget_limits(value)
+    assert error.value.code == "runtime_limits_invalid"

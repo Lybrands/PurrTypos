@@ -1,7 +1,32 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { AiAgentRunSnapshot } from '../types.ts'
-import { recoverDurableAgentStream } from './durableAgentStreamRecovery.ts'
+import { recoverDurableAgentStream as recoverSubscribedStream } from './durableAgentStreamRecovery.ts'
+
+// Existing journal fixtures are delivered through a fake subscription. The
+// production recovery has no snapshot polling branch.
+function recoverDurableAgentStream(dependencies: Omit<Parameters<typeof recoverSubscribedStream>[0], 'subscribe'> & {
+  getRunSnapshot(input: { runId: string; after: number; limit: number }): Promise<{
+    success: boolean; data?: AiAgentRunSnapshot; error?: string
+  }>
+}) {
+  return recoverSubscribedStream({
+    ...dependencies,
+    subscribe: async ({ runId, after, onEvent }) => {
+      let cursor = after
+      for (let attempt = 0; attempt < 20 && !dependencies.isAborted(); attempt++) {
+        const result = await dependencies.getRunSnapshot({ runId, after: cursor, limit: 500 })
+        if (result.success && result.data) {
+          await onEvent(result.data)
+          cursor = Math.max(cursor, result.data.nextCursor)
+          if (!result.data.hasMore && result.data.run.status !== 'running') return
+          if (result.data.hasMore) continue
+        }
+        await dependencies.wait(250)
+      }
+    },
+  })
+}
 
 const snapshot = (
   status: AiAgentRunSnapshot['run']['status'],

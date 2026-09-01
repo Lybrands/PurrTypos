@@ -3,7 +3,7 @@ name: resolveForeshadowing
 description: 当用户确认某条伏笔已经在当前或指定章节回收时使用。
 ---
 
-把伏笔状态改为“已回收”，并同步归档对应的长期记忆镜像。先用 searchSparkIdeas 或 searchMemories 找到伏笔 ID，不要猜测 ID。
+把伏笔状态改为“已回收”。先用 searchSparkIdeas 找到伏笔 ID，不要猜测 ID；需要处理通用长期记忆时，再使用 searchMemories 和对应的记忆操作。
 
 ## Parameters（JSON Schema）
 

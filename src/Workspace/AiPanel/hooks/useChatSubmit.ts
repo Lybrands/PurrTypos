@@ -74,6 +74,7 @@ export interface UseChatSubmitParams {
   currentChapterTitle?: string
   selectedModel: string
   agentEnabled: boolean
+  selectedLongTermMemoryIds?: string[]
   selectedMemoryIds?: (number | string)[]
   selectedForeshadowingIds?: (number | string)[]
   writingMethodOverrides?: WritingMethodOverrides
@@ -135,6 +136,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     currentChapterTitle,
     selectedModel,
     agentEnabled,
+    selectedLongTermMemoryIds,
     selectedMemoryIds,
     selectedForeshadowingIds,
     writingMethodOverrides,
@@ -391,6 +393,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           associatedOutlineIds: [
             ...(queuedContext?.associatedOutlineIds ?? associatedOutlineIds),
           ],
+          selectedLongTermMemoryIds: [
+            ...(queuedContext?.selectedLongTermMemoryIds
+              ?? selectedLongTermMemoryIds
+              ?? []),
+          ],
           selectedMemoryIds: [
             ...(queuedContext?.selectedMemoryIds ?? selectedMemoryIds ?? []),
           ],
@@ -428,6 +435,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.associatedOutlineIds ?? associatedOutlineIds;
       const requestSelectedMemoryIds =
         queuedContext?.selectedMemoryIds ?? selectedMemoryIds;
+      const requestSelectedLongTermMemoryIds =
+        queuedContext?.selectedLongTermMemoryIds ?? selectedLongTermMemoryIds;
       const requestSelectedForeshadowingIds =
         queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds;
       const requestWritingMethodOverrides =
@@ -463,6 +472,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         agentEnabled: requestAgentEnabled,
         associatedChapterIds: [...requestAssociatedChapterIds],
         associatedOutlineIds: [...requestAssociatedOutlineIds],
+        selectedLongTermMemoryIds: [
+          ...(requestSelectedLongTermMemoryIds ?? []),
+        ],
         selectedMemoryIds: [...(requestSelectedMemoryIds ?? [])],
         selectedForeshadowingIds: [
           ...(requestSelectedForeshadowingIds ?? []),
@@ -763,6 +775,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     })
     unsubscribe = services.ai.onAiChunk(
       (chunk) => {
+        if (chunk.transportError) {
+          if (host.isVisible()) appMessage.error(chunk.transportError)
+          return
+        }
         const receiptBinding = resolveRootRunBinding(
           acc.conversationRunId,
           chunk.requestReceipt?.runId,
@@ -819,7 +835,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         if (
           requestAgentEnabled
           && runId
-          && shouldRefreshBookProposalProjection(chunk)
+          && shouldRefreshBookProposalProjection(chunk,
+            ctx.acc.canonicalOutput?.operations[String(chunk.payload?.operationId || '')])
         ) {
           void proposalProjection.refresh(runId)
         }
@@ -859,6 +876,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         requestSelectedMemoryIds && requestSelectedMemoryIds.length > 0
           ? requestSelectedMemoryIds
           : undefined,
+      selectedLongTermMemoryIds:
+        requestSelectedLongTermMemoryIds
+        && requestSelectedLongTermMemoryIds.length > 0
+          ? requestSelectedLongTermMemoryIds
+          : undefined,
       selectedForeshadowingIds:
         requestSelectedForeshadowingIds &&
         requestSelectedForeshadowingIds.length > 0
@@ -895,6 +917,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setConversations,
     setSessions,
     selectedMemoryIds,
+    selectedLongTermMemoryIds,
     selectedForeshadowingIds,
     writingMethodOverrides,
     sessionScope,

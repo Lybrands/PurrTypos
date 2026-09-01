@@ -108,6 +108,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
         "tool_choice": "required",
     }]
     assert result == {
+        "applied_output_limit": 4096,
         "message": {
             "role": "assistant",
             "content": "完成",

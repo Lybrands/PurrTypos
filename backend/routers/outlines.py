@@ -38,14 +38,14 @@ async def get_outlines(type: Optional[str] = Query(None)):
 @router.post("/outlines")
 async def save_outline(body: SaveOutlineRequest):
     db = get_db()
-    created = await crud_save_outline(db, body.model_dump())
-    row = await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [created["id"]])
-    try:
-        from services import memory_deposition_service
-        await memory_deposition_service.deposit_outline_plan_memory(row)
-    except Exception:
-        pass
-    return {"success": True, "data": row}
+    from services import memory_deposition_service
+
+    async with db.transaction(cancellation_linearizable=True):
+        created = await crud_save_outline(db, body.model_dump())
+        row = await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [created["id"]])
+        delivery_keys = await memory_deposition_service.record_outline_plan(db, row)
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {"success": True, "data": row, "memoryDelivery": [item.to_dict() for item in deliveries]}
 
 
 @router.put("/outlines/{outlineId}")
@@ -65,30 +65,30 @@ async def update_outline(outlineId: str, body: UpdateOutlineRequest):
         if val is not None:
             payload[field_name] = val
 
-    if len(payload) > 1:
-        await crud_update_outline(db, payload, history_source="user")
+    from services import memory_deposition_service
 
-    side_fields = []
-    side_values = []
-    for field_name in ["book_id", "type"]:
-        val = getattr(body, field_name, None)
-        if val is not None:
-            side_fields.append(f"{field_name} = ?")
-            side_values.append(val)
-    if side_fields:
-        side_values.append(outlineId)
-        await db.execute(
-            f"UPDATE outlines SET {', '.join(side_fields)} WHERE id = ?",
-            side_values,
-        )
+    async with db.transaction(cancellation_linearizable=True):
+        if len(payload) > 1:
+            await crud_update_outline(db, payload, history_source="user")
 
-    row = await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [outlineId])
-    try:
-        from services import memory_deposition_service
-        await memory_deposition_service.deposit_outline_plan_memory(row)
-    except Exception:
-        pass
-    return {"success": True, "data": row}
+        side_fields = []
+        side_values = []
+        for field_name in ["book_id", "type"]:
+            val = getattr(body, field_name, None)
+            if val is not None:
+                side_fields.append(f"{field_name} = ?")
+                side_values.append(val)
+        if side_fields:
+            side_values.append(outlineId)
+            await db.execute(
+                f"UPDATE outlines SET {', '.join(side_fields)} WHERE id = ?",
+                side_values,
+            )
+
+        row = await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [outlineId])
+        delivery_keys = await memory_deposition_service.record_outline_plan(db, row)
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {"success": True, "data": row, "memoryDelivery": [item.to_dict() for item in deliveries]}
 
 
 @router.get("/outlines/{outlineId}/history")
@@ -108,18 +108,35 @@ async def get_outline_history_detail(historyId: int):
 @router.post("/outlines/history/{historyId}/restore")
 async def restore_outline_history(historyId: int):
     db = get_db()
+    from services import memory_deposition_service
+
     try:
-        row = await restore_outline_from_history(db, historyId)
+        async with db.transaction(cancellation_linearizable=True):
+            row = await restore_outline_from_history(db, historyId)
+            delivery_keys = await memory_deposition_service.record_outline_plan(db, row)
     except ValueError as e:
         return {"success": False, "error": str(e)}
-    return {"success": True, "data": row}
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {"success": True, "data": row, "memoryDelivery": [item.to_dict() for item in deliveries]}
 
 
 @router.delete("/outlines/{outlineId}")
 async def delete_outline(outlineId: str):
     db = get_db()
-    await crud_delete_outline(db, outlineId)
-    return {"success": True}
+    from services import memory_deposition_service
+
+    row = await db.fetch_one("SELECT book_id FROM outlines WHERE id = ?", [outlineId])
+    if row is None:
+        return {"success": False, "error": "大纲不存在"}
+    async with db.transaction(cancellation_linearizable=True):
+        await crud_delete_outline(db, outlineId)
+        delivery_keys = await memory_deposition_service.record_deleted_source(
+            db,
+            book_id=str(row["book_id"]),
+            source_base=f"outline:{outlineId}",
+        )
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {"success": True, "memoryDelivery": [item.to_dict() for item in deliveries]}
 
 
 @router.get("/outlines/volume/{bookId}")

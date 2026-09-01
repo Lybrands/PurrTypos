@@ -22,6 +22,7 @@ from tests.support.asgi_sse import (
     request_json,
     start_asgi_request,
 )
+from tests.support.planning_stream import route_planning_stream
 
 
 pytestmark = pytest.mark.asyncio
@@ -379,6 +380,7 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
                 }],
             }
         return {
+            "applied_output_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -425,7 +427,7 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
                 }],
             }
 
-        return {"stream": _stream(), "model": "route-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -433,11 +435,12 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
     body = request_body(request_id)
     body["messages"] = [{"role": "user", "content": "深化弄堂氛围"}]
     body["currentChapterTitle"] = "第一章：弄堂"
+    body["planningMode"] = "planned"
     body.pop("streamId")
     body.pop("requestReceiptVersion")
     frames = [
@@ -469,7 +472,6 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
             step["id"],
             step["title"],
             step["type"],
-            step["executor"],
             step["status"],
         )
         for step in plans[-1]["steps"]
@@ -478,14 +480,12 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
             "inspect-current-chapter",
             "检查当前章节",
             "read",
-            "tool",
             "done",
         ),
         (
             "shape-wind-sound-atmosphere",
             "围绕风声调整弄堂氛围",
             "review",
-            "model",
             "running",
         ),
     ]
@@ -530,6 +530,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
     async def _planner(_key, _messages, _options, _provider, signal=None):
         assert signal is not None
         return {
+            "applied_output_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -612,7 +613,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
                     }],
                 }
 
-        return {"stream": _stream(), "model": "route-model"}
+        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -620,11 +621,12 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
     body = request_body("chat-candidate-first")
     body["messages"] = [{"role": "user", "content": "深化弄堂氛围"}]
     body["currentChapterTitle"] = "第一章：弄堂"
+    body["planningMode"] = "planned"
     body.pop("streamId")
     body.pop("requestReceiptVersion")
     chunks = [

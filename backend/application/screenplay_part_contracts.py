@@ -240,7 +240,7 @@ def screenplay_task_budget_limits(
             )
             for contract in contracts
         ),
-        max_output_tokens=sum(
+        max_run_output_tokens=sum(
             contract.output_token_cap * _MAX_INVOCATIONS_PER_PART
             for contract in contracts
         ),

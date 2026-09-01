@@ -11,7 +11,7 @@ class Glm5_3FlashProfile(ModelProfile):
     profile_id = "zai:glm-5.3-flash"
     model_names = frozenset({"glm-5.3-flash"})
     base_urls = frozenset({"https://open.bigmodel.cn/api/paas/v4"})
-    max_output_tokens = 131_072
+    max_call_output_tokens = 131_072
     capability_source = "https://docs.z.ai/guides/vlm/glm-5.3-flash"
     supports_json_object_output = True
     reasoning_control = ReasoningControl.ALWAYS_ENABLED

@@ -377,7 +377,8 @@ Writing/Screenplay 工具与生命周期 143 个、共享 Composer/发送队列�
 94 个均通过，`npm run typecheck` 通过。数据库破坏性验收沿用
 `test_data_integrity_routes.py` 中的旧 `book_style` 行样本，并以
 `test_database_web_import.py` 覆盖导入后连接恢复。当前实现中
-`RepositoryWritingContextSource` 位于 `backend/domains/writing/context_source.py`；
+`RepositoryWritingContextSource` 当时位于 `backend/domains/writing/context_source.py`，
+2026-09-01 的记忆组件接入已将它移到 `backend/application/writing_context_source.py`；
 共享 Composer 已有渲染插槽但没有结构化命令菜单状态；这些是后续阶段的实际接缝。
 
 门禁：基线失败必须区分“既有失败”和“本需求引入”，不能把既有失败当成本需求通过。

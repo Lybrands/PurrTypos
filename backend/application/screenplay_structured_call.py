@@ -14,6 +14,7 @@ from purra.contracts import (
     AgentRunRequest,
     MessageOrigin,
     MessageRole,
+    PlanningMode,
     RunBinding,
     RunStatus,
 )
@@ -155,6 +156,7 @@ class ScreenplayStructuredCallService:
             mode="screenplay_final_response",
             context_window=window,
             tools_enabled=False,
+            planning_mode=PlanningMode.REACTIVE,
             metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
         )
         options = AgentCoreRunOptions(

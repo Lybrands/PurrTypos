@@ -31,10 +31,10 @@ from purra.api import (
     ContextStrategy,
     DelegationPolicy,
     ExecutionProfile,
-    ReactivePlanningPolicy,
     AgentPreset,
 )
 from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
+from purra.operations import AgentOperationController
 from purra.long_tasks import LongTaskRepository
 from purra.events import AgentEvent, CoreEventType
 from purra.ports import (
@@ -62,7 +62,6 @@ from application.agent_profile_registry import (
     AgentProfile,
     AgentProfileRegistry,
 )
-from application.planning_constraints import RequiredToolPlanningPolicy
 from application.run_execution_control import RunExecutionSession
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from infrastructure.models.model_conversation_summarizer import (
@@ -172,6 +171,7 @@ class AgentComposition:
         approval_gateway: ApprovalGateway | None = None,
         tool_execution_limits: ToolExecutionLimits | None = None,
         delegation_policy: DelegationPolicy = DelegationPolicy(),
+        memory_resource=None,
     ):
         if not isinstance(delegation_policy, DelegationPolicy):
             raise TypeError("delegation_policy must be a DelegationPolicy")
@@ -218,6 +218,7 @@ class AgentComposition:
             provider_capabilities or ProviderCapabilityCache()
         )
         self._delegation_policy = delegation_policy
+        self._memory_resource = memory_resource
         self._profiles = tuple(
             factory(
                 db=db,
@@ -270,6 +271,10 @@ class AgentComposition:
         return self._delegation_policy
 
     @property
+    def memory_resource(self):
+        return self._memory_resource
+
+    @property
     def run_snapshot_reader(self):
         return self._run_snapshot_reader
 
@@ -280,6 +285,10 @@ class AgentComposition:
     @property
     def output_journal(self) -> AgentOutputJournalQuery:
         return self._output_repository
+
+    @property
+    def output_notifications(self):
+        return self._output_publisher
 
     @property
     def output_processor(self) -> AgentOutputProcessor:
@@ -356,7 +365,6 @@ class AgentComposition:
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         extra_tool_registrations: Sequence[ToolRegistration] = (),
         allowed_tool_modes: Collection[ToolExecutionMode] | None = None,
-        required_tool_names: Collection[str] | None = None,
         context_compression_hook: ContextCompressionHook | None = None,
         context_compression_settings: ContextCompressionSettings = (
             ContextCompressionSettings()
@@ -364,6 +372,7 @@ class AgentComposition:
         conversation_compactor: ConversationCompactor | None = None,
         context_provider_override: ContextProvider | None = None,
         long_task_executor=None,
+        evidence_validator=None,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -377,11 +386,6 @@ class AgentComposition:
         profile = self._profile_registry.require(profile_id)
         adapter = profile.adapter
         planning_policy = adapter.planning_policy
-        if required_tool_names:
-            planning_policy = RequiredToolPlanningPolicy(
-                planning_policy,
-                required_tool_names,
-            )
         context_provider = context_provider_override or adapter.context_provider
         context_provider_factory = None
         if context_provider_override is None:
@@ -430,9 +434,6 @@ class AgentComposition:
             extras=extras,
             allowed_modes=normalized_modes,
         )
-        resolved_planning_policy = (
-            planning_policy or ReactivePlanningPolicy()
-        )
         resolved_context_strategy = getattr(
             adapter,
             "context_strategy",
@@ -441,26 +442,26 @@ class AgentComposition:
         if resolved_context_strategy is None:
             resolved_context_strategy = ContextStrategy.SINGLE_PASS
         configured_planner = getattr(adapter, "planner", None)
+        planner = configured_planner
+        if planner is None and planning_policy is not None:
+            planner = AgentPlanner(
+                model_gateway,
+                limits=getattr(
+                    adapter,
+                    "planner_limits",
+                    PlannerLimits(),
+                ),
+                output_observer=self._output_processor,
+                result_validator=getattr(
+                    adapter,
+                    "planning_result_validator",
+                    None,
+                ),
+            )
+        operations = AgentOperationController(self._output_processor)
         execution_profile = ExecutionProfile(
-            planner=(
-                None
-                if isinstance(resolved_planning_policy, ReactivePlanningPolicy)
-                else configured_planner or AgentPlanner(
-                    model_gateway,
-                    limits=getattr(
-                        adapter,
-                        "planner_limits",
-                        PlannerLimits(),
-                    ),
-                    output_observer=self._output_processor,
-                    result_validator=getattr(
-                        adapter,
-                        "planning_result_validator",
-                        None,
-                    ),
-                )
-            ),
-            planning_policy=resolved_planning_policy,
+            planner=planner,
+            planning_policy=planning_policy,
             context_strategy=resolved_context_strategy,
             task_admission_evaluator=profile.task_admission(),
             long_task_dispatcher=self.create_long_task_dispatcher(
@@ -489,14 +490,19 @@ class AgentComposition:
             preset=preset,
             approval_gateway=self._approval_gateway,
             tool_idempotency_gateway=self._tool_idempotency_gateway,
-            tool_execution_limits=self._tool_execution_limits,
+            tool_execution_limits=(
+                getattr(adapter, "tool_execution_limits", None)
+                or self._tool_execution_limits
+            ),
             output_processor=self._output_processor,
             output_repository=self._output_repository,
             output_publisher=self._output_publisher,
+            operation_controller=operations,
             execution_lease_store=self._execution_lease_store,
             execution_owner_id=self._repository.owner_id,
             execution_lease_duration_ms=self._repository.lease_duration_ms,
             delegation_repository=self._delegation_repository,
+            evidence_validator=evidence_validator,
         )
         self._active_cores.add(core)
         return core
@@ -511,6 +517,13 @@ class AgentComposition:
         **kwargs,
     ) -> AgentCore:
         profile = self._profile_registry.for_request(request)
+        validator_hook = getattr(
+            profile,
+            "model_input_evidence_validator",
+            None,
+        )
+        if callable(validator_hook) and "evidence_validator" not in kwargs:
+            kwargs["evidence_validator"] = validator_hook(request)
         return self.create_core(
             api_key,
             agent_profile=profile.id,
@@ -691,6 +704,8 @@ class AgentComposition:
             )
         for profile in self._profiles:
             profile.clear_active_executions()
+        if self._memory_resource is not None:
+            await self._memory_resource.close()
         close = getattr(self._approval_gateway, "close", None)
         if close is not None:
             await close()

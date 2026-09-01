@@ -29,6 +29,7 @@ import {
   resolveTerminalRootOwnership,
 } from '../agent-runtime/rootOwnership'
 import { recoverDurableAgentStream } from './durableAgentStreamRecovery'
+import { consumeAgentEventStream, waitForAgentRetry } from './agentEventStream'
 import {
   reserveWritingChatRequest,
   replayWritingChatPostUntilObserved,
@@ -211,29 +212,21 @@ export const backendApi: BackendApi = {
     `/screenplay/v2/projects/${data.projectId}/conversation/snapshot?sessionId=${data.sessionId}`,
   ),
   watchScreenplayConversationEvents: (data) => {
-    const params = new URLSearchParams({
-      sessionId: String(data.sessionId),
-      chunkAfter: String(Math.max(0, data.chunkAfter ?? 0)),
-      limit: '500',
-    })
-    const source = new EventSource(
-      `${backendBaseUrl}/api/screenplay/v2/projects/${encodeURIComponent(data.projectId)}/conversation/events?${params.toString()}`,
-    )
-    source.onmessage = (message) => {
-      try {
-        const event = JSON.parse(message.data)
-        if (event && typeof event === 'object'
-          && event.kind === 'agent_chunks'
-          && Number.isFinite(Number(event.nextCursor))
-          && Array.isArray(event.chunks)) {
-          data.onEvent(event)
-        }
-      } catch {
-        // Snapshot polling remains the recovery path for a malformed notice.
-      }
-    }
-    return () => source.close()
+    const controller = new AbortController()
+    void consumeAgentEventStream({
+      url: after => `${backendBaseUrl}/api/screenplay/v2/projects/${encodeURIComponent(data.projectId)}/conversation/events?sessionId=${data.sessionId}&chunkAfter=${after}&limit=500`,
+      after: data.chunkAfter, signal: controller.signal, onEvent: data.onEvent,
+    }).catch(error => data.onError?.(error instanceof Error ? error : new Error(String(error))))
+    return () => controller.abort()
   },
+  consumeNovelAnalysisEvents: data => consumeAgentEventStream({
+    url: after => `${backendBaseUrl}/api/novel-source-revisions/${encodeURIComponent(data.revisionId)}/analysis-events?after=${after}&limit=500`,
+    signal: data.signal, onEvent: data.onEvent,
+  }),
+  consumeAgentRunEvents: data => consumeAgentEventStream({
+    url: after => `${backendBaseUrl}/api/ai/agent-runs/${encodeURIComponent(data.runId)}/events?sessionId=${data.sessionId}&after=${after}`,
+    after: data.after, signal: data.signal, onEvent: data.onEvent,
+  }),
   cancelScreenplayConversationTurn: (data) => apiPostIdempotent(
     `/screenplay/v2/conversation/turns/${data.turnId}/cancel`,
     {},
@@ -545,7 +538,7 @@ export const backendApi: BackendApi = {
   ),
   reviewNovelAnalysisArtifact: (data) => apiPostIdempotent(
     `/novel-analysis-artifacts/${data.artifactId}/review`,
-    { facts: data.facts, craftCards: data.craftCards },
+    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview },
     data.commandId,
   ),
   publishNovelAnalysisArtifact: (data) => apiPost(
@@ -694,26 +687,49 @@ export const backendApi: BackendApi = {
   reorderPromptTemplates: (data) => apiPost('/prompt-templates/reorder', { ids: data.ids }),
 
   addSparkIdea: (data) => apiPost('/spark-ideas', data),
-  updateSparkIdea: (data) => apiPut(`/spark-ideas/${data.id}`, { data: data.data }),
-  deleteSparkIdea: (data) => apiDelete(`/spark-ideas/${data.id}`),
+  updateSparkIdea: (data) => apiPut(
+    `/spark-ideas/${data.id}`,
+    {
+      bookId: data.bookId,
+      ...('content' in data.data ? { content: data.data.content } : {}),
+      ...('layer' in data.data ? { layer: data.data.layer } : {}),
+      ...('chapter_id' in data.data ? { chapterId: data.data.chapter_id } : {}),
+      ...('character_id' in data.data ? { characterId: data.data.character_id } : {}),
+    },
+  ),
+  deleteSparkIdea: (data) => apiDelete(
+    `/spark-ideas/${data.id}?bookId=${encodeURIComponent(String(data.bookId))}`,
+  ),
   getSparkIdeasByBook: (data) =>
     apiGet(`/spark-ideas/by-book?bookId=${data.bookId}${data.layer ? `&layer=${data.layer}` : ''}`),
-  getSparkIdeasByIds: (data) => apiPost('/spark-ideas/by-ids', data),
   getSparkIdeasForPrompt: (data) => apiPost('/spark-ideas/for-prompt', data),
 
   addForeshadowing: (data) => apiPost('/foreshadowing', data),
-  updateForeshadowing: (data) =>
-    apiPut(`/foreshadowing/${data.id}`, { data: data.data }),
-  deleteForeshadowing: (data) => apiDelete(`/foreshadowing/${data.id}`),
+  updateForeshadowing: (data) => apiPut(
+    `/foreshadowing/${data.id}`,
+    {
+      bookId: data.bookId,
+      ...('content' in data.data ? { content: data.data.content } : {}),
+      ...('type' in data.data ? { type: data.data.type } : {}),
+      ...('expected_chapter_id' in data.data
+        ? { expectedChapterId: data.data.expected_chapter_id }
+        : {}),
+      ...('status' in data.data ? { status: data.data.status } : {}),
+      ...('resolved_chapter_id' in data.data
+        ? { resolvedChapterId: data.data.resolved_chapter_id }
+        : {}),
+    },
+  ),
+  deleteForeshadowing: (data) => apiDelete(
+    `/foreshadowing/${data.id}?bookId=${encodeURIComponent(String(data.bookId))}`,
+  ),
   getForeshadowingByBook: (data) =>
     apiGet(`/foreshadowing/by-book?bookId=${data.bookId}${data.status ? `&status=${data.status}` : ''}`),
-  getForeshadowingByIds: (data) => apiPost('/foreshadowing/by-ids', data),
   getForeshadowingForPrompt: (data) => apiPost('/foreshadowing/for-prompt', data),
 
   createMemory: (data) => apiPost('/memories', data),
-  updateMemory: (data) => apiPut(`/memories/${data.id}`, { data: data.data }),
-  archiveMemory: (data) => apiPost(`/memories/${data.id}/archive`, {}),
-  searchMemories: (data) => apiPost('/memories/search', data),
+  updateMemory: ({ id, ...data }) => apiPut(`/memories/${id}`, data),
+  setMemoryState: ({ id, ...data }) => apiPost(`/memories/${id}/state`, data),
   listUnifiedMemories: (data) => {
     const params = new URLSearchParams()
     if (data.query) params.set('q', data.query)
@@ -724,8 +740,19 @@ export const backendApi: BackendApi = {
     const query = params.toString()
     return apiGet(`/books/${data.bookId}/memories/unified${query ? `?${query}` : ''}`)
   },
-  getMemoriesByIds: (data) => apiPost('/memories/by-ids', data),
   linkMemories: (data) => apiPost('/memories/link', data),
+  reviewMemory: ({ id, ...data }) => apiPost(`/memories/${encodeURIComponent(id)}/review`, data),
+  resolveMemories: (data) => apiPost('/memories/resolve', data),
+  deleteMemory: ({ id, ...data }) => apiPost(`/memories/${encodeURIComponent(id)}/delete`, data),
+  getMemoryHistory: (data) => apiGet(
+    `/memories/${encodeURIComponent(data.id)}/history?bookId=${encodeURIComponent(data.bookId)}`,
+  ),
+  getMemoryLinks: (data) => {
+    const params = new URLSearchParams({ bookId: String(data.bookId) })
+    if (data.limit) params.set('limit', String(data.limit))
+    if (data.after) params.set('after', data.after)
+    return apiGet(`/memories/${encodeURIComponent(data.id)}/links?${params.toString()}`)
+  },
   buildMemoryContext: (data) => apiPost('/memories/context', data),
 
   generateSessionTitle: (data) => apiPost('/ai/title', data),
@@ -978,23 +1005,26 @@ export const backendApi: BackendApi = {
       aiChunkListeners.forEach((listener) => listener({ ...chunk, streamId }))
     }
 
-    const recoverDurableStream = () => recoverDurableAgentStream({
-      runId: observedAgentRunId,
-      sessionId: Number(data.sessionId),
-      after: lastCanonicalSequence,
-      getLatestRun: (sessionId) => apiGet(
-        `/ai/session-runs/latest?sessionId=${encodeURIComponent(sessionId)}`
-        + `&requestId=${encodeURIComponent(streamId)}`,
-      ),
-      getRunSnapshot: ({ runId, after, limit }) => apiGet(
-        `/ai/agent-runs/${encodeURIComponent(runId)}?after=${after}&limit=${limit}`,
-      ),
-      wait: () => new Promise<void>((resolve) => {
-        window.setTimeout(resolve, 500)
-      }),
-      isAborted: () => abortController.signal.aborted,
-      emit: deliverChunk,
-    })
+    let recoveryAttempted = false
+    const recoverDurableStream = () => {
+      recoveryAttempted = true
+      return recoverDurableAgentStream({
+        runId: observedAgentRunId,
+        sessionId: Number(data.sessionId),
+        after: lastCanonicalSequence,
+        getLatestRun: (sessionId) => apiGet(
+          `/ai/session-runs/latest?sessionId=${encodeURIComponent(sessionId)}`
+          + `&requestId=${encodeURIComponent(streamId)}`,
+        ),
+        subscribe: ({ runId, after, onEvent }) => backendApi.consumeAgentRunEvents({
+          runId, after, sessionId: Number(data.sessionId),
+          signal: abortController.signal, onEvent,
+        }),
+        wait: ms => waitForAgentRetry(ms, abortController.signal),
+        isAborted: () => abortController.signal.aborted,
+        emit: deliverChunk,
+      })
+    }
 
     Promise.resolve(durableReservation).then(async (reservation) => {
       if (reservation?.kind === 'rejected') {
@@ -1081,7 +1111,16 @@ export const backendApi: BackendApi = {
         && requestStarted
         && !abortController.signal.aborted
       ) {
-        await recoverDurableStream()
+        try {
+          if (recoveryAttempted) throw error
+          await recoverDurableStream()
+        } catch {
+          if (!abortController.signal.aborted) {
+            await deliverChunk({
+              transportError: '对话连接已中断，后台任务状态未改变。请重新进入此会话恢复连接。',
+            })
+          }
+        }
         return
       }
       const chunk = abortController.signal.aborted

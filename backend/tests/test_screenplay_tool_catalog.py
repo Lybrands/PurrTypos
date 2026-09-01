@@ -1918,11 +1918,12 @@ class _ToolModelGateway:
                     finish_reason=ModelFinishReason.STOP,
                 )
 
-        return ModelStream(chunks=chunks(), model="fixture-model")
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
 
     async def complete(self, messages, invocation, signal=None):
-        del messages, invocation, signal
+        del messages, signal
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message={"role": "assistant", "content": "unused"},
             model="fixture-model",
         )
@@ -1989,11 +1990,12 @@ class _ReasoningTruncationToolModelGateway:
                 finish_reason=ModelFinishReason.STOP,
             )
 
-        return ModelStream(chunks=chunks(), model="fixture-model")
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
 
     async def complete(self, messages, invocation, signal=None):
-        del messages, invocation, signal
+        del messages, signal
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message={"role": "assistant", "content": "unused"},
             model="fixture-model",
         )
@@ -2025,11 +2027,12 @@ class _HostPreparedSceneModelGateway:
                 finish_reason=ModelFinishReason.STOP,
             )
 
-        return ModelStream(chunks=chunks(), model="fixture-model")
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
 
     async def complete(self, messages, invocation, signal=None):
-        del messages, invocation, signal
+        del messages, signal
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message={"role": "assistant", "content": "unused"},
             model="fixture-model",
         )
@@ -2086,11 +2089,12 @@ class _TaskValidationRetryGateway:
                 finish_reason=ModelFinishReason.STOP,
             )
 
-        return ModelStream(chunks=chunks(), model="fixture-model")
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
 
     async def complete(self, messages, invocation, signal=None):
-        del messages, invocation, signal
+        del messages, signal
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message={"role": "assistant", "content": "unused"},
             model="fixture-model",
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from typing import Any, Mapping, Sequence
 
@@ -12,7 +13,6 @@ from domains.writing.unified_memory import (
     UnifiedMemorySource,
     UnifiedMemoryStatus,
 )
-from services.long_term_memory_service import normalize_memory_text
 
 
 _STATUS_ORDER = {
@@ -25,9 +25,16 @@ _STATUS_ORDER = {
 }
 
 
+def normalize_memory_text(text: str) -> str:
+    raw = str(text or "").strip().lower()
+    raw = re.sub(r"[\s\r\n\t]+", "", raw)
+    return re.sub(r"[，。！？、,.!?;；:：\"'“”‘’（）()\[\]【】《》<>]", "", raw)
+
+
 class UnifiedMemoryQueryService:
-    def __init__(self, db: Any):
+    def __init__(self, db: Any, memory):
         self._db = db
+        self._memory = memory
 
     async def list_items(
         self,
@@ -42,7 +49,20 @@ class UnifiedMemoryQueryService:
         clean_book_id = str(book_id or "").strip()
         if not clean_book_id:
             raise ValueError("book_id is required")
-        semantic_rows, story_rows, review_rows, character_rows = await _gather(
+        semantic_states = tuple(dict.fromkeys(
+            "disabled" if value in {"archived", "rejected", "conflict", "stale"}
+            else value
+            for value in statuses
+            if value in {"active", "pending", "archived", "rejected", "conflict", "stale"}
+        ))
+        semantic_rows = await self._memory.list_records(
+            book_id=clean_book_id,
+            states=semantic_states,
+            kinds=kinds,
+            query=query,
+            limit=500,
+        )
+        story_rows, review_rows, character_rows = await _gather(
             self._db,
             clean_book_id,
         )
@@ -80,7 +100,7 @@ class UnifiedMemoryQueryService:
         semantic_items: list[UnifiedMemoryItem] = []
         suppressed = 0
         for row in semantic_rows:
-            item = _semantic_item(row)
+            item = _semantic_item(row, clean_book_id)
             normalized = normalize_memory_text(item.content)
             source_id = str(item.source_id or "").strip()
             source_is_story = item.source_type in {
@@ -167,10 +187,6 @@ class UnifiedMemoryQueryService:
 
 
 async def _gather(db: Any, book_id: str):
-    semantic_rows = await db.fetch_all(
-        "SELECT * FROM memory_items WHERE book_id = ? ORDER BY id DESC",
-        [book_id],
-    )
     story_rows = await db.fetch_all(
         "SELECT r.*, s.chapter_id AS source_chapter_id, "
         "s.excerpt AS source_excerpt, s.status AS source_status, "
@@ -191,45 +207,53 @@ async def _gather(db: Any, book_id: str):
         "SELECT id, name FROM characters WHERE book_id = ?",
         [book_id],
     )
-    return semantic_rows, story_rows, review_rows, character_rows
+    return story_rows, review_rows, character_rows
 
 
-def _semantic_item(row: Mapping[str, Any]) -> UnifiedMemoryItem:
-    status = str(row.get("status") or "active")
+def _semantic_item(row: Mapping[str, Any], book_id: str) -> UnifiedMemoryItem:
+    state = str(row.get("state") or "active")
+    reason = str(row.get("reason") or "")
     mapped_status = {
         "active": UnifiedMemoryStatus.ACTIVE,
         "pending": UnifiedMemoryStatus.PENDING,
-        "archived": UnifiedMemoryStatus.ARCHIVED,
-        "superseded": UnifiedMemoryStatus.ARCHIVED,
-    }.get(status, UnifiedMemoryStatus.ARCHIVED)
+        "disabled": {
+            "rejected": UnifiedMemoryStatus.REJECTED,
+            "conflict": UnifiedMemoryStatus.CONFLICT,
+            "stale": UnifiedMemoryStatus.STALE,
+        }.get(reason, UnifiedMemoryStatus.ARCHIVED),
+    }.get(state, UnifiedMemoryStatus.ARCHIVED)
     memory_id = str(row["id"])
+    metadata = dict(row.get("metadata") or {})
+    source = dict(row.get("source") or {})
     return UnifiedMemoryItem(
         id=f"semantic:{memory_id}",
-        book_id=str(row["book_id"]),
+        book_id=book_id,
         source=UnifiedMemorySource.SEMANTIC,
-        kind=str(row.get("kind") or "summary"),
+        kind=str(metadata.get("kind") or "summary"),
         status=mapped_status,
-        content=str(row.get("content") or ""),
-        summary=str(row.get("summary") or ""),
+        content=str(row.get("text") or ""),
+        summary=str(metadata.get("summary") or ""),
         structured_data={
-            "keywords": str(row.get("keywords") or ""),
-            "importance": int(row.get("importance") or 0),
+            "keywords": str(metadata.get("keywords") or ""),
+            "importance": int(metadata.get("importance") or 0),
+            "reason": reason or None,
         },
-        scope_type=str(row.get("scope_type") or "book"),
-        scope_id=_optional(row.get("scope_id")),
-        confidence=float(row.get("confidence") or 0.0),
-        pinned=bool(row.get("pinned")),
-        source_type=str(row.get("source_type") or ""),
-        source_id=_optional(row.get("source_id")),
+        scope_type=str(metadata.get("scopeType") or "book"),
+        scope_id=_optional(metadata.get("scopeId")),
+        confidence=float(metadata.get("confidence") or 0.0),
+        version=int(row.get("version") or 1),
+        pinned=bool(metadata.get("pinned")),
+        source_type="inferred" if row.get("inferred") else "direct",
+        source_id=_optional(source.get("id")),
         actions=(
-            ("activate", "edit", "pin", "archive")
+            ("activate", "edit", "pin", "archive", "review", "delete", "view_history", "view_links")
             if mapped_status is UnifiedMemoryStatus.PENDING
-            else ("edit", "pin", "archive")
+            else ("edit", "pin", "archive", "delete", "view_history", "view_links")
             if mapped_status is UnifiedMemoryStatus.ACTIVE
-            else ("edit", "activate")
+            else ("edit", "activate", "delete", "view_history", "view_links")
         ),
-        create_time=_optional(row.get("create_time")),
-        update_time=_optional(row.get("update_time")),
+        create_time=_optional(row.get("createdAt")),
+        update_time=_optional(row.get("updatedAt")),
     )
 
 

@@ -71,7 +71,6 @@ _hiddenimports = [
     "database.crud.prompt_templates",
     "database.crud.settings",
     "database.crud.story_background",
-    "services.memory_service",
     "services.screenplay_pdf",
     "infrastructure.models.openai_chat",
     "infrastructure.models.anthropic_chat",

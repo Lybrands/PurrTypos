@@ -16,13 +16,12 @@ description: 当用户明确要求记住某个长期事实、设定、人物状�
     "content": { "type": "string", "description": "记忆正文，必须简明且可直接注入 AI 上下文" },
     "summary": { "type": "string", "description": "可选。更短摘要" },
     "keywords": { "type": "string", "description": "可选。空格分隔关键词" },
-    "scopeType": { "type": "string", "description": "可选。book / chapter / character / outline / session，默认 book" },
+    "scopeType": { "type": "string", "enum": ["book", "chapter", "character", "outline"], "description": "可选，默认 book" },
     "scopeId": { "type": "string", "description": "可选。scope 对应的 ID" },
     "importance": { "type": "number", "description": "可选。1-5，默认 3" },
     "confidence": { "type": "number", "description": "可选。0-1，默认 1" },
-    "status": { "type": "string", "enum": ["active", "pending", "archived", "superseded"], "description": "可选。默认 active" },
-    "pinned": { "type": "boolean", "description": "可选。是否固定优先召回" },
-    "sourceId": { "type": "string", "description": "可选。来源记录 ID" }
+    "state": { "type": "string", "enum": ["active", "pending"], "description": "可选。默认 active" },
+    "pinned": { "type": "boolean", "description": "可选。是否固定优先召回" }
   },
   "required": ["bookId", "kind", "content"]
 }

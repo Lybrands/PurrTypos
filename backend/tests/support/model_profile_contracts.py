@@ -50,7 +50,7 @@ async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
                 snapshot,
                 explicit_user_override=None,
             )
-            if snapshot.max_output_tokens is not None
+            if snapshot.max_call_output_tokens is not None
             else None
         ),
         reasoning_mode=ReasoningMode.DEFAULT,
@@ -59,8 +59,8 @@ async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
     assert options["model"] == model
     assert options["model_profile"] == profile.profile_id
     assert options["tools"][0]["function"]["name"] == "publish_part"
-    if snapshot.max_output_tokens is not None:
-        assert options["max_tokens"] == snapshot.max_output_tokens
+    if snapshot.max_call_output_tokens is not None:
+        assert options["max_tokens"] == snapshot.max_call_output_tokens
     else:
         assert "max_tokens" not in options
 

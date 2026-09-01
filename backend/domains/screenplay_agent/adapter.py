@@ -80,7 +80,7 @@ class ScreenplayExecutionStateFactory:
 
 
 class ScreenplayToolLoopPolicy:
-    """Plan only the public Root turn, never an internal screenplay Part."""
+    """Constrain screenplay runs after the Root selects Planned mode."""
 
     def planning_constraints(
         self,
@@ -92,23 +92,6 @@ class ScreenplayToolLoopPolicy:
             capabilities.constraints,
             allow_model_only_fallback=False,
         )
-
-    def should_plan(
-        self,
-        request: AgentRunRequest,
-        capabilities: PlanningCapabilities,
-    ) -> bool:
-        del capabilities
-        context = ScreenplayAgentDomainContext.from_core_context(
-            request.domain_context
-        )
-        return bool(
-            context.project_id
-            and request.latest_user_text().strip()
-            and context.task_id is None
-            and context.unit_id is None
-        )
-
 
 def validate_screenplay_planning_result(
     request: AgentRunRequest,
@@ -396,6 +379,7 @@ class ScreenplayDomainAdapter:
         ScreenplayHostContextProvider()
     )
     runtime_limits: RuntimeLimits = RuntimeLimits(
+        max_run_output_tokens=None,
         max_model_rounds=8,
         max_progress_rounds=8,
         provider_invocation_timeout_ms=300_000,

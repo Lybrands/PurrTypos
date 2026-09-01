@@ -221,12 +221,16 @@ Phase 0–5 删除了旧 Writing Chat 双轨，但第一版 native Conversation 
 - 咨询对话使用简洁的剧作顾问规则，正式 Operation 才注入 Artifact/阶段提交协议；
 - 同一 Session 同时最多一个 queued/running Turn，不再依赖渲染进程的临时发送队列；
 - 失败或取消 Turn 不进入后续模型历史；恢复会清除旧半截回答和旧 Run/Revision 引用，并递增 Turn attempt；
-- Conversation event 只做 Snapshot 失效通知，永不复制 `screenplay.document_proposal` 全文；
-- 页面以 SSE cursor 通知触发 Snapshot 刷新，低频轮询只作为订阅断线的恢复路径。
+- Conversation event 传输持久化的公开 canonical chunks 与业务 `projectionVersion`，永不复制 `screenplay.document_proposal` 全文；
+- 公开文本/过程直接增量重放；只有业务版本变化才合并刷新 Snapshot。共同 SSE 读取器从已消费 cursor 有界重连，健康连接旁不再常驻 HTTP 轮询。详见 [生命周期改造记录](2026-08-31-agent-conversation-transport-lifecycle-refactor-plan.md#9-本轮实现与验收记录)。
 
 此前 native Conversation 表缺少 attempt，且无法安全表达新恢复语义。测试阶段启动时只定向删除这一个不兼容的旧 Conversation/Events 数据集；Project、Operation、Revision、Head、Artifact 与来源数据保持不变。
 
 ## 8. 每阶段验收门槛
+
+公共对话链路的传输、恢复与规划可见性须遵守
+[统一生命周期规范](2026-08-31-agent-conversation-transport-lifecycle-refactor-plan.md#42-规划阶段也必须有真实执行状态)。
+初始规划与动态调整必须由共享装配接入 canonical Operation，不能只在页面补“正在规划”的文本；私有规划结果不作为公开回复。
 
 每个阶段都必须满足：
 

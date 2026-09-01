@@ -15,7 +15,7 @@ from domains.writing.memory_context import (
     MemoryContextRequest,
     MemoryUsageReceipt,
     SelectedMemoryContextFact,
-    WritingMemoryContextBuilder,
+    unavailable_memory_context,
 )
 from domains.writing.repositories import (
     StoryMemoryRecallItem,
@@ -90,15 +90,15 @@ class MemoryContextPack:
     outer_truncated: bool = False
 
     @property
-    def included_ids(self) -> list[int]:
+    def included_ids(self) -> list[str]:
         return list(self.semantic.included_ids)
 
     @property
-    def deferred_ids(self) -> list[int]:
+    def deferred_ids(self) -> list[str]:
         return list(self.semantic.deferred_ids)
 
     @property
-    def suppressed_ids(self) -> list[int]:
+    def suppressed_ids(self) -> list[str]:
         return list(self.semantic.suppressed_ids)
 
     @property
@@ -109,7 +109,7 @@ class MemoryContextPack:
         return MemoryContextPack(
             text=self.text,
             semantic=self.semantic.with_outer_truncation(),
-            story=self.story,
+            story=replace(self.story, receipts=()),
             token_estimate=self.token_estimate,
             receipts=(),
             diagnostics={
@@ -143,7 +143,7 @@ class StoryMemoryContextProvider:
         budget = max(0, int(request.token_budget))
         if not book_id or budget <= 0 or not request.include_story_memory:
             return StoryMemoryContextBlock(diagnostics=_story_diagnostics())
-        maximum = max(1, min(64, int(request.recall_limit)))
+        maximum = max(1, min(32, int(request.recall_limit)))
         candidates = await self._repository.search_current(
             book_id,
             request.user_prompt,
@@ -153,7 +153,7 @@ class StoryMemoryContextProvider:
             chapter_ids=request.chapter_ids,
             limit=max(
                 maximum,
-                min(160, max(1, int(request.candidate_limit))),
+                min(32, max(1, int(request.candidate_limit))),
             ),
         )
         items = candidates[:maximum]
@@ -229,13 +229,11 @@ class StoryMemoryContextProvider:
                     ],
                 }
             except Exception as error:
-                # Recall is optional context. A malformed or unavailable judge
-                # must not erase deterministic candidates or fail the Agent Run.
-                items = candidates[:maximum]
+                items = ()
                 rerank_diagnostics = {
                     "candidateCount": len(candidates),
                     "rerankerUsed": True,
-                    "rerankerStatus": "fallback",
+                    "rerankerStatus": "failed",
                     "rerankerError": type(error).__name__,
                 }
         included: list[StoryMemoryRecallItem] = []
@@ -326,7 +324,7 @@ class MemoryContextAssembler:
                 semantic.with_outer_truncation()
                 if outer_truncated else semantic
             ),
-            story=story,
+            story=(replace(story, receipts=()) if outer_truncated else story),
             token_estimate=estimate_json_tokens(text),
             receipts=receipts,
             diagnostics=diagnostics,
@@ -334,18 +332,30 @@ class MemoryContextAssembler:
         )
 
 
+def unavailable_memory_context_pack(request: MemoryContextRequest) -> MemoryContextPack:
+    return MemoryContextAssembler().assemble(
+        StoryMemoryContextBlock(diagnostics={
+            "recalled": 0,
+            "included": 0,
+            "deferred": 0,
+            "unavailable": True,
+        }),
+        unavailable_memory_context(request),
+        token_budget=request.token_budget,
+    )
+
+
 class UnifiedMemoryRetriever:
     """Recall authoritative story state first, then semantic memory."""
 
     def __init__(
         self,
-        semantic_builder: WritingMemoryContextBuilder,
-        story_provider: StoryMemoryContextProvider | None = None,
-        assembler: MemoryContextAssembler | None = None,
+        semantic_builder,
+        story_provider: StoryMemoryContextProvider,
     ):
         self._semantic = semantic_builder
         self._story = story_provider
-        self._assembler = assembler or MemoryContextAssembler()
+        self._assembler = MemoryContextAssembler()
 
     async def build(
         self,
@@ -359,17 +369,13 @@ class UnifiedMemoryRetriever:
         content_budget = max(0, total_budget - overhead_reserve)
         story_budget = (
             min(content_budget, max(240, content_budget * 11 // 20))
-            if self._story is not None and request.include_story_memory
+            if request.include_story_memory
             else 0
         )
-        story = (
-            await self._story.build(
-                replace(request, token_budget=story_budget),
-                model_request=model_request,
-                signal=signal,
-            )
-            if self._story is not None
-            else StoryMemoryContextBlock(diagnostics=_story_diagnostics())
+        story = await self._story.build(
+            replace(request, token_budget=story_budget),
+            model_request=model_request,
+            signal=signal,
         )
         semantic_budget = max(0, content_budget - story.token_estimate)
         semantic = await self._semantic.build(
@@ -585,4 +591,5 @@ __all__ = [
     "StoryMemoryContextProvider",
     "UnifiedMemoryRetriever",
     "memory_context_request_from_task",
+    "unavailable_memory_context_pack",
 ]

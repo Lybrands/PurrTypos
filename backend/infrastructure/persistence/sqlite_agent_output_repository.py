@@ -8,13 +8,18 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from purra.api import (
+    PLANNING_STREAM_SCHEMA,
+    PlanningScope,
+    PlanningStreamError,
+    PlanningStreamParser,
+)
 from purra.contracts import (
     DomainEffect,
     ModelFinishReason,
     RunCreateParams,
     RunId,
     RunStatus,
-    RuntimeLimits,
 )
 from purra.errors import ContractViolationError, RunCommitProjectionError
 from purra.json_values import thaw_json_mapping
@@ -36,6 +41,7 @@ from purra.output import (
 )
 from purra.ports import RunBeginResult, RunCommit
 from purra.ports import RunBeginProjector, RunCommitProjector
+from infrastructure.persistence.run_store import runtime_limits_from_mapping
 
 
 _VALIDATED_RESULT_SCHEMA = "purra.run-validated-result/v1"
@@ -93,10 +99,20 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError(
                     "terminal run cannot open a new output stream"
                 )
+            if spec.planning_scope is not None:
+                if not await self._planning_operation_is_active(
+                    spec.run_id,
+                    spec.planning_scope.operation_id,
+                ):
+                    raise ContractViolationError(
+                        "planning operation is not active"
+                    )
             await self._db.execute(
                 "INSERT INTO ai_agent_output_streams "
-                "(id, run_id, turn_id, invocation_id, intent, commit_mode) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, run_id, turn_id, invocation_id, intent, commit_mode, "
+                "output_protocol, planning_run_id, planning_operation_id, "
+                "planning_revision, planning_attempt) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     spec.output_stream_id,
                     spec.run_id,
@@ -104,6 +120,23 @@ class SqliteAgentOutputRepository:
                     spec.invocation_id,
                     spec.intent.value,
                     spec.commit_mode.value,
+                    spec.output_protocol,
+                    (
+                        spec.planning_scope.run_id
+                        if spec.planning_scope is not None
+                        else None
+                    ),
+                    (
+                        spec.planning_scope.operation_id
+                        if spec.planning_scope is not None
+                        else None
+                    ),
+                    (
+                        spec.planning_scope.revision
+                        if spec.planning_scope is not None
+                        else 0
+                    ),
+                    spec.planning_attempt,
                 ],
             )
         return spec
@@ -537,6 +570,10 @@ class SqliteAgentOutputRepository:
                     "only a committed model stream can publish commentary"
                 )
             spec = _stream_spec(stream)
+            if spec.output_protocol is not None:
+                raise ContractViolationError(
+                    "planning streams cannot be promoted to commentary"
+                )
             if spec.intent is not AgentOutputIntent.STRUCTURED_PRIVATE:
                 raise ContractViolationError(
                     "only private model content can be promoted to commentary"
@@ -792,6 +829,22 @@ class SqliteAgentOutputRepository:
         )
         return tuple((int(row["id"]), _event(row)) for row in rows)
 
+    async def list_bound_events(
+        self, *, aggregate_id: str, namespaces: tuple[str, ...],
+        after_cursor: int, limit: int,
+    ) -> tuple[tuple[int, AgentOutputEvent], ...]:
+        marks = ",".join("?" for _ in namespaces)
+        rows = await self._db.fetch_all(
+            "SELECT e.* FROM ai_agent_run_events e "
+            "JOIN ai_agent_runs r ON r.id = e.run_id "
+            f"WHERE r.binding_namespace IN ({marks}) AND r.binding_aggregate_id = ? "
+            "AND e.event_id IS NOT NULL AND e.visibility = 'public' "
+            "AND e.id > ? ORDER BY e.id LIMIT ?",
+            [*namespaces, aggregate_id, non_negative_int(after_cursor, "after cursor"),
+             positive_int(limit, "limit")],
+        )
+        return tuple((int(row["id"]), _event(row)) for row in rows)
+
     async def _append_event_in_transaction(
         self,
         draft: AgentOutputEventDraft,
@@ -840,7 +893,6 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError(
                     f"canonical event run {draft.run_id!r} does not exist"
                 )
-
         is_domain_effect = draft.kind is OutputEventKind.DOMAIN_EFFECT
         if is_domain_effect != (draft.source is OutputSource.DOMAIN):
             raise ContractViolationError(
@@ -968,6 +1020,14 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError(
                     "canonical event does not match its output stream"
                 )
+            if (
+                stream.get("output_protocol") is not None
+                and draft.visibility is OutputVisibility.PUBLIC
+                and draft.kind is not OutputEventKind.PLANNING_PROGRESS
+            ):
+                raise ContractViolationError(
+                    "planning bytes cannot be published as ordinary text"
+                )
         else:
             run = await self._db.fetch_one(
                 "SELECT id FROM ai_agent_runs WHERE id = ?",
@@ -977,6 +1037,8 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError(
                     f"canonical event run {draft.run_id!r} does not exist"
                 )
+        if draft.kind is OutputEventKind.PLANNING_PROGRESS:
+            await self._validate_planning_projection(draft)
         is_domain_effect = draft.kind is OutputEventKind.DOMAIN_EFFECT
         if is_domain_effect != (draft.source is OutputSource.DOMAIN):
             raise ContractViolationError(
@@ -998,10 +1060,7 @@ class SqliteAgentOutputRepository:
             [run_scope["root_run_id"]],
         )
         raw_limits = _json_mapping((root or {}).get("runtime_limits_json"))
-        allowed = RuntimeLimits.__dataclass_fields__
-        limits = RuntimeLimits(**{
-            key: value for key, value in raw_limits.items() if key in allowed
-        })
+        limits = runtime_limits_from_mapping(raw_limits)
         usage = await self._db.fetch_one(
             "SELECT COALESCE(SUM(provider_output_events), 0) AS events, "
             "COALESCE(SUM(provider_output_bytes), 0) AS bytes "
@@ -1180,6 +1239,104 @@ class SqliteAgentOutputRepository:
             )
         return stream
 
+    async def _planning_operation_is_active(
+        self,
+        run_id: str,
+        operation_id: str,
+    ) -> bool:
+        rows = await self._db.fetch_all(
+            "SELECT kind, payload_json FROM ai_agent_run_events "
+            "WHERE run_id = ? AND kind IN (?, ?) ORDER BY sequence, id",
+            [
+                run_id,
+                OutputEventKind.OPERATION_STARTED.value,
+                OutputEventKind.OPERATION_FINISHED.value,
+            ],
+        )
+        scoped = [
+            row
+            for row in rows
+            if _json_mapping(row.get("payload_json")).get("operationId")
+            == operation_id
+        ]
+        if not scoped:
+            return False
+        payload = _json_mapping(scoped[-1].get("payload_json"))
+        return (
+            scoped[-1].get("kind") == OutputEventKind.OPERATION_STARTED.value
+            and payload.get("kind") == "planning"
+        )
+
+    async def _validate_planning_projection(
+        self,
+        draft: AgentOutputEventDraft,
+    ) -> None:
+        stream = await self._require_stream(str(draft.output_stream_id or ""))
+        spec = _stream_spec(stream)
+        scope = spec.planning_scope
+        payload = draft.payload
+        if (
+            spec.output_protocol != PLANNING_STREAM_SCHEMA
+            or scope is None
+            or payload.get("operationId") != scope.operation_id
+            or payload.get("revision") != scope.revision
+            or payload.get("attempt") != spec.planning_attempt
+            or draft.source_event_key
+            != f"planning:{draft.invocation_id}:{payload.get('recordIndex')}"
+        ):
+            raise ContractViolationError("planning projection scope mismatch")
+        if not await self._planning_operation_is_active(
+            draft.run_id,
+            scope.operation_id,
+        ):
+            raise ContractViolationError("planning operation is not active")
+        run = await self._db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [draft.run_id],
+        )
+        if run is None or run.get("status") != RunStatus.RUNNING.value:
+            raise ContractViolationError(
+                "terminal Run cannot accept planning progress"
+            )
+        rows = await self._db.fetch_all(
+            "SELECT kind, payload_json FROM ai_agent_run_events "
+            "WHERE run_id = ? AND invocation_id = ? AND source = ? "
+            "ORDER BY sequence, id",
+            [draft.run_id, draft.invocation_id, OutputSource.PROVIDER.value],
+        )
+        raw = "".join(_provider_text(row) for row in rows).encode("utf-8")
+        start = payload.get("sourceStart")
+        end = payload.get("sourceEnd")
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or not 0 <= start < end <= len(raw)
+        ):
+            raise ContractViolationError(
+                "planning projection has invalid source span"
+            )
+        try:
+            records = PlanningStreamParser().feed(raw[:end].decode("utf-8"))
+            expected = next(
+                record
+                for record in records
+                if record.record_index == payload.get("recordIndex")
+            )
+            if any(
+                payload.get(key) != value
+                for key, value in expected.to_mapping().items()
+            ):
+                raise ValueError("projection differs")
+        except (
+            PlanningStreamError,
+            UnicodeDecodeError,
+            ValueError,
+            StopIteration,
+        ) as error:
+            raise ContractViolationError(
+                "planning projection does not match Provider source"
+            ) from error
+
     async def _require_event_by_source_key(
         self,
         source_event_key: str,
@@ -1196,6 +1353,19 @@ class SqliteAgentOutputRepository:
 
 
 def _stream_spec(row: dict[str, Any]) -> OutputStreamSpec:
+    planning_operation_id = str(
+        row.get("planning_operation_id") or ""
+    ).strip()
+    planning_run_id = str(row.get("planning_run_id") or "").strip()
+    planning_scope = (
+        PlanningScope(
+            run_id=planning_run_id,
+            operation_id=planning_operation_id,
+            revision=int(row.get("planning_revision") or 0),
+        )
+        if planning_operation_id and planning_run_id
+        else None
+    )
     return OutputStreamSpec(
         output_stream_id=str(row["id"]),
         run_id=str(row["run_id"]),
@@ -1203,6 +1373,9 @@ def _stream_spec(row: dict[str, Any]) -> OutputStreamSpec:
         invocation_id=str(row["invocation_id"]),
         intent=AgentOutputIntent(str(row["intent"])),
         commit_mode=OutputCommitMode(str(row["commit_mode"])),
+        output_protocol=str(row.get("output_protocol") or "") or None,
+        planning_scope=planning_scope,
+        planning_attempt=int(row.get("planning_attempt") or 0),
     )
 
 

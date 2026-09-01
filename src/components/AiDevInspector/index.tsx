@@ -1,4 +1,6 @@
 import React from "react";
+import type { AiTaskPlan } from "../../agent-runtime";
+import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
 import type {
   AiAgentRunDiagnostics,
   AiAgentRunStabilityTrendReport,
@@ -55,6 +57,17 @@ const STATUS_LABELS: Record<AiDebugRunStatus, string> = {
   aborted: "已中止",
   failed: "失败",
 };
+
+function debugTaskPlan(value: unknown, runId: string): AiTaskPlan | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const plan = value as Record<string, unknown>;
+  if (!Array.isArray(plan.steps)) return null;
+  return {
+    ...(plan as unknown as AiTaskPlan),
+    runId,
+    title: String(plan.title || 'Core Planner 执行计划'),
+  };
+}
 
 function loadPosition(): Position {
   const fallback = {
@@ -358,7 +371,7 @@ function ModelCallRow({
   index: number;
   source: string;
 }) {
-  const outputBudget = call.parameters?.outputBudget as Record<string, unknown> | undefined;
+  const maxCallOutputTokens = call.parameters?.maxCallOutputTokens;
   const modelCapabilities = call.parameters?.modelOutputCapabilities as Record<string, unknown> | undefined;
   const roundLabel =
     call.logicalRound != null
@@ -376,11 +389,11 @@ function ModelCallRow({
         {roundLabel ? <small>{roundLabel}</small> : null}
       </div>
       <div className="ai-dev-inspector__tool-chips">
-        {outputBudget ? (
-          <span>本次预算 {formatTokens(outputBudget.effectiveTokens)}</span>
+        {maxCallOutputTokens ? (
+          <span>本次上限 {formatTokens(maxCallOutputTokens)}</span>
         ) : null}
-        {modelCapabilities?.maxOutputTokens ? (
-          <span>模型上限 {formatTokens(modelCapabilities.maxOutputTokens)}</span>
+        {modelCapabilities?.maxCallOutputTokens ? (
+          <span>模型上限 {formatTokens(modelCapabilities.maxCallOutputTokens)}</span>
         ) : null}
         {call.toolNames.length > 0
           ? call.toolNames.map((name) => <code key={name}>{name}</code>)
@@ -960,6 +973,7 @@ function Overview({
     0,
   );
   const modelCallCount = rootModelCallCount + delegationModelCallCount;
+  const taskPlan = debugTaskPlan(run.agentPlan, run.agentRunId || run.id);
   const modelCallRows = [
     ...run.modelCalls.map((call) => ({
       key: `root:${call.id}`,
@@ -1012,8 +1026,12 @@ function Overview({
         </div>
         <div>
           <span>模型调用</span>
-          <strong title={`主流程 ${rootModelCallCount} 次 · 委派 ${delegationModelCallCount} 次`}>
-            {modelCallCount} 次
+          <strong title={modelCallCount
+            ? `主流程 ${rootModelCallCount} 次 · 委派 ${delegationModelCallCount} 次`
+            : run.providerOutputEvents
+              ? `已收到 ${run.providerOutputEvents} 批 Provider 输出，但持久化快照没有调用明细`
+              : undefined}>
+            {modelCallCount ? `${modelCallCount} 次` : run.providerOutputEvents ? '明细缺失' : '0 次'}
           </strong>
         </div>
         <div><span>传入工具</span><strong>{modelToolNames.length} 个</strong></div>
@@ -1065,7 +1083,11 @@ function Overview({
         </div>
       ) : (
         <div className="ai-dev-inspector__empty">
-          {modelCallCount > 0 ? "本轮模型调用未传入工具函数" : "等待模型调用…"}
+          {modelCallCount > 0
+            ? "本轮模型调用未传入工具函数"
+            : run.providerOutputEvents
+              ? `已收到 ${run.providerOutputEvents} 批模型流式输出；调用明细未写入公开快照`
+              : "等待模型调用…"}
         </div>
       )}
       {modelCallRows.length > 0 ? (
@@ -1110,12 +1132,7 @@ function Overview({
         <pre>{run.output || "等待最终回答…"}</pre>
       </details>
 
-      {run.agentPlan !== undefined && (
-        <details className="ai-dev-inspector__text-block">
-          <summary>Core Planner 执行计划</summary>
-          <pre>{formatJson(run.agentPlan)}</pre>
-        </details>
-      )}
+      {taskPlan ? <TaskPlanCard plan={taskPlan} planKey={`debug:${taskPlan.runId}`} /> : null}
       {run.contextBudget !== undefined && (
         <details className="ai-dev-inspector__text-block">
           <summary>上下文预算</summary>

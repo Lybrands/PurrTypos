@@ -11,10 +11,10 @@ import {
   PinIcon,
 } from '@/purr-components'
 import type {
+  ComponentMemoryLinkPage,
+  ComponentMemoryOperation,
   EntityId,
-  MemoryItem,
   MemoryKind,
-  StoryMemoryVersionView,
   UnifiedMemoryItem,
   UnifiedMemorySource,
   UnifiedMemoryStatus,
@@ -75,6 +75,26 @@ const SOURCE_OPTIONS: Array<{ value: UnifiedMemorySource; label: string }> = [
 const SOURCE_LABEL = Object.fromEntries(
   SOURCE_OPTIONS.map((item) => [item.value, item.label]),
 ) as Record<UnifiedMemorySource, string>
+
+const RELATION_OPTIONS = [
+  { value: 'supports', label: '支持' },
+  { value: 'contradicts', label: '冲突' },
+  { value: 'supersedes', label: '取代' },
+  { value: 'relates_to', label: '相关' },
+] as const
+
+const MEMORY_ERROR_MESSAGES: Record<string, string> = {
+  memory_component_unavailable: '本地记忆组件不可用，请检查组件配置后重试。',
+  memory_embedding_unconfigured: '尚未配置记忆 Embedding 模型，无法执行语义记忆操作。',
+  memory_model_unconfigured: '尚未配置记忆评审模型，无法生成审核建议。',
+  memory_version_conflict: '这条记忆已被其他操作更新，请刷新后重试。',
+  memory_context_stale: '记忆来源已经变化，请重新召回后再执行。',
+  memory_not_found: '这条记忆已不存在或不属于当前作品。',
+}
+
+function memoryErrorMessage(code: string | undefined, fallback: string): string {
+  return (code && MEMORY_ERROR_MESSAGES[code]) || code || fallback
+}
 
 const KIND_HINTS: Record<MemoryKind, string> = {
   canon: '记录不会轻易改变的规则、身份或核心设定。',
@@ -169,8 +189,17 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const [editingContent, setEditingContent] = React.useState('')
   const [editingSaving, setEditingSaving] = React.useState(false)
   const [historyItem, setHistoryItem] = React.useState<UnifiedMemoryItem | null>(null)
-  const [history, setHistory] = React.useState<StoryMemoryVersionView[]>([])
+  const [history, setHistory] = React.useState<Array<Record<string, unknown>>>([])
   const [historyLoading, setHistoryLoading] = React.useState(false)
+  const [reviewItem, setReviewItem] = React.useState<UnifiedMemoryItem | null>(null)
+  const [reviewOperation, setReviewOperation] = React.useState<ComponentMemoryOperation | null>(null)
+  const [reviewLoading, setReviewLoading] = React.useState(false)
+  const [linkItem, setLinkItem] = React.useState<UnifiedMemoryItem | null>(null)
+  const [links, setLinks] = React.useState<ComponentMemoryLinkPage['items']>([])
+  const [linkTargetId, setLinkTargetId] = React.useState<string>()
+  const [linkRelation, setLinkRelation] = React.useState<ComponentMemoryLinkPage['items'][number]['relation']>('relates_to')
+  const [linkNote, setLinkNote] = React.useState('')
+  const [linkLoading, setLinkLoading] = React.useState(false)
 
   const load = React.useCallback(async () => {
     if (bookId == null) {
@@ -189,7 +218,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     setLoading(false)
     if (!res.success || !res.data || !Array.isArray(res.data.items)) {
       setItems([])
-      purrToast.error(res.error || '读取记忆失败')
+      purrToast.error(memoryErrorMessage(res.error, '读取记忆失败'))
       return
     }
     setItems(res.data.items)
@@ -237,41 +266,58 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
     const res = await services.memories.createMemory({
       bookId,
       kind: newKind,
-      content: newContent.trim(),
-      status: newStatus,
+      text: newContent.trim(),
+      operationKey: crypto.randomUUID(),
+      state: newStatus === 'pending' ? 'pending' : 'active',
       pinned: newPinned,
-      sourceType: 'manual',
     })
     setCreating(false)
     if (!res.success) {
-      purrToast.error(res.error || '保存记忆失败')
+      purrToast.error(memoryErrorMessage(res.error, '保存记忆失败'))
       return
     }
     setNewContent('')
     setNewPinned(false)
     setCreateOpen(false)
-    purrToast.success(res.data?.deduped ? '已有相同记忆，已更新时间' : '已保存记忆')
+    purrToast.success('已保存记忆')
     await load()
   }, [bookId, load, newContent, newKind, newPinned, newStatus])
 
   const updateSemantic = React.useCallback(async (
     item: UnifiedMemoryItem,
-    data: Partial<MemoryItem>,
+    data: { content?: string; status?: 'active' | 'archived'; pinned?: number },
   ) => {
     const id = semanticId(item)
-    if (!id) return false
-    const res = await services.memories.updateMemory({ id, data })
+    if (!id || bookId == null || !item.version) return false
+    const res = data.status
+      ? await services.memories.setMemoryState({
+          id,
+          bookId,
+          version: item.version,
+          operationKey: crypto.randomUUID(),
+          state: data.status === 'active' ? 'active' : 'disabled',
+          reason: data.status === 'active' ? 'activated' : 'archived',
+        })
+      : await services.memories.updateMemory({
+          id,
+          bookId,
+          version: item.version,
+          operationKey: crypto.randomUUID(),
+          ...(data.content !== undefined ? { text: data.content } : {}),
+          ...(data.pinned !== undefined ? { pinned: Boolean(data.pinned) } : {}),
+        })
     if (!res.success) {
-      purrToast.error(res.error || '更新记忆失败')
+      purrToast.error(memoryErrorMessage(res.error, '更新记忆失败'))
       return false
     }
     await load()
     return true
-  }, [load])
+  }, [bookId, load])
 
   const archiveSemantic = React.useCallback((item: UnifiedMemoryItem) => {
     const id = semanticId(item)
-    if (!id) return
+    if (!id || bookId == null || !item.version) return
+    const version = item.version
     void confirm({
       title: '归档这条记忆？',
       content: '归档后不会自动召回，但仍可在已归档筛选中查看。',
@@ -280,12 +326,19 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       confirmVariant: 'danger',
     }).then(async (result) => {
       if (result === 'confirm') {
-        const res = await services.memories.archiveMemory({ id })
-        if (!res.success) purrToast.error(res.error || '归档失败')
+        const res = await services.memories.setMemoryState({
+          id,
+          bookId,
+          version,
+          operationKey: crypto.randomUUID(),
+          state: 'disabled',
+          reason: 'archived',
+        })
+        if (!res.success) purrToast.error(memoryErrorMessage(res.error, '归档失败'))
         await load()
       }
     })
-  }, [confirm, load])
+  }, [bookId, confirm, load])
 
   const submitCandidateGroup = React.useCallback(async (
     deltaId: string,
@@ -312,18 +365,127 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   }, [load, resolutions])
 
   const openHistory = React.useCallback(async (item: UnifiedMemoryItem) => {
-    if (bookId == null || !item.memory_key) return
+    if (bookId == null) return
     setHistoryItem(item)
     setHistory([])
     setHistoryLoading(true)
-    const res = await services.storyMemory.getStoryMemoryVersions({
-      bookId,
-      memoryKey: item.memory_key,
-    })
+    const id = semanticId(item)
+    const res = id
+      ? await services.memories.getMemoryHistory({ bookId, id })
+      : item.memory_key
+        ? await services.storyMemory.getStoryMemoryVersions({
+            bookId,
+            memoryKey: item.memory_key,
+          })
+        : null
     setHistoryLoading(false)
-    if (res.success && Array.isArray(res.data)) setHistory(res.data)
-    else purrToast.error(res.error || '读取版本历史失败')
+    if (res?.success && Array.isArray(res.data)) {
+      setHistory(res.data.map((row) => ({ ...row })))
+    }
+    else purrToast.error(memoryErrorMessage(res?.error, '读取版本历史失败'))
   }, [bookId])
+
+  const reviewSemantic = React.useCallback(async (item: UnifiedMemoryItem) => {
+    const id = semanticId(item)
+    if (!id || !item.version || bookId == null) return
+    setReviewItem(item)
+    setReviewOperation(null)
+    setReviewLoading(true)
+    const res = await services.memories.reviewMemory({
+      id,
+      bookId,
+      version: item.version,
+      operationKey: crypto.randomUUID(),
+    })
+    setReviewLoading(false)
+    if (res.success) setReviewOperation(res.data)
+    else purrToast.error(memoryErrorMessage(res.error, '生成审核建议失败'))
+  }, [bookId])
+
+  const applyReviewProposal = React.useCallback(async () => {
+    const proposal = reviewOperation?.review?.proposal
+    if (!proposal || bookId == null) return
+    setReviewLoading(true)
+    const res = await services.memories.resolveMemories({
+      bookId,
+      operationKey: crypto.randomUUID(),
+      kind: proposal.kind,
+      items: proposal.items,
+      keep: proposal.keep,
+      reviewKey: proposal.reviewKey,
+    })
+    setReviewLoading(false)
+    if (!res.success) {
+      purrToast.error(memoryErrorMessage(res.error, '应用审核决议失败'))
+      return
+    }
+    setReviewItem(null)
+    setReviewOperation(null)
+    purrToast.success('已应用审核决议')
+    await load()
+  }, [bookId, load, reviewOperation])
+
+  const deleteSemantic = React.useCallback((item: UnifiedMemoryItem) => {
+    const id = semanticId(item)
+    if (!id || !item.version || bookId == null) return
+    void confirm({
+      title: '永久删除这条记忆？',
+      content: '删除会保留组件审计历史，但该记忆不能再被召回。',
+      confirmText: '删除',
+      cancelText: '取消',
+      confirmVariant: 'danger',
+    }).then(async (result) => {
+      if (result !== 'confirm') return
+      const res = await services.memories.deleteMemory({
+        id,
+        bookId,
+        version: item.version as number,
+        operationKey: crypto.randomUUID(),
+      })
+      if (!res.success) purrToast.error(memoryErrorMessage(res.error, '删除记忆失败'))
+      else await load()
+    })
+  }, [bookId, confirm, load])
+
+  const openLinks = React.useCallback(async (item: UnifiedMemoryItem) => {
+    const id = semanticId(item)
+    if (!id || bookId == null) return
+    setLinkItem(item)
+    setLinks([])
+    setLinkTargetId(undefined)
+    setLinkNote('')
+    setLinkLoading(true)
+    const res = await services.memories.getMemoryLinks({ id, bookId, limit: 32 })
+    setLinkLoading(false)
+    if (res.success) setLinks(res.data.items)
+    else purrToast.error(memoryErrorMessage(res.error, '读取记忆关系失败'))
+  }, [bookId])
+
+  const createLink = React.useCallback(async () => {
+    const fromId = linkItem ? semanticId(linkItem) : ''
+    const target = items.find((item) => item.id === linkTargetId)
+    const toId = target ? semanticId(target) : ''
+    if (!fromId || !linkItem?.version || !toId || !target?.version || bookId == null) return
+    setLinkLoading(true)
+    const res = await services.memories.linkMemories({
+      bookId,
+      operationKey: crypto.randomUUID(),
+      fromMemory: { id: fromId, version: linkItem.version },
+      toMemory: { id: toId, version: target.version },
+      relation: linkRelation,
+      note: linkNote.trim(),
+    })
+    if (!res.success) {
+      setLinkLoading(false)
+      purrToast.error(memoryErrorMessage(res.error, '建立记忆关系失败'))
+      return
+    }
+    const refreshed = await services.memories.getMemoryLinks({ id: fromId, bookId, limit: 32 })
+    setLinkLoading(false)
+    if (refreshed.success) setLinks(refreshed.data.items)
+    setLinkTargetId(undefined)
+    setLinkNote('')
+  }, [bookId, items, linkItem, linkNote, linkRelation, linkTargetId])
 
   const displayEntries = React.useMemo<DisplayEntry[]>(() => {
     const candidates = new Map<string, UnifiedMemoryItem[]>()
@@ -471,8 +633,17 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
         {item.actions.includes('archive') ? (
           <PurrButton size="small" icon={<InboxIcon />} onClick={() => archiveSemantic(item)}>归档</PurrButton>
         ) : null}
+        {item.actions.includes('review') ? (
+          <PurrButton size="small" onClick={() => void reviewSemantic(item)}>审核建议</PurrButton>
+        ) : null}
+        {item.actions.includes('view_links') ? (
+          <PurrButton size="small" onClick={() => void openLinks(item)}>关系</PurrButton>
+        ) : null}
         {item.actions.includes('view_history') ? (
           <PurrButton size="small" icon={<HistoryIcon />} onClick={() => void openHistory(item)}>版本</PurrButton>
+        ) : null}
+        {item.actions.includes('delete') ? (
+          <PurrButton size="small" danger onClick={() => deleteSemantic(item)}>删除</PurrButton>
         ) : null}
       </PurrSpace>
     </article>
@@ -668,13 +839,57 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
           {history.length ? (
             <div className="unified-memory-history">
               {history.map((version) => (
-                <div key={`${version.record_id}:${version.version}`}>
-                  <PurrSpace size={6}><PurrTag>v{version.version}</PurrTag><PurrTag>{version.action}</PurrTag><PurrTag>{version.provenance_status}</PurrTag></PurrSpace>
-                  <pre>{JSON.stringify(version.payload, null, 2)}</pre>
+                <div key={JSON.stringify(version)}>
+                  <pre>{JSON.stringify(version, null, 2)}</pre>
                 </div>
               ))}
             </div>
           ) : <PurrEmpty image={PurrEmpty.PRESENTED_IMAGE_SIMPLE} description="暂无版本记录" />}
+        </PurrSpin>
+      </PurrModal>
+
+      <PurrModal
+        title="组件审核建议"
+        open={!!reviewItem}
+        confirmLoading={reviewLoading}
+        okText="应用建议"
+        cancelText="关闭"
+        okButtonProps={{ disabled: !reviewOperation?.review?.proposal }}
+        onCancel={() => { setReviewItem(null); setReviewOperation(null) }}
+        onOk={() => void applyReviewProposal()}
+      >
+        <PurrSpin spinning={reviewLoading}>
+          {reviewOperation?.review ? (
+            <pre>{JSON.stringify(reviewOperation.review, null, 2)}</pre>
+          ) : <PurrEmpty image={PurrEmpty.PRESENTED_IMAGE_SIMPLE} description="组件没有给出可执行建议" />}
+        </PurrSpin>
+      </PurrModal>
+
+      <PurrModal
+        title={linkItem ? `${linkItem.content} · 记忆关系` : '记忆关系'}
+        open={!!linkItem}
+        confirmLoading={linkLoading}
+        okText="建立关系"
+        cancelText="关闭"
+        okButtonProps={{ disabled: !linkTargetId }}
+        onCancel={() => setLinkItem(null)}
+        onOk={() => void createLink()}
+      >
+        <PurrSpin spinning={linkLoading}>
+          <div style={{ display: 'grid', gap: 8, width: '100%' }}>
+            <PurrSelect
+              style={{ width: '100%' }}
+              placeholder="选择另一条语义记忆"
+              value={linkTargetId}
+              options={items.filter((item) => item.source === 'semantic' && item.id !== linkItem?.id && item.version).map((item) => ({ value: item.id, label: item.content }))}
+              onChange={setLinkTargetId}
+            />
+            <PurrSelect style={{ width: '100%' }} value={linkRelation} options={[...RELATION_OPTIONS]} onChange={setLinkRelation} />
+            <PurrInput.TextArea value={linkNote} onChange={(event) => setLinkNote(event.target.value)} placeholder="关系说明（可选）" maxLength={1000} />
+            {links.length ? links.map((link) => (
+              <div key={link.key}><PurrTag>{link.relation}</PurrTag>{link.from.id} → {link.to.id}{link.note ? ` · ${link.note}` : ''}{link.valid ? '' : ' · 已失效'}</div>
+            )) : <PurrEmpty image={PurrEmpty.PRESENTED_IMAGE_SIMPLE} description="暂无关系" />}
+          </div>
         </PurrSpin>
       </PurrModal>
     </div>

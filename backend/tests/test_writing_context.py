@@ -16,11 +16,6 @@ from purra.contracts import (
 )
 from purra.json_values import thaw_json_mapping
 from purra.testing import assert_context_provider_conforms
-from domains.writing.associated_context import (
-    AssociatedContextResult,
-    ChapterContextFact,
-    OutlineContextFact,
-)
 from domains.writing.context import (
     WRITING_AGENT_POLICY_CONTEXT,
     WRITING_RETRIEVAL_CONTEXT,
@@ -28,11 +23,29 @@ from domains.writing.context import (
     writing_context_claims,
 )
 from domains.writing.contracts import WritingDomainContext
-from domains.writing.memory_context import (
-    MemoryContextBlock,
-    SelectedMemoryContextFact,
-)
 from domains.writing.prompts import build_writing_agent_policy
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_specific", [False, True])
+async def test_execution_context_retains_public_progress_policy(task_specific):
+    from purra.engine.context_capability import ContextCapability
+    from purra.context_strategies import ContextStrategy
+    from domains.agent_output_policy import build_agent_public_progress_policy
+
+    request = _request()
+    capability = ContextCapability(ContextStrategy.STAGED, WritingContextProvider())
+    planning = await capability.build_initial(request, _budget(request), None)
+    task = TaskContextRequest(
+        task_spec=TaskSpec(goal="核对当前章节"), include_response_context=True,
+    ) if task_specific else None
+    execution, _ = await capability.build_execution(
+        request, _budget(request), planning, task, None,
+    )
+    policies = [block for block in execution.blocks if block.name == WRITING_AGENT_POLICY_CONTEXT]
+    assert len(policies) == 1
+    assert not policies[0].untrusted
+    assert build_agent_public_progress_policy() in policies[0].content
 
 
 def _request(
@@ -138,36 +151,15 @@ async def test_explicit_evidence_planning_keeps_manifest_without_loading_bodies(
             self.memory_calls = 0
             self.associated_calls = 0
 
-        async def build_memory(self, context, request, token_budget):
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
             del context, request, token_budget
             self.memory_calls += 1
-            return MemoryContextBlock(
-                text="DATABASE_MEMORY_BODY_UNIQUE_MARKER",
-                selected_fact=SelectedMemoryContextFact(
-                    requested_count=2,
-                    complete_count=2,
-                    truncated_count=0,
-                    not_injected_count=0,
-                ),
-            )
+            raise AssertionError("Planning must not read memory bodies")
 
         async def build_associated(self, context, request, token_budget):
             del context, request, token_budget
             self.associated_calls += 1
-            return AssociatedContextResult(
-                text=(
-                    "DATABASE_CHAPTER_BODY_UNIQUE_MARKER\n"
-                    "DATABASE_OUTLINE_BODY_UNIQUE_MARKER"
-                ),
-                chapter_facts=(ChapterContextFact(
-                    "chapter-associated",
-                    "complete",
-                ),),
-                outline_facts=(OutlineContextFact(
-                    "outline-associated",
-                    "complete",
-                ),),
-            )
+            raise AssertionError("Planning must not read associated bodies")
 
     request = _request(explicit_evidence=True)
     source = _Source()

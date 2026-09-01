@@ -22,28 +22,6 @@ class AssociatedOutline:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryItem:
-    id: int
-    book_id: str
-    kind: str
-    scope_type: str
-    scope_id: str | None
-    content: str
-    summary: str
-    importance: int
-    status: str
-    pinned: int
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryLink:
-    from_memory_id: int
-    to_memory_id: int
-    relation: str
-    note: str = ""
-
-
-@dataclass(frozen=True, slots=True)
 class StoryMemoryRecallItem:
     """One authoritative current-story fact with valid source evidence."""
 
@@ -76,51 +54,6 @@ class AssociatedContextRepository(Protocol):
         book_id: str,
         outline_ids: Sequence[str],
     ) -> tuple[AssociatedOutline, ...]: ...
-
-
-class MemoryRecallRepository(Protocol):
-    """Book-scoped memory retrieval needed by the writing domain."""
-
-    async def get_by_ids(
-        self,
-        book_id: str,
-        ids: Sequence[Any],
-        *,
-        statuses: Sequence[str],
-    ) -> tuple[MemoryItem, ...]: ...
-
-    async def get_by_source_ids(
-        self,
-        book_id: str,
-        source_type: str,
-        source_ids: Sequence[Any],
-        *,
-        statuses: Sequence[str],
-    ) -> tuple[MemoryItem, ...]: ...
-
-    async def search(
-        self,
-        book_id: str,
-        query: str,
-        *,
-        limit: int,
-        statuses: Sequence[str] = ("active",),
-        kinds: Sequence[str] = (),
-        scope_type: str | None = None,
-        scope_id: str | None = None,
-    ) -> tuple[MemoryItem, ...]: ...
-
-    async def get_links(
-        self,
-        book_id: str,
-        memory_ids: Sequence[int],
-    ) -> tuple[MemoryLink, ...]: ...
-
-    async def mark_used(
-        self,
-        book_id: str,
-        memory_ids: Sequence[int],
-    ) -> None: ...
 
 
 class StoryMemoryRecallRepository(Protocol):

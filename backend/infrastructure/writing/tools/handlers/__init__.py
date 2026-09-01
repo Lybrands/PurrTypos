@@ -12,7 +12,6 @@ from infrastructure.writing.tools.handlers import (
     outline_tools,
     setting_entity_tools,
     story_background_tools,
-    writing_method_tools,
     continuation_tools,
 )
 
@@ -35,7 +34,6 @@ WRITING_TOOL_OPERATIONS = MappingProxyType({
     "deleteSparkIdea": memory_tools._tool_delete_spark_idea,
     "addForeshadowing": memory_tools._tool_add_foreshadowing,
     "searchSparkIdeas": memory_tools._tool_search_spark_ideas,
-    "searchMemories": memory_tools._tool_search_memories,
     "createMemory": memory_tools._tool_create_memory,
     "updateMemory": memory_tools._tool_update_memory,
     "archiveMemory": memory_tools._tool_archive_memory,
@@ -53,7 +51,6 @@ WRITING_TOOL_OPERATIONS = MappingProxyType({
     "deleteSettingEntity": setting_entity_tools._tool_delete_setting_entity,
     "getStoryBackground": story_background_tools._tool_get_story_background,
     "editStoryBackground": story_background_tools._tool_edit_story_background,
-    "searchWritingMethods": writing_method_tools._tool_search_writing_methods,
     "readContinuationSourceSection": continuation_tools._tool_read_continuation_source_section,
 })
 

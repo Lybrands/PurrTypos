@@ -9,13 +9,9 @@ import pytest_asyncio
 from database.connection import DatabaseConnection
 from domains.writing.associated_context import AssociatedContextBuilder
 from domains.writing.contracts import WritingDomainContext
-from domains.writing.memory_context import (
-    MemoryContextRequest,
-    WritingMemoryContextBuilder,
-)
 from infrastructure.persistence.writing import (
     SqliteAssociatedContextRepository,
-    SqliteMemoryRecallRepository,
+    SqliteWritingSourceRepository,
 )
 
 
@@ -65,23 +61,6 @@ async def _seed_book_chapter(
         "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
         [chapter_id, _lexical(text)],
     )
-
-
-async def _seed_memory(
-    db: DatabaseConnection,
-    *,
-    book_id: str,
-    content: str,
-    source_id: str,
-) -> int:
-    memory_id = await db.execute_and_get_id(
-        "INSERT INTO memory_items "
-        "(book_id, kind, content, source_type, source_id, fingerprint) "
-        "VALUES (?, 'canon', ?, 'spark_idea', ?, ?)",
-        [book_id, content, source_id, f"{book_id}:{source_id}"],
-    )
-    assert memory_id is not None
-    return memory_id
 
 
 @pytest.mark.asyncio
@@ -262,89 +241,38 @@ async def test_associated_context_distinguishes_empty_from_missing_outlines(temp
 
 
 @pytest.mark.asyncio
-async def test_memory_repository_scopes_ids_sources_search_and_mark_used(temp_db):
-    own_id = await _seed_memory(
-        temp_db,
-        book_id="book-1",
-        content="本书记忆",
-        source_id="source-1",
+async def test_writing_sources_share_one_book_scoped_repository(temp_db):
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('book-1', '甲'), ('book-2', '乙')"
     )
-    other_id = await _seed_memory(
-        temp_db,
-        book_id="book-2",
-        content="另一书秘密记忆",
-        source_id="source-2",
+    repository = SqliteWritingSourceRepository(temp_db)
+    spark = await repository.add_spark_idea("book-1", "全局", "本书设定")
+    clue = await repository.add_foreshadowing(
+        "book-1", "chapter-1", "本书伏笔"
     )
-    repository = SqliteMemoryRecallRepository(temp_db)
 
-    by_id = await repository.get_by_ids(
-        "book-1",
-        [own_id, other_id],
-        statuses=("active",),
-    )
-    by_source = await repository.get_by_source_ids(
-        "book-1",
-        "spark_idea",
-        ["source-1", "source-2"],
-        statuses=("active",),
-    )
-    recalled = await repository.search("book-1", "", limit=20)
-    await repository.mark_used("book-1", [own_id, other_id])
-
-    assert [item.id for item in by_id] == [own_id]
-    assert [item.id for item in by_source] == [own_id]
-    assert [item.id for item in recalled] == [own_id]
-    own_row = await temp_db.fetch_one(
-        "SELECT last_used_at FROM memory_items WHERE id = ?",
-        [own_id],
-    )
-    other_row = await temp_db.fetch_one(
-        "SELECT last_used_at FROM memory_items WHERE id = ?",
-        [other_id],
-    )
-    assert own_row and own_row["last_used_at"] is not None
-    assert other_row and other_row["last_used_at"] is None
-
-
-@pytest.mark.asyncio
-async def test_memory_context_legacy_source_ids_cannot_cross_book(temp_db):
-    own_id = await _seed_memory(
-        temp_db,
-        book_id="book-1",
-        content="本书规则",
-        source_id="source-1",
-    )
-    await _seed_memory(
-        temp_db,
-        book_id="book-2",
-        content="另一书秘密规则",
-        source_id="source-2",
-    )
-    builder = WritingMemoryContextBuilder(SqliteMemoryRecallRepository(temp_db))
-
-    block = await builder.build(MemoryContextRequest(
-        book_id="book-1",
-        user_prompt="",
-        selected_spark_idea_ids=("source-1", "source-2"),
-    ))
-
-    assert "本书规则" in block.text
-    assert "另一书秘密规则" not in block.text
-    assert own_id in block.included_ids
-    assert block.selected_fact is not None
-    assert block.selected_fact.requested_count == 2
-    assert block.selected_fact.complete_count == 1
-    assert block.selected_fact.not_injected_count == 1
-    assert block.selected_fact.status == "truncated"
+    assert await repository.update_spark_idea(
+        "book-2", str(spark["id"]), {"content": "越权修改"}
+    ) is None
+    assert await repository.delete_foreshadowing(
+        "book-2", str(clue["id"])
+    ) is None
+    assert [row["content"] for row in await repository.list_spark_ideas(
+        "book-1"
+    )] == ["本书设定"]
+    assert [row["content"] for row in await repository.list_foreshadowing(
+        "book-1"
+    )] == ["本书伏笔"]
 
 
 def test_new_context_path_has_no_process_global_dependencies():
     root = Path(__file__).resolve().parent.parent
     files = [
-        root / "domains" / "writing" / "context_source.py",
+        root / "application" / "writing_context_source.py",
         root / "domains" / "writing" / "memory_context.py",
         root / "infrastructure" / "persistence" / "writing" / "sqlite_context_repository.py",
-        root / "infrastructure" / "persistence" / "writing" / "sqlite_memory_repository.py",
+        root / "application" / "component_memory_context.py",
+        root / "application" / "memory_operations.py",
     ]
     forbidden = (
         "services.long_term_memory_service",

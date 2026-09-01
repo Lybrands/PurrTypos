@@ -70,10 +70,12 @@ export async function hydrateLatestBookRun(input: {
     model: input.snapshot.run.provenance.modelName || '',
     agent_run_id: input.snapshot.run.runId,
   } as Conversation
-  const directSnapshot = { ...input.snapshot, hasMore: false }
   const result = await hydrateBookConversationReadModel([synthetic], {
-    getRunSnapshot: dependencies?.getRunSnapshot
-      ?? (async () => ({ success: true, data: directSnapshot })),
+    getRunSnapshot: async request => {
+      if (request.after == null) return { success: true, data: input.snapshot }
+      if (!dependencies) throw new Error('完整恢复需要读取后续事件页')
+      return dependencies.getRunSnapshot(request)
+    },
   })
   const readModel = result ?? { messages: [], settingDiffOccurrences: [] }
   const messages = readModel.messages.map((message) => (

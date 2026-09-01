@@ -11,11 +11,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 
 from database.connection import DatabaseConnection
+from application.agent_composition import (
+    clear_agent_composition,
+    set_agent_composition,
+)
 from dependencies import set_db
 from routers.outlines import (
     delete_outline,
@@ -38,9 +43,12 @@ async def temp_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
     await db.init()
     set_db(db)
+    composition = SimpleNamespace(memory_resource=None)
+    set_agent_composition(composition)
     try:
         yield db
     finally:
+        clear_agent_composition(composition)
         await db.close()
 
 

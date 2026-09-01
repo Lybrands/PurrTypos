@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 import pytest
+from infrastructure.persistence.agent_output_publisher import InProcessAgentOutputPublisher
 
 import routers.screenplay_conversations as conversation_routes
 import application.agent_composition as agent_composition
@@ -377,6 +378,7 @@ async def test_conversation_sse_streams_only_canonical_agent_output(
         "get_agent_composition",
         lambda: type("Composition", (), {
             "output_journal": canonical_output,
+            "output_notifications": InProcessAgentOutputPublisher(),
         })(),
     )
     monkeypatch.setattr(
@@ -439,6 +441,7 @@ async def test_conversation_sse_announces_empty_chunk_replay_completion(
         "get_agent_composition",
         lambda: type("Composition", (), {
             "output_journal": canonical_output,
+            "output_notifications": InProcessAgentOutputPublisher(),
         })(),
     )
     monkeypatch.setattr(
@@ -491,6 +494,7 @@ async def test_conversation_sse_advances_past_unbound_canonical_output(
         "get_agent_composition",
         lambda: type("Composition", (), {
             "output_journal": canonical_output,
+            "output_notifications": InProcessAgentOutputPublisher(),
         })(),
     )
     monkeypatch.setattr(
@@ -523,59 +527,6 @@ async def test_conversation_sse_advances_past_unbound_canonical_output(
     }
 
 
-async def test_chunk_delivery_keeps_every_canonical_event_live():
-    items = [
-        {"cursor": 1, "chunk": {"kind": "operation.started"}},
-        {"cursor": 2, "chunk": {"kind": "provider.content_delta"}},
-        {"cursor": 3, "chunk": {"kind": "provider.content_delta"}},
-        {"cursor": 4, "chunk": {"kind": "operation.finished"}},
-    ]
-
-    pages = conversation_routes._chunk_delivery_pages({
-        "chunks": items,
-        "nextCursor": 4,
-        "hasMore": False,
-    })
-
-    assert [len(page["chunks"]) for page in pages] == [1, 1, 1, 1]
-    assert [page["nextCursor"] for page in pages] == [1, 2, 3, 4]
-    assert [page["hasMore"] for page in pages] == [True, True, True, False]
-
-
-async def test_chunk_delivery_advances_a_cursor_without_visible_chunks():
-    pages = conversation_routes._chunk_delivery_pages({
-        "chunks": [],
-        "nextCursor": 7,
-        "hasMore": False,
-    })
-
-    assert pages == ({
-        "kind": "agent_chunks",
-        "chunks": [],
-        "nextCursor": 7,
-        "hasMore": False,
-    },)
-
-
-async def test_chunk_replay_keeps_persisted_history_in_one_batch():
-    items = [
-        {"cursor": 1, "chunk": {"kind": "operation.started"}},
-        {"cursor": 2, "chunk": {"kind": "provider.content_delta"}},
-        {"cursor": 3, "chunk": {"kind": "operation.finished"}},
-    ]
-
-    page = conversation_routes._chunk_replay_page({
-        "chunks": items,
-        "nextCursor": 3,
-        "hasMore": True,
-    })
-
-    assert page == {
-        "kind": "agent_chunks",
-        "chunks": items,
-        "nextCursor": 3,
-        "hasMore": True,
-    }
 
 
 async def test_conversation_sse_disconnect_only_detaches_subscription(monkeypatch):
@@ -595,6 +546,7 @@ async def test_conversation_sse_disconnect_only_detaches_subscription(monkeypatc
 
     class Composition:
         output_journal = object()
+        output_notifications = InProcessAgentOutputPublisher()
 
     monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
     monkeypatch.setattr(

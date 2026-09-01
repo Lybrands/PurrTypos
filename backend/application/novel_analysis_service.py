@@ -18,6 +18,7 @@ from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageRole,
+    PlanningMode,
     RunBinding,
     StepStatus,
 )
@@ -52,8 +53,10 @@ from domains.novel_analysis import (
     NOVEL_ANALYSIS_REVIEW_ARTIFACT_KIND,
     NOVEL_ANALYSIS_SCHEMA_VERSION,
     NovelAnalysisDomainContext,
+    NovelAnalysisSegment,
     canonical_digest,
     compile_novel_analysis_recipe,
+    novel_analysis_model_call_count,
 )
 from exceptions import AppError, NotFoundError
 from infrastructure.persistence.sqlite_long_task_repository import (
@@ -72,47 +75,6 @@ def _discard_active_analysis(
     active = _ACTIVE_ANALYSES.get(source_revision_id)
     if active is not None and active[1] is completed:
         _ACTIVE_ANALYSES.pop(source_revision_id, None)
-
-
-def _artifact_preview(title: str, kind: str, artifact: Mapping[str, object]) -> dict:
-    """Build a bounded public summary from a finalized, validated unit Artifact."""
-    facts = list(artifact.get("facts") or ())
-    cards = list(artifact.get("craftCards") or ())
-    highlights: list[str] = []
-    for fact in facts[:3]:
-        if not isinstance(fact, Mapping):
-            continue
-        value = json.dumps(
-            fact.get("value"), ensure_ascii=False, separators=(",", ":")
-        )
-        if len(value) > 72:
-            value = value[:69] + "…"
-        highlights.append(
-            " · ".join(filter(None, (
-                str(fact.get("subjectKey") or "").strip(),
-                str(fact.get("predicate") or "").strip(),
-                value,
-            )))
-        )
-    for card in cards[:max(0, 3 - len(highlights))]:
-        if isinstance(card, Mapping) and str(card.get("title") or "").strip():
-            highlights.append(f"写作技法：{str(card['title']).strip()}")
-
-    if kind == "coverage_report":
-        coverage = artifact.get("coverage")
-        ratio = coverage.get("ratio") if isinstance(coverage, Mapping) else None
-        summary = (
-            f"{title}完成，证据覆盖率 {float(ratio):.0%}。"
-            if isinstance(ratio, (int, float))
-            else f"{title}完成。"
-        )
-    elif kind == "build_review_artifact":
-        summary = f"分析结果已生成：{len(facts)} 条硬事实，{len(cards)} 张写作技法卡。"
-    elif facts or cards:
-        summary = f"{title}完成，识别 {len(facts)} 条事实和 {len(cards)} 个写作技法。"
-    else:
-        summary = f"{title}完成。"
-    return {"summary": summary, "highlights": highlights}
 
 
 class _NovelAnalysisContinuationLifecycle:
@@ -173,7 +135,7 @@ class NovelAnalysisService:
         *,
         source_revision_id: str,
         command_id: str,
-        prompt: str = "分析这部小说的事实脉络和写作技法。",
+        prompt: str = "分析这部小说的全局故事概览、事实脉络和写作技法。",
         runtime,
     ) -> dict:
         sections = await self._source.list_bound_sections(source_revision_id)
@@ -259,6 +221,8 @@ class NovelAnalysisService:
         prompt: str,
         runtime,
         failed_resume_attempts: int,
+        segments: tuple[NovelAnalysisSegment, ...] = (),
+        input_token_budget: int = 0,
         durable_continuation: DurableTaskContinuation | None = None,
         run_binding_lifecycle=None,
     ) -> asyncio.Task[None]:
@@ -278,6 +242,8 @@ class NovelAnalysisService:
             prompt=prompt,
             runtime=runtime,
             failed_resume_attempts=failed_resume_attempts,
+            segments=segments,
+            input_token_budget=input_token_budget,
             durable_continuation=durable_continuation,
             run_binding_lifecycle=run_binding_lifecycle,
         ))
@@ -338,6 +304,8 @@ class NovelAnalysisService:
         prompt: str,
         runtime,
         failed_resume_attempts: int,
+        segments: tuple[NovelAnalysisSegment, ...],
+        input_token_budget: int,
         durable_continuation: DurableTaskContinuation | None,
         run_binding_lifecycle,
     ) -> None:
@@ -345,6 +313,8 @@ class NovelAnalysisService:
             source_revision_id=source_revision_id,
             command_id=task_idempotency_key,
             section_ids=section_ids,
+            segments=segments,
+            input_token_budget=input_token_budget,
         )
         model_request = model_request_from_runtime(runtime)
         window = runtime_context_window_tokens(runtime)
@@ -362,7 +332,7 @@ class NovelAnalysisService:
             messages=(AgentMessage(
                 role=MessageRole.USER,
                 content=(
-                    prompt or "分析这部小说的事实脉络和写作技法。"
+                    prompt or "分析这部小说的全局故事概览、事实脉络和写作技法。"
                 ),
             ),),
             model=model_request,
@@ -370,6 +340,7 @@ class NovelAnalysisService:
             mode="novel_source_analysis",
             context_window=window,
             tools_enabled=False,
+            planning_mode=PlanningMode.PLANNED,
             metadata={
                 "failedResumeAttempts": failed_resume_attempts,
             },
@@ -451,6 +422,7 @@ class NovelAnalysisService:
             mode="novel_source_analysis_follow_up",
             context_window=window,
             tools_enabled=False,
+            planning_mode=PlanningMode.REACTIVE,
         )
         try:
             async for _update in self._runs.run(
@@ -492,7 +464,8 @@ class NovelAnalysisService:
             "r.create_time, r.update_time, "
             "r.provider_output_events, "
             "t.id AS task_id, t.status AS task_status, t.revision AS task_revision, "
-            "t.total_units, t.completed_units, t.failed_units "
+            "t.total_units, t.completed_units, t.failed_units, "
+            "t.metadata_json AS task_metadata_json "
             "FROM ai_agent_runs AS r "
             "LEFT JOIN ai_agent_long_task_runs AS ltr ON ltr.run_id = r.id "
             "LEFT JOIN ai_agent_long_tasks AS t ON t.id = ltr.task_id "
@@ -519,22 +492,33 @@ class NovelAnalysisService:
             final = None
             units = ()
             analysis_plan = None
+            related_runs = []
             provider_output_events = int(row.get("provider_output_events") or 0)
             if task_id:
-                task = await self._long_tasks.load(task_id)
-                if task is not None:
-                    raw_plan = task.metadata.get("analysisPlan")
-                    if isinstance(raw_plan, Mapping):
-                        analysis_plan = thaw_json_mapping(raw_plan)
+                # This is a read projection, so do not hydrate the executable
+                # LongTaskRecord merely to show its plan. Resume paths still
+                # load the record and enforce the current budget contract.
+                try:
+                    task_metadata = json.loads(
+                        str(row.get("task_metadata_json") or "{}")
+                    )
+                except (TypeError, ValueError):
+                    task_metadata = {}
+                if not isinstance(task_metadata, Mapping):
+                    task_metadata = {}
+                raw_plan = task_metadata.get("analysisPlan")
+                if isinstance(raw_plan, Mapping):
+                    analysis_plan = thaw_json_mapping(raw_plan)
                 units = await self._long_tasks.list_units(task_id)
-                activity = await self._db.fetch_one(
-                    "SELECT COALESCE(SUM(r.provider_output_events), 0) AS count "
-                    "FROM ai_agent_long_task_runs AS binding "
-                    "JOIN ai_agent_runs AS r ON r.id = binding.run_id "
-                    "WHERE binding.task_id = ?",
-                    [task_id],
+                task_runs = await self._list_task_runs(task_id)
+                related_runs = [
+                    {"runId": item["id"], "status": item["status"]}
+                    for item in task_runs if item["id"] != row["run_id"]
+                ]
+                provider_output_events = sum(
+                    int(item.get("provider_output_events") or 0)
+                    for item in task_runs
                 )
-                provider_output_events = int((activity or {}).get("count") or 0)
                 unit = await self._db.fetch_one(
                     "SELECT output_ref FROM ai_agent_long_task_units "
                     "WHERE task_id = ? AND unit_id = 'artifact:review' "
@@ -542,24 +526,8 @@ class NovelAnalysisService:
                     [task_id],
                 )
                 final = str((unit or {}).get("output_ref") or "") or None
-            preview_unit_ids = {
-                unit.id
-                for unit in tuple(
-                    item
-                    for item in units
-                    if item.status.value == "completed" and item.output_ref
-                )[-20:]
-            }
             unit_views = []
             for unit in units:
-                preview = None
-                if unit.id in preview_unit_ids and unit.output_ref:
-                    with suppress(Exception):
-                        preview = _artifact_preview(
-                            str(unit.metadata.get("displayTitle") or unit.id),
-                            str(unit.metadata.get("unitKind") or ""),
-                            await self._artifacts.require(unit.output_ref),
-                        )
                 unit_views.append({
                     "unitId": unit.id,
                     "title": str(unit.metadata.get("displayTitle") or unit.id),
@@ -573,7 +541,6 @@ class NovelAnalysisService:
                     "maxAttempts": unit.max_attempts,
                     "errorCode": unit.error_code,
                     "updateTime": unit.update_time,
-                    **(preview or {}),
                 })
             results.append({
                 "runId": str(row["run_id"]),
@@ -587,7 +554,11 @@ class NovelAnalysisService:
                     or None
                 ),
                 "prompt": str(row.get("prompt") or ""),
-                "finalResponse": str(row.get("final_response") or ""),
+                "finalResponse": (
+                    str(row.get("final_response") or "")
+                    if binding_attributes.get("interactionKind") == "follow_up"
+                    else ""
+                ),
                 "taskId": task_id or None,
                 "taskStatus": str(row.get("task_status") or "") or None,
                 "taskRevision": row.get("task_revision"),
@@ -597,6 +568,7 @@ class NovelAnalysisService:
                 "error": row.get("error"),
                 "artifactRef": final,
                 "providerOutputEvents": provider_output_events,
+                "relatedRuns": related_runs,
                 "analysisPlan": analysis_plan,
                 "units": unit_views,
                 "createTime": row.get("create_time"),
@@ -606,6 +578,23 @@ class NovelAnalysisService:
 
     async def get_artifact(self, reference: str) -> dict:
         return await self._artifacts.require(reference)
+
+    async def _list_task_runs(self, task_id: str) -> list[dict]:
+        # Durable unit Runs are recorded on units (including retry history),
+        # not in the task's root/continuation Run binding table.
+        return await self._db.fetch_all(
+            "SELECT r.id, r.status, r.provider_output_events FROM ai_agent_runs AS r "
+            "WHERE r.id IN ("
+            "SELECT run_id FROM ai_agent_long_task_runs WHERE task_id = ? "
+            "UNION SELECT run_id FROM ai_agent_long_task_units WHERE task_id = ? "
+            "UNION SELECT json_extract(history.value, '$.runId') "
+            "FROM ai_agent_long_task_units AS unit, "
+            "json_each(unit.metadata_json, '$.runHistory') AS history "
+            "WHERE unit.task_id = ?) "
+            "AND r.binding_namespace IN ('novel_source_analysis', 'novel_source_analysis.unit') "
+            "ORDER BY r.rowid",
+            [task_id, task_id, task_id],
+        )
 
     async def pause(self, task_id: str, expected_revision: int | None = None):
         try:
@@ -624,11 +613,13 @@ class NovelAnalysisService:
             raise NotFoundError("来源分析任务不存在")
         if not task.status.terminal:
             task = await self._long_tasks.cancel(task.id)
-        bindings = await self._long_tasks.list_run_bindings(task.id)
+        runs = await self._list_task_runs(task.id)
         if self._cancellation is not None:
-            for binding in bindings:
+            for run in runs:
+                if run["status"] != "running":
+                    continue
                 with suppress(Exception):
-                    await self._cancellation.cancel(binding.run_id)
+                    await self._cancellation.cancel(run["id"])
         return _task_mapping(task)
 
     async def resume(
@@ -661,15 +652,23 @@ class NovelAnalysisService:
                 for step in plan.steps
             ),
         )
+        raw_segments = metadata.get("segments") or ()
+        segments = tuple(
+            NovelAnalysisSegment.from_mapping(item)
+            for item in raw_segments
+            if isinstance(item, Mapping)
+        )
         recipe = compile_novel_analysis_recipe(
             section_ids=tuple(metadata["sectionIds"]),
+            segments=segments,
             plan_step_ids=tuple(step.id for step in plan.steps),
         )
+        model_call_count = novel_analysis_model_call_count(recipe)
         admission = TaskAdmissionDecision(
             mode=ExecutionMode.DURABLE,
             reason_code="novel_analysis_durable_continuation",
             estimated_units=len(recipe.steps),
-            estimated_model_calls=len(tuple(metadata["sectionIds"])) + 2,
+            estimated_model_calls=model_call_count,
             covered_step_ids=tuple(step.id for step in plan.steps),
             execution_recipe=recipe,
         )
@@ -699,10 +698,12 @@ class NovelAnalysisService:
             run_command_id=run_command_id,
             prompt=str(
                 metadata.get("prompt")
-                or "分析这部小说的事实脉络和写作技法。"
+                or "分析这部小说的全局故事概览、事实脉络和写作技法。"
             ),
             runtime=runtime,
             failed_resume_attempts=1 if retry_failed else 0,
+            segments=segments,
+            input_token_budget=int(metadata.get("inputTokenBudget") or 0),
             durable_continuation=continuation,
             run_binding_lifecycle=lifecycle,
         )
@@ -731,6 +732,15 @@ class NovelAnalysisService:
             "sectionIds": list(source["sectionIds"]),
             "facts": list(payload.get("facts") or ()),
             "craftCards": list(payload.get("craftCards") or ()),
+            **(
+                {"storyOverview": dict(payload["storyOverview"])}
+                if isinstance(payload.get("storyOverview"), Mapping)
+                else {
+                    "storyOverview": dict(source["storyOverview"])
+                }
+                if isinstance(source.get("storyOverview"), Mapping)
+                else {}
+            ),
             "coverage": dict(source.get("coverage") or {}),
             "conflicts": list(source.get("conflicts") or ()),
             "reviewStatus": "reviewed",
@@ -792,6 +802,12 @@ class NovelAnalysisService:
                         bound_section_ids=section_ids,
                         section_id=str(raw_evidence.get("sectionId") or ""),
                         excerpt=str(raw_evidence.get("excerpt") or ""),
+                        start_character=_optional_int(
+                            raw_evidence.get("segmentStartCharacter")
+                        ),
+                        end_character=_optional_int(
+                            raw_evidence.get("segmentEndCharacter")
+                        ),
                     ))
                 if not evidence:
                     raise AppError("每条事实和技法卡必须至少有一条证据", 422)
@@ -802,12 +818,44 @@ class NovelAnalysisService:
                     if name != "contentDigest"
                 })
                 target.append(item)
+        overview = value.get("storyOverview")
+        validated_overview = None
+        if isinstance(overview, Mapping):
+            summary_markdown = str(overview.get("summaryMarkdown") or "").strip()
+            if not summary_markdown:
+                raise AppError("故事概览不能为空", 422)
+            overview_evidence = []
+            for raw_evidence in overview.get("evidence") or ():
+                if not isinstance(raw_evidence, Mapping):
+                    raise AppError("故事概览证据无效", 422)
+                overview_evidence.append(await self._source.validate_excerpt(
+                    source_revision_id=revision_id,
+                    bound_section_ids=section_ids,
+                    section_id=str(raw_evidence.get("sectionId") or ""),
+                    excerpt=str(raw_evidence.get("excerpt") or ""),
+                    start_character=_optional_int(
+                        raw_evidence.get("segmentStartCharacter")
+                    ),
+                    end_character=_optional_int(
+                        raw_evidence.get("segmentEndCharacter")
+                    ),
+                ))
+            if not overview_evidence:
+                raise AppError("故事概览至少需要一条原文证据", 422)
+            validated_overview = {
+                "summaryMarkdown": summary_markdown,
+                "evidence": overview_evidence,
+            }
+            validated_overview["contentDigest"] = canonical_digest(
+                validated_overview
+            )
         return {
             "analysisSchemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
             "sourceRevisionId": revision_id,
             "sectionIds": list(section_ids),
             "facts": facts,
             "craftCards": cards,
+            **({"storyOverview": validated_overview} if validated_overview else {}),
             "coverage": dict(value.get("coverage") or {}),
             "conflicts": list(value.get("conflicts") or ()),
             "reviewStatus": str(value.get("reviewStatus") or "pending"),
@@ -850,6 +898,11 @@ class NovelAnalysisService:
                         "artifactId": artifact_id,
                         "coverage": payload["coverage"],
                         "conflicts": payload["conflicts"],
+                        **(
+                            {"storyOverview": payload["storyOverview"]}
+                            if isinstance(payload.get("storyOverview"), Mapping)
+                            else {}
+                        ),
                     }, ensure_ascii=False, separators=(",", ":")),
                 ],
             )
@@ -975,6 +1028,7 @@ class NovelAnalysisService:
             "schemaVersion": analysis["schema_version"],
             "contentDigest": analysis["content_digest"],
             "summary": summary,
+            "storyOverview": summary.get("storyOverview"),
             "facts": [{
                 "id": item["id"],
                 "factKind": item["fact_kind"],
@@ -1009,6 +1063,12 @@ def _task_mapping(task) -> dict:
         "completedUnits": task.completed_units,
         "failedUnits": task.failed_units,
     }
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
 
 
 __all__ = ["NovelAnalysisService"]

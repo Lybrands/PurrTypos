@@ -12,11 +12,11 @@ from purra.model_protocol.output_limits import (
 )
 
 
-def _snapshot(max_output_tokens: int | None = 393_216):
+def _snapshot(max_call_output_tokens: int | None = 393_216):
     return replace(
         generic_capability_snapshot(),
         profile_id="fixture:model",
-        max_output_tokens=max_output_tokens,
+        max_call_output_tokens=max_call_output_tokens,
     )
 
 
@@ -71,7 +71,7 @@ def test_user_override_above_profile_limit_fails_before_provider_call():
 def test_profile_without_verified_output_limit_is_not_inherited_or_guessed():
     with pytest.raises(UnsupportedModelFeatureError) as captured:
         resolve_invocation_output_limit(
-            _snapshot(max_output_tokens=None),
+            _snapshot(max_call_output_tokens=None),
             explicit_user_override=10_000,
         )
 

@@ -94,7 +94,7 @@ def _snapshot(
         profile_id="test:profile",
         provider_protocol="test_protocol",
         context_window_tokens=200_000,
-        max_output_tokens=100_000,
+        max_call_output_tokens=100_000,
         thinking_token_accounting=ThinkingTokenAccounting.INCLUDED,
         protocol=ModelProtocolCapabilities(
             reasoning_control=reasoning_control,

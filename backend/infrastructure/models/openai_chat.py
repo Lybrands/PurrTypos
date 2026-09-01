@@ -98,6 +98,7 @@ async def chat_no_stream(
             "model": res.model or model,
             "finish_reason": getattr(choice, "finish_reason", None),
             "usage": usage,
+            "applied_output_limit": params.get(profile.openai_output_token_parameter),
         }
     finally:
         await close_async_resource(client)
@@ -215,6 +216,7 @@ async def chat_stream(
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
+        "applied_output_limit": params.get(profile.openai_output_token_parameter),
     }
 
 

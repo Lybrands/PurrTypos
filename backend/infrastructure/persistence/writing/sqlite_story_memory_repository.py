@@ -143,7 +143,7 @@ class SqliteStoryMemoryRepository:
         normalized_id = str(delta_id).strip()
         changed_keys: tuple[str, ...] = ()
         result_status = StoryMemoryDeltaStatus.APPLIED
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._transaction():
             delta = await self._require_delta_row(normalized_id)
             operations = await self._operation_rows(normalized_id)
             changed_keys = tuple(str(row["target_key"]) for row in operations)
@@ -184,7 +184,7 @@ class SqliteStoryMemoryRepository:
     async def rollback_delta(self, delta_id: str) -> StoryMemoryApplyReceipt:
         normalized_id = str(delta_id).strip()
         changed_keys: tuple[str, ...] = ()
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._transaction():
             delta = await self._require_delta_row(normalized_id)
             operations = await self._operation_rows(normalized_id, descending=True)
             changed_keys = tuple(
@@ -291,7 +291,7 @@ class SqliteStoryMemoryRepository:
         invalidated_count = 0
         review_count = 0
         stale_record_count = 0
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._transaction():
             where = [
                 "book_id = ?",
                 "chapter_id = ?",
@@ -381,6 +381,15 @@ class SqliteStoryMemoryRepository:
             invalidated_pending_deltas=invalidated_count,
             review_required_deltas=review_count,
             stale_records=stale_record_count,
+        )
+
+    def _transaction(self):
+        """Join a caller transaction; otherwise own a linearizable commit."""
+
+        return self._db.transaction(
+            cancellation_linearizable=(
+                not self._db.current_task_owns_transaction()
+            )
         )
 
     async def _require_delta_row(self, delta_id: str) -> dict[str, Any]:

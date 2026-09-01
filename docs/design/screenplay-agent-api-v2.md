@@ -167,7 +167,7 @@ POST   /projects/{projectId}/agent-sessions
 ```http
 POST /projects/{projectId}/conversation/turns
 GET  /projects/{projectId}/conversation/snapshot?sessionId={sessionId}
-GET  /projects/{projectId}/conversation/events?sessionId={sessionId}&after={cursor}
+GET  /projects/{projectId}/conversation/events?sessionId={sessionId}&chunkAfter={cursor}
 POST /conversation/turns/{turnId}/cancel
 POST /conversation/turns/{turnId}/resume
 ```
@@ -213,7 +213,7 @@ Conversation Snapshot 协议 v2 只序列化 `rootRunId`。前端只在读取历
 
 提交先原子持久化 User Turn 与可选 `stageCommand`。执行阶段由统一 Planner 补全 instruction；Planner 结果必须与命令的 action、targetRole 和 scope 精确相容，并通过 Resolver 的权威项目状态校验后，服务端才创建唯一 Operation。API key、原始 provider URL 均不落库，只保存脱敏 runtime profile。执行恢复从 Turn/Operation 读取业务输入，客户端只需通过 resume 重新提供 runtime 凭据。
 
-Snapshot 是界面事实源，cursor event 只负责通知 Snapshot 已失效。事件订阅断开只移除订阅者，不取消 Turn、Run 或 Operation；取消必须调用 cancel 命令。普通咨询必须保持 Operation、Candidate 与 Revision 数量为零。
+Snapshot 是 Turn/Task/Operation 等业务投影的事实源；公开输出以相同持久化 canonical chunks 增量消费，业务 `projectionVersion` 变化才通知 Snapshot 失效。事件订阅断开只移除订阅者，不取消 Turn、Run 或 Operation；取消必须调用 cancel 命令。普通咨询必须保持 Operation、Candidate 与 Revision 数量为零。
 
 普通咨询仍可调用经过项目范围校验的只读工具，以核对当前 Project、已接受 Revision 和来源材料；它不能调用任何提案工具。正式 Operation 才获得提案权限及阶段 Artifact 协议。两种路径使用不同的宿主指令，普通对话不会再收到正式交付物的机械提交流程。
 
@@ -221,7 +221,7 @@ Snapshot 是界面事实源，cursor event 只负责通知 Snapshot 已失效。
 
 Turn 的 `attempt` 表示当前请求的执行次数。进程或 lease 中断后，恢复会保留 User 内容，清空旧 Run 引用、半截 Assistant 内容和未完成 Revision 引用，然后以新的 Core Run 开始下一次 attempt。Core 中的旧 Run 审计不删除。
 
-Conversation event 只包含失效通知元数据；`screenplay.document_proposal` 全文不会写入 Conversation 表或通用 AI wire。候选结果只保存权威 `revisionId`。前端通过 SSE cursor 触发 Snapshot 刷新，低频 HTTP cursor 检查只作为断线兜底。
+Conversation event 页包含公开 `chunks`、`nextCursor`、`hasMore` 和 `projectionVersion`；`screenplay.document_proposal` 全文不会写入 Conversation 表或通用 AI wire。候选结果只保存权威 `revisionId`。`chunkAfter` 是会话事件查询游标，不是某个 Run 的局部 sequence。前端按已消费游标续订，不在健康 SSE 旁轮询 Snapshot。服务端等待已有提交通知，并保留无通知时 2s 一次的持久化补查；没有宣称跨进程通知或零 SQL。详见 [生命周期改造记录](2026-08-31-agent-conversation-transport-lifecycle-refactor-plan.md#9-本轮实现与验收记录)。
 
 ### 5.3 Operation
 

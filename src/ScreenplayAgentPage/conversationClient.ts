@@ -37,8 +37,8 @@ function dataOrThrow<T>(
 /**
  * Product-owned client for the native screenplay Conversation API.
  *
- * Cursor events are invalidation notices; the persisted Snapshot is always the
- * canonical UI source. This client deliberately has no dependency on the
+ * Canonical chunks update the conversation incrementally. Only a changed
+ * product projection fingerprint invalidates the business Snapshot. No dependency on the
  * Writing chat stream, chunk reducer, or renderer-local conversation store.
  */
 export class ScreenplayConversationClient {
@@ -78,20 +78,25 @@ export class ScreenplayConversationClient {
       chunkAfter: number
       onInvalidate: () => void
       onChunks: (page: ScreenplayAgentChunkPage) => void
+      onError?: (error: Error) => void
     },
   ): () => void {
     let chunkCursor = Math.max(0, options.chunkAfter)
     let receivedPage = false
+    let projectionVersion: string | undefined
     return this.api.watchScreenplayConversationEvents({
       projectId: state.projectId,
       sessionId: state.sessionId,
       chunkAfter: chunkCursor,
+      onError: options.onError,
       onEvent: (event) => {
-        if (receivedPage && event.nextCursor <= chunkCursor) return
+        const changed = event.projectionVersion !== projectionVersion
+        if (receivedPage && event.nextCursor <= chunkCursor && !changed) return
         receivedPage = true
         chunkCursor = event.nextCursor
         options.onChunks(event)
-        options.onInvalidate()
+        projectionVersion = event.projectionVersion
+        if (changed) options.onInvalidate()
       },
     })
   }

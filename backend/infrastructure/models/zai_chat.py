@@ -122,9 +122,10 @@ async def chat_no_stream(
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     client = _create_client(api_key, base_url)
     try:
+        params = _build_chat_params(messages, opts, profile, stream=False)
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            **_build_chat_params(messages, opts, profile, stream=False),
+            **params,
         )
         payload = _as_mapping(response)
         choices = payload.get("choices")
@@ -147,6 +148,7 @@ async def chat_no_stream(
                 else None
             ),
             "usage": dict(usage) if isinstance(usage, Mapping) else None,
+            "applied_output_limit": params.get("max_tokens"),
         }
     finally:
         await _close_in_thread(client)
@@ -164,9 +166,10 @@ async def chat_stream(
     profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
     client = _create_client(api_key, base_url)
     try:
+        params = _build_chat_params(messages, opts, profile, stream=True)
         raw_stream = await asyncio.to_thread(
             client.chat.completions.create,
-            **_build_chat_params(messages, opts, profile, stream=True),
+            **params,
         )
     except BaseException:
         await _close_in_thread(client)
@@ -190,6 +193,7 @@ async def chat_stream(
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
+        "applied_output_limit": params.get("max_tokens"),
     }
 
 

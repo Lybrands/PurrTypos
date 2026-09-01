@@ -7,6 +7,7 @@ import {
   isCanonicalOutputEvent,
   reduceCanonicalOutput,
   type CanonicalOutputEvent,
+  type CanonicalOutputState,
 } from '../canonicalOutput.ts'
 import { projectContextBudget } from '../contextBudgetProjection.ts'
 import type {
@@ -138,9 +139,7 @@ export function handleCanonicalOutput(
         contextBudget: ctx.acc.contextBudget ?? message.contextBudget,
         contextCompaction:
           ctx.acc.contextCompaction ?? message.contextCompaction,
-        toolCalling: state.operationOrder.some(
-          (operationId) => state.operations[operationId]?.status === 'running',
-        ),
+        toolCalling: hasRunningToolOperation(state),
       }
       return next
     })
@@ -431,12 +430,16 @@ function delegationActivity(
       toolApprovals: value.output.approvalOrder.map(
         (approvalId) => value.output.approvals[approvalId],
       ),
-      toolCalling: value.output.operationOrder.some(
-        (operationId) =>
-          value.output.operations[operationId]?.status === 'running',
-      ),
+      toolCalling: hasRunningToolOperation(value.output),
     },
   }
+}
+
+function hasRunningToolOperation(output: CanonicalOutputState): boolean {
+  return output.operationOrder.some((operationId) => {
+    const operation = output.operations[operationId]
+    return operation?.kind === 'tool' && operation.status === 'running'
+  })
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

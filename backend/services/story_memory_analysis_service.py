@@ -25,7 +25,6 @@ from infrastructure.persistence.writing.sqlite_story_memory_repository import (
     SqliteStoryMemoryRepository,
 )
 from schemas.story_memory import StorySettingInput
-from services.memory_intelligence_service import MEMORY_INTELLIGENCE_MODEL_ID_KEY
 from services.model_settings_service import (
     build_model_options,
     is_setting_enabled,
@@ -190,7 +189,6 @@ async def analyze_chapter(
         db,
         selection_key=STORY_MEMORY_ANALYSIS_MODEL_ID_KEY,
         preferred_model_id=preferred_model_id,
-        fallback_selection_keys=(MEMORY_INTELLIGENCE_MODEL_ID_KEY,),
     )
     if config is None:
         return _receipt(

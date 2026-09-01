@@ -114,7 +114,7 @@ async def test_minimax_openai_stream_requests_split_reasoning(
         chat = _Chat()
 
     monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: _Client())
-    await openai_chat.chat_stream(
+    result = await openai_chat.chat_stream(
         "k",
         [{"role": "user", "content": "reason"}],
         {
@@ -129,7 +129,8 @@ async def test_minimax_openai_stream_requests_split_reasoning(
         "reasoning_split": True,
         "thinking": {"type": "adaptive"},
     }
-    assert captured["max_completion_tokens"] == 2_048
+    assert result["applied_output_limit"] == captured["max_completion_tokens"] == 2_048
+    await result["stream"].aclose()
     assert "max_tokens" not in captured
 
 
@@ -161,7 +162,7 @@ async def test_kimi_k3_stream_forces_max_reasoning_and_preserves_history(
         {"role": "user", "content": "continue"},
     ]
     monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: _Client())
-    await openai_chat.chat_stream(
+    result = await openai_chat.chat_stream(
         "k",
         messages,
         {
@@ -174,7 +175,8 @@ async def test_kimi_k3_stream_forces_max_reasoning_and_preserves_history(
     )
 
     assert captured["extra_body"] == {"reasoning_effort": "max"}
-    assert captured["max_completion_tokens"] == 2_048
+    assert result["applied_output_limit"] == captured["max_completion_tokens"] == 2_048
+    await result["stream"].aclose()
     assert "max_tokens" not in captured
     assert captured["messages"] == messages
 
@@ -417,7 +419,8 @@ async def test_openai_stream_creation_failure_releases_client(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_openai_no_stream_releases_client_after_success(monkeypatch):
+@pytest.mark.parametrize("profile,parameter", [(None, "max_tokens"), ("moonshot:kimi-k3", "max_completion_tokens")])
+async def test_openai_no_stream_releases_client_after_success(monkeypatch, profile, parameter):
     from infrastructure.models import openai_chat
 
     response = SimpleNamespace(
@@ -431,7 +434,8 @@ async def test_openai_no_stream_releases_client_after_success(monkeypatch):
         model="mock",
     )
 
-    async def _create(**_kwargs):
+    async def _create(**kwargs):
+        assert kwargs[parameter] == 2_048
         return response
 
     client = _ClosableOpenAIClient(_create)
@@ -440,10 +444,11 @@ async def test_openai_no_stream_releases_client_after_success(monkeypatch):
     result = await openai_chat.chat_no_stream(
         "k",
         [{"role": "user", "content": "read"}],
-        {"model": "mock", "baseURL": "http://example.invalid"},
+        {"model": "mock", "baseURL": "http://example.invalid", "model_profile": profile, "max_tokens": 2_048},
     )
 
     assert result["message"]["content"] == "done"
+    assert result["applied_output_limit"] == 2_048
     assert client.close_calls == 1
 
 

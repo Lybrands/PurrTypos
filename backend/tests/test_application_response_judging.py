@@ -38,6 +38,7 @@ class _Gateway:
     async def complete(self, messages, invocation, signal=None):
         self.calls.append((tuple(messages), invocation, signal))
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message=AgentMessage(role="assistant", content='{"ok":true}'),
             model="judge-model",
             finish_reason=ModelFinishReason.STOP,
@@ -74,7 +75,7 @@ async def test_model_backed_judge_disables_tools_without_rewriting_model_options
                 capability_snapshot=replace(
                     generic_capability_snapshot(),
                     profile_id="fixture:writer-model",
-                    max_output_tokens=4_096,
+                    max_call_output_tokens=4_096,
                 ),
             options={
                 "temperature": 0.8,
@@ -106,7 +107,7 @@ async def test_model_backed_judge_disables_tools_without_rewriting_model_options
     assert invocation.tools == ()
     assert invocation.tool_choice is ToolChoiceMode.NONE
     assert invocation.reasoning_mode is ReasoningMode.DEFAULT
-    assert invocation.max_output_tokens == 4_096
+    assert invocation.max_call_output_tokens == 4_096
     assert invocation.request.options["temperature"] == 0.8
     assert invocation.request.options["baseURL"] == "https://provider.test/v1"
     assert invocation.request.profile_id == "fixture:writer-model"
@@ -131,6 +132,7 @@ async def test_model_backed_judge_fails_closed_on_an_unexpected_tool_call():
     class _ToolCallingGateway(_Gateway):
         async def complete(self, messages, invocation, signal=None):
             return ModelCompletion(
+                applied_output_limit=invocation.max_call_output_tokens,
                 message=AgentMessage(
                     role="assistant",
                     content='{"ok":true}',
@@ -152,7 +154,7 @@ async def test_model_backed_judge_fails_closed_on_an_unexpected_tool_call():
                 model="model",
                 capability_snapshot=replace(
                     generic_capability_snapshot(),
-                    max_output_tokens=4_096,
+                    max_call_output_tokens=4_096,
                 ),
             ),
             policy=_Policy(),

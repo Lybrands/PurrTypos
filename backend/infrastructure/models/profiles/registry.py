@@ -18,11 +18,11 @@ def _validated_profiles(*profiles: ModelProfile) -> tuple[ModelProfile, ...]:
     invalid = [
         profile.profile_id
         for profile in profiles
-        if profile.actionable and profile.max_output_tokens is None
+        if profile.actionable and profile.max_call_output_tokens is None
     ]
     if invalid:
         raise RuntimeError(
-            "actionable model profiles require max_output_tokens: "
+            "actionable model profiles require max_call_output_tokens: "
             + ", ".join(invalid)
         )
     return tuple(profiles)

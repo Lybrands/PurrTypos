@@ -15,7 +15,7 @@ class KimiK3Profile(ModelProfile):
     })
     reasoning_control = ReasoningControl.ALWAYS_ENABLED
     reasoning_replay = ReasoningReplayPolicy.REQUIRED
-    max_output_tokens = 1_048_576
+    max_call_output_tokens = 1_048_576
     capability_source = "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart"
     supports_json_object_output = True
     openai_output_token_parameter = "max_completion_tokens"

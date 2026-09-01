@@ -93,6 +93,8 @@ export default function InlineEditLayer({
 
   // 记忆 / 伏笔（同样跨入口共享）
   const {
+    selectedLongTermMemoryIds,
+    setSelectedLongTermMemoryIds,
     selectedMemoryIds,
     setSelectedMemoryIds,
     selectedForeshadowingIds,
@@ -149,6 +151,7 @@ export default function InlineEditLayer({
           outlineSelectOptions={outlineSelectOptions}
           handleQuickAssociateChapter={handleQuickAssociateChapter}
           handleQuickAssociateOutline={handleQuickAssociateOutline}
+          selectedLongTermMemoryIds={selectedLongTermMemoryIds}
           selectedMemoryIds={selectedMemoryIds}
           selectedForeshadowingIds={selectedForeshadowingIds}
           onOpenMemoryModal={() => setMemoryModalOpen(true)}
@@ -159,9 +162,11 @@ export default function InlineEditLayer({
         onCancel={() => setMemoryModalOpen(false)}
         bookId={bookId}
         writingChapters={writingChapters}
+        selectedLongTermMemoryIds={selectedLongTermMemoryIds}
         selectedIds={selectedMemoryIds}
         selectedForeshadowingIds={selectedForeshadowingIds}
-        onSelectConfirm={(memoryIds, foreshadowingIds) => {
+        onSelectConfirm={(longTermMemoryIds, memoryIds, foreshadowingIds) => {
+          setSelectedLongTermMemoryIds(longTermMemoryIds)
           setSelectedMemoryIds(memoryIds)
           setSelectedForeshadowingIds(foreshadowingIds)
         }}

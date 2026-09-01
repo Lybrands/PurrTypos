@@ -71,6 +71,7 @@ from infrastructure.screenplay.agent_continuation_begin_projector import (
     ScreenplayContinuationBeginProjector,
 )
 from purra.contracts import (
+    RuntimeLimits,
     AgentMessage,
     ModelCompletion,
     ModelFinishReason,
@@ -118,6 +119,10 @@ from schemas.screenplay_agent import (
     SubmitScreenplayAgentTurnRequest,
 )
 from schemas.screenplay_v2 import CreateScreenplayV2ProjectRequest
+from tests.support.planning_stream import (
+    is_planning_request,
+    planning_stream_wire,
+)
 
 
 @pytest_asyncio.fixture
@@ -144,6 +149,7 @@ class _CoreComposition:
     def create_core_for_request(self, request, api_key):
         del request, api_key
         return AgentCore(
+            runtime_limits=RuntimeLimits(max_run_output_tokens=None),
             model_gateway=self._gateway,
             run_repository=self._runs,
             planning_policy=ScreenplayToolLoopPolicy(),
@@ -395,12 +401,25 @@ class _ScriptedPlannerGateway:
         del signal
         self.calls.append((tuple(messages), invocation))
         round_chunks = self.rounds.pop(0)
+        if is_planning_request(messages):
+            raw_plan = "".join(chunk.content_delta for chunk in round_chunks)
+            try:
+                plan = json.loads(raw_plan)
+            except (TypeError, ValueError):
+                plan = raw_plan
+            finish_reason = round_chunks[-1].finish_reason
+            round_chunks = [
+                ModelStreamChunk(
+                    content_delta=planning_stream_wire(plan),
+                    finish_reason=finish_reason,
+                ),
+            ]
 
         async def chunks():
             for chunk in round_chunks:
                 yield chunk
 
-        return ModelStream(chunks=chunks(), model=invocation.request.model)
+        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model=invocation.request.model)
 
     async def complete(self, messages, invocation, signal=None):
         del signal
@@ -408,6 +427,7 @@ class _ScriptedPlannerGateway:
         round_chunks = self.rounds.pop(0)
         content = "".join(chunk.content_delta for chunk in round_chunks)
         return ModelCompletion(
+            applied_output_limit=invocation.max_call_output_tokens,
             message=AgentMessage(role="assistant", content=content),
             model=invocation.request.model,
             finish_reason=round_chunks[-1].finish_reason,
@@ -1744,7 +1764,7 @@ async def test_part_run_usage_settlement_counts_retries_once_per_run(screenplay_
             budget_limits=LongTaskBudgetLimits(
                 max_invocation_attempts=8,
                 max_input_tokens=10_000,
-                max_output_tokens=10_000,
+                max_run_output_tokens=10_000,
                 max_reasoning_tokens=10_000,
             ),
         ),
@@ -1808,7 +1828,7 @@ async def test_unreported_part_run_usage_fails_long_task_before_part_commit(
             budget_limits=LongTaskBudgetLimits(
                 max_invocation_attempts=8,
                 max_input_tokens=10_000,
-                max_output_tokens=10_000,
+                max_run_output_tokens=10_000,
                 max_reasoning_tokens=10_000,
             ),
         ),
@@ -1851,7 +1871,7 @@ async def test_unit_executor_settles_bound_run_before_host_part_write(
             budget_limits=LongTaskBudgetLimits(
                 max_invocation_attempts=8,
                 max_input_tokens=10_000,
-                max_output_tokens=10_000,
+                max_run_output_tokens=10_000,
                 max_reasoning_tokens=10_000,
             ),
         ),
