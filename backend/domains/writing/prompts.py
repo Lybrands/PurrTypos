@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 
-from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.writing.continuity_validation import (
     ATOMIC_CONTINUITY_SINGLE_DIMENSION_GUIDANCE,
     ATOMIC_CONTINUITY_VISIBLE_ORDER_GUIDANCE,
@@ -60,8 +59,8 @@ _SUMMARY_MAX_PATTERNS = (
 )
 
 
-def build_writing_agent_policy() -> str:
-    """Return the trusted behavior contract for the Writing Agent."""
+def build_writing_planning_policy() -> str:
+    """Return trusted Writing rules that may shape a Planner result."""
 
     return (
         "【小说 Agent 动态规划规则】\n"
@@ -75,8 +74,7 @@ def build_writing_agent_policy() -> str:
         "已完成步骤是执行历史，不得删除、重写或改回未完成。\n"
         "- 证据不足以安全继续时向用户澄清；完成用户目标后立即停止，不要额外扩写。\n"
         "- 正文改动只能形成候选稿或待应用结果；未经用户确认和现有应用流程，"
-        "不得覆盖正式正文。\n"
-        + build_agent_public_progress_policy()
+        "不得覆盖正式正文。"
     )
 
 

@@ -36,7 +36,7 @@ def _request() -> AgentRunRequest:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["writing", "screenplay"])
+@pytest.mark.parametrize("profile", ["writing", "novel_analysis", "screenplay"])
 async def test_every_product_uses_the_core_planner_without_a_host_wrapper(
     temp_db,
     profile,
@@ -52,7 +52,7 @@ async def test_every_product_uses_the_core_planner_without_a_host_wrapper(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["writing", "screenplay"])
+@pytest.mark.parametrize("profile", ["writing", "novel_analysis", "screenplay"])
 async def test_every_product_planner_uses_the_versioned_provider_stream(
     temp_db,
     monkeypatch,
@@ -115,18 +115,6 @@ async def test_every_product_planner_uses_the_versioned_provider_stream(
             for message in calls[0][0]
         )
         assert calls[0][1].get("tools") is None
-    finally:
-        composition.release_core(core)
-        await core.close()
-
-
-@pytest.mark.asyncio
-async def test_novel_analysis_uses_its_deterministic_domain_planner(temp_db):
-    composition = get_agent_composition()
-    core = composition.create_core("test-key", agent_profile="novel_analysis")
-    try:
-        assert not isinstance(core._planner, AgentPlanner)
-        assert type(core._planner).__name__ == "_NovelAnalysisPlanner"
     finally:
         composition.release_core(core)
         await core.close()

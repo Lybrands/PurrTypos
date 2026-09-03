@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
+from purra.api import AgentCoreRunOptions, PlanningMode
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     ContextBudgetClaim,
     ModelRequest,
-    PlanningMode,
     RunBinding,
     RunProvenance,
 )
-from purra.api import AgentCoreRunOptions
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
@@ -35,11 +35,12 @@ from domains.writing.response import (
 from domains.writing.public_facts import WritingPublicFactsProvider
 from schemas.ai import ChatStreamRequest
 from infrastructure.models.profiles.registry import resolve_model_profile
-from application.model_runtime import reasoning_mode_from_options
+from application.model_runtime import (
+    fit_output_limit_to_context,
+    reasoning_mode_from_options,
+)
 from purra.model_protocol import (
     FeatureRequirement,
-    InvocationOutputLimit,
-    InvocationOutputLimitSource,
     TaskCapabilityRequirements,
     preflight_capabilities,
     resolve_invocation_output_limit,
@@ -55,9 +56,6 @@ CONTEXT_WINDOW_TOKENS: dict[str, int] = {
     "300k": 300_000,
     "1m": 1_000_000,
 }
-WRITING_MAX_OUTPUT_TOKENS = 32_768
-
-
 class UnsupportedCallerToolContractError(ValueError):
     """The single Writing Agent path cannot execute caller-defined tools."""
 
@@ -157,7 +155,7 @@ def to_writing_agent_request(
             cancellation_required=True,
         ),
     )
-    return AgentRunRequest(
+    request = AgentRunRequest(
         messages=tuple(
             AgentMessage.from_mapping(message)
             for message in body.messages
@@ -174,11 +172,15 @@ def to_writing_agent_request(
         mode=body.chatAgentMode,
         context_window=selected_context_window,
         tools_enabled=bool(body.enableAgentTools and body.bookId),
-        planning_mode=PlanningMode(body.planningMode),
         metadata={
             "locale": body.locale,
             **({"streamId": body.streamId} if body.streamId else {}),
         },
+    )
+    return (
+        request
+        if body.planningMode is None
+        else replace(request, planning_mode=PlanningMode(body.planningMode))
     )
 
 
@@ -214,16 +216,7 @@ def writing_run_options(
         request.model.options.get("max_tokens"),
     )
     context_window = request.context_window or 200_000
-    workflow_output_cap = min(
-        WRITING_MAX_OUTPUT_TOKENS,
-        max(1_024, context_window // 4),
-    )
-    if output_limit.max_tokens > workflow_output_cap:
-        output_limit = InvocationOutputLimit(
-            max_tokens=workflow_output_cap,
-            source=InvocationOutputLimitSource.WORKFLOW_POLICY,
-            profile_max_tokens=output_limit.profile_max_tokens,
-        )
+    output_limit = fit_output_limit_to_context(output_limit, context_window)
     response_constraints = writing_response_constraints(request)
     response_validators = writing_response_validators(request)
     judge_policies = tuple(response_judge_policies)

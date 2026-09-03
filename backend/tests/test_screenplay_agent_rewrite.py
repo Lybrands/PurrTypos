@@ -142,8 +142,6 @@ from domains.screenplay_agent.agent_context import (
     ScreenplayAgentDomainContext,
 )
 from domains.screenplay_agent.contracts import (
-    ScreenplayPlanBinding,
-    ScreenplayPlanPhase,
     ScreenplayScopeKind,
 )
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
@@ -2227,11 +2225,6 @@ async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutati
             target={"screenplay": {
                 "version": 1,
                 "scope": {"kind": "next_episodes", "count": 9},
-                "stepBindings": [
-                    {"stepId": "evidence", "phase": "evidence"},
-                    {"stepId": "create", "phase": "creation"},
-                    {"stepId": "deliver", "phase": "delivery"},
-                ],
             }},
         )
         proposed = replace(current, task_spec=changed_spec)
@@ -2352,11 +2345,6 @@ def _screenplay_task_spec(
     extension = screenplay or {
         "version": 1,
         "scope": {"kind": "current_stage"},
-        "stepBindings": [
-            {"stepId": "understand-source", "phase": "evidence"},
-            {"stepId": "draft-analysis", "phase": "creation"},
-            {"stepId": "deliver-candidate", "phase": "delivery"},
-        ],
     }
     return TaskSpec(
         goal="分析原作范围",
@@ -2369,7 +2357,7 @@ def _screenplay_task_spec(
     )
 
 
-async def test_screenplay_intent_compiles_versioned_task_spec_and_exact_plan_bindings():
+async def test_screenplay_intent_compiles_versioned_task_spec_without_plan_shaping():
     intent = ScreenplayIntent.from_task_spec(
         _screenplay_task_spec(),
         _semantic_steps(),
@@ -2379,29 +2367,24 @@ async def test_screenplay_intent_compiles_versioned_task_spec_and_exact_plan_bin
     assert intent.instruction == "梳理人物、事件与可改编冲突。"
     assert intent.requested_deliverable == "sourceAnalysis"
     assert intent.scope.kind is ScreenplayScopeKind.CURRENT_STAGE
-    assert [(binding.step_id, binding.phase) for binding in intent.plan_bindings] == [
-        ("understand-source", ScreenplayPlanPhase.EVIDENCE),
-        ("draft-analysis", ScreenplayPlanPhase.CREATION),
-        ("deliver-candidate", ScreenplayPlanPhase.DELIVERY),
-    ]
+    assert not hasattr(intent, "plan_bindings")
     assert "reply" not in intent.to_mapping()
     assert ScreenplayIntent.from_mapping(intent.to_mapping()) == intent
 
 
-async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deserialized():
+async def test_answer_task_spec_needs_no_reply_and_rejects_legacy_fields():
     task_spec = _screenplay_task_spec(operation="answer", deliverable=None)
 
     intent = ScreenplayIntent.from_task_spec(task_spec, _semantic_steps())
-    restored = ScreenplayIntent.from_mapping({
-        "action": "answer",
-        "instruction": "说明当前阶段",
-        "reply": "旧持久化回复不能完成新 Turn",
-    })
 
     assert intent.action is ScreenplayIntentAction.ANSWER
     assert not hasattr(intent, "reply")
-    assert not hasattr(restored, "reply")
-    assert "reply" not in restored.to_mapping()
+    with pytest.raises(ValueError, match="intent fields"):
+        ScreenplayIntent.from_mapping({
+            "action": "answer",
+            "instruction": "说明当前阶段",
+            "reply": "旧持久化回复不能完成新 Turn",
+        })
 
 
 @pytest.mark.parametrize(
@@ -2434,43 +2417,6 @@ async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deseriali
             }),
             "episode numbers",
         ),
-        (
-            lambda raw: raw["stepBindings"].append(
-                {"stepId": "understand-source", "phase": "review"}
-            ),
-            "exactly once",
-        ),
-        (lambda raw: raw["stepBindings"].pop(), "plan steps"),
-        (
-            lambda raw: raw["stepBindings"].append(
-                {"stepId": "publish-internal-revision", "phase": "delivery"}
-            ),
-            "plan steps",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"phase": "internal"}),
-            "phase",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"stepId": 1}),
-            "step id",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"stepId": True}),
-            "step id",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"phase": 1}),
-            "phase",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"phase": True}),
-            "phase",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"unknown": True}),
-            "binding fields",
-        ),
     ],
 )
 async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_contracts(
@@ -2480,11 +2426,6 @@ async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_con
     raw = {
         "version": 1,
         "scope": {"kind": "current_stage"},
-        "stepBindings": [
-            {"stepId": "understand-source", "phase": "evidence"},
-            {"stepId": "draft-analysis", "phase": "creation"},
-            {"stepId": "deliver-candidate", "phase": "delivery"},
-        ],
     }
     mutate(raw)
 
@@ -2493,24 +2434,6 @@ async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_con
             _screenplay_task_spec(screenplay=raw),
             _semantic_steps(),
         )
-
-
-@pytest.mark.parametrize("step_id", [1, b"understand-source", True])
-async def test_screenplay_plan_binding_rejects_non_string_step_ids(step_id):
-    with pytest.raises(ValueError, match="step id"):
-        ScreenplayPlanBinding.from_mapping({
-            "stepId": step_id,
-            "phase": "evidence",
-        })
-
-
-@pytest.mark.parametrize("phase", [1, b"evidence", True])
-async def test_screenplay_plan_binding_rejects_non_string_phases(phase):
-    with pytest.raises(ValueError, match="phase"):
-        ScreenplayPlanBinding.from_mapping({
-            "stepId": "understand-source",
-            "phase": phase,
-        })
 
 
 @pytest.mark.parametrize("kind", [1, b"current_stage", True])
@@ -2573,11 +2496,6 @@ async def test_task_spec_scope_is_compatible_with_the_same_stage_command(scope):
     screenplay = {
         "version": 1,
         "scope": scope,
-        "stepBindings": [
-            {"stepId": "understand-source", "phase": "evidence"},
-            {"stepId": "draft-analysis", "phase": "creation"},
-            {"stepId": "deliver-candidate", "phase": "delivery"},
-        ],
     }
     intent = ScreenplayIntent.from_task_spec(
         _screenplay_task_spec(screenplay=screenplay),
@@ -2680,6 +2598,7 @@ async def test_tool_calling_service_preserves_bound_revision_and_episode_scope(
     captured = {}
 
     async def fake_child(**kwargs):
+        assert kwargs["request"].metadata["responseAudience"] == "internal"
         captured["payload"] = thaw_json_mapping(
             kwargs["request"].domain_context.payload
         )
@@ -2731,7 +2650,6 @@ async def test_tool_calling_service_preserves_bound_revision_and_episode_scope(
         user_payload={"episodeNumber": 2},
         domain_context=context,
         conversation_turn_id="turn-1",
-        output_token_cap=16_384,
         host_candidate_template={"sceneId": "scene-1"},
         candidate_validation_contract={
             "protocol": "purrtypos.screenplay.candidate-validation/v1",
@@ -2924,11 +2842,6 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         source_revision_refs=("sprev-scenes", "sprev-brief"),
         episode_scene_ids={4: ("ep04_s01", "ep04_s02")},
         original_request="请创作第 4 集，并保留上一集的结尾伏笔。",
-        plan_bindings=(
-            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("draft", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("understand", "draft", "deliver"),
     )
     compiled = compile_screenplay_manifest(**arguments)
@@ -2966,7 +2879,7 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         "preserve": [],
         "baseRevisionId": None,
     }
-    assert compiled.recipe.metadata["recipeVersion"] == 6
+    assert compiled.recipe.metadata["recipeVersion"] == 7
     assert compiled.manifest.digest == repeated.manifest.digest
     assert [part.id for part in compiled.manifest.parts] == [
         part.id for part in repeated.manifest.parts
@@ -2983,11 +2896,6 @@ async def test_scene_list_manifest_persists_episode_specific_part_identity():
         target_role="sceneList",
         source_revision_refs=("structure-head",),
         document_sections=("episode-1", "episode-2"),
-        plan_bindings=(
-            ScreenplayPlanBinding("read", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("plan", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("read", "plan", "deliver"),
     )
     episode_steps = [
@@ -3005,7 +2913,25 @@ async def test_scene_list_manifest_persists_episode_specific_part_identity():
     )
 
 
-async def test_multi_episode_recipe_obeys_root_public_step_barriers():
+async def test_manifest_maps_one_model_authored_step_without_padding_the_plan():
+    plan_steps = _bound_steps("完成用户要求")
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="形成创意简报",
+            requested_deliverable="creativeBrief",
+        ),
+        target_role="creativeBrief",
+        document_sections=("premise",),
+        plan_steps=plan_steps,
+    )
+
+    assert {step.plan_step_id for step in compiled.recipe.steps} == {
+        plan_steps[0].id,
+    }
+
+
+async def test_multi_episode_recipe_keeps_domain_dependencies_while_mapping_plan():
     compiled = compile_screenplay_manifest(
         intent=ScreenplayIntent(
             action=ScreenplayIntentAction.CREATE,
@@ -3017,11 +2943,6 @@ async def test_multi_episode_recipe_obeys_root_public_step_barriers():
             4: ("ep04_s01",),
             5: ("ep05_s01",),
         },
-        plan_bindings=(
-            ScreenplayPlanBinding("read-sources", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("write-episodes", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver-result", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps(
             "read-sources",
             "write-episodes",
@@ -3030,24 +2951,22 @@ async def test_multi_episode_recipe_obeys_root_public_step_barriers():
     )
 
     steps = {step.id: step for step in compiled.recipe.steps}
-    evidence_ids = {"evidence:4", "evidence:5"}
-    validation_ids = {"episode:4:validation", "episode:5:validation"}
     assert steps["evidence:4"].depends_on == ()
-    assert steps["evidence:5"].depends_on == ()
-    assert set(steps["draft:4:ep04_s01"].depends_on) == evidence_ids
-    assert set(steps["draft:5:ep05_s01"].depends_on) == evidence_ids
-    assert set(steps["compose-final-response"].depends_on) == validation_ids
-    assert {
-        step.plan_step_id for step in compiled.recipe.steps
-        if step.id in evidence_ids
-    } == {"read-sources"}
-    assert {
-        step.plan_step_id for step in compiled.recipe.steps
-        if step.id in validation_ids
-    } == {"write-episodes"}
+    assert steps["draft:4:ep04_s01"].depends_on == ("evidence:4",)
+    assert steps["evidence:5"].depends_on == ("episode:4:validation",)
+    assert steps["draft:5:ep05_s01"].depends_on == ("evidence:5",)
+    assert steps["compose-final-response"].depends_on == (
+        "episode:4:validation",
+        "episode:5:validation",
+    )
+    assert {step.plan_step_id for step in compiled.recipe.steps} == {
+        "read-sources",
+        "write-episodes",
+        "deliver-result",
+    }
 
 
-async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order():
+async def test_manifest_mapping_follows_model_plan_order_without_rewriting_dag():
     plan_steps = _semantic_steps()
     compiled = compile_screenplay_manifest(
         intent=ScreenplayIntent(
@@ -3060,20 +2979,6 @@ async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order(
             4: ("ep04_s01",),
             5: ("ep05_s01",),
         },
-        plan_bindings=(
-            ScreenplayPlanBinding(
-                "deliver-candidate",
-                ScreenplayPlanPhase.DELIVERY,
-            ),
-            ScreenplayPlanBinding(
-                "understand-source",
-                ScreenplayPlanPhase.EVIDENCE,
-            ),
-            ScreenplayPlanBinding(
-                "draft-analysis",
-                ScreenplayPlanPhase.CREATION,
-            ),
-        ),
         plan_steps=plan_steps,
     )
 
@@ -3082,10 +2987,9 @@ async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order(
         step.id for step in plan_steps
     )
     by_id = {step.id: step for step in steps}
-    validation_ids = {"episode:4:validation", "episode:5:validation"}
-    assert set(by_id["compose-final-response"].depends_on) == validation_ids
-    assert steps.index(by_id["compose-final-response"]) > max(
-        steps.index(by_id[unit_id]) for unit_id in validation_ids
+    assert by_id["compose-final-response"].depends_on == (
+        "episode:4:validation",
+        "episode:5:validation",
     )
 
 
@@ -3102,11 +3006,6 @@ async def test_source_analysis_recipe_exposes_semantic_progress_titles():
             "title": "第一章",
             "index": 1,
         },),
-        plan_bindings=(
-            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("analyze", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("understand", "analyze", "deliver"),
     )
 
@@ -3137,11 +3036,6 @@ async def test_source_analysis_manifest_compiles_one_digest_per_authorized_chapt
         ),
         target_role="sourceAnalysis",
         source_chapters=chapters,
-        plan_bindings=(
-            ScreenplayPlanBinding("read", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("analyze", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("read", "analyze", "deliver"),
     )
 
@@ -3177,11 +3071,6 @@ async def test_source_analysis_manifest_builds_fixed_twelve_way_reduction_tree()
         ),
         target_role="sourceAnalysis",
         source_chapters=chapters,
-        plan_bindings=(
-            ScreenplayPlanBinding("read", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("analyze", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("read", "analyze", "deliver"),
     )
 
@@ -3381,11 +3270,6 @@ async def test_structure_manifest_persists_index_before_episode_part_expansion()
             requested_deliverable="structure",
         ),
         target_role="structure",
-        plan_bindings=(
-            ScreenplayPlanBinding("read", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("design", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("read", "design", "deliver"),
     )
 
@@ -3451,11 +3335,6 @@ async def test_compiled_recipe_persists_part_contracts_and_nonempty_budget():
             requested_deliverable="structure",
         ),
         target_role="structure",
-        plan_bindings=(
-            ScreenplayPlanBinding("read", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("design", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("read", "design", "deliver"),
     )
 
@@ -3501,11 +3380,6 @@ async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode(
         source_revision_refs=("sprev-draft",),
         episode_scene_ids={1: ("ep01_s01", "ep01_s02")},
         reviewed_draft_id="sprev-draft",
-        plan_bindings=(
-            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("review", ScreenplayPlanPhase.REVIEW),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("understand", "review", "deliver"),
     )
 
@@ -3725,10 +3599,6 @@ def _admission_plan(
             target={"screenplay": {
                 "version": 1,
                 "scope": {"kind": "current_stage"},
-                "stepBindings": [
-                    {"stepId": step.id, "phase": phase}
-                    for step, phase in zip(steps, phases, strict=True)
-                ],
             }},
         ),
         steps=steps,
@@ -3944,7 +3814,7 @@ async def test_screenplay_profile_admits_formal_plan_as_one_operation_and_privat
         thaw_json_mapping(recipe.metadata),
         ensure_ascii=False,
     )
-    assert "planBindingDigest" in recipe.metadata
+    assert "planMappingDigest" in recipe.metadata
     assert all(step.title not in serialized_metadata for step in plan.steps)
 
 
@@ -4604,8 +4474,10 @@ async def test_planning_context_contains_state_not_artifact_bodies(
     assert "episodeState" in context
 
 
+@pytest.mark.parametrize('context_method', ['build_context', 'build_planning_context'])
 async def test_composed_screenplay_root_planning_context_uses_db_facts_without_body_leakage(
     temp_db: DatabaseConnection,
+    context_method: str,
 ):
     source_marker = "SCREENPLAY_PLANNER_MUST_NOT_SEE_SOURCE_TEXT_8C4D"
     await temp_db.execute(
@@ -4716,7 +4588,7 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
         provider = composition._profile_registry.require(
             "screenplay"
         ).adapter.context_provider
-        bundle = await provider.build_planning_context(
+        bundle = await getattr(provider, context_method)(
             request,
             ContextBudget(
                 window_tokens=128_000,
@@ -6116,7 +5988,6 @@ class _CheckpointingToolCalls:
         self.fail_once_key = fail_once_key
         self.failed = False
         self.calls: list[tuple[str, str, ReasoningMode]] = []
-        self.output_caps: list[int] = []
         self.tool_profiles: list[str] = []
         self.user_payloads: list[dict] = []
         self.system_instructions: list[str] = []
@@ -6133,7 +6004,6 @@ class _CheckpointingToolCalls:
             part_key,
             kwargs.get("reasoning_mode", ReasoningMode.DEFAULT),
         ))
-        self.output_caps.append(int(kwargs["output_token_cap"]))
         self.tool_profiles.append(str(context.tool_access))
         self.user_payloads.append(dict(kwargs["user_payload"]))
         self.system_instructions.append(str(kwargs["system_instruction"]))
@@ -6522,12 +6392,8 @@ async def test_source_analysis_parts_read_only_bound_identities_and_propagate_ru
         "source_digest_reduction",
         "source_analysis_section",
     ]
-    assert tool_calls.calls[0]["context"].source_scope["chapterIds"] == [
-        "chapter-1"
-    ]
-    assert tool_calls.calls[1]["context"].source_scope["chapterIds"] == [
-        "chapter-2"
-    ]
+    assert tool_calls.calls[0]["context"].source_scope["mode"] == "whole_book"
+    assert tool_calls.calls[1]["context"].source_scope["mode"] == "whole_book"
     assert tool_calls.calls[2]["payload"]["dependencyPartKeys"] == [
         "source-analysis:chapter:chapter-1",
         "source-analysis:chapter:chapter-2",
@@ -6636,7 +6502,7 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
                 "id": "draft:1:scene-1",
                 "kind": "generate_draft_scene",
                 "status": "pending",
-                "dependsOn": ["evidence:1"],
+                "dependsOn": ["evidence:1", "evidence:2"],
                 "input": {
                     "episodeNumber": 1,
                     "sceneId": "scene-1",
@@ -6679,6 +6545,16 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
                     "sceneIds": ["scene-1", "scene-2"],
                 },
             },
+            {
+                "id": "evidence:2",
+                "kind": "collect_evidence",
+                "status": "completed",
+                "input": {"episodeNumber": 2},
+                "output": {
+                    "evidenceDescriptor": {"episodeNumber": 2},
+                    "evidenceReceipt": "receipt-2",
+                },
+            },
         ],
     }
 
@@ -6700,7 +6576,6 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
     assert validated["episodeDraft"]["sceneIds"] == ["scene-1", "scene-2"]
     assert len(validated["validationReceipt"]) == 64
     assert [key for _, key, _ in tool_calls.calls] == ["scene-1", "scene-2", "1"]
-    assert tool_calls.output_caps == [16_384, 16_384, 4_096]
     assert tool_calls.tool_profiles == [
         "draft_scene",
         "draft_scene",
@@ -6948,7 +6823,7 @@ async def test_review_dimension_parts_aggregate_host_side(
         and "reviewReport" not in payload
         for payload in tool_calls.user_payloads
     )
-    assert "必须调用 getScreenplayEpisodeContext" in tool_calls.system_instructions[0]
+    assert "使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext" in tool_calls.system_instructions[0]
     assert "最多提交 1 个问题" in tool_calls.system_instructions[0]
     assert all(
         context.episode_number == 1

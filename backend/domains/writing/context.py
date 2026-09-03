@@ -39,8 +39,8 @@ from domains.writing.unified_memory_context import (
     unavailable_memory_context_pack,
 )
 from domains.writing.prompts import (
-    build_writing_agent_policy,
     build_writing_evidence_policy,
+    build_writing_planning_policy,
     build_writing_session_binding,
     frame_untrusted_writing_context,
 )
@@ -50,7 +50,7 @@ from domains.writing.response import writing_response_contract_for_request
 WRITING_RETRIEVAL_CONTEXT = "writing_retrieval"
 WRITING_BINDING_CONTEXT = "writing_session_binding"
 WRITING_EVIDENCE_POLICY_CONTEXT = "writing_evidence_policy"
-WRITING_AGENT_POLICY_CONTEXT = "writing_agent_policy"
+WRITING_DOMAIN_POLICY_CONTEXT = "writing_domain_policy"
 WRITING_PLANNING_FACTS_CONTEXT = "writing_planning_facts"
 CONTINUATION_CANON_CONTEXT = "continuation_canon"
 
@@ -155,7 +155,7 @@ class WritingContextProvider:
             selected_foreshadowing_ids=context.selected_foreshadowing_ids,
         ))
         associated = _planning_associated_manifest(context)
-        policy = build_writing_agent_policy()
+        policy = build_writing_planning_policy()
         host_facts = build_host_planning_facts(
             current_chapter_bound=bool(
                 str(context.chapter_id or "").strip()
@@ -207,7 +207,7 @@ class WritingContextProvider:
         return ContextBundle(
             blocks=(
                 ContextBlock(
-                    name=WRITING_AGENT_POLICY_CONTEXT,
+                    name=WRITING_DOMAIN_POLICY_CONTEXT,
                     content=policy,
                     token_count=estimate_json_tokens(policy),
                     untrusted=False,
@@ -406,9 +406,9 @@ class WritingContextProvider:
 
         # Staged execution replaces the planning bundle; behavioral rules must
         # be present here too, including after task-specific retrieval.
-        agent_policy = build_writing_agent_policy()
+        agent_policy = build_writing_planning_policy()
         blocks.append(ContextBlock(
-            name=WRITING_AGENT_POLICY_CONTEXT,
+            name=WRITING_DOMAIN_POLICY_CONTEXT,
             content=agent_policy,
             token_count=estimate_json_tokens(agent_policy),
             untrusted=False,

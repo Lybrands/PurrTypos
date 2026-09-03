@@ -20,6 +20,7 @@ from purra.recovery import FailureCategory, FailureSignal
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from domains.screenplay_agent.contracts import (
+    SCREENPLAY_DELIVERABLE_LABELS,
     ReviewEpisodeInputRef,
     ReviewEpisodeResult,
 )
@@ -50,14 +51,6 @@ _DOCUMENT_KIND = {
     "sceneList": "scene_list",
     "screenplayDraft": "scene_draft",
     "review": "review",
-}
-_ROLE_LABELS = {
-    "sourceAnalysis": "原作分析",
-    "creativeBrief": "创作简报",
-    "structure": "分集结构",
-    "sceneList": "场景表",
-    "screenplayDraft": "剧本正文",
-    "review": "审阅报告",
 }
 SCREENPLAY_AI_PART_KINDS = frozenset({
     "generate_draft_scene",
@@ -345,7 +338,6 @@ class ScreenplayTaskModelCalls:
             ),
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
-            output_token_cap=contract.output_token_cap,
             host_candidate_template=_host_scene_candidate_template(scene_id),
             candidate_validation_contract={
                 "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
@@ -406,7 +398,6 @@ class ScreenplayTaskModelCalls:
             ),
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
-            output_token_cap=contract.output_token_cap,
             candidate_validation_contract={
                 "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
                 "kind": contract.validation_kind,
@@ -472,7 +463,6 @@ class ScreenplayTaskModelCalls:
             ),
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
-            output_token_cap=contract.output_token_cap,
             candidate_validation_contract={
                 "protocol": SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
                 "kind": contract.validation_kind,
@@ -729,7 +719,6 @@ class ScreenplayTaskModelCalls:
             ),
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
-            output_token_cap=contract.output_token_cap,
             candidate_validation_contract=validation_contract,
             signal=signal,
         )
@@ -883,7 +872,7 @@ class ScreenplayTaskModelCalls:
             "instruction": str(unit_input.get("instruction") or ""),
             "target": {
                 "role": role,
-                "label": _ROLE_LABELS.get(role, "剧本交付物"),
+                "label": SCREENPLAY_DELIVERABLE_LABELS.get(role, "剧本交付物"),
             },
             "constraints": list(unit_input.get("constraints") or ()),
             "preserve": list(unit_input.get("preserve") or ()),
@@ -893,7 +882,6 @@ class ScreenplayTaskModelCalls:
             ],
         }
         assert self._models is not None
-        contract = self._part_contract(task, unit)
         result = await self._models.run_public_text(
             runtime=runtime,
             session_id=int(task["sessionId"]),
@@ -906,7 +894,6 @@ class ScreenplayTaskModelCalls:
             unit_id=str(unit["id"]),
             expected_part_key=str(task["targetRole"]),
             conversation_turn_id=str(task["turnId"]),
-            output_token_cap=contract.output_token_cap,
             bind_run=bind_run,
             signal=signal,
         )
@@ -935,16 +922,6 @@ class ScreenplayTaskModelCalls:
         if project is None:
             raise AppError("剧本项目不存在", 404)
         source_scope = parse_source_scope(project.get("source_scope_json"))
-        if tool_profile == "source_chapter_digest":
-            chapter_id = str(
-                (unit.get("input") or {}).get("chapterId") or ""
-            ).strip()
-            if not chapter_id:
-                raise ValueError("source chapter digest has no bound chapter")
-            source_scope = parse_source_scope({
-                "mode": "selected_chapters",
-                "chapterIds": [chapter_id],
-            })
         return ScreenplayAgentDomainContext(
             project_id=str(task["projectId"]),
             task_id=str(task["id"]),
@@ -1364,6 +1341,8 @@ def _dependency_output(
         and str(item.get("kind") or "") == expected_kind
         and item.get("status") == "completed"
     )
+    if len(direct) > 1:
+        direct = tuple(item for item in direct if _same_recipe_target(item, unit))
     candidates = direct or tuple(
         item
         for item in units
@@ -1559,9 +1538,9 @@ def _completed_part_outputs(
 
 def _scene_tool_instruction(episode_number: int, scene_id: str) -> str:
     return f"""你是专业剧本编剧，只创作第 {episode_number} 集中的场景 {scene_id}。
-必须调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 和 episodeNumber 获取场景计划、旧稿、审阅信息或原作依据。不得把 evidenceDescriptor 当成正文，也不得声称未调用工具就已读到材料。
-如果 dependencyPartKeys 非空，必须调用 readScreenplayTaskDependencies 读取这些当前任务依赖；不得根据 Part key 猜测其内容。
-取得工具结果后完成创作，不得扩大到其他场景或重新规划任务。
+使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext 获取，再按需通过可用工具读取其他集、项目文档或原作依据。
+如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取；不得根据 Part key 猜测其内容。
+材料齐备后完成创作，不得扩大到其他场景或重新规划任务。
 最终回复只输出当前场景的完整可拍摄剧本文本。不得输出 JSON、Markdown 代码块、过程说明、整集或其他场景。场景身份和写入由宿主负责。"""
 
 
@@ -1592,7 +1571,7 @@ def _review_dimension_tool_instruction(
 ) -> str:
     issue_limit = len(tuple(dict.fromkeys(scene_ids)))
     return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集的 {dimension} 维度。
-必须调用 getScreenplayEpisodeContext，使用 evidenceDescriptor 中的 episodeNumber、reviewedDraftId 和 sceneListRevisionId 读取指定不可变版本。只能依据工具返回的材料审阅，不得把系统错误写成审阅意见。
+使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext 读取，再按需读取其他集或项目文档，依据已提供或读取的材料审阅。
 构造以下候选对象：
 {{"episodeNumber":{episode_number},"reviewDimension":"{dimension}","title":"第 {episode_number} 集 {dimension} 审阅","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
 问题只能引用这些场景 ID：{list(scene_ids)}。本维度最多提交 {issue_limit} 个问题，不得超过当前集场景数；没有问题时 issues=[] 且 verdict=ready。最终必须调用 writeScreenplayCandidatePart 写入候选对象，不得只在回复中打印 JSON。"""
@@ -1747,7 +1726,7 @@ def _creative_brief_section_tool_instruction(section_key: str) -> str:
         )
     )
     return f"""你只生成 creativeBrief 文档中的 {section_key} 章节。
-如果 evidenceDescriptor.acceptedRevisionIds 非空，必须调用 readScreenplayDeliverable，并严格使用其中绑定给 sourceAnalysis 或 creativeBrief 的 role 与 revisionId；不得读取其他交付物、旧版本或当前 Operation 的候选 Part。若该映射为空，只能依据当前用户指令和已有对话上下文，不得虚构已读取材料。
+参考 evidenceDescriptor.acceptedRevisionIds，通过 readScreenplayDeliverable 按需读取项目材料；指定 revisionId 可查阅其他已有版本。不得虚构已读取材料。
 如果 dependencyPartKeys 非空，必须调用 readScreenplayTaskDependencies 读取这些直接依赖；不得根据 Part key 猜测内容。
 构造以下候选对象：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的紧凑 Markdown 正文","contentJson":{content_json}}}
@@ -1768,8 +1747,8 @@ def _document_section_tool_instruction(role: str, section_key: str) -> str:
     if content_json is None:
         raise ValueError("screenplay_part_contract_unknown")
     return f"""你只生成 {role} 文档中的 {section_key} 章节。
-必须调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 获取完成本章节所需的项目交付物或原作依据。不得把描述符当作正文。
-如果 dependencyPartKeys 非空，必须调用 readScreenplayTaskDependencies 读取这些当前任务依赖；不得根据 Part key 猜测内容。
+优先使用已提供的读取结果；缺少材料时调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 获取完成本章节所需的项目交付物或原作依据。不得把描述符当作正文。
+如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取；不得根据 Part key 猜测内容。
 构造以下候选对象：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{content_json}}}
 contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。最终必须调用 writeScreenplayCandidatePart 写入候选对象，不得只在回复中打印 JSON。"""
@@ -1796,7 +1775,7 @@ def _source_chapter_digest_tool_instruction(
 ) -> str:
     section_key = f"source_digest:chapter:{chapter_id}"
     return f"""你只分析宿主绑定的一个授权叶子章节：第 {chapter_index} 章《{chapter_title}》。
-必须调用 readSourceChapters，chapterIds 只能且必须是 [{json.dumps(chapter_id, ensure_ascii=False)}]；不得读取其他章节、全书目录、人物库或既有分析文档。
+使用已提供的章节正文；缺失时调用 readSourceChapters 读取章节 {json.dumps(chapter_id, ensure_ascii=False)}；需要核对上下文时，可按需读取授权范围内的其他章节。
 构造以下候选对象：
 {{"sectionKey":{json.dumps(section_key, ensure_ascii=False)},"title":"当前章节事实摘要","contentText":"只包含本章事件边界的紧凑摘要","contentJson":{_source_digest_schema(chapter_id)}}}
 contentJson 只能包含示例中的八个字段；数组应紧凑、键唯一，不得复制长原文，不得生成分集、场景、对白或改编成稿。最终必须调用 writeScreenplayCandidatePart；不得输出工具参数、Run/Task/Artifact ID 或私有推理。"""
@@ -1848,8 +1827,8 @@ contentJson 顶层及嵌套字段必须与示例完全一致。{boundary}
 
 def _structure_episode_plan_index_tool_instruction() -> str:
     return """你只确定分集结构的索引，不写完整分集内容。
-必须调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 读取已接受创作简报、原作分析，并按需读取原作结构或正文。不得把原作章节数直接等同于剧集数；应依据项目格式、叙事容量、主线阶段和用户约束确定集数。
-如果 dependencyPartKeys 非空，必须调用 readScreenplayTaskDependencies 读取这些当前任务依赖。
+优先使用已提供的读取结果；缺少材料时调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 读取已接受创作简报、原作分析，并按需读取原作结构或正文。不得把原作章节数直接等同于剧集数；应依据项目格式、叙事容量、主线阶段和用户约束确定集数。
+如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取。
 构造以下候选对象：
 {"sectionKey":"episode_plan:index","title":"分集索引","contentText":"简短的分集索引 Markdown","contentJson":{"episodes":[{"number":1,"id":"ep01","title":"集标题","summary":"本集叙事边界与核心推进","sourceChapterIds":["实际读取过的 chapterId"]}]}}
 集号必须从 1 连续递增，最多 100 集；id、title、summary 必须唯一且简洁。这里只提交用于后续逐集生成的轻量索引，不得展开场景或长篇正文。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
@@ -1857,7 +1836,7 @@ def _structure_episode_plan_index_tool_instruction() -> str:
 
 def _structure_series_arc_index_tool_instruction() -> str:
     return """你只确定全剧主线的阶段索引，不写分集、场景或完整阶段正文。
-必须调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 获取已接受材料；如 dependencyPartKeys 非空，还必须调用 readScreenplayTaskDependencies 读取直接依赖。
+优先使用已提供的读取结果；缺少材料时调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 获取已接受材料；如 dependencyPartKeys 非空，使用已提供的依赖正文，缺失时调用 readScreenplayTaskDependencies 读取直接依赖。
 构造以下候选对象：
 {"sectionKey":"series_arc:index","title":"全剧阶段索引","contentText":"简短的阶段索引 Markdown","contentJson":{"phases":[{"key":"稳定的英文或数字键","title":"阶段标题","objective":"该阶段的叙事目标"}]}}
 阶段必须按叙事顺序排列，数量 1 到 12；key、title 必须唯一。不得包含 episodes、scenes、sceneText 或对白。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
@@ -1871,7 +1850,7 @@ def _structure_series_arc_phase_tool_instruction(
     objective = str(entry.get("objective") or "")
     return f"""你只生成全剧主线中的阶段 {title}。
 阶段索引已经固定身份：key={key}、title={title}、objective={objective}。不得改变这些值，也不得输出其他阶段。
-必须调用 readScreenplayTaskDependencies 读取 dependencyPartKeys 中的阶段索引；需要已接受创作简报或原作分析时，按 evidenceDescriptor 中的精确 revisionId 调用交付物读取工具。
+使用已提供的阶段索引；缺失时调用 readScreenplayTaskDependencies 读取 dependencyPartKeys 中的阶段索引；需要已接受创作简报或原作分析时，按 evidenceDescriptor 中的精确 revisionId 调用交付物读取工具。
 构造以下候选对象：
 {{"sectionKey":"series_arc:phase:{key}","title":{json.dumps(title, ensure_ascii=False)},"contentText":"当前阶段的 Markdown 正文","contentJson":{{"seriesArc":{{"phases":[{{"key":{json.dumps(key, ensure_ascii=False)},"title":{json.dumps(title, ensure_ascii=False)},"objective":{json.dumps(objective, ensure_ascii=False)},"centralConflict":"阶段核心冲突","turningPoint":"阶段关键转折","exitState":"阶段结束状态"}}]}}}}}}
 contentJson 只能包含当前阶段；不得包含 episodes、scenes、sceneText 或对白。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
@@ -1887,7 +1866,7 @@ def _structure_episode_plan_fragment_tool_instruction(
     title_json = json.dumps(title, ensure_ascii=False)
     return f"""你只生成分集结构中的第 {number} 集。
 分集索引已经固定本集身份：number={number}、id={episode_id}、title={title}。不得改变集数、ID、标题，也不得输出其他集。
-必须调用 readScreenplayTaskDependencies，读取 dependencyPartKeys 中的分集索引和其他直接依赖；需要原作依据时再按 evidenceDescriptor 调用对应读取工具。不得根据 Part key 猜测内容。
+使用已提供的分集索引和依赖正文；缺失时调用 readScreenplayTaskDependencies 读取 dependencyPartKeys 中的材料；需要原作依据时再按 evidenceDescriptor 调用对应读取工具。不得根据 Part key 猜测内容。
 构造以下候选对象：
 {{"sectionKey":"episode_plan:episode-{number}","title":"第 {number} 集分集结构","contentText":"当前集分集结构的 Markdown 正文","contentJson":{{"episodes":[{{"number":{number},"id":{episode_id_json},"title":{title_json},"summary":"本集完整梗概","objective":"本集目标","conflict":"核心冲突","turn":"关键转折","hook":"集末钩子"}}]}}}}
 contentJson.episodes 必须且只能包含当前一集。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
@@ -1916,8 +1895,8 @@ turningEpisodes 只能引用已读取分集的 id。contentJson 只能包含当�
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
     return f"""你只规划已采纳结构中的第 {episode_number} 集场景。
-必须调用 readScreenplayDeliverable，使用 role=structure、evidenceDescriptor 中的精确 structureRevisionId 和 episodeNumber={episode_number}，只读取当前集结构。
-如果 dependencyPartKeys 非空，必须调用 readScreenplayTaskDependencies 读取这些当前任务依赖。
+使用已提供的当前集结构；缺失时调用 readScreenplayDeliverable，使用 role=structure、evidenceDescriptor 中的 structureRevisionId 和 episodeNumber={episode_number} 获取当前集结构；需要全局依据时，可继续读取其他集或项目文档。
+如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取。
 构造以下候选对象：
 {{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
 只提交当前集，场景顺序必须可直接用于后续剧本创作。最终必须调用 writeScreenplayCandidatePart 写入候选对象，不得只在回复中打印 JSON。"""
@@ -2774,7 +2753,7 @@ def _validate_document_parts(
     value = _validate_deliverable(
         role,
         {
-            "title": _ROLE_LABELS.get(role, "剧本交付物"),
+            "title": SCREENPLAY_DELIVERABLE_LABELS.get(role, "剧本交付物"),
             "contentText": "\n\n".join(str(section["contentText"]) for section in sections),
             "contentJson": merged,
         },
@@ -2913,10 +2892,11 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
 
 
 def _final_response_instruction() -> str:
-    return """你负责为已经完成校验、但尚未向用户公布的剧本候选稿撰写最终答复。
-使用 2 至 5 句自然语言，直接回应用户原始请求，准确总结完成了哪些候选内容以及值得注意的覆盖范围；如果合适，再说明这些内容仍可继续编辑。
+    return """
+你负责为已经完成校验、但尚未向用户公布的剧本候选稿撰写最终答复。
+直接回应用户原始请求，准确总结真正完成的候选内容和覆盖范围；如果合适，再说明这些内容仍可继续编辑。
 只能依据输入中的公开事实，不得声称候选稿已经采纳，不得编造版本号、链接或未提供的结果。
-不得复述剧本正文，不得输出工具过程、内部协议、推理过程，也不得套用固定模板。"""
+不得复述剧本正文。"""
 
 
 def _public_candidate_fact(

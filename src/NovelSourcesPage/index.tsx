@@ -31,7 +31,7 @@ import {
   type AgentConversationExtensions,
 } from '../components/AgentConversation'
 import Markdown from '../components/Markdown'
-import NovelAnalysisEvidenceModal, {
+import {
   NovelAnalysisEvidenceList,
   type NovelSourceEvidenceTarget,
 } from '../components/NovelAnalysisEvidenceModal'
@@ -44,6 +44,7 @@ import type {
   AiModelConfig,
   Book,
   NovelAnalysisArtifact,
+  NovelAnalysisCraftCard,
   NovelAnalysisEvidence,
   NovelAnalysisRun,
   NovelSourceImportPreview,
@@ -66,6 +67,30 @@ const LONG_SOURCE_SECTION_CHARACTERS = 100_000
 
 const ACTIVE_ANALYSIS_STATUSES = new Set(['pending', 'running', 'claimed'])
 const BLOCKING_ANALYSIS_STATUSES = new Set([...ACTIVE_ANALYSIS_STATUSES, 'paused'])
+const CRAFT_CATEGORY_LABELS: Record<string, string> = {
+  narrative_structure: '叙事结构',
+  characterization: '人物塑造',
+  point_of_view: '视角与信息控制',
+  pacing_and_tension: '节奏与张力',
+  language_and_style: '语言与文风',
+  dialogue: '对话设计',
+  imagery_and_atmosphere: '意象与氛围',
+  theme_and_symbolism: '主题与象征',
+}
+
+function groupCraftCards(cards: NovelAnalysisCraftCard[]) {
+  const grouped = new Map<string, NovelAnalysisCraftCard[]>()
+  cards.forEach((card) => {
+    const values = grouped.get(card.cardKind) ?? []
+    values.push(card)
+    grouped.set(card.cardKind, values)
+  })
+  return Array.from(grouped, ([kind, items]) => ({
+    kind,
+    label: CRAFT_CATEGORY_LABELS[kind] ?? '其他写作技法',
+    items,
+  }))
+}
 
 function isAnalysisRunActive(run: NovelAnalysisRun) {
   return ACTIVE_ANALYSIS_STATUSES.has(run.taskStatus || run.runStatus)
@@ -375,15 +400,12 @@ export default function NovelSourcesPage({
   const [evidenceView, setEvidenceView] = React.useState<{
     title: string
     evidence: NovelAnalysisEvidence[]
-    origin: 'analysis' | 'method'
     focus?: {
       kind: 'overview' | 'fact' | 'craft'
       heading: string
       body: string
     }
   } | null>(null)
-  const [methodCandidateOpen, setMethodCandidateOpen] = React.useState(false)
-  const [selectedCraftCardIds, setSelectedCraftCardIds] = React.useState<string[]>([])
   const [creatingMethodCandidates, setCreatingMethodCandidates] = React.useState(false)
   const [importOpen, setImportOpen] = React.useState(false)
   const [importView, setImportView] = React.useState<ImportView>('choose')
@@ -671,25 +693,19 @@ export default function NovelSourcesPage({
   const methodCandidateCards = (
     publishedAnalyses.find((analysis) => analysis.id === publishedAnalysisId)?.craftCards ?? []
   ).filter((card) => Boolean(card.id))
-
-  const openMethodCandidateReview = () => {
-    if (!methodCandidateCards.length) return appMessage.info('当前分析没有可提炼的写作技法')
-    setSelectedCraftCardIds([])
-    setAnalysisResultOpen(false)
-    setMethodCandidateOpen(true)
-  }
+  const analysisCraftGroups = groupCraftCards(analysisArtifact?.craftCards ?? [])
 
   const createMethodCandidates = async () => {
-    if (!publishedAnalysisId || !selectedCraftCardIds.length) return
+    if (!publishedAnalysisId || !methodCandidateCards.length) {
+      return appMessage.info('当前分析没有可提炼的写作技法')
+    }
     setCreatingMethodCandidates(true)
     try {
       const result = await services.writingMethods.createCandidates({
         analysisId: publishedAnalysisId,
-        craftCardIds: selectedCraftCardIds,
       })
       if (!result.success || !result.data) throw new Error(result.error || '生成候选写作方法失败')
-      setMethodCandidateOpen(false)
-      appMessage.success(`已创建 ${result.data.methods.length} 个候选草稿，尚未发布`)
+      appMessage.success(`已创建 1 个写作 Skill（${result.data.methods.length} 个分类模块），尚未发布`)
       navigate('/writing-methods')
     } catch (error) {
       appMessage.error((error as Error).message)
@@ -870,6 +886,7 @@ export default function NovelSourcesPage({
         if (import.meta.env.DEV) {
           for (const event of page.chunks) recordAgentConversationDebugChunk({
             runId: event.runId, turnId: currentRun?.commandId,
+            conversationRootRunId: currentRun?.runId,
             source: '小说来源分析', prompt: currentRun?.prompt || '',
             model: selectedAnalysisModel?.name, chunk: event.chunk,
           })
@@ -1003,7 +1020,7 @@ export default function NovelSourcesPage({
   const resultPanel = analysisArtifact ? <section className="novel-analysis-result-summary">
     <div className="novel-analysis-result-summary-copy">
       <span>分析结果</span>
-      <strong>{analysisArtifact.storyOverview ? '1 个故事概览 · ' : ''}{analysisArtifact.facts.length} 条硬事实 · {analysisArtifact.craftCards.length} 个写作技法</strong>
+      <strong>{analysisArtifact.storyOverview ? '1 个故事概览 · ' : ''}{analysisArtifact.facts.length} 条硬事实 · {analysisCraftGroups.length ? `1 个写作 Skill（${analysisCraftGroups.length} 类）` : '未形成写作 Skill'}</strong>
     </div>
     <div className="novel-analysis-result-summary-actions">
       <em className={publishedAnalysisId ? 'is-saved' : ''}>{publishedAnalysisId ? '已保存' : '待保存'}</em>
@@ -1013,15 +1030,13 @@ export default function NovelSourcesPage({
   const showEvidence = (
     title: string,
     evidence: NovelAnalysisEvidence[],
-    origin: 'analysis' | 'method' = 'analysis',
     focus?: { kind: 'overview' | 'fact' | 'craft'; heading: string; body: string },
   ) => {
-    setEvidenceView({ title, evidence, origin, focus })
+    setEvidenceView({ title, evidence, focus })
   }
   const locateEvidence = (target: NovelSourceEvidenceTarget) => {
     setSourceRevisionId(target.revisionId)
     setSourceReaderTarget(target)
-    if (evidenceView?.origin === 'method') setEvidenceView(null)
     setSourceReaderOpen(true)
   }
   const analysisResultActions = analysisArtifact ? <div className="novel-analysis-result-actions">
@@ -1039,7 +1054,7 @@ export default function NovelSourcesPage({
           children: <section className="novel-analysis-result-tab">
             {analysisArtifact.storyOverview ? <>
               <div className="novel-analysis-result-overview"><Markdown>{analysisArtifact.storyOverview.summaryMarkdown}</Markdown></div>
-              <PurrButton type="text" size="small" aria-label={`查看 ${analysisArtifact.storyOverview.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence('故事概览 · 原文证据', analysisArtifact.storyOverview!.evidence, 'analysis', { kind: 'overview', heading: '全局故事概览', body: analysisArtifact.storyOverview!.summaryMarkdown })}>原文证据 {analysisArtifact.storyOverview.evidence.length}</PurrButton>
+              <PurrButton type="text" size="small" aria-label={`查看 ${analysisArtifact.storyOverview.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence('故事概览 · 原文证据', analysisArtifact.storyOverview!.evidence, { kind: 'overview', heading: '全局故事概览', body: analysisArtifact.storyOverview!.summaryMarkdown })}>原文证据 {analysisArtifact.storyOverview.evidence.length}</PurrButton>
             </> : <p className="novel-analysis-result-empty">这份旧分析没有故事概览；重新分析后会生成。</p>}
           </section>,
         },
@@ -1051,18 +1066,18 @@ export default function NovelSourcesPage({
               <div><strong>续写正史依据</strong><span>保存后，创建续写会按所选分叉章节筛选已验证事实并冻结为正史快照。</span></div>
               {publishedAnalysisId ? <PurrButton size="small" onClick={() => navigate('/bookshelf', { state: { createContinuationFrom: { workId, revisionId: analysisRevisionId, analysisId: publishedAnalysisId } } })}>创建续写</PurrButton> : <small>保存分析后可用</small>}
             </div>
-            {analysisArtifact.facts.length ? <div className="novel-analysis-result-list">{analysisArtifact.facts.map((fact, index) => <article key={fact.id || `${fact.subjectKey}:${fact.predicate}:${index}`}><strong>{fact.subjectKey}</strong><p>{fact.predicate} · {displayFactValue(fact.value)}</p><PurrButton type="text" size="small" aria-label={`查看 ${fact.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${fact.subjectKey} · 原文证据`, fact.evidence, 'analysis', { kind: 'fact', heading: fact.subjectKey, body: `${fact.predicate} · ${displayFactValue(fact.value)}` })}>原文证据 {fact.evidence.length}</PurrButton></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的硬事实。</p>}
+            {analysisArtifact.facts.length ? <div className="novel-analysis-result-list">{analysisArtifact.facts.map((fact, index) => <article key={fact.id || `${fact.subjectKey}:${fact.predicate}:${index}`}><strong>{fact.subjectKey}</strong><p>{fact.predicate} · {displayFactValue(fact.value)}</p><PurrButton type="text" size="small" aria-label={`查看 ${fact.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${fact.subjectKey} · 原文证据`, fact.evidence, { kind: 'fact', heading: fact.subjectKey, body: `${fact.predicate} · ${displayFactValue(fact.value)}` })}>原文证据 {fact.evidence.length}</PurrButton></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的硬事实。</p>}
           </section>,
         },
         {
           key: 'craft',
-          label: `写作技法（${analysisArtifact.craftCards.length}）`,
+          label: `写作 Skill（${analysisCraftGroups.length} 类）`,
           children: <section className="novel-analysis-result-tab">
             <div className="novel-analysis-tab-context-action">
-              <div><strong>提炼为写作方法</strong><span>保存后可选择值得复用的技法，只创建候选草稿，不会自动发布。</span></div>
-              {publishedAnalysisId ? <PurrButton size="small" onClick={openMethodCandidateReview}>选择技法</PurrButton> : <small>保存分析后可用</small>}
+              <div><strong>提炼为写作 Skill</strong><span>保存后按技法类型生成一个 Skill；原文证据不会进入 Skill 正文。</span></div>
+              {publishedAnalysisId ? <PurrButton size="small" loading={creatingMethodCandidates} onClick={() => void createMethodCandidates()}>创建 Skill 草稿</PurrButton> : <small>保存分析后可用</small>}
             </div>
-            {analysisArtifact.craftCards.length ? <div className="novel-analysis-result-list">{analysisArtifact.craftCards.map((card, index) => <article key={card.id || `${card.title}:${index}`}><strong>{card.title}</strong><Markdown>{card.bodyMarkdown}</Markdown><PurrButton type="text" size="small" aria-label={`查看 ${card.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${card.title} · 原文证据`, card.evidence, 'analysis', { kind: 'craft', heading: card.title, body: card.bodyMarkdown })}>原文证据 {card.evidence.length}</PurrButton></article>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的写作技法。</p>}
+            {analysisCraftGroups.length ? <div className="novel-analysis-skill-groups">{analysisCraftGroups.map((group) => <section key={group.kind} className="novel-analysis-skill-group"><header><strong>{group.label}</strong><span>{group.items.length} 项技法</span></header><div className="novel-analysis-result-list">{group.items.map((card, index) => <article key={card.id || `${card.title}:${index}`}><strong>{card.title}</strong><Markdown>{card.bodyMarkdown}</Markdown><PurrButton type="text" size="small" aria-label={`查看 ${card.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${card.title} · 原文证据`, card.evidence, { kind: 'craft', heading: card.title, body: card.bodyMarkdown })}>原文证据 {card.evidence.length}</PurrButton></article>)}</div></section>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的写作 Skill。</p>}
           </section>,
         },
       ]}
@@ -1199,28 +1214,20 @@ export default function NovelSourcesPage({
         onRevisionChange={selectSourceRevision}
       /> : null}
     </PurrModal> : null}
-    <NovelAnalysisEvidenceModal
-      open={evidenceView?.origin === 'method'}
-      title={evidenceView?.title ?? '原文证据'}
-      evidence={evidenceView?.evidence ?? []}
-      sourceRevisionId={analysisArtifact?.sourceRevisionId ?? analysisRevisionId}
-      onClose={() => setEvidenceView(null)}
-      onLocate={locateEvidence}
-    />
     {analysisArtifact ? <PurrModal
-      title={`分析结果 · ${analysisArtifact.facts.length} 条硬事实 · ${analysisArtifact.craftCards.length} 个写作技法`}
+      title={`分析结果 · ${analysisArtifact.facts.length} 条硬事实 · ${analysisCraftGroups.length ? '1 个写作 Skill' : '未形成写作 Skill'}`}
       open={analysisResultOpen}
       width="min(1180px, calc(100vw - 48px))"
       footer={analysisResultActions}
       onCancel={() => {
         setAnalysisResultOpen(false)
-        if (evidenceView?.origin === 'analysis') setEvidenceView(null)
+        setEvidenceView(null)
       }}
       className="novel-analysis-result-modal"
     >
       <div className="novel-analysis-result-layout">
-        <div className={`novel-analysis-result-content${evidenceView?.origin === 'analysis' && evidenceView.focus ? ' is-hidden' : ''}`}>{analysisResultDetail}</div>
-        {evidenceView?.origin === 'analysis' && evidenceView.focus ? <section className="novel-analysis-evidence-focus">
+        <div className={`novel-analysis-result-content${evidenceView?.focus ? ' is-hidden' : ''}`}>{analysisResultDetail}</div>
+        {evidenceView?.focus ? <section className="novel-analysis-evidence-focus">
           <header>
             <PurrButton type="text" size="small" icon={<ArrowLeftIcon />} onClick={() => setEvidenceView(null)}>返回全部分析</PurrButton>
             <span>{evidenceView.focus.kind === 'overview' ? '故事概览与原文证据' : evidenceView.focus.kind === 'fact' ? '事实脉络与原文证据' : '写作技法与原文证据'}</span>
@@ -1247,47 +1254,6 @@ export default function NovelSourcesPage({
           </div>
         </section> : null}
       </div>
-    </PurrModal> : null}
-    {analysisArtifact ? <PurrModal
-      title="选择要提炼的写作方法"
-      open={methodCandidateOpen}
-      width="min(720px, calc(100vw - 32px))"
-      okText={`创建 ${selectedCraftCardIds.length} 个候选草稿`}
-      cancelText="返回分析结果"
-      confirmLoading={creatingMethodCandidates}
-      okButtonProps={{ disabled: !selectedCraftCardIds.length }}
-      onOk={() => void createMethodCandidates()}
-      onCancel={() => {
-        setMethodCandidateOpen(false)
-        setAnalysisResultOpen(true)
-      }}
-      styles={{ body: { maxHeight: 'min(68vh, 640px)', overflowY: 'auto' } }}
-    >
-      <section className="novel-method-candidate-review">
-        <p>写作技法不会直接全部进入方法库。请先选择值得复用的内容；确认后只创建可编辑草稿，不会自动发布或绑定作品。</p>
-        <div className="novel-method-candidate-review-toolbar">
-          <span>已选择 {selectedCraftCardIds.length} / {methodCandidateCards.length}</span>
-          <div>
-            <PurrButton type="text" size="small" onClick={() => setSelectedCraftCardIds(methodCandidateCards.map((card) => card.id!))}>全选</PurrButton>
-            <PurrButton type="text" size="small" disabled={!selectedCraftCardIds.length} onClick={() => setSelectedCraftCardIds([])}>清空</PurrButton>
-          </div>
-        </div>
-        <div className="novel-method-candidate-review-list">
-          {methodCandidateCards.map((card) => <div key={card.id} className="novel-method-candidate-review-item">
-            <PurrCheckbox
-              checked={selectedCraftCardIds.includes(card.id!)}
-              onChange={(event) => setSelectedCraftCardIds((current) => event.target.checked
-                ? [...current, card.id!]
-                : current.filter((id) => id !== card.id))}
-            >
-              <strong>{card.title}</strong>
-              <small>{card.bodyMarkdown.replace(/[#*_>`\[\]()]/g, '').trim().slice(0, 140) || '暂无方法说明'}</small>
-              <em>{card.evidence.length} 条原文证据</em>
-            </PurrCheckbox>
-            <PurrButton type="text" size="small" onClick={() => showEvidence(`${card.title} · 原文证据`, card.evidence, 'method')}>查看证据</PurrButton>
-          </div>)}
-        </div>
-      </section>
     </PurrModal> : null}
     {busy ? <div className="novel-source-busy"><PurrSpin /></div> : null}
   </div>

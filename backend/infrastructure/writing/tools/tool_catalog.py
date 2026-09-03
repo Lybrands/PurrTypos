@@ -18,6 +18,7 @@ from infrastructure.writing.retrieval import (
     WritingMethodRetriever,
 )
 from infrastructure.writing.tools.handlers import WRITING_TOOL_OPERATIONS
+from infrastructure.writing.tools.prepared_reads import WritingPreparedReads
 from infrastructure.writing.tools.runtime import (
     WritingToolDependencies,
     bind_writing_tool_handlers,
@@ -50,6 +51,8 @@ def build_writing_tool_catalog(
         )
     )
     resolved_handler_overrides = dict(handler_overrides or {})
+    prepared_reads = WritingPreparedReads(dependencies.db)
+    bound_handlers = {name: prepared_reads.bind(name, handler) for name, handler in bound_handlers.items()}
     bound_handlers.update(resolved_handler_overrides)
     probes = dict(WRITING_CACHE_PROBES)
     probes.update(cache_probe_overrides or {})

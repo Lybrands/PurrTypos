@@ -45,9 +45,11 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "minItems": 1,
             "maxItems": 12,
             "uniqueItems": True,
-            "description": "当前 Unit 的直接依赖 Part key，不得重复。",
+            "description": "当前任务中已完成的 Part key，不得重复。省略 partKeys 可列出可读 Part。",
         },
-    }, ("partKeys",)),
+        "cursor": _CURSOR,
+        "limit": _LIMIT,
+    }),
     "inspectScreenplayProject": _object({}),
     "readScreenplayDeliverable": _object({
         "role": _ROLES["items"],
@@ -56,18 +58,22 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "minLength": 1,
             "maxLength": 120,
             "description": (
-                "同一项目、同一 role 的 revisionId；省略时读取当前已接受版本。"
+                "同一项目、同一 role 的 revisionId；省略时优先使用任务参考版本，否则读取已接受版本。"
             ),
         },
-        "episodeNumber": {"type": "integer", "minimum": 1},
+        "episodeNumber": {
+            "type": "integer", "minimum": 1,
+            "description": "按集读取；省略时读取文档，分集存储的交付物返回集数目录。",
+        },
     }, ("role",)),
     "searchScreenplayDeliverables": _object({
         "query": {"type": "string", "minLength": 1, "maxLength": 500},
         "roles": _ROLES,
         "limit": _LIMIT,
+        "includeHistory": {"type": "boolean", "description": "同时检索项目内其他已有版本。"},
     }, ("query",)),
     "getScreenplayEpisodeContext": _object({
-        "episodeNumber": {"type": "integer", "minimum": 1},
+        "episodeNumber": {"type": "integer", "minimum": 1, "description": "要读取的集数；省略时使用当前任务集数。"},
         "draftRevisionId": {
             "type": "string",
             "minLength": 1,
@@ -81,10 +87,10 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "minLength": 1,
             "maxLength": 120,
             "description": (
-                "sceneList 的 revisionId；用于读取任务已锁定的不可变场景表版本。"
+                "同一项目的 sceneList revisionId；省略时优先使用任务参考版本。"
             ),
         },
-    }, ("episodeNumber",)),
+    }),
     "inspectSourceStructure": _object({"cursor": _CURSOR, "limit": _LIMIT}),
     "readSourceChapters": _object({
         "chapterIds": {
@@ -192,12 +198,12 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 
 SCREENPLAY_TOOL_DESCRIPTIONS = {
     "readScreenplayTaskDependencies": (
-        "按 Part key 读取当前任务、当前执行单元已完成的直接依赖；"
+        "按 Part key 读取当前任务中已完成的产物；省略 partKeys 可分页列出可读 Part。"
         "每次最多读取 12 项。"
     ),
     "inspectScreenplayProject": "查看当前剧本项目、阶段和已有交付物的紧凑清单。",
     "readScreenplayDeliverable": "读取当前项目内一个已接受或指定版本的交付物。revisionId 必须属于所选 role。",
-    "searchScreenplayDeliverables": "只在当前项目各交付物的已接受版本中检索相关内容，避免旧版本污染上下文。",
+    "searchScreenplayDeliverables": "检索当前项目交付物。默认检索已接受版本，includeHistory=true 时包含其他已有版本；结果标明版本是否已接受。",
     "getScreenplayEpisodeContext": "读取指定集的场景计划、前集连续性与当前草稿。",
     "inspectSourceStructure": "分页查看当前许可改编范围内的原作卷章结构，并返回可读取正文的 chapterId。",
     "readSourceChapters": "按 chapterId 读取当前许可范围内的原文章节；chapterIds 不接受 outlineId。",

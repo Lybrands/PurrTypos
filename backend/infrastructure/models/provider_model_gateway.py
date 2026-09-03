@@ -31,6 +31,7 @@ from purra.cancellation import raise_if_stopped
 from infrastructure.models import provider_router
 from infrastructure.models.capabilities import reasoning_mode_from_options
 from purra.stream_ownership import OwnedAsyncIterator, close_async_resource
+from config import DEV_DIAGNOSTICS_ENABLED
 
 
 class ProviderModelGateway:
@@ -54,11 +55,22 @@ class ProviderModelGateway:
         messages: Sequence[AgentMessage],
         invocation: ModelInvocation,
     ) -> dict[str, Any]:
-        return build_model_call_parameters(
+        parameters = build_model_call_parameters(
             messages,
             invocation,
             provider_options=_provider_options(invocation),
         )
+        if DEV_DIAGNOSTICS_ENABLED:
+            parameters["inputMessages"] = [
+                _diagnostic_provider_message(
+                    message,
+                    reasoning_replay=(
+                        invocation.request.protocol_capabilities.reasoning_replay
+                    ),
+                )
+                for message in messages
+            ]
+        return parameters
 
     async def stream(
         self,
@@ -250,6 +262,45 @@ def _provider_message(
         ]
     if message.tool_call_id is not None:
         value["tool_call_id"] = message.tool_call_id
+    return value
+
+
+def _diagnostic_provider_message(
+    message: AgentMessage,
+    *,
+    reasoning_replay: ReasoningReplayPolicy,
+) -> dict[str, Any]:
+    value = _provider_message(message, reasoning_replay=reasoning_replay)
+    value.pop("reasoning_content", None)
+    return _redact_diagnostic_fields(value)
+
+
+def _redact_diagnostic_fields(value: Any, *, field_name: str = "") -> Any:
+    normalized = "".join(
+        character for character in field_name.lower()
+        if character.isalnum()
+    )
+    if normalized in {
+        "apikey",
+        "authorization",
+        "proxyauthorization",
+        "password",
+        "secret",
+        "accesstoken",
+        "refreshtoken",
+        "token",
+    }:
+        return "<redacted>"
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_diagnostic_fields(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return [_redact_diagnostic_fields(item) for item in value]
     return value
 
 

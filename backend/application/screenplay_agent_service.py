@@ -20,7 +20,6 @@ from uuid import uuid4
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
-    PlanningMode,
     MessageRole,
     AgentRunResult,
     RunBinding,
@@ -47,7 +46,7 @@ from purra.task_admission import (
     TaskAdmissionDecision,
 )
 from purra.output import RuntimeOutputEvent
-from purra.model_protocol import InvocationOutputLimit, resolve_invocation_output_limit
+from purra.model_protocol import resolve_invocation_output_limit
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
@@ -60,6 +59,7 @@ from application.screenplay_checkpoint_planning import (
     SqliteScreenplayCheckpointRepository,
 )
 from application.model_runtime import (
+    fit_output_limit_to_context,
     model_request_from_runtime,
     reasoning_mode_from_options,
 )
@@ -190,12 +190,7 @@ class ScreenplayAgentService:
                 model_request.capability_snapshot,
                 model_request.options.get("max_tokens"),
             )
-            if output_limit.max_tokens >= window:
-                output_limit = InvocationOutputLimit(
-                    max_tokens=max(1_024, window // 4),
-                    source=output_limit.source,
-                    profile_max_tokens=output_limit.profile_max_tokens,
-                )
+            output_limit = fit_output_limit_to_context(output_limit, window)
             lifecycle = _ScreenplayTurnRunLifecycle(
                 self._db,
                 self._repository,
@@ -351,12 +346,7 @@ class ScreenplayAgentService:
                 model_request.capability_snapshot,
                 model_request.options.get("max_tokens"),
             )
-            if output_limit.max_tokens >= window:
-                output_limit = InvocationOutputLimit(
-                    max_tokens=max(1_024, window // 4),
-                    source=output_limit.source,
-                    profile_max_tokens=output_limit.profile_max_tokens,
-                )
+            output_limit = fit_output_limit_to_context(output_limit, window)
             lifecycle = _ScreenplayContinuationRunLifecycle(
                 self._db,
                 self._repository,
@@ -1079,7 +1069,6 @@ def _root_request(turn: Mapping[str, Any], runtime) -> AgentRunRequest:
             runtime.contextWindow or runtime.options.get("context_window")
         ),
         tools_enabled=True,
-        planning_mode=PlanningMode.PLANNED,
         metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
     )
 

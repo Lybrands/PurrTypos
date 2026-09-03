@@ -137,6 +137,32 @@ export interface ExecutionPanelPresentation {
   title: string;
 }
 
+export function getActiveOperationLabel(
+  parts: TimelineOperationPart[],
+): string | undefined {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (part.type === "operation" && part.operation.status === "running") {
+      return part.isRetry ? `重试 ${part.label}` : part.label;
+    }
+    if (part.type === "tools" && part.isLive) {
+      const completed = Math.max(0, part.segment.completedToolCount ?? 0);
+      const activeLabel = part.segment.labels.find(
+        (_label, labelIndex) =>
+          labelIndex >= completed && !part.segment.cachedFlags?.[labelIndex],
+      );
+      if (activeLabel) return activeLabel;
+    }
+    if (
+      part.type === "contextCompaction"
+      && part.state.status === "running"
+    ) {
+      return "压缩上下文";
+    }
+  }
+  return undefined;
+}
+
 function isTimelineOperationPart(
   part: AssistantTimelinePart,
 ): part is TimelineOperationPart {
@@ -148,9 +174,15 @@ function isTimelineOperationPart(
 
 export function getExecutionPanelPresentation(
   parts: AssistantTimelinePart[],
-  input: { isStreaming: boolean; durationMs?: number },
+  input: {
+    isStreaming: boolean;
+    durationMs?: number;
+    status?: string | null;
+    hasError?: boolean;
+  },
 ): ExecutionPanelPresentation {
-  const progress = getOperationGroupProgress(parts.filter(isTimelineOperationPart));
+  const operationParts = parts.filter(isTimelineOperationPart);
+  const progress = getOperationGroupProgress(operationParts);
   const active = input.isStreaming;
   const stepCount = progress.total;
   const visible = active
@@ -163,9 +195,13 @@ export function getExecutionPanelPresentation(
     stepCount,
     title: active
       ? "正在进行"
-      : stepCount > 0
-        ? `执行了 ${stepCount} 个步骤`
-        : "用时",
+      : input.hasError || input.status === "failed" || input.status === "blocked"
+        ? "执行失败"
+        : input.status === "canceled"
+          ? "已取消"
+          : input.status === "paused"
+            ? "已暂停"
+            : "已完成",
   };
 }
 
@@ -305,6 +341,19 @@ export function buildAssistantTimeline(
           md: narration,
           startedAt: Date.parse(progress.occurredAt),
           regionKey: `${messageIndex}-planning-progress-${progress.eventId}`,
+        },
+      });
+    });
+    canonicalOutput.agentProgress.forEach((progress) => {
+      const narration = publicAgentProgressNarration(progress.text);
+      if (!narration) return;
+      canonicalParts.push({
+        sequence: progress.sequence,
+        part: {
+          type: "commentary",
+          md: narration,
+          startedAt: Date.parse(progress.occurredAt),
+          regionKey: `${messageIndex}-agent-progress-${progress.eventId}`,
         },
       });
     });

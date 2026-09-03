@@ -69,12 +69,7 @@ export function replayNovelAnalysisRun(
   relatedSnapshots: AiAgentRunSnapshot[] = [],
 ): AgentConversationMessage {
   return replayAgentRunSnapshot({
-    // Historical analysis finalResponse values came from the recipe, not the
-    // model. Only public output events may supply this workflow's answer.
-    snapshot: run.interactionKind === 'follow_up' ? snapshot : {
-      ...snapshot,
-      run: { ...snapshot.run, finalResponse: '' },
-    },
+    snapshot,
     prompt: run.prompt || '',
     turnId: `novel-analysis:${run.commandId || run.runId}`,
     model,
@@ -130,7 +125,9 @@ export function buildNovelAnalysisMessages(
   messages.push({
     ...runtimeMessage,
     role: 'assistant',
-    content: runtimeMessage?.content || (followUp ? run.finalResponse : '') || '',
+    content: runtimeMessage?.content
+      || (run.runStatus === 'done' ? run.finalResponse : '')
+      || '',
     sentAt: run.updateTime || undefined,
     agentRunId: run.runId,
     longTaskId: run.taskId || undefined,

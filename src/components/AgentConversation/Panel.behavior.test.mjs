@@ -9,6 +9,7 @@ let vite
 let AgentConversationPanel
 let AgentMessageFooter
 let ExecutionLog
+let ExecutionLogStepGroup
 let buildAgentModelLabels
 let formatAgentMessageTime
 
@@ -24,7 +25,7 @@ before(async () => {
   ;({ default: AgentMessageFooter } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/MessageFooter.tsx',
   ))
-  ;({ default: ExecutionLog } = await vite.ssrLoadModule(
+  ;({ default: ExecutionLog, ExecutionLogStepGroup } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/ExecutionLog/index.tsx',
   ))
   ;({ buildAgentModelLabels, formatAgentMessageTime } = await vite.ssrLoadModule(
@@ -120,6 +121,33 @@ test('active execution log title does not append animated ellipsis', () => {
 
   assert.match(markup, /正在进行/)
   assert.doesNotMatch(markup, /a-blink-dots|\.\.\./)
+})
+
+test('execution panel shows status while nested groups retain their execution heading', () => {
+  for (const active of [false, true]) {
+    const markup = renderToStaticMarkup(React.createElement(ExecutionLog, {
+      logKey: `execution-headings-${active}`,
+      title: active ? '正在进行' : '已完成',
+      active,
+      autoOpen: true,
+      children: React.createElement(ExecutionLogStepGroup, {
+        groupKey: `step-count-${active}`,
+        stepCount: 9,
+        active,
+        activeLabel: '读取剧本交付物',
+        completedDurationMs: 65,
+        children: React.createElement('span', null, '读取剧本交付物'),
+      }),
+    }))
+    const { document } = parseHTML(`<html><body>${markup}</body></html>`)
+    const outerTitle = document.querySelector('.work-log__toggle').textContent
+    const innerTitle = document.querySelector('.work-log-step-group__toggle').textContent
+    assert.match(outerTitle, active ? /正在进行/ : /已完成/)
+    assert.doesNotMatch(outerTitle, /个步骤|读取剧本交付物/)
+    assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /执行了9 个步骤/)
+    assert.doesNotMatch(innerTitle, /正在进行|已完成/)
+    assert.match(markup, /读取剧本交付物/)
+  }
 })
 
 test('assistant footer places actions before hover-only time', () => {

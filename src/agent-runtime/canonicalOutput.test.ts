@@ -195,6 +195,46 @@ test('Planner progress replays as typed intent without exposing private plan byt
   assert.equal(state.commentaryText, '')
 })
 
+test('Provider public progress replays separately from final text and reasoning', () => {
+  const state = replayCanonicalOutput([
+    event(1, {
+      source: 'provider',
+      kind: 'provider.delta_batch',
+      channel: 'diagnostic',
+      visibility: 'private',
+      outputStreamId: 'answer-stream',
+      invocationId: 'answer-invocation',
+      payload: {
+        entries: [{
+          sourceChunkIndex: 1,
+          sourcePartIndex: 3,
+          kind: 'provider.progress_delta',
+          payload: { delta: '正在核对人物动机' },
+        }],
+      },
+    }),
+    event(2, {
+      source: 'provider',
+      kind: 'agent.progress',
+      channel: 'commentary',
+      outputStreamId: 'answer-stream',
+      invocationId: 'answer-invocation',
+      payload: {
+        schemaVersion: 'purra.agent-progress/v1',
+        text: '正在核对人物动机',
+        sourceChunkIndex: 1,
+      },
+    }),
+  ])
+
+  assert.deepEqual(state.agentProgress.map((item) => item.text), [
+    '正在核对人物动机',
+  ])
+  assert.equal(state.finalText, '')
+  assert.equal(state.commentaryText, '')
+  assert.equal(JSON.stringify(state).includes('provider.progress_delta'), false)
+})
+
 test('terminal Root lifecycle restores its authoritative final response', () => {
   const state = replayCanonicalOutput([
     event(1, {

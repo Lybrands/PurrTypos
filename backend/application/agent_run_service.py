@@ -59,7 +59,7 @@ class AgentRunService:
     ) -> AgentModelTextResult:
         """Run one private model task inside an existing durable Run."""
 
-        runner = self._composition.create_model_task_runner(
+        runner = await self._composition.create_model_task_runner(
             api_key=api_key,
             run_id=run_id,
             turn_id=turn_id,

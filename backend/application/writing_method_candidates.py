@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
-from domains.writing.methods import WritingMethodConflictError, canonical_json
 from application.writing_method_service import WritingMethodService
+from domains.novel_analysis import novel_analysis_craft_category_label
+from domains.writing.methods import WritingMethodConflictError, canonical_json
 
 
 class WritingMethodCandidateService:
@@ -40,35 +40,59 @@ class WritingMethodCandidateService:
             rows = [by_id[card_id] for card_id in selected]
         if not rows:
             raise WritingMethodConflictError("正式分析没有已验证技法卡")
+        if any(
+            "## 写作逻辑" not in str(card["body_markdown"])
+            or "## 风格特征" not in str(card["body_markdown"])
+            for card in rows
+        ):
+            raise WritingMethodConflictError(
+                "这份旧分析仍是零散技法卡，请重新分析后再创建写作 Skill"
+            )
 
         async with self._db.transaction(cancellation_linearizable=True):
-            method_ids: list[str] = []
-            for card in rows:
-                evidence = await self._db.fetch_all(
-                    "SELECT excerpt FROM novel_source_analysis_evidence "
-                    "WHERE analysis_id = ? AND owner_type = 'craft_card' AND owner_id = ?",
-                    [analysis_id, card["id"]],
+            evidence_rows = await self._db.fetch_all(
+                "SELECT owner_id, excerpt FROM novel_source_analysis_evidence "
+                "WHERE analysis_id = ? AND owner_type = 'craft_card'",
+                [analysis_id],
+            )
+            evidence_by_card: dict[str, list[str]] = {}
+            for item in evidence_rows:
+                evidence_by_card.setdefault(str(item["owner_id"]), []).append(
+                    str(item["excerpt"])
                 )
+            grouped: dict[str, list[Mapping]] = {}
+            for card in rows:
+                grouped.setdefault(str(card["card_kind"]), []).append(card)
+            method_ids: list[str] = []
+            for category, cards in grouped.items():
+                card_ids = [str(card["id"]) for card in cards]
+                category_label = novel_analysis_craft_category_label(category)
                 markdown = _method_markdown(
-                    str(card["title"]),
-                    str(card["body_markdown"]),
-                    [str(item["excerpt"]) for item in evidence],
+                    category_label,
+                    cards,
+                    [
+                        excerpt
+                        for card_id in card_ids
+                        for excerpt in evidence_by_card.get(card_id, ())
+                    ],
                 )
                 source_ref = {
                     "analysisId": analysis_id,
                     "analysisVersionNo": int(analysis["version_no"]),
                     "analysisDigest": str(analysis["content_digest"]),
                     "sourceRevisionId": str(analysis["source_revision_id"]),
-                    "craftCardId": str(card["id"]),
-                    "craftCardDigest": str(card["content_digest"]),
+                    "craftCardIds": card_ids,
+                    "craftCardDigests": [
+                        str(card["content_digest"]) for card in cards
+                    ],
                 }
                 method = await self._methods.create_method(
-                    name=str(card["title"]),
-                    description="由已验证来源技法卡生成的候选草稿，需用户审核后主动发布。",
+                    name=f"写作 Skill · {category_label}",
+                    description="写作 Skill 的分类模块；内容已与来源证据分离，需审核后主动发布。",
                     method_type="technique",
-                    tags=[str(card["card_kind"])],
+                    tags=["writing-skill", category],
                     markdown=markdown,
-                    metadata={"schemaVersion": 1, "sourceRef": source_ref},
+                    metadata={"schemaVersion": 2, "sourceRef": source_ref},
                 )
                 await self._db.execute(
                     "UPDATE writing_methods SET source_type = 'analysis_candidate', "
@@ -77,8 +101,8 @@ class WritingMethodCandidateService:
                 )
                 method_ids.append(str(method["id"]))
             scheme = await self._methods.create_scheme(
-                name="来源技法候选方案",
-                description="由已验证技法卡组成；逐项审核后一次确认发布。",
+                name="来源写作 Skill",
+                description="按技法类型组织的可复用写作 Skill；审核分类模块后一次确认发布。",
                 member_revision_ids=[],
             )
             scheme_ref = {
@@ -139,7 +163,10 @@ class WritingMethodCandidateService:
                 if (
                     method.get("source_type") != "analysis_candidate"
                     or source_ref.get("analysisId") != scheme_ref.get("analysisId")
-                    or not source_ref.get("craftCardId")
+                    or not (
+                        source_ref.get("craftCardIds")
+                        or source_ref.get("craftCardId")
+                    )
                 ):
                     raise WritingMethodConflictError("候选方法来源引用不完整")
                 revisions.append(await self._methods.publish_method(method_id))
@@ -158,15 +185,28 @@ class WritingMethodCandidateService:
         }
 
 
-def _method_markdown(title: str, body: str, evidence_excerpts: Sequence[str]) -> str:
-    cleaned = str(body or "").strip()
+def _method_markdown(
+    category: str,
+    cards: Sequence[Mapping],
+    evidence_excerpts: Sequence[str],
+) -> str:
+    sections = []
+    for card in cards:
+        body = str(card["body_markdown"] or "").strip()
+        sections.append(
+            f"## {str(card['title']).strip()}\n\n"
+            + body.replace("## 写作逻辑", "### 写作逻辑").replace(
+                "## 风格特征", "### 风格特征"
+            )
+        )
+    cleaned = "\n\n".join(sections)
     for excerpt in sorted(
         {str(item).strip() for item in evidence_excerpts if str(item).strip()},
         key=len,
         reverse=True,
     ):
-        cleaned = cleaned.replace(excerpt, "（原文证据见来源分析档案）")
-    return f"# {title.strip()}\n\n{cleaned}".strip()
+        cleaned = cleaned.replace(excerpt, "")
+    return f"# {category.strip()}\n\n{cleaned}".strip()
 
 
 __all__ = ["WritingMethodCandidateService"]

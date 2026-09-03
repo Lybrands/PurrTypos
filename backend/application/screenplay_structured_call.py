@@ -8,13 +8,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from purra.api import AgentCoreRunOptions
+from purra.api import AgentCoreRunOptions, PlanningMode
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageOrigin,
     MessageRole,
-    PlanningMode,
     RunBinding,
     RunStatus,
 )
@@ -29,6 +28,7 @@ from purra.structured_output import parse_json_object
 
 from application.agent_run_service import AgentRunService
 from application.model_runtime import (
+    fit_output_limit_to_context,
     model_request_from_runtime,
     reasoning_mode_from_options,
 )
@@ -131,7 +131,6 @@ class ScreenplayStructuredCallService:
         unit_id: str,
         expected_part_key: str,
         conversation_turn_id: str,
-        output_token_cap: int,
         bind_run: BindRun | None = None,
         signal=None,
     ) -> PublicModelResult:
@@ -164,7 +163,6 @@ class ScreenplayStructuredCallService:
             output_limit=_output_limit(
                 runtime,
                 model_request,
-                part_cap=output_token_cap,
             ),
             default_context_window_tokens=window,
             model_supports_tools=False,
@@ -238,23 +236,16 @@ def _messages(
 def _output_limit(
     runtime,
     model_request,
-    *,
-    part_cap: int | None = None,
 ) -> InvocationOutputLimit:
-    window = context_window_tokens(
-        runtime.contextWindow or runtime.options.get("context_window")
-    )
     limit = screenplay_output_limit(
         model_request.capability_snapshot,
         model_request.options.get("max_tokens"),
-        part_cap=part_cap,
     )
-    if limit.max_tokens < window:
-        return limit
-    return InvocationOutputLimit(
-        max_tokens=max(1_024, window // 4),
-        source=limit.source,
-        profile_max_tokens=limit.profile_max_tokens,
+    return fit_output_limit_to_context(
+        limit,
+        context_window_tokens(
+            runtime.contextWindow or runtime.options.get("context_window")
+        ),
     )
 
 

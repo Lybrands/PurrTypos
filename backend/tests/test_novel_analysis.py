@@ -1,27 +1,37 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from purra.context_budget import estimate_json_tokens
 from purra.contracts import (
     AgentMessage,
+    AgentRunResult,
     AgentRunRequest,
     ExecutionPlan,
     ModelRequest,
     PlanningCapabilities,
+    PlanningKind,
+    PlanningResult,
+    RunStatus,
     StepExecutor,
     StepType,
     TaskSpec,
     TaskStep,
+    WorkPlan,
+    WorkStep,
 )
 from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
 from purra.errors import ModelGatewayError
 from purra.json_values import freeze_json_mapping
-from purra.model_protocol import InvocationOutputLimit, InvocationOutputLimitSource
 from purra.plan_compiler import compile_work_plan
-from purra.recovery import FailureCategory
+from purra.recovery import (
+    FailureCategory,
+    FailureDisposition,
+    decide_failure,
+)
 
 from application.novel_analysis_agent_profile import (
     NovelAnalysisAgentProfile,
@@ -29,9 +39,10 @@ from application.novel_analysis_agent_profile import (
 )
 from application.novel_analysis_artifacts import NovelAnalysisArtifactStore
 from application.novel_analysis_executor import (
+    NovelAnalysisModelCalls,
     NovelAnalysisTaskUnitExecutor,
-    _bounded_novel_analysis_output_limit,
     _combine_candidates,
+    _normalize_card,
     _restore_evidence_scopes,
     _thaw_analysis_strategy,
 )
@@ -52,10 +63,13 @@ from domains.novel_analysis import (
     compile_novel_analysis_recipe,
     novel_analysis_model_call_count,
 )
+from domains.novel_analysis_prompts import build_novel_analysis_method_guidance
+from domains.novel_analysis_public_facts import NovelAnalysisPublicFactsProvider
 from exceptions import AppError
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
 )
+from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
 
 def test_source_segmentation_is_contiguous_and_token_bounded():
@@ -170,23 +184,6 @@ def test_host_combines_leaf_and_global_candidates_without_losing_evidence():
     assert len(combined["facts"][0]["evidence"]) == 2
 
 
-def test_model_output_limit_reserves_room_for_binary_aggregation():
-    resolved = InvocationOutputLimit(
-        max_tokens=32_768,
-        source=InvocationOutputLimitSource.MODEL_PROFILE,
-        profile_max_tokens=32_768,
-    )
-
-    bounded = _bounded_novel_analysis_output_limit(
-        resolved,
-        context_window=32_000,
-        input_tokens=22_000,
-    )
-
-    assert bounded.max_tokens == 32_000 // 6
-    assert bounded.source is InvocationOutputLimitSource.WORKFLOW_POLICY
-
-
 def test_model_merge_restores_repeated_evidence_to_each_frozen_segment():
     dependencies = ({
         "facts": [{
@@ -227,6 +224,51 @@ def test_model_merge_restores_repeated_evidence_to_each_frozen_segment():
         evidence["segmentStartCharacter"]
         for evidence in restored["facts"][0]["evidence"]
     ] == [0, 20]
+
+
+def test_model_merge_does_not_trust_model_authored_segment_ranges():
+    dependency = ({
+        "facts": [{
+            "evidence": [{
+                "sectionId": "s1",
+                "excerpt": "逐字证据",
+                "segmentId": "s1:0:20",
+                "segmentStartCharacter": 0,
+                "segmentEndCharacter": 20,
+            }],
+        }],
+        "craftCards": [],
+    },)
+    merged = {
+        "facts": [{
+            "evidence": [{
+                "sectionId": "s1",
+                "excerpt": "模型改写的证据",
+                "segmentId": "s1:0:20",
+                "segmentStartCharacter": 0,
+                "segmentEndCharacter": 20,
+            }],
+        }],
+        "craftCards": [],
+    }
+
+    with pytest.raises(ValueError, match="lost its segment scope"):
+        _restore_evidence_scopes(merged, dependency, required=True)
+
+
+def test_craft_description_is_structured_and_cannot_copy_evidence():
+    with pytest.raises(ValueError, match="must not copy source evidence"):
+        _normalize_card({
+            "cardKind": "pacing_and_tension",
+            "title": "延迟揭示",
+            "bodyMarkdown": (
+                "## 写作逻辑\n把逐字证据直接写进技法。"
+                "\n\n## 风格特征\n克制。"
+            ),
+            "evidence": [{"sectionId": "s1", "excerpt": "逐字证据"}],
+        }, default_section_id=None)
+
+
 @pytest.fixture
 async def db(tmp_path):
     connection = DatabaseConnection(tmp_path)
@@ -249,31 +291,6 @@ def test_analysis_strategy_is_serializable_after_purra_freezes_task_metadata():
         "taskSpec": {"goal": "分析事实脉络"},
         "steps": [{"id": "facts", "title": "提取事实"}],
     }
-
-
-@pytest.mark.parametrize(
-    ("requested", "expected", "expected_source"),
-    [
-        (8_192, 8_192, InvocationOutputLimitSource.MODEL_PROFILE),
-        (131_072, 16_384, InvocationOutputLimitSource.WORKFLOW_POLICY),
-    ],
-)
-def test_novel_analysis_output_limit_keeps_small_limits_and_bounds_thinking_models(
-    requested,
-    expected,
-    expected_source,
-):
-    resolved = InvocationOutputLimit(
-        max_tokens=requested,
-        source=InvocationOutputLimitSource.MODEL_PROFILE,
-        profile_max_tokens=requested,
-    )
-
-    bounded = _bounded_novel_analysis_output_limit(resolved)
-
-    assert bounded.max_tokens == expected
-    assert bounded.source is expected_source
-    assert bounded.profile_max_tokens == requested
 
 
 def test_novel_analysis_runtime_allows_bounded_thinking_units_to_finish():
@@ -303,6 +320,35 @@ async def _source(db):
         rights_confirmed=True,
         model_data_boundary_confirmed=True,
     )
+
+
+async def test_evidence_validation_discards_bad_model_citations_without_losing_run(db):
+    revision = await _source(db)
+    section = revision["sections"][0]
+    executor = NovelAnalysisTaskUnitExecutor(db)
+
+    validated = await executor._validate_candidates({
+        "facts": [{
+            "factKind": "event",
+            "subjectKey": "甲",
+            "predicate": "看见",
+            "value": "红门",
+            "evidence": [
+                {"sectionId": section["id"], "excerpt": "甲看见一扇红门。"},
+                {"sectionId": section["id"], "excerpt": "模型改写的伪引文"},
+            ],
+        }],
+        "craftCards": [{
+            "cardKind": "pacing_and_tension",
+            "title": "无有效证据的技法",
+            "bodyMarkdown": "## 写作逻辑\n延迟信息。\n\n## 风格特征\n克制。",
+            "evidence": [{"sectionId": section["id"], "excerpt": "不存在"}],
+        }],
+    }, revision_id=revision["id"], section_ids=[section["id"]])
+
+    assert len(validated["facts"]) == 1
+    assert len(validated["facts"][0]["evidence"]) == 1
+    assert validated["craftCards"] == []
 
 
 async def _insert_task(db, revision_id: str, *, status: str):
@@ -347,9 +393,12 @@ async def _candidate_artifact(db, revision, *, status="completed"):
             }],
         }],
         "craftCards": [{
-            "cardKind": "knowledge_gap",
+            "cardKind": "point_of_view",
             "title": "限制视角信息差",
-            "bodyMarkdown": "让读者知道角色不知道的信息。",
+            "bodyMarkdown": (
+                "## 写作逻辑\n通过限制角色可见信息制造认知差。"
+                "\n\n## 风格特征\n克制、悬疑，信息逐层释放。"
+            ),
             "evidence": [{
                 "sectionId": sections[1]["id"],
                 "excerpt": "甲并不知道钥匙在乙手里",
@@ -383,15 +432,12 @@ async def _candidate_artifact(db, revision, *, status="completed"):
     )
 
 
-@pytest.mark.parametrize("legacy_reply", [
-    "", "来源分析已完成，等待用户审核后发布。",
-])
-async def test_analysis_completion_has_no_host_authored_reply(db, legacy_reply):
+async def test_analysis_completion_uses_root_model_reply_not_unit_metadata(db):
     revision = await _source(db)
     reference, payload = await _candidate_artifact(db, revision)
     await db.execute(
         "UPDATE ai_agent_runs SET final_response = ? WHERE id = 'analysis-run'",
-        [legacy_reply or "Durable task completed."],
+        ["模型根据已提交分析形成的结构化总结。"],
     )
     await db.execute(
         "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) "
@@ -405,14 +451,14 @@ async def test_analysis_completion_has_no_host_authored_reply(db, legacy_reply):
         [reference, json.dumps({
             "displayTitle": "形成待审核分析",
             "unitKind": "build_review_artifact",
-            **({"finalResponse": legacy_reply} if legacy_reply else {}),
+            "finalResponse": "不能进入根对话的单元文案",
         }, ensure_ascii=False)],
     )
     service = NovelAnalysisService(db)
 
     runs = await service.list_for_revision(revision["id"])
 
-    assert runs[0]["finalResponse"] == ""
+    assert runs[0]["finalResponse"] == "模型根据已提交分析形成的结构化总结。"
     assert runs[0]["artifactRef"] == reference
     assert runs[0]["completedUnits"] == 1
     assert all("summary" not in unit and "highlights" not in unit
@@ -434,9 +480,47 @@ async def test_analysis_completion_has_no_host_authored_reply(db, legacy_reply):
     )
 
     assert result.status.value == "completed"
-    assert result.final_response == ""
+    assert result.final_response == reference
     assert result.metadata["completedUnits"] == 1
     assert updates
+
+
+async def test_analysis_public_facts_use_committed_review_without_internal_ids(db):
+    revision = await _source(db)
+    reference, _payload = await _candidate_artifact(db, revision)
+    await db.execute(
+        "UPDATE ai_agent_runs SET prompt = ? WHERE id = 'analysis-run'",
+        ["分析全局故事、事实脉络和写作技法"],
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) "
+        "VALUES ('analysis-task', 'analysis-run', 'created')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status, output_ref, metadata_json) "
+        "VALUES ('analysis-task', 'artifact:review', 'artifact:review', 0, "
+        "'completed', ?, '{}')",
+        [reference],
+    )
+
+    bundle = await NovelAnalysisPublicFactsProvider(db).facts_for(
+        "analysis-run",
+        AgentRunResult(
+            run_id="analysis-run",
+            status=RunStatus.DONE,
+            final_response=reference,
+            model="fixture",
+        ),
+    )
+    public_input = bundle.as_messages()[1].content
+
+    assert "分析全局故事、事实脉络和写作技法" in public_input
+    assert "甲看见红门后" in public_input
+    assert "限制视角信息差" in public_input
+    assert "novel-analysis-artifact://" not in public_input
+    assert revision["id"] not in public_input
+    assert '"sectionTitle":"null"' not in public_input
 
 
 def test_analysis_executor_retries_transient_provider_failures(db):
@@ -453,7 +537,119 @@ def test_analysis_executor_retries_transient_provider_failures(db):
     assert signal.code == "upstream_stream_interrupted"
 
 
-async def test_profile_hydrates_exact_section_scope_and_compiles_fixed_recipe(db):
+@pytest.mark.parametrize(
+    "code",
+    ["model_output_truncated", "tool_call_truncated"],
+)
+def test_analysis_executor_retries_safe_output_truncation_in_a_new_unit_run(
+    db,
+    code,
+):
+    executor = NovelAnalysisTaskUnitExecutor(db)
+
+    signal = executor.classify_failure(ModelGatewayError(
+        code,
+        code=code,
+        retryable=True,
+    ))
+    decision = decide_failure(signal, attempts_remaining=1)
+
+    assert signal.category is FailureCategory.MODEL_OUTPUT_INVALID
+    assert signal.retryable is True
+    assert decision.disposition is FailureDisposition.RETRY_ATTEMPT
+
+
+async def test_truncation_retry_uses_resolved_limit_and_private_recovery_guidance(db):
+    captured = {}
+
+    class FailingRuns:
+        async def run(self, *, request, options, **_kwargs):
+            captured["request"] = request
+            captured["options"] = options
+            yield AgentRunResult(
+                run_id="retry-run",
+                status=RunStatus.FAILED,
+                error="model_output_truncated",
+                model=request.model.model,
+            )
+
+    runtime = ScreenplayAgentRuntimeRequest(
+        apiKey="test-key",
+        options={
+            "model": "glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash",
+            "max_tokens": 131_072,
+            "thinking": {"type": "enabled"},
+        },
+        contextWindow="256k",
+    )
+    calls = NovelAnalysisModelCalls(db, None, runtime)
+    calls._runs = FailingRuns()
+
+    with pytest.raises(ModelGatewayError) as caught:
+        await calls.run_json(
+            context=SimpleNamespace(
+                run_id="root-run",
+                unit=SimpleNamespace(
+                    id="extract:1",
+                    attempt=2,
+                    error_code="model_output_truncated",
+                ),
+                task=SimpleNamespace(
+                    id="task-1",
+                    metadata={
+                        "sourceRevisionId": "revision-1",
+                        "sectionIds": ["section-1"],
+                    },
+                ),
+                bind_run=None,
+            ),
+            instruction="提取有依据的事实",
+            payload={"userAnalysisRequest": "分析"},
+        )
+
+    assert caught.value.code == "model_output_truncated"
+    assert caught.value.retryable is True
+    assert captured["options"].output_limit.max_tokens == 131_072
+    assert "上一次执行未能在输出限额内提交候选" in (
+        captured["request"].messages[0].content
+    )
+
+
+def _model_authored_analysis_plan() -> PlanningResult:
+    return PlanningResult(
+        kind=PlanningKind.PLANNED,
+        model="planner-model",
+        model_call_count=1,
+        work_plan=WorkPlan(
+            title="核对红门引发的因果链",
+            goal="解释人物行动与信息差如何推动情节",
+            task_spec=TaskSpec(
+                goal="形成可审核的红门因果分析",
+                operation="analyze",
+                instruction="围绕红门事件核对人物行动、知识边界与证据",
+                deliverable="带原文证据的因果分析",
+            ),
+            steps=(
+                WorkStep(
+                    id="trace-motives",
+                    title="追踪人物动机",
+                    type=StepType.ANALYZE,
+                    executor=StepExecutor.MODEL,
+                ),
+                WorkStep(
+                    id="review-evidence",
+                    title="复核因果证据",
+                    type=StepType.REVIEW,
+                    executor=StepExecutor.MODEL,
+                    depends_on=("trace-motives",),
+                ),
+            ),
+        ),
+    )
+
+
+async def test_profile_hydrates_scope_and_accepts_model_authored_plan(db):
     revision = await _source(db)
     context = NovelAnalysisDomainContext(
         source_revision_id=revision["id"],
@@ -473,38 +669,19 @@ async def test_profile_hydrates_exact_section_scope_and_compiles_fixed_recipe(db
         item["id"] for item in revision["sections"]
     )
 
-    assert hasattr(profile.adapter, "planner")
+    assert profile.adapter.planner is None
+    assert profile.adapter.planner_limits.max_steps is None
     assert not hasattr(profile.adapter.planning_policy, "should_plan")
-    planning = await profile.adapter.planner.create_plan(
+    constraints = profile.adapter.planning_policy.planning_constraints(
         prepared,
         PlanningCapabilities(),
     )
-    assert planning.model_call_count == 0
-    assert planning.work_plan.title == "小说综合分析"
-    assert [step.id for step in planning.work_plan.steps] == [
-        "story-overview",
-        "fact-thread",
-        "writing-technique",
-    ]
-    assert all(
-        step.executor is StepExecutor.MODEL
-        and step.type is StepType.ANALYZE
-        and not step.capability_names
-        for step in planning.work_plan.steps
-    )
-    assert planning.work_plan.task_spec == TaskSpec(
-        goal="形成可审核的小说来源综合分析",
-        operation="analyze",
-        instruction=(
-            "分析当前宿主绑定的小说来源，梳理全局故事概览、"
-            "事实脉络与写作技法"
-        ),
-        constraints=(
-            "仅分析宿主绑定的来源版本和章节范围",
-            "结果仅供审核，不直接写入书稿或记忆",
-        ),
-        deliverable="包含全局故事概览、事实脉络与写作技法的结构化分析",
-    )
+    assert constraints.allow_model_only_fallback is False
+    assert constraints.planning_excluded_executors == {StepExecutor.TOOL}
+    planning = _model_authored_analysis_plan()
+    assert profile.adapter.planning_result_validator(prepared, planning) is None
+    assert planning.model_call_count == 1
+    assert planning.work_plan.title == "核对红门引发的因果链"
 
     plan = compile_work_plan(planning.work_plan, ()).execution_plan
     decision = await profile.evaluate(prepared, plan)
@@ -515,16 +692,65 @@ async def test_profile_hydrates_exact_section_scope_and_compiles_fixed_recipe(db
     assert all("finalResponse" not in step.metadata for step in recipe.steps)
     assert all(step.executor == "novel_analysis" for step in recipe.steps)
     assert {step.plan_step_id for step in recipe.steps} == {
-        "story-overview",
-        "fact-thread",
-        "writing-technique",
+        "trace-motives",
+        "review-evidence",
     }
     assert [
         step["id"] for step in decision.metadata["analysisPlan"]["steps"]
-    ] == ["story-overview", "fact-thread", "writing-technique"]
+    ] == ["trace-motives", "review-evidence"]
 
 
-async def test_source_analysis_planner_rejects_non_analysis_interactions():
+async def test_dispatch_uses_exact_idempotency_lookup_without_decoding_unrelated_history(db):
+    revision = await _source(db)
+    await db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, status, "
+        "total_units, budget_limits_json, metadata_json) "
+        "VALUES ('old-incompatible-task', ?, 'novel_source_analysis', ?, "
+        "'old-run', 'failed', 0, ?, ?)",
+        [
+            NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
+            revision["id"],
+            json.dumps({"maxOutputTokens": None}),
+            json.dumps({"idempotencyKey": "old-command", "sessionId": None}),
+        ],
+    )
+    context = NovelAnalysisDomainContext(
+        source_revision_id=revision["id"],
+        command_id="current-command",
+    )
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="分析"),),
+        model=ModelRequest(provider="openai", model="test"),
+        domain_context=context.to_core_context(),
+    )
+    profile = NovelAnalysisAgentProfile(db)
+    prepared = await profile.prepare_request(request)
+    planning = _model_authored_analysis_plan()
+    plan = compile_work_plan(planning.work_plan, ()).execution_plan
+    decision = await profile.evaluate(prepared, plan)
+    dispatcher = profile.create_long_task_dispatcher(
+        long_task_repository=SqliteLongTaskRepository(db),
+        executor=NovelAnalysisTaskUnitExecutor(db),
+    )
+
+    receipt = await dispatcher.dispatch(
+        prepared,
+        plan,
+        decision,
+        run_id="current-run",
+    )
+
+    assert receipt.task_id != "old-incompatible-task"
+    binding = await db.fetch_one(
+        "SELECT relation FROM ai_agent_long_task_runs "
+        "WHERE task_id = ? AND run_id = 'current-run'",
+        [receipt.task_id],
+    )
+    assert binding == {"relation": "created"}
+
+
+async def test_source_analysis_plan_validator_rejects_non_analysis_interactions():
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="分析"),),
         model=ModelRequest(provider="openai", model="test"),
@@ -535,15 +761,13 @@ async def test_source_analysis_planner_rejects_non_analysis_interactions():
             analysis_artifact_ref="novel-analysis:artifact",
         ).to_core_context(),
     )
-    with pytest.raises(ValueError, match="only accepts analysis runs"):
-        await NovelAnalysisDomainAdapter().planner.create_plan(
-            request,
-            PlanningCapabilities(),
-        )
+    assert NovelAnalysisDomainAdapter().planning_result_validator(
+        request,
+        _model_authored_analysis_plan(),
+    ) == "novel analysis Planner only accepts analysis runs"
 
 
 async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):
-    from domains.agent_output_policy import build_agent_public_progress_policy
     from purra.contracts import ContextBudget
 
     revision = await _source(db)
@@ -593,12 +817,16 @@ async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):
 
     assert decision.mode.value == "inline"
     assert plan.task_spec.operation == "answer"
-    progress_block = next(
+    assert not {
+        "agent_public_progress",
+        "agent_final_response",
+    } & {block.name for block in bundle.blocks}
+    method_block = next(
         block for block in bundle.blocks
-        if block.name == "agent_public_progress"
+        if block.name == "novel_analysis_method"
     )
-    assert progress_block.untrusted is False
-    assert progress_block.content == build_agent_public_progress_policy()
+    assert method_block.untrusted is False
+    assert method_block.content == build_novel_analysis_method_guidance()
     artifact_block = next(
         block for block in bundle.blocks
         if block.name == "novel_analysis_follow_up"
@@ -608,8 +836,7 @@ async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):
     assert "这是当前分析快照" in artifact_block.content
 
 
-async def test_analysis_planning_context_uses_shared_public_progress_policy(db):
-    from domains.agent_output_policy import build_agent_public_progress_policy
+async def test_analysis_planning_context_contains_only_domain_policy(db):
     from purra.contracts import ContextBudget
 
     revision = await _source(db)
@@ -636,11 +863,34 @@ async def test_analysis_planning_context_uses_shared_public_progress_policy(db):
     )
 
     assert [block.name for block in bundle.blocks] == [
-        "agent_public_progress",
+        "novel_analysis_method",
         "novel_analysis_policy",
     ]
-    assert bundle.blocks[0].content == build_agent_public_progress_policy()
+    assert bundle.blocks[0].content == build_novel_analysis_method_guidance()
+    assert "不要求逐项拆成计划步骤" in bundle.blocks[1].content
     assert all(block.untrusted is False for block in bundle.blocks)
+
+
+def test_recipe_maps_more_than_four_model_authored_steps_without_a_domain_cap():
+    segments = tuple(
+        NovelAnalysisSegment(
+            id=f"section-1:{index * 100}:{(index + 1) * 100}",
+            section_id="section-1",
+            section_ordinal=0,
+            start_character=index * 100,
+            end_character=(index + 1) * 100,
+        )
+        for index in range(4)
+    )
+    planned = tuple(f"semantic-{index}" for index in range(1, 8))
+
+    recipe = compile_novel_analysis_recipe(
+        section_ids=("section-1",),
+        segments=segments,
+        plan_step_ids=planned,
+    )
+
+    assert {step.plan_step_id for step in recipe.steps} == set(planned)
 
 
 async def test_fixed_recipe_maps_parallel_units_to_one_planner_transition(db):

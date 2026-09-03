@@ -170,9 +170,24 @@ def _with_screenplay_tool_display_names(
         or episode_number <= 0
     ):
         episode_number = None
+    task_episode_number = label_params.get("taskEpisodeNumber")
+    if (
+        isinstance(task_episode_number, bool)
+        or not isinstance(task_episode_number, int)
+        or task_episode_number <= 0
+    ):
+        task_episode_number = None
+    role = label_params.get("deliverableRole")
+    targets = label_params.get("readTargets")
+    query = label_params.get("searchQuery")
     display_names = screenplay_tool_display_names(
         tool_name,
         episode_number=episode_number,
+        deliverable_role=role if isinstance(role, str) else None,
+        task_episode_number=task_episode_number,
+        read_targets=tuple(value for value in targets if isinstance(value, str))
+        if isinstance(targets, (list, tuple)) else (),
+        search_query=query if isinstance(query, str) else None,
     )
     if not display_names:
         return chunk

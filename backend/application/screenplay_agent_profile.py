@@ -12,6 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
+from application.prepared_read_context import PreparedReadContextProvider
+from infrastructure.screenplay.tools.prepared_reads import ScreenplayPreparedReads
 from application.model_runtime import reasoning_mode_from_options
 from application.screenplay_manifest_compiler import compile_screenplay_manifest
 from application.screenplay_part_contracts import (
@@ -55,7 +57,7 @@ from infrastructure.persistence.sqlite_screenplay_operation_repository import (
 from infrastructure.screenplay import (
     build_screenplay_tool_catalog,
 )
-from purra.contracts import AgentRunRequest, ExecutionPlan
+from purra.contracts import AgentRunRequest, ExecutionPlan, PlanningMode
 from purra.contracts import StepStatus
 from purra.events import AgentEvent, CoreEventType
 from purra.long_tasks import (
@@ -97,13 +99,12 @@ class ScreenplayAgentProfile:
             workspace = await self._projects.get_workspace(project_id)
             return await context_query.planning_context(workspace)
 
+        catalog = build_screenplay_tool_catalog(db=db, candidate_normalizer=candidate_normalizer)
         self._adapter = ScreenplayDomainAdapter(
-            tool_catalog=build_screenplay_tool_catalog(
-                db=db,
-                candidate_normalizer=candidate_normalizer,
-            ),
-            context_provider=ScreenplayHostContextProvider(
-                planning_context_loader=load_planning_context,
+            tool_catalog=catalog,
+            context_provider=PreparedReadContextProvider(
+                ScreenplayHostContextProvider(planning_context_loader=load_planning_context),
+                ScreenplayPreparedReads(db, catalog).load,
             ),
         )
 
@@ -140,7 +141,15 @@ class ScreenplayAgentProfile:
             source_book_id=str(source.get("bookId") or "") or None,
             source_scope=dict(source.get("scope") or {}),
         )
-        return replace(request, domain_context=hydrated.to_core_context())
+        return replace(
+            request,
+            domain_context=hydrated.to_core_context(),
+            planning_mode=(
+                PlanningMode.PLANNED
+                if hydrated.stage_command is not None
+                else request.planning_mode
+            ),
+        )
 
     def context_provider_factory(self):
         return None
@@ -188,7 +197,6 @@ class ScreenplayAgentProfile:
             document_sections=resolved.document_sections,
             source_chapters=resolved.source_chapters,
             original_request=request.latest_user_text(),
-            plan_bindings=intent.plan_bindings,
             plan_steps=plan.steps,
         )
         turn = await self._turns.load_turn(str(context.turn_id))
@@ -267,6 +275,7 @@ class ScreenplayAgentProfile:
             descriptor_resolver=_ScreenplayTaskDescriptorResolver(),
             executor_registry=DurableExecutorRegistry({"screenplay": executor}),
             worker_id=self._owner_id,
+            task_timeout_ms=self._adapter.runtime_limits.root_run_timeout_ms,
             checkpoint_planner=getattr(executor, "checkpoint_planner", None),
         )
 

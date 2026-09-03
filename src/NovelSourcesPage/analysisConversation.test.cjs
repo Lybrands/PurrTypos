@@ -23,7 +23,7 @@ const snapshot = (events = [], overrides = {}) => ({
   version: 1,
   run: {
     runId: 'analysis-run', status: 'done',
-    finalResponse: '来源分析已完成，等待用户审核后发布。',
+    finalResponse: '非完成状态不得展示的内容',
     provenance: {}, execution: { attempt: 1, cancellationRequested: false },
     ...overrides,
   },
@@ -138,27 +138,29 @@ test('leaving analysis during hydration cannot populate the next source cache', 
   assert.equal(cache.size, 0)
 })
 
-for (const status of ['pending', 'running', 'paused', 'failed', 'completed', 'canceled']) {
+for (const status of ['pending', 'running', 'paused', 'failed', 'canceled']) {
   test(`analysis ${status} state never supplies assistant prose`, () => {
     const messages = buildNovelAnalysisMessages(run({
       taskStatus: status,
-      finalResponse: '来源分析已完成，等待用户审核后发布。',
+      finalResponse: '非完成状态不得展示的内容',
       artifactRef: 'review-artifact',
     }), 'model')
     assert.equal(messages[0].content, '只分析人物的认知差异')
     assert.equal(messages[1].content, '')
     assert.equal(messages[1].longTaskId, 'analysis-task')
-    assert.equal(messages[1].taskPlan.steps.length, 1)
+    assert.equal(messages[1].taskPlan, undefined)
   })
 }
 
-test('historical recipe finalResponse never becomes an answer during replay', () => {
-  const input = run({ runStatus: 'done', taskStatus: 'completed' })
+test('completed analysis uses the root Run final response during replay', () => {
+  const finalResponse = '## 故事概览\n\n红门事件连接了人物认知差与钥匙冲突。'
+  const input = run({ runStatus: 'done', taskStatus: 'completed', finalResponse })
   const stored = snapshot()
+  stored.run.finalResponse = finalResponse
   const replayed = replayNovelAnalysisRun(input, stored, 'model')
-  assert.equal(replayed.content, '')
-  assert.equal(buildNovelAnalysisMessages(input, 'model', replayed).at(-1).content, '')
-  assert.equal(stored.run.finalResponse, '来源分析已完成，等待用户审核后发布。')
+  assert.equal(replayed.content, finalResponse)
+  assert.equal(buildNovelAnalysisMessages(input, 'model', replayed).at(-1).content, finalResponse)
+  assert.equal(buildNovelAnalysisMessages(input, 'model').at(-1).content, finalResponse)
 })
 
 test('public model answer and commentary survive without summaries or private JSON', () => {
@@ -169,7 +171,7 @@ test('public model answer and commentary survive without summaries or private JS
     event(3, { source: 'runtime', channel: 'commentary', outputStreamId: 'model-progress', kind: 'stream.committed', payload: {} }),
     event(4),
     event(5, { source: 'runtime', kind: 'stream.committed', payload: {} }),
-  ]), 'model')
+  ], { finalResponse: '模型的真实公开回答。' }), 'model')
   const assistant = buildNovelAnalysisMessages(input, 'model', replayed).at(-1)
   assert.equal(assistant.content, '模型的真实公开回答。')
   assert.equal(assistant.canonicalOutput.finalText, assistant.content)

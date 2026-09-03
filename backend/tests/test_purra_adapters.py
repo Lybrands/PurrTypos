@@ -295,6 +295,49 @@ def test_provider_message_downgrades_developer_role_to_system():
     }
 
 
+def test_development_model_diagnostics_capture_final_provider_messages(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        provider_model_gateway,
+        "DEV_DIAGNOSTICS_ENABLED",
+        True,
+    )
+    gateway = ProviderModelGateway("private-provider-key")
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="model",
+            options={"thinking": {"type": "disabled"}},
+        ),
+        reasoning_mode=ReasoningMode.DISABLED,
+    )
+
+    parameters = gateway.describe_invocation(
+        [
+            AgentMessage(
+                role="developer",
+                content="内置写作方法",
+                attributes={
+                    "context_name": "writing_method",
+                    "apiKey": "private-message-key",
+                },
+            ),
+            AgentMessage(role="user", content="用户原始输入"),
+        ],
+        invocation,
+    )
+
+    assert parameters["inputMessages"] == [
+        {
+            "apiKey": "<redacted>",
+            "role": "system",
+            "content": "内置写作方法",
+        },
+        {"role": "user", "content": "用户原始输入"},
+    ]
+
+
 @pytest.mark.parametrize(
     ("status", "message", "expected"),
     [

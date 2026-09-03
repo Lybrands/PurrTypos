@@ -26,9 +26,12 @@ from purra.json_values import thaw_json_mapping
 from purra.ports import CancellationSignal, ToolCatalog
 from purra.recovery import RecoveryPolicy
 
-from domains.agent_output_policy import build_agent_public_progress_policy
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
-from domains.screenplay_agent.contracts import ScreenplayIntent
+from domains.screenplay_agent.contracts import (
+    SCREENPLAY_DELIVERABLE_ROLES,
+    ScreenplayIntent,
+    ScreenplayIntentScope,
+)
 from domains.screenplay_agent.prompts import build_screenplay_planning_policy
 
 
@@ -37,7 +40,6 @@ ScreenplayPlanningContextLoader = Callable[
 ]
 
 SCREENPLAY_PLANNING_FACTS_CONTEXT = "screenplay_planning_facts"
-SCREENPLAY_PUBLIC_PROGRESS_CONTEXT = "screenplay_public_progress"
 
 
 class ScreenplayExecutionStateFactory:
@@ -53,6 +55,7 @@ class ScreenplayExecutionStateFactory:
             "expectedPartType": context.expected_part_type,
             "expectedPartKey": context.expected_part_key,
             "dependencyPartKeys": list(context.dependency_part_keys),
+            "sceneIds": list(request.metadata.get("screenplaySceneIds") or ()),
             **(
                 {
                     "deliverableRevisionScope": dict(
@@ -114,32 +117,12 @@ def validate_screenplay_planning_result(
         )
         if context.stage_command is not None:
             context.stage_command.require_compatible(intent)
-            work_phase = (
-                "review"
-                if context.stage_command.target_role == "review"
-                else "creation"
-            )
-            phases = tuple(binding.phase.value for binding in intent.plan_bindings)
-            if (
-                len(phases) < 3
-                or phases.count("evidence") != 1
-                or phases.count("delivery") != 1
-                or set(phases) != {"evidence", work_phase, "delivery"}
-            ):
-                raise ValueError(
-                    f"{context.stage_command.target_role} plan phases must be "
-                    f"evidence, {work_phase}, and delivery"
-                )
     except (TypeError, ValueError) as error:
-        step_ids = [step.id for step in result.work_plan.steps]
-        expected_scope = (
-            context.stage_command.scope.to_mapping()
-            if context.stage_command is not None
-            else {"kind": "current_stage"}
-        )
+        operation = str(task_spec.operation or "").strip()
+        deliverable_roles = ", ".join(sorted(SCREENPLAY_DELIVERABLE_ROLES))
         command_rule = (
             "operation must be answer and deliverable must be omitted or empty"
-            if str(task_spec.operation or "") == "answer"
+            if operation == "answer"
             else (
                 "operation and deliverable must exactly match stageCommand: "
                 f"{context.stage_command.action.value}, "
@@ -147,7 +130,10 @@ def validate_screenplay_planning_result(
                 if context.stage_command is not None
                 else (
                     "operation must be answer, create, revise, or review; "
-                    "answer omits deliverable and formal operations use a valid role"
+                    "answer omits deliverable and formal operations must use "
+                    "exactly one of these deliverable roles: "
+                    f"{deliverable_roles}; episode screenplay drafting uses "
+                    "screenplayDraft"
                 )
             )
         )
@@ -158,111 +144,45 @@ def validate_screenplay_planning_result(
             if isinstance(raw_screenplay, Mapping)
             else raw_target
         )
-        raw_bindings = binding_source.get("stepBindings")
-        expected_bindings = (
-            [
-                {
-                    "stepId": str(step_id),
-                    "phase": str(
-                        phase.get("phase")
-                        if isinstance(phase, Mapping)
-                        else phase
-                    ),
-                }
-                for step_id, phase in raw_bindings.items()
-            ]
-            if isinstance(raw_bindings, Mapping)
-            else raw_bindings
-            if isinstance(raw_bindings, list)
-            else []
-        )
-        if {
-            str(binding.get("stepId") or "")
-            for binding in expected_bindings
-            if isinstance(binding, Mapping)
-        } != set(step_ids):
-            expected_bindings = [
-                {
-                    "stepId": step.id,
-                    "phase": (
-                        "evidence"
-                        if len(result.work_plan.steps) == 1
-                        else "delivery"
-                        if index == len(result.work_plan.steps) - 1
-                        else "evidence"
-                        if step.type.value in {"read", "analyze"}
-                        else "review"
-                        if step.type.value == "review"
-                        else "creation"
-                    ),
-                }
-                for index, step in enumerate(result.work_plan.steps)
-            ]
-        todo_rule = ""
+        expected_scope = None
         if context.stage_command is not None:
-            work_phase = (
-                "review"
-                if context.stage_command.target_role == "review"
-                else "creation"
+            expected_scope = context.stage_command.scope.to_mapping()
+        else:
+            raw_scope = binding_source.get("scope")
+            if isinstance(raw_scope, Mapping):
+                try:
+                    expected_scope = ScreenplayIntentScope.from_task_spec_mapping(
+                        raw_scope
+                    ).to_mapping()
+                except ValueError:
+                    pass
+        if expected_scope is None:
+            target_rule = (
+                "Replace the entire taskSpec.target with exactly one legal "
+                "shape: {\"screenplay\":{\"version\":1,\"scope\":"
+                "{\"kind\":\"current_stage\"}}}, "
+                "{\"screenplay\":{\"version\":1,\"scope\":"
+                "{\"kind\":\"next_episodes\",\"count\":N}}}, "
+                "{\"screenplay\":{\"version\":1,\"scope\":"
+                "{\"kind\":\"episodes\",\"episodeNumbers\":[...]}}}, or "
+                "{\"screenplay\":{\"version\":1,\"scope\":"
+                "{\"kind\":\"all_remaining\"}}}. Choose the scope from "
+                "the original request; consecutive N-episode creation uses "
+                "next_episodes with count N. "
             )
-            repair_step_ids = list(step_ids)
-            used_step_ids = set(repair_step_ids)
-
-            def unused_step_id(base: str) -> str:
-                candidate = base
-                suffix = 2
-                while candidate in used_step_ids:
-                    candidate = f"{base}-{suffix}"
-                    suffix += 1
-                used_step_ids.add(candidate)
-                return candidate
-
-            if not repair_step_ids:
-                repair_step_ids = [
-                    unused_step_id("stage-evidence"),
-                    unused_step_id("stage-work"),
-                    unused_step_id("stage-delivery"),
-                ]
-            elif len(repair_step_ids) == 1:
-                repair_step_ids = [
-                    unused_step_id("stage-evidence"),
-                    repair_step_ids[0],
-                    unused_step_id("stage-delivery"),
-                ]
-            elif len(repair_step_ids) == 2:
-                repair_step_ids.insert(1, unused_step_id("stage-work"))
-            if repair_step_ids != step_ids:
-                todo_rule = (
-                    "Replace the todos too; their ids in order must equal exactly "
-                    f"{json.dumps(repair_step_ids, ensure_ascii=False, separators=(',', ':'))}. "
-                )
-            expected_bindings = [
-                {
-                    "stepId": step_id,
-                    "phase": (
-                        "evidence"
-                        if index == 0
-                        else "delivery"
-                        if index == len(repair_step_ids) - 1
-                        else work_phase
-                    ),
-                }
-                for index, step_id in enumerate(repair_step_ids)
-            ]
-        expected_target = {"screenplay": {
-            "version": 1,
-            "scope": expected_scope,
-            "stepBindings": expected_bindings,
-        }}
+        else:
+            expected_target = {"screenplay": {
+                "version": 1,
+                "scope": expected_scope,
+            }}
+            target_rule = (
+                "Replace the entire taskSpec.target; it must equal exactly "
+                f"{json.dumps(expected_target, ensure_ascii=False, separators=(',', ':'))}. "
+            )
         return (
             f"{str(error) or type(error).__name__}. "
-            "Replace the entire taskSpec.target; it must equal exactly "
-            f"{json.dumps(expected_target, ensure_ascii=False, separators=(',', ':'))}. "
-            f"{todo_rule}"
-            "Do not keep version, scope, or stepBindings at target top level. "
-            "For a formal stage command, keep the first todo for evidence, "
-            "the last todo for delivery, and make every middle todo match the "
-            "required work phase and title. "
+            f"{target_rule}"
+            "Do not change, add, remove, reorder, or rename the model-authored todos. "
             f"{command_rule}."
         )
     return None
@@ -282,15 +202,12 @@ class ScreenplayHostContextProvider:
         budget: ContextBudget,
         signal: CancellationSignal | None = None,
     ) -> ContextBundle:
-        del request, budget, signal
-        policy = build_agent_public_progress_policy()
+        context = ScreenplayAgentDomainContext.from_core_context(
+            request.domain_context
+        )
+        if context.is_root:
+            return await self.build_planning_context(request, budget, signal)
         return ContextBundle(
-            blocks=(ContextBlock(
-                name=SCREENPLAY_PUBLIC_PROGRESS_CONTEXT,
-                content=policy,
-                token_count=estimate_json_tokens(policy),
-                untrusted=False,
-            ),),
             diagnostics={"contextMode": "screenplay-tools"},
         )
 
@@ -330,15 +247,8 @@ class ScreenplayHostContextProvider:
             separators=(",", ":"),
             sort_keys=True,
         )
-        progress_policy = build_agent_public_progress_policy()
         return ContextBundle(
             blocks=(
-                ContextBlock(
-                    name=SCREENPLAY_PUBLIC_PROGRESS_CONTEXT,
-                    content=progress_policy,
-                    token_count=estimate_json_tokens(progress_policy),
-                    untrusted=False,
-                ),
                 ContextBlock(
                     name=SCREENPLAY_PLANNING_FACTS_CONTEXT,
                     content=planning_facts,
@@ -367,7 +277,7 @@ class ScreenplayHostContextProvider:
 class ScreenplayDomainAdapter:
     tool_catalog: ToolCatalog
     planning_policy: ScreenplayToolLoopPolicy = ScreenplayToolLoopPolicy()
-    planner_limits: PlannerLimits = PlannerLimits(max_repair_attempts=3)
+    planner_limits: PlannerLimits = PlannerLimits(max_repair_attempts=2)
     planning_result_validator = staticmethod(
         validate_screenplay_planning_result
     )
@@ -382,7 +292,8 @@ class ScreenplayDomainAdapter:
         max_run_output_tokens=None,
         max_model_rounds=8,
         max_progress_rounds=8,
-        provider_invocation_timeout_ms=300_000,
+        root_run_timeout_ms=None,
+        provider_invocation_timeout_ms=None,
     )
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
