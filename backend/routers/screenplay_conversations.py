@@ -39,7 +39,6 @@ def _service() -> ScreenplayAgentService:
             composition=composition,
         ),
         projects=ScreenplayV2ProjectService(db),
-        output_processor=composition.output_processor,
         track_background=composition.track_background_run,
     )
 

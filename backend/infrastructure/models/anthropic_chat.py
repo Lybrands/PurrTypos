@@ -1,9 +1,4 @@
-"""
-Anthropic Messages API infrastructure adapter.
-
-Converts between OpenAI-format messages/chunks and the Anthropic SDK
-so the rest of the backend can stay provider-agnostic.
-"""
+"""Anthropic-compatible business transport and title generation."""
 
 from __future__ import annotations
 
@@ -25,7 +20,7 @@ from utils.session_title import (
     SESSION_TITLE_SYSTEM_PROMPT,
     normalize_session_title,
 )
-from purra.stream_ownership import OwnedAsyncIterator, openai_chunk_is_terminal
+from purra.stream_ownership import OwnedAsyncIterator, close_async_resource, openai_chunk_is_terminal
 from utils.url import normalize_base_url
 
 logger = logging.getLogger(__name__)
@@ -38,6 +33,7 @@ def _create_client(api_key: str, base_url: str | None) -> AsyncAnthropic:
     return AsyncAnthropic(
         api_key=(api_key or "").strip(),
         base_url=url or None,  # SDK default when None
+        max_retries=0,
     )
 
 
@@ -251,7 +247,6 @@ async def chat_stream_as_openai_format(
     require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
 
-    client = _create_client(api_key, base_url)
     converted = openai_messages_to_anthropic(messages)
     system: str | None = converted["system"]
     anth_messages: list[dict] = converted["messages"]
@@ -291,7 +286,12 @@ async def chat_stream_as_openai_format(
         except (TypeError, ValueError):
             pass
 
-    raw_stream = await client.messages.create(**params)
+    client = _create_client(api_key, base_url)
+    try:
+        raw_stream = await client.messages.create(**params)
+    except BaseException:
+        await close_async_resource(client)
+        raise
 
     async def _convert() -> AsyncIterator[dict]:
         tool_accum: dict[int, dict] = {}
@@ -386,6 +386,7 @@ async def chat_stream_as_openai_format(
         "stream": OwnedAsyncIterator(
             _convert(),
             raw_stream,
+            client,
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
@@ -417,7 +418,6 @@ async def chat_no_stream_as_openai_format(
     require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
 
-    client = _create_client(api_key, base_url)
     converted = openai_messages_to_anthropic(messages)
     system: str | None = converted["system"]
     anth_messages: list[dict] = converted["messages"]
@@ -456,7 +456,11 @@ async def chat_no_stream_as_openai_format(
         except (TypeError, ValueError):
             pass
 
-    msg = await client.messages.create(**params)
+    client = _create_client(api_key, base_url)
+    try:
+        msg = await client.messages.create(**params)
+    finally:
+        await close_async_resource(client)
 
     blocks = msg.content if isinstance(msg.content, list) else []
     text_parts: list[str] = []
@@ -546,7 +550,6 @@ async def generate_title(
     require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     thinking_enabled = normalize_thinking_enabled(opts)
 
-    client = _create_client(api_key, base_url)
     user_text = str(text or "").strip()[:4000]
 
     thinking_param, max_tokens = build_anthropic_thinking_param(
@@ -566,7 +569,11 @@ async def generate_title(
     for key in ("temperature", "top_k"):
         if opts.get(key) is not None:
             payload[key] = opts[key]
-    msg = await client.messages.create(**payload)
+    client = _create_client(api_key, base_url)
+    try:
+        msg = await client.messages.create(**payload)
+    finally:
+        await close_async_resource(client)
 
     raw = _extract_anthropic_title_plain_text(msg)
     logger.info("[ai-generate-title][anthropic] 模型返回原文: %s", raw)

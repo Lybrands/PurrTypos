@@ -194,8 +194,20 @@ async def test_domain_cannot_replace_a_shared_policy_block():
 )
 def test_domain_policy_does_not_restate_shared_agent_behavior(domain_policy):
     for shared_marker in (
-        "【公开工作进展规则】",
-        "【最终答复规则】",
-        "Root 任务成功完成时",
+        "【进展标题】",
+        "【最终答复】",
     ):
         assert shared_marker not in domain_policy
+
+
+def test_shared_public_policies_do_not_name_runtime_internals():
+    policy = "\n".join((
+        build_agent_public_progress_policy(),
+        build_agent_final_response_policy(),
+    ))
+
+    for marker in (
+        "Run", "Task", "Turn", "Operation", "Artifact", "Revision", "Root",
+        "reasoning", "chain-of-thought", "内部 ID", "工具协议", "宿主", "独立通道",
+    ):
+        assert marker not in policy

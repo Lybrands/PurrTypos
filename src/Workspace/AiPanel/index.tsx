@@ -316,7 +316,6 @@ export default function AiPanel({
     setAssociatedChapterIds,
     associatedOutlineIds,
     setAssociatedOutlineIds,
-    availableOutlines,
     outlineSelectOptions,
     chapterSelectOptions,
     handleQuickAssociateChapter,

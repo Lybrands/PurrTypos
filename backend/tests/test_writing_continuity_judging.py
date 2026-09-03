@@ -115,7 +115,7 @@ def test_policy_builds_untrusted_json_only_from_strict_candidate_items():
 
     assert [message.role.value for message in messages] == ["system", "user"]
     assert "untrusted story data" in messages[0].content
-    assert "deterministically verified" in messages[0].content
+    assert "has been verified" in messages[0].content
     payload = json.loads(messages[1].content)
     assert payload["items"][0] == {
         "number": 1,

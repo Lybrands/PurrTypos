@@ -3,9 +3,11 @@ import test from 'node:test'
 import {
   initialCanonicalOutputState,
   reduceCanonicalOutput,
-  replayCanonicalOutput,
   type CanonicalOutputEvent,
 } from './canonicalOutput.ts'
+
+const replayCanonicalOutput = (events: readonly CanonicalOutputEvent[], afterSequence = 0) =>
+  events.reduce(reduceCanonicalOutput, initialCanonicalOutputState(afterSequence))
 
 const event = (
   sequence: number,
@@ -70,9 +72,10 @@ const events: CanonicalOutputEvent[] = [
   }),
 ]
 
-test('real-time reduction equals zero-based replay', () => {
+test('canonical events project the public answer and invocation ownership', () => {
   const live = events.reduce(reduceCanonicalOutput, initialCanonicalOutputState())
-  assert.deepEqual(replayCanonicalOutput(events), live)
+  assert.equal(live.finalText, '已完成')
+  assert.equal(live.operations['operation-1'].status, 'succeeded')
   assert.equal(
     live.commentaryBlocks[0]?.invocationId,
     'invocation-commentary',
@@ -225,10 +228,22 @@ test('Provider public progress replays separately from final text and reasoning'
         sourceChunkIndex: 1,
       },
     }),
+    event(3, {
+      source: 'provider',
+      kind: 'agent.progress',
+      channel: 'commentary',
+      outputStreamId: 'answer-stream',
+      invocationId: 'answer-invocation',
+      payload: {
+        schemaVersion: 'purra.agent-progress/v1',
+        text: '正在核对人物动机与关系',
+        sourceChunkIndex: 2,
+      },
+    }),
   ])
 
   assert.deepEqual(state.agentProgress.map((item) => item.text), [
-    '正在核对人物动机',
+    '正在核对人物动机与关系',
   ])
   assert.equal(state.finalText, '')
   assert.equal(state.commentaryText, '')

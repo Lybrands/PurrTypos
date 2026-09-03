@@ -6,8 +6,18 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from purra.contracts import RunBinding, RunCreateParams
+from purra.contracts import (
+    AgentRunRequest,
+    AgentRunResult,
+    DomainContext,
+    ModelRequest,
+    RunBinding,
+    RunCreateParams,
+    RunStatus,
+)
 from purra.errors import RunCommitProjectionError
+from purra.events import AgentEvent, CoreEventType
+from purra.execution import AgentRunSupervisor
 from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
 from purra.output import (
     AgentOutputIntent,
@@ -17,9 +27,10 @@ from purra.output import (
 from application.agent_cancellation_service import AgentCancellationService
 from application.agent_orphan_recovery_service import AgentOrphanRecoveryService
 from application.composition_factory import create_agent_composition
-from application.run_execution_control import RunExecutionSession
 from database.connection import DatabaseConnection
 from infrastructure.persistence import run_store
+from infrastructure.persistence.agent_output_publisher import InProcessAgentOutputPublisher
+from infrastructure.persistence.sqlite_agent_output_repository import SqliteAgentOutputRepository
 from infrastructure.persistence.run_execution_store import (
     SqliteRunControlStore,
 )
@@ -164,21 +175,38 @@ async def test_cancellation_blocks_future_claim_and_wakes_live_session(db):
         prompt="cancel me",
         mode="agent",
     ))
-    external = asyncio.Event()
-    session = RunExecutionSession(
-        control := SqliteRunControlStore(db),
+    canceled = asyncio.Event()
+
+    async def execute(_request, _options, signal):
+        yield AgentEvent(type=CoreEventType.RUN_STARTED, run_id=run_id)
+        await signal.wait()
+        canceled.set()
+        yield AgentRunResult(run_id=run_id, status=RunStatus.CANCELED)
+
+    control = SqliteRunControlStore(db)
+    supervisor = AgentRunSupervisor(
+        output_repository=SqliteAgentOutputRepository(db),
+        output_publisher=InProcessAgentOutputPublisher(),
+        execution_factory=execute,
+        lease_store=control,
         owner_id=repository.owner_id,
         lease_duration_ms=repository.lease_duration_ms,
-        external_signal=external,
         poll_interval_seconds=0.01,
     )
-    await session.bind(run_id)
-
-    assert await control.request_cancellation(run_id)
-    assert not await control.request_cancellation(run_id)
-    await asyncio.wait_for(session.signal.wait(), timeout=0.5)
-    assert session.signal.is_set()
-    await session.close()
+    try:
+        handle = await supervisor.submit(AgentRunRequest(
+            messages=(),
+            model=ModelRequest(provider="openai", model="test-model"),
+            domain_context=DomainContext(namespace="test.lease"),
+        ))
+        assert handle.run_id == run_id
+        assert await control.request_cancellation(run_id)
+        assert not await control.request_cancellation(run_id)
+        result = await asyncio.wait_for(handle.wait(), timeout=0.5)
+        assert result.status is RunStatus.CANCELED
+        assert canceled.is_set()
+    finally:
+        await supervisor.close()
 
     assert not await control.claim(
         run_id,

@@ -30,12 +30,6 @@ def clear_db(db: "DatabaseConnection | None" = None) -> None:
         _db_instance = None
 
 
-def is_db_owner(db: "DatabaseConnection") -> bool:
-    """Return whether ``db`` is the active process-scoped database."""
-
-    return _db_instance is db
-
-
 def get_db() -> "DatabaseConnection":
     if _db_instance is None:
         from exceptions import DatabaseNotReadyError

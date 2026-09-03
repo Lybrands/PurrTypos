@@ -11,6 +11,9 @@ from domains.writing.methods import (
     WritingMethodConflictError,
     WritingMethodReferenceError,
 )
+from infrastructure.persistence.writing.sqlite_writing_method_repository import (
+    SqliteWritingMethodRepository,
+)
 
 
 @pytest.fixture
@@ -248,7 +251,7 @@ async def test_recommendation_catalog_is_read_only_metadata_without_binding_side
     )
     revision = await service.publish_method(method["id"])
 
-    rows = await service.search_published_methods("冲突", limit=4)
+    rows = await SqliteWritingMethodRepository(db).search_published_methods("冲突", limit=4)
 
     matched = next(item for item in rows if item["id"] == revision["id"])
     assert "markdown_body" not in matched

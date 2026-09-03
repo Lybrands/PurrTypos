@@ -1,10 +1,4 @@
-"""Ratchet guards for the PurrA and screenplay conversation rebuild.
-
-The allowlists in this file describe *known architectural debt*, not approved
-design.  A refactor may remove any listed occurrence without updating the
-baseline.  Adding a new dependency, route, field, or generic UI reference must
-fail until the architecture review deliberately changes this guard.
-"""
+"""Architecture guards for host orchestration and screenplay ownership."""
 
 from __future__ import annotations
 
@@ -14,8 +8,10 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_DIR = ROOT_DIR / "packages" / "purra" / "src" / "purra"
-SCREENPLAY_DOMAIN_DIR = BACKEND_DIR / "domains" / "screenplay"
+SCREENPLAY_DOMAIN_DIRS = (
+    BACKEND_DIR / "domains" / "screenplay",
+    BACKEND_DIR / "domains" / "screenplay_agent",
+)
 GENERIC_CHUNK_HANDLER_DIR = (
     ROOT_DIR / "src" / "agent-runtime" / "chunkHandlers"
 )
@@ -111,25 +107,13 @@ FORBIDDEN_SCREENPLAY_DOMAIN_IMPORT_ROOTS = {
     "schemas",
 }
 
-# Phase 2 closed this debt completely. Any database import is now a regression.
-SCREENPLAY_DOMAIN_DATABASE_DEBT: set[tuple[str, str]] = set()
-
-# These files are generic application surfaces.  Their screenplay references
-# must monotonically decrease until product composition and transport are split.
-GENERIC_APPLICATION_SCREENPLAY_DEBT_CAPS = {
-    "application/agent_composition.py": 0,
-    "application/agent_run_queries.py": 0,
-    "application/agent_run_service.py": 0,
-    "application/request_mapping.py": 0,
-    "application/run_execution_control.py": 0,
-    "application/sse_mapping.py": 0,
-}
-
-CHAT_STREAM_SCREENPLAY_FIELD_DEBT: set[str] = set()
-
-AI_ROUTER_PRODUCT_ROUTE_DEBT: set[str] = set()
-
-GENERIC_FRONTEND_SCREENPLAY_DEBT_CAPS: dict[str, int] = {}
+GENERIC_APPLICATION_FILES = (
+    "application/agent_composition.py",
+    "application/agent_run_queries.py",
+    "application/agent_run_service.py",
+    "application/request_mapping.py",
+    "application/sse_mapping.py",
+)
 
 
 def _imports(path: Path) -> list[str]:
@@ -188,9 +172,19 @@ def _router_paths(path: Path) -> set[str]:
     return result
 
 
+def _screenplay_domain_files() -> list[Path]:
+    files: list[Path] = []
+    for directory in SCREENPLAY_DOMAIN_DIRS:
+        assert directory.is_dir(), f"Missing screenplay domain: {directory}"
+        domain_files = sorted(directory.rglob("*.py"))
+        assert domain_files, f"No Python files in screenplay domain: {directory}"
+        files.extend(domain_files)
+    return files
+
+
 def test_screenplay_domain_never_depends_on_upper_or_infrastructure_layers():
     violations: list[str] = []
-    for path in sorted(SCREENPLAY_DOMAIN_DIR.rglob("*.py")):
+    for path in _screenplay_domain_files():
         for imported in _imports(path):
             if imported.split(".", 1)[0] in FORBIDDEN_SCREENPLAY_DOMAIN_IMPORT_ROOTS:
                 violations.append(f"{_relative_backend(path)} imports {imported}")
@@ -200,32 +194,31 @@ def test_screenplay_domain_never_depends_on_upper_or_infrastructure_layers():
     )
 
 
-def test_screenplay_domain_database_debt_can_only_shrink():
+def test_screenplay_domain_has_no_database_dependency():
     observed: set[tuple[str, str]] = set()
-    for path in sorted(SCREENPLAY_DOMAIN_DIR.rglob("*.py")):
+    for path in _screenplay_domain_files():
         for imported in _imports(path):
             if imported.split(".", 1)[0] == "database":
                 observed.add((_relative_backend(path), imported))
 
-    unexpected = observed - SCREENPLAY_DOMAIN_DATABASE_DEBT
-    assert not unexpected, "New screenplay domain database dependencies:\n" + "\n".join(
-        f"{path} imports {module}" for path, module in sorted(unexpected)
+    assert not observed, "Screenplay domain database dependencies:\n" + "\n".join(
+        f"{path} imports {module}" for path, module in sorted(observed)
     )
 
 
-def test_generic_application_screenplay_debt_can_only_shrink():
+def test_generic_application_has_no_screenplay_references():
     violations: list[str] = []
-    for relative, cap in GENERIC_APPLICATION_SCREENPLAY_DEBT_CAPS.items():
+    for relative in GENERIC_APPLICATION_FILES:
         observed = _screenplay_count(BACKEND_DIR / relative)
-        if observed > cap:
-            violations.append(f"{relative}: {observed} references, baseline cap {cap}")
+        if observed:
+            violations.append(f"{relative}: {observed} references")
 
-    assert not violations, "Generic application screenplay debt grew:\n" + "\n".join(
+    assert not violations, "Generic application screenplay references:\n" + "\n".join(
         violations
     )
 
 
-def test_generic_chat_request_screenplay_fields_can_only_shrink():
+def test_generic_chat_request_has_no_screenplay_fields():
     fields = _class_fields(BACKEND_DIR / "schemas" / "ai.py", "ChatStreamRequest")
     product_fields = {
         field
@@ -233,40 +226,34 @@ def test_generic_chat_request_screenplay_fields_can_only_shrink():
         if "screenplay" in field.casefold()
         or field in {"activeDocumentId", "activeStage", "sourceBookId"}
     }
-    unexpected = product_fields - CHAT_STREAM_SCREENPLAY_FIELD_DEBT
-
-    assert not unexpected, "New product fields in ChatStreamRequest: " + ", ".join(
-        sorted(unexpected)
+    assert not product_fields, "Product fields in ChatStreamRequest: " + ", ".join(
+        sorted(product_fields)
     )
 
 
-def test_generic_ai_router_product_routes_can_only_shrink():
+def test_generic_ai_router_has_no_product_routes():
     routes = _router_paths(BACKEND_DIR / "routers" / "ai.py")
     product_routes = {
         route
         for route in routes
         if "screenplay" in route.casefold() or "long-tasks" in route.casefold()
     }
-    unexpected = product_routes - AI_ROUTER_PRODUCT_ROUTE_DEBT
-
-    assert not unexpected, "New product routes in generic AI router: " + ", ".join(
-        sorted(unexpected)
+    assert not product_routes, "Product routes in generic AI router: " + ", ".join(
+        sorted(product_routes)
     )
 
 
-def test_generic_frontend_screenplay_debt_can_only_shrink():
-    generic_paths = [
-        *sorted(GENERIC_CHUNK_HANDLER_DIR.glob("*.ts")),
-    ]
+def test_generic_frontend_has_no_screenplay_references():
+    generic_paths = sorted(GENERIC_CHUNK_HANDLER_DIR.glob("*.ts"))
+    assert generic_paths, f"No chunk handlers in {GENERIC_CHUNK_HANDLER_DIR}"
     violations: list[str] = []
     for path in generic_paths:
         relative = path.relative_to(ROOT_DIR).as_posix()
         observed = _screenplay_count(path)
-        cap = GENERIC_FRONTEND_SCREENPLAY_DEBT_CAPS.get(relative, 0)
-        if observed > cap:
-            violations.append(f"{relative}: {observed} references, baseline cap {cap}")
+        if observed:
+            violations.append(f"{relative}: {observed} references")
 
-    assert not violations, "Generic frontend screenplay debt grew:\n" + "\n".join(
+    assert not violations, "Generic frontend screenplay references:\n" + "\n".join(
         violations
     )
 
@@ -838,19 +825,6 @@ def test_phase_five_generic_runtime_has_no_product_operation_ownership():
     )
 
 
-def test_purra_has_no_product_or_model_identity_branches():
-    forbidden = {"deepseek", "kimi", "glm", "zhipu", "minimax", "mimo"}
-    violations = [
-        f"{path.relative_to(ROOT_DIR).as_posix()}: {token}"
-        for path in sorted(PURRA_DIR.rglob("*.py"))
-        for token in forbidden
-        if token in path.read_text(encoding="utf-8").casefold()
-    ]
-    assert not violations, "PurrA branches on concrete model identity:\n" + "\n".join(
-        violations
-    )
-
-
 def test_removed_failure_and_reasoning_fallback_paths_stay_removed():
     forbidden = {
         "pinned_disabled_after_truncation",
@@ -861,7 +835,6 @@ def test_removed_failure_and_reasoning_fallback_paths_stay_removed():
     }
     boundary_test = Path(__file__).resolve()
     paths = (
-        *sorted(PURRA_DIR.rglob("*.py")),
         *(path for path in sorted(BACKEND_DIR.rglob("*.py")) if path != boundary_test),
     )
     violations = [
@@ -908,7 +881,6 @@ def test_legacy_task_budgets_and_truncation_replay_stay_removed():
     }
     boundary_test = Path(__file__).resolve()
     paths = (
-        *sorted(PURRA_DIR.rglob("*.py")),
         *sorted((BACKEND_DIR / "application").rglob("*.py")),
         *sorted((BACKEND_DIR / "infrastructure" / "models").rglob("*.py")),
     )

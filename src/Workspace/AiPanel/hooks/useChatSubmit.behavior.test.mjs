@@ -869,7 +869,6 @@ test('terminal keeps editing disabled until durable conversation persistence set
   globalThis.document = { documentElement: { lang: 'zh-CN' } }
   let onChunk
   let finishSave
-  let associatedTarget
   const originalSubscribe = services.ai.onAiChunk
   const originalStream = services.ai.aiChatStream
   const originalSave = services.conversations.saveConversation
@@ -887,11 +886,7 @@ test('terminal keeps editing disabled until durable conversation persistence set
     finishSave = resolve
   })
   try {
-    const { result } = renderHook({
-      associateAssistantIdentities: (_source, target) => {
-        associatedTarget = target
-      },
-    })
+    const { result } = renderHook()
     assert.equal(result.handleSubmit({ content: '等待持久化' }), 'started')
     onChunk({
       done: true,

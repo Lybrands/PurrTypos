@@ -19,13 +19,19 @@ _datas = []
 if os.path.isdir(_skills_src):
     _datas.append((_skills_src, "skills"))
 
+_screenplay_skills = os.path.join("domains", "screenplay_agent", "skills")
+_datas.append((os.path.join(_spec_dir, _screenplay_skills), _screenplay_skills))
+
 _hiddenimports = [
     "certifi",
     "aiosqlite",
     "yaml",
     "httpx",
+    "httpx2",
     "openai",
     "anthropic",
+    "purra_openai",
+    "purra_anthropic",
     "zai",
     "sse_starlette.sse",
     "pydantic",
@@ -59,17 +65,13 @@ _hiddenimports = [
     "routers.story_background",
     "routers.files",
     "routers.prompt_templates",
-    "routers.screenplay",
     "database.connection",
     "database.schema",
     "database.crud.outlines",
     "database.crud.chapters",
     "database.crud.articles",
     "database.crud.characters",
-    "database.crud.sessions",
-    "database.crud.ai_favorites",
     "database.crud.prompt_templates",
-    "database.crud.settings",
     "database.crud.story_background",
     "services.screenplay_pdf",
     "infrastructure.models.openai_chat",

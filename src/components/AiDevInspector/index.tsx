@@ -358,14 +358,6 @@ const MODEL_PHASE_LABELS: Record<string, string> = {
   response_judge: "回答校验",
 };
 
-const MODEL_FINISH_REASON_LABELS: Record<string, string> = {
-  stop: "正常完成",
-  tool_calls: "进入工具调用",
-  length: "达到本次输出预算",
-  filtered: "供应商内容过滤",
-  other: "供应商其他原因",
-};
-
 function ModelCallRow({
   call,
   index,

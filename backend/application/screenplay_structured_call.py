@@ -172,6 +172,7 @@ class ScreenplayStructuredCallService:
             provenance=screenplay_run_provenance(
                 runtime,
                 user_payload,
+                model_request=model_request,
                 output_contract="assistant_text",
                 tool_protocol_contract="none",
             ),

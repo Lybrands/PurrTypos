@@ -157,13 +157,12 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
       createSession: () => undefined,
       closeSession: () => undefined,
       renameSession: () => undefined,
-      send: () => lifecycle.runIfCurrent(token, () => { sends += 1 }),
+      send: () => { if (lifecycle.canAct(token)) sends += 1 },
       abort: () => undefined,
       resume: () => undefined,
-      editMessage: (index, content) => lifecycle.runIfCurrent(
-        token,
-        () => { edits.push({ index, content }) },
-      ),
+      editMessage: (index, content) => {
+        if (lifecycle.canAct(token)) edits.push({ index, content })
+      },
       resolveToolApproval: async () => ({ success: true }),
       onSubmitErrorReport: async () => ({ success: true }),
       },

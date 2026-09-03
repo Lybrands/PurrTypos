@@ -31,7 +31,7 @@ from purra.contracts import (
 )
 from purra.api import AgentCoreRunOptions
 from purra.errors import ResponseJudgeContractError
-from purra.events import AgentEvent, CoreEventType
+from purra.events import AgentEvent
 from purra.model_protocol import generic_capability_snapshot
 from purra.operations import (
     AgentOperationController,

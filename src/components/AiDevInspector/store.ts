@@ -149,7 +149,6 @@ export interface AiDebugRun {
   error?: string;
   errorReport?: AiErrorReport;
   abortRequested?: boolean;
-  persistedEventCursor?: number;
   providerOutputEvents?: number;
 }
 
@@ -909,11 +908,6 @@ function mergeDebugAgentPlan(
   };
 }
 
-function debugAgentPlanStatus(plan: unknown, status: string): unknown {
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return plan;
-  return { ...(plan as Record<string, unknown>), status };
-}
-
 function canonicalModel(event: CanonicalOutputEvent | null): string | undefined {
   if (event?.kind !== "operation.started" || event.payload.kind !== "model") {
     return undefined;
@@ -979,148 +973,6 @@ export function startAiDebugRun(
   setState({
     runs: retainRecentTurns([run, ...withoutSameId]),
     selectedRunId: streamId,
-  });
-}
-
-function persistedRunStatus(
-  status: AiAgentRunSnapshot['run']['status'],
-): AiDebugRunStatus {
-  if (status === 'done') return 'completed';
-  if (status === 'canceled') return 'aborted';
-  if (status === 'failed' || status === 'blocked') return 'failed';
-  return 'preparing';
-}
-
-function persistedTimestamp(value: string | null | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
-    ? value
-    : `${value.replace(' ', 'T')}Z`;
-  const timestamp = Date.parse(normalized);
-  return Number.isFinite(timestamp) ? timestamp : fallback;
-}
-
-function persistedDebugRunId(runId: string): string {
-  return `persisted-${runId}`;
-}
-
-/** Rebuild a debug entry from the canonical persisted Run event stream. */
-export function hydrateAiDebugRunSnapshot(data: {
-  snapshot: AiAgentRunSnapshot;
-  prompt: string;
-  source?: string;
-  turnId?: string;
-  conversationRootRunId?: string;
-}): void {
-  if (!DEBUG_STORE_ENABLED) return;
-  const { snapshot } = data;
-  const runId = String(snapshot.run.runId || '').trim();
-  if (!runId) return;
-  const debugRunId = persistedDebugRunId(runId);
-  const existing = state.runs.find(
-    (run) => run.agentRunId === runId || run.id === debugRunId,
-  );
-
-  if (!existing || existing.persistedEventCursor == null) {
-    const now = Date.now();
-    const startedAt = persistedTimestamp(snapshot.run.createdAt, now);
-    const source = String(data.source || '').trim() || 'Agent 历史恢复';
-    const run: AiDebugRun = {
-      id: debugRunId,
-      turnId: data.turnId,
-      conversationRootRunId: data.conversationRootRunId,
-      sessionId: snapshot.run.sessionId ?? undefined,
-      conversationId: snapshot.run.conversationId ?? undefined,
-      source,
-      taskType: '持久化 Agent Run',
-      status: persistedRunStatus(snapshot.run.status),
-      startedAt,
-      updatedAt: persistedTimestamp(snapshot.run.updatedAt, now),
-      finishedAt: snapshot.run.status === 'running'
-        ? undefined
-        : persistedTimestamp(snapshot.run.updatedAt, now),
-      request: {
-        messages: data.prompt.trim()
-          ? [{ role: 'user', content: data.prompt }]
-          : [],
-        meta: { recovered: true },
-      },
-      model: snapshot.run.provenance.modelName ?? undefined,
-      // Preserve Provider-authored public text already observed before detach.
-      output: existing?.output ?? '',
-      commentary: existing?.commentary ?? '',
-      modelCalls: [],
-      tools: [],
-      events: [{
-        id: ++eventSequence,
-        at: startedAt,
-        type: 'recovered',
-        label: '从持久化事件恢复 Agent Run',
-        payload: { runId },
-      }],
-      eventCount: 1,
-      tokenUsage: persistedTokenUsage(
-        snapshot.run.activity,
-        snapshot.run.status !== 'running',
-      ),
-      agentRunId: runId,
-      agentPlan: snapshot.todos.length
-        ? { status: snapshot.run.status, steps: snapshot.todos }
-        : undefined,
-      delegations: snapshot.delegations.items.map((item) => sanitizeValue(item)),
-      delegationActivities: [],
-      approvals: [],
-      persistedEventCursor: 0,
-      providerOutputEvents: snapshot.run.activity?.providerOutputEvents,
-    };
-    // Snapshot monitoring starts only after the live stream is detached. At
-    // that boundary the persisted event stream is authoritative, so replace
-    // any partial live debug copy instead of merging and duplicating events.
-    const withoutSameRun = state.runs.filter(
-      (item) => item.id !== debugRunId && item.agentRunId !== runId,
-    );
-    setState({
-      runs: retainRecentTurns([run, ...withoutSameRun]),
-      selectedRunId: debugRunId,
-    });
-  }
-
-  const currentCursor = state.runs.find(
-    (run) => run.agentRunId === runId || run.id === debugRunId,
-  )?.persistedEventCursor ?? 0;
-  let nextCursor = currentCursor;
-  for (const event of [...snapshot.events].sort((left, right) => (
-    left.cursor - right.cursor
-  ))) {
-    if (event.cursor <= currentCursor) continue;
-    if (event.chunk) {
-      recordAiDebugRunEvent(runId, event.chunk as AiDebugChunk);
-    }
-    nextCursor = Math.max(nextCursor, event.cursor);
-  }
-  replaceRunByAgentRunId(runId, (run) => {
-    const terminal = snapshot.run.status !== 'running' && !snapshot.hasMore;
-    return {
-      ...run,
-      turnId: data.turnId ?? run.turnId,
-      conversationRootRunId: data.conversationRootRunId ?? run.conversationRootRunId,
-      sessionId: snapshot.run.sessionId ?? run.sessionId,
-      conversationId: snapshot.run.conversationId ?? run.conversationId,
-      model: snapshot.run.provenance.modelName ?? run.model,
-      status: terminal ? persistedRunStatus(snapshot.run.status) : run.status,
-      updatedAt: persistedTimestamp(snapshot.run.updatedAt, run.updatedAt),
-      finishedAt: terminal
-        ? persistedTimestamp(snapshot.run.updatedAt, run.updatedAt)
-        : run.finishedAt,
-      agentPlan: terminal
-        ? debugAgentPlanStatus(run.agentPlan, snapshot.run.status)
-        : run.agentPlan,
-      providerOutputEvents: snapshot.run.activity?.providerOutputEvents
-        ?? run.providerOutputEvents,
-      tokenUsage: persistedTokenUsage(snapshot.run.activity, terminal)
-        ?? run.tokenUsage,
-      persistedEventCursor: Math.max(nextCursor, snapshot.nextCursor),
-    };
   });
 }
 
@@ -1237,81 +1089,6 @@ export function recordAgentConversationDebugChunk(data: {
   if (data.source) replaceRun(streamId, run => ({ ...run, source: data.source! }));
 }
 
-/**
- * Attach a durable same-Run event to its owning diagnostic entry.
- */
-export function recordAiDebugRunEvent(
-  rootAgentRunId: string,
-  chunk: AiDebugChunk,
-): void {
-  if (!DEBUG_STORE_ENABLED || !rootAgentRunId) return;
-  const now = Date.now();
-  replaceRunByAgentRunId(rootAgentRunId, (run) => {
-    const observedRun = run.status === "dispatched"
-      ? { ...run, status: "preparing" as AiDebugRunStatus }
-      : run;
-    const status = FINAL_STATUSES.has(run.status)
-      ? run.status
-      : chunk.runResult
-        ? nextStatus(observedRun, chunk)
-        : chunk.aborted
-          ? "aborted"
-          : chunk.error || (chunk.done && chunk.errorReport)
-            ? "failed"
-            : chunk.done
-              ? "completed"
-              : nextStatus(observedRun, chunk);
-    const terminal = FINAL_STATUSES.has(status);
-    const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
-    const delta = canonicalEvent ? canonicalProviderTextDelta(canonicalEvent) : "";
-    const runtimeData = canonicalRuntimeData(canonicalEvent);
-    const succeeded = successfulTerminal(chunk);
-    const delegation = canonicalEvent?.kind === "delegation.event"
-      ? canonicalEvent.payload
-      : null;
-    const approval = runtimeData?.eventType.startsWith("approval.")
-      ? { eventType: runtimeData.eventType, ...runtimeData.data }
-      : null;
-    return {
-      ...run,
-      status,
-      taskType: updatedTaskType(run, chunk),
-      updatedAt: now,
-      finishedAt: terminal ? run.finishedAt ?? now : undefined,
-      model: canonicalModel(canonicalEvent) || chunk.model || run.model,
-      output: run.output + (canonicalEvent?.channel === "final" ? delta : ""),
-      commentary: run.commentary + (
-        canonicalEvent?.channel === "commentary" ? delta : ""
-      ),
-      modelCalls: appendModelCall(run, chunk, now),
-      tools: upsertTools(run, chunk, now),
-      events: appendEvent(run, chunk, now),
-      eventCount: run.eventCount + 1,
-      tokenUsage: runtimeTokenUsage(
-        run.tokenUsage,
-        runtimeData,
-        run.modelCalls.reduce((count, call) => count + call.count, 0),
-      ),
-      contextBudget: runtimeData?.eventType.startsWith("context.")
-        ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
-        : run.contextBudget,
-      contextCompaction: runtimeData?.eventType.startsWith("conversation.compaction.")
-        ? runtimeData.data
-        : run.contextCompaction,
-      // Canonical events never replace the owning Run identity.
-      agentRunId: rootAgentRunId,
-      agentPlan: mergeDebugAgentPlan(run.agentPlan, runtimeData),
-      delegations: delegation
-        ? upsertDebugDelegation(run.delegations, delegation)
-        : run.delegations,
-      delegationActivities: updateDelegationActivities(run, chunk, now),
-      approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: succeeded ? undefined : runTerminalError(chunk) || run.error,
-      errorReport: succeeded ? undefined : chunk.errorReport ?? run.errorReport,
-    };
-  });
-}
-
 export function recordAiDebugErrorReportStatus(
   streamId: string,
   status: AiErrorReportStatus,
@@ -1417,11 +1194,6 @@ export function subscribeAiDebugStore(listener: () => void): () => void {
 
 export function getAiDebugSnapshot(): AiDebugState {
   return state;
-}
-
-export function selectAiDebugRun(runId: string): void {
-  if (!state.runs.some((run) => run.id === runId)) return;
-  setState({ ...state, selectedRunId: runId });
 }
 
 export function clearAiDebugRuns(): void {

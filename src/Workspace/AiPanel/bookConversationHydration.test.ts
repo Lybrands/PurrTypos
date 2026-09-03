@@ -8,10 +8,13 @@ import {
   BookConversationHydrationError,
   mergeHydratedBookRun,
   hydrateBookConversationReadModel,
-  hydrateBookConversations,
   hydrateLatestBookRun,
 } from './bookConversationHydration.ts'
+
 import { createConversationSessionLifecycle } from './conversationSessionLifecycle.ts'
+
+const hydrateBookConversations = (...args: Parameters<typeof hydrateBookConversationReadModel>) =>
+  hydrateBookConversationReadModel(...args).then(result => result?.messages)
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -367,7 +370,6 @@ test('deferred A hydrate cannot commit, submit, or edit after B becomes current'
   const pendingA = deferred<ReturnType<typeof snapshot>>()
   const tokenA = lifecycle.beginLoad(7)
   lifecycle.setDraft(7, 'A draft')
-  const editA = lifecycle.beginEdit(tokenA, 'conversation:701:user')
   const hydrateA = hydrateBookConversations([row(701, 'run-701')], {
     getRunSnapshot: async () => ({ success: true, data: await pendingA.promise }),
     isCurrent: () => lifecycle.isCurrent(tokenA),
@@ -388,7 +390,7 @@ test('deferred A hydrate cannot commit, submit, or edit after B becomes current'
 
   assert.equal(hydrateB!.at(-1)?.content, 'B final')
   assert.equal(await hydrateA, undefined)
-  assert.equal(lifecycle.canSubmitEdit(editA), false)
+  assert.equal(lifecycle.canAct(tokenA), false)
   assert.equal(lifecycle.getDraft(8), 'B draft')
 })
 

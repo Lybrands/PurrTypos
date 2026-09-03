@@ -185,27 +185,6 @@ export interface ScreenplayDocumentEpisode {
   update_time?: string;
 }
 
-export interface ScreenplayDocumentProposal {
-  kind: ScreenplayDocumentKind;
-  title: string;
-  contentJson: Record<string, unknown>;
-  contentText: string;
-  derivedFromIds: EntityId[];
-  /** Run whose formal proposal event produced this exact payload. */
-  sourceRunId?: string;
-}
-
-export interface ScreenplayRevisionRef {
-  schemaVersion: 1;
-  projectId: EntityId;
-  taskId: string;
-  revisionId: string;
-  role: ScreenplayV2DeliverableRole;
-  revisionNo: number;
-  /** Live transport provenance; persisted conversations resolve by Revision id. */
-  sourceRunId?: string;
-}
-
 export interface ScreenplaySourceRef {
   id: number;
   project_id: EntityId;
@@ -1013,17 +992,6 @@ export interface ChapterDiffHistory {
   create_time?: string;
 }
 
-export interface StoryMemoryAnalysisReceipt {
-  book_id: string;
-  chapter_id: string;
-  source_revision: string;
-  status: 'skipped' | 'running' | 'completed' | 'reused' | 'failed';
-  candidate_count: number;
-  delta_id?: string | null;
-  reason: string;
-  model: string;
-}
-
 export interface StoryMemoryEvolutionFieldChange {
   field: string;
   before: unknown;
@@ -1050,15 +1018,6 @@ export interface StoryMemoryEvolutionDecision {
   resolved_delta_id?: string | null;
   resolution_actor?: string | null;
   resolved_at?: string | null;
-}
-
-export interface StoryMemoryEvolutionReview {
-  delta_id: string;
-  book_id: string;
-  chapter_id: string;
-  status: 'open' | 'resolved' | 'stale';
-  decisions: StoryMemoryEvolutionDecision[];
-  summary: Record<StoryMemoryEvolutionDecision['classification'], number>;
 }
 
 export interface StoryMemoryEvolutionResolutionReceipt {
@@ -1684,15 +1643,6 @@ export interface MemoryContextBlock {
   diagnostics: Record<string, unknown>;
 }
 
-export interface XmindTopic {
-  title?: string;
-  children?: { attached?: XmindTopic[] };
-}
-
-export interface XmindSheet {
-  rootTopic?: XmindTopic;
-}
-
 export interface ApiResult<T = unknown> {
   success: boolean;
   data: T;
@@ -1721,228 +1671,6 @@ export interface AiErrorReport {
   resolvedAt?: string;
   createTime: string;
   updateTime: string;
-}
-
-export interface AiAgentRunStabilityReport {
-  verdict: "pass" | "warn" | "fail";
-  metrics: {
-    toolCalls: number;
-    completedToolCalls: number;
-    failedToolCalls: number;
-    incompleteToolCalls: number;
-    toolSuccessRate?: number | null;
-    toolProtocolFailures: number;
-    toolErrorCodes: Record<string, number>;
-    modelAttempts: number;
-    interruptedModelAttempts: number;
-    retryAttempts: number;
-    contextOverflows: number;
-    maxDroppedMessages: number;
-    compactionPasses: number;
-    compactedTurns: number;
-    compactionFallbacks: number;
-    compactionFailures: number;
-    compactionOutcomes: Record<string, number>;
-  };
-  checks: Array<{
-    name: string;
-    status: "pass" | "warn" | "fail";
-    detail: unknown;
-  }>;
-}
-
-export interface AiAgentRunArtifactMetrics {
-  artifactCount: number;
-  openArtifacts: number;
-  finalizedArtifacts: number;
-  abortedArtifacts: number;
-  batchCount: number;
-  committedItemCount: number;
-  expectedItemCount: number;
-  completionRate?: number | null;
-  artifacts: Array<{
-    artifactId: string;
-    namespace: string;
-    kind: string;
-    status: string;
-    ownerRef: {
-      kind: string;
-      id: string;
-    };
-    revision: number;
-    committedItemCount: number;
-    expectedItemCount?: number | null;
-    batchCount: number;
-    batchItemCount: number;
-  }>;
-}
-
-export interface AiArtifactMaintenanceSnapshot {
-  checkedAtMs: number;
-  scopeRunId?: string | null;
-  artifactCount: number;
-  openArtifacts: number;
-  finalizedArtifacts: number;
-  abortedArtifacts: number;
-  unknownArtifacts: number;
-  claimCount: number;
-  activeClaims: number;
-  expiredClaims: number;
-  unavailableRunClaims: number;
-  invalidTargetClaims: number;
-  reclaimableClaims: number;
-  consistencyIssues: number;
-  requiresAttention: boolean;
-}
-
-export interface AiArtifactMaintenanceReport {
-  expiredClaimsReleased: number;
-  unavailableRunClaimsReleased: number;
-  invalidTargetClaimsReleased: number;
-  releasedClaims: number;
-  purgedArtifacts: number;
-  consistencyIssues: number;
-  changed: boolean;
-}
-
-export interface AiArtifactMaintenanceResult {
-  report: AiArtifactMaintenanceReport;
-  snapshot: AiArtifactMaintenanceSnapshot;
-}
-
-export interface AiAgentRunStabilityTrendAlert {
-  code: string;
-  severity: "warn" | "fail";
-  value: number | null;
-  threshold: number;
-}
-
-export interface AiAgentRunFailureFinding {
-  code: string;
-  category: string;
-  severity: "warn" | "fail";
-  confidence: "high" | "medium" | "low";
-  evidence: Record<string, unknown>;
-  remediation: string;
-}
-
-export interface AiAgentRunFailureClassification {
-  verdict: "pass" | "warn" | "fail";
-  primaryFinding?: AiAgentRunFailureFinding | null;
-  findings: AiAgentRunFailureFinding[];
-  summary: {
-    findingCount: number;
-    categoryCounts: Record<string, number>;
-  };
-}
-
-export interface AiAgentRunRecoveryDecision {
-  round: number;
-  cause: string;
-  action: "retry_model" | "fallback_provider_mode" | "replan" | string;
-  allowed: boolean;
-  reasonCode: string;
-  attempt: number;
-  maxAttempts: number;
-  remainingModelRounds: number;
-  effectState: "not_started" | "committed" | "unknown" | string;
-  mayRepeatSideEffect: boolean;
-}
-
-export interface AiAgentRunRecoveryReport {
-  summary: {
-    decisionCount: number;
-    allowedCount: number;
-    deniedCount: number;
-    safetyProtectedCount: number;
-    causes: Record<string, number>;
-    allowedActions: Record<string, number>;
-    deniedReasons: Record<string, number>;
-  };
-  decisions: AiAgentRunRecoveryDecision[];
-}
-
-export interface AiAgentRunStabilityRegressionGate {
-  verdict: "pass" | "warn" | "fail" | "insufficient_data";
-  candidateSampleSize: number;
-  baselineSampleSize: number;
-  minimumWindowSize: number;
-  metricDeltas: Record<string, number | null>;
-  newToolErrorCodes: string[];
-  newCriticalSignals: string[];
-  checks: Array<{
-    name: string;
-    status: "pass" | "warn" | "fail" | "insufficient_data" | "not_applicable";
-    detail: Record<string, unknown>;
-  }>;
-  alerts: Array<{
-    code: string;
-    severity: "warn" | "fail";
-    detail: Record<string, unknown>;
-  }>;
-}
-
-export interface AiAgentRunStabilityTrendReport {
-  verdict: "pass" | "warn" | "fail" | "insufficient_data";
-  sampleSize: number;
-  minimumSampleSize: number;
-  windowLimit: number;
-  comparisonWindowSize: number;
-  scope: {
-    type: "session" | "book" | "screenplay_project" | "global";
-    id?: EntityId | null;
-  };
-  metrics: {
-    failedRuns: number;
-    runFailureRate: number | null;
-    stabilityFailedRuns: number;
-    stabilityFailureRate: number | null;
-    toolRuns: number;
-    toolProtocolFailureRuns: number;
-    toolProtocolRunRate: number | null;
-    incompleteToolRuns: number;
-    incompleteToolRunRate: number | null;
-    contextOverflowRuns: number;
-    contextOverflowRunRate: number | null;
-    compactionFailureRuns: number;
-    compactionFailureRunRate: number | null;
-    modelRuns: number;
-    retryRuns: number;
-    retryRunRate: number | null;
-    currentFailureStreak: number;
-    toolErrorCodes: Record<string, number>;
-    topToolErrorCodes: Array<{ code: string; count: number }>;
-  };
-  checks: Array<{
-    name: string;
-    status: "pass" | "warn" | "fail" | "insufficient_data" | "not_applicable";
-    value: number | null;
-    numerator: number;
-    denominator: number | null;
-    warnAt: number;
-    failAt: number;
-  }>;
-  alerts: AiAgentRunStabilityTrendAlert[];
-  regressionGate: AiAgentRunStabilityRegressionGate;
-  recentRuns: Array<{
-    runId: string;
-    runStatus: string;
-    stabilityVerdict: "pass" | "warn" | "fail" | string;
-    createTime?: string | null;
-  }>;
-}
-
-export interface AiAgentRunDiagnostics {
-  runId?: string;
-  runStatus?: string;
-  verdict: "pass" | "warn" | "fail";
-  performance: Record<string, unknown>;
-  stability: AiAgentRunStabilityReport;
-  recovery: AiAgentRunRecoveryReport;
-  failureClassification: AiAgentRunFailureClassification;
-  artifacts: AiAgentRunArtifactMetrics;
-  artifactMaintenance: AiArtifactMaintenanceSnapshot;
-  [key: string]: unknown;
 }
 
 export interface AiPlannerModelOutputDiagnostic {
@@ -2030,10 +1758,7 @@ export interface AiAgentRunToolDiagnostics {
 }
 
 export interface ElectronAPI {
-  openXmindFile: () => Promise<string | null>;
-  parseXmind: (filePath: string) => Promise<ApiResult<XmindSheet[]>>;
   openFilePath: (filePath: string) => Promise<ApiResult<void>>;
-  readFileBuffer: (filePath: string) => Promise<ApiResult<Uint8Array>>;
   writeExportFiles: (data: { entries: Array<{ path: string; content: string }>; exportAsZip: boolean }) => Promise<ApiResult<void>>;
   /** 整本导出为单个 TXT：保存对话框 + 写盘 */
   writeSingleTextFile: (data: { defaultName: string; content: string }) => Promise<ApiResult<{ path: string }>>;
@@ -2312,17 +2037,11 @@ export interface ElectronAPI {
   getVolumeOutlines: (
     bookId?: EntityId | null,
   ) => Promise<ApiResult<VolumeOutline[]>>;
-  getOutlineByWritingChapter: (
-    writingChapterId: EntityId,
-  ) => Promise<ApiResult<Outline | null>>;
   /** 本章自身绑定的 outline（outlines.writing_chapter_id == id），
    *  与 OutlinePanel 显示的章/卷大纲一致。 */
   getOutlineForChapter: (
     writingChapterId: EntityId,
   ) => Promise<ApiResult<Outline | null>>;
-  getOutlines: (
-    typeFilter?: "global" | "chapter",
-  ) => Promise<ApiResult<Outline[]>>;
   getWritingOutline: (bookId?: EntityId | null) => Promise<ApiResult<Outline>>;
   getGlobalOutline: (
     bookId?: EntityId | null,
@@ -2354,11 +2073,6 @@ export interface ElectronAPI {
   restoreOutlineHistory: (data: {
     historyId: number;
   }) => Promise<ApiResult<Outline>>;
-  // 章节
-  saveChapters: (data: {
-    outlineId: EntityId;
-    chapters: unknown[];
-  }) => Promise<ApiResult<void>>;
   getChapters: (data: { outlineId: EntityId }) => Promise<ApiResult<Chapter[]>>;
   addChapter: (data: {
     outlineId: EntityId;
@@ -2372,10 +2086,6 @@ export interface ElectronAPI {
     id: EntityId;
     title: string;
   }) => Promise<ApiResult<void>>;
-  updateChapterProgress: (data: {
-    id: EntityId;
-    progress: string;
-  }) => Promise<ApiResult<void>>;
   // 文档
   saveArticle: (data: {
     chapterId: EntityId;
@@ -2385,25 +2095,10 @@ export interface ElectronAPI {
   getArticle: (data: {
     chapterId: EntityId;
   }) => Promise<ApiResult<Article | null>>;
-  analyzeChapterStoryMemory: (data: {
-    bookId: EntityId;
-    chapterId: EntityId;
-    modelId?: string;
-  }) => Promise<ApiResult<StoryMemoryAnalysisReceipt>>;
-  reviewStoryMemoryDelta: (data: {
-    deltaId: string;
-  }) => Promise<ApiResult<StoryMemoryEvolutionReview>>;
-  getStoryMemoryEvolutionReview: (data: {
-    deltaId: string;
-  }) => Promise<ApiResult<StoryMemoryEvolutionReview>>;
   getStoryMemoryVersions: (data: {
     bookId: EntityId;
     memoryKey: string;
   }) => Promise<ApiResult<StoryMemoryVersionView[]>>;
-  listStoryMemoryEvolutionReviews: (data: {
-    bookId: EntityId;
-    statuses?: Array<'open' | 'resolved' | 'stale'>;
-  }) => Promise<ApiResult<StoryMemoryEvolutionReview[]>>;
   resolveStoryMemoryEvolutionReview: (data: {
     deltaId: string;
     resolutions: Record<string, 'accepted' | 'rejected'>;
@@ -2423,7 +2118,6 @@ export interface ElectronAPI {
   publishWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethodRevision>>;
   publishWritingMethodBatch: (data: { methodIds: string[]; schemeIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevisions: WritingSchemeRevision[] }>>;
   copyWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
-  setWritingMethodStatus: (data: { methodId: string; status: 'active' | 'archived' }) => Promise<ApiResult<WritingMethod>>;
   deleteWritingMethod: (data: { methodId: string }) => Promise<ApiResult<void>>;
   listWritingSchemes: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingScheme[]>>;
   getWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
@@ -2431,7 +2125,6 @@ export interface ElectronAPI {
   updateWritingSchemeDraft: (data: { schemeId: string; expectedDraftRevision: number; name: string; description?: string; memberRevisionIds: string[] }) => Promise<ApiResult<WritingScheme>>;
   publishWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingSchemeRevision>>;
   copyWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
-  setWritingSchemeStatus: (data: { schemeId: string; status: 'active' | 'archived' }) => Promise<ApiResult<WritingScheme>>;
   deleteWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<void>>;
   listBookWritingMethodBindings: (data: { bookId: EntityId }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
   bindBookWritingMethod: (data: { bookId: EntityId; bindingType: 'method' | 'scheme'; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
@@ -2439,7 +2132,6 @@ export interface ElectronAPI {
   upgradeBookWritingMethodBinding: (data: { bookId: EntityId; bindingId: string; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
   unbindBookWritingMethod: (data: { bookId: EntityId; bindingId: string }) => Promise<ApiResult<void>>;
   createWritingMethodCandidates: (data: { analysisId: string; craftCardIds?: string[] }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
-  getWritingMethodCandidateBatch: (data: { schemeId: string }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
   publishWritingMethodCandidateBatch: (data: { schemeId: string; methodIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevision: WritingSchemeRevision; bindingChanged: false }>>;
   previewNovelSourceImport: (data: NovelSourcePickedFile) => Promise<ApiResult<NovelSourceImportPreview>>;
   confirmNovelSourceImport: (data: NovelSourcePickedFile & {
@@ -2454,10 +2146,8 @@ export interface ElectronAPI {
   freezeBookAsNovelSource: (data: { bookId: EntityId }) => Promise<ApiResult<NovelSourceRevision>>;
   listNovelSources: (data?: { includeArchived?: boolean }) => Promise<ApiResult<NovelSourceWork[]>>;
   getNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
-  archiveNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
   deleteNovelSource: (data: { workId: string }) => Promise<ApiResult<void>>;
   getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
-  deleteNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<void>>;
   getNovelSourceSection: (data: { revisionId: string; sectionId: string; startCharacter?: number; characterLimit?: number }) => Promise<ApiResult<NovelSourceSection>>;
   searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<NovelSourceSearchResult[]>>;
   startNovelAnalysis: (data: { commandId: string; revisionId: string; prompt?: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
@@ -2485,7 +2175,6 @@ export interface ElectronAPI {
     rejectedSegments?: number;
   }) => Promise<ApiResult<{ id: number } | null>>;
   listChapterDiff: (data: { chapterId: EntityId; limit?: number }) => Promise<ApiResult<ChapterDiffHistory[]>>;
-  getChapterDiff: (data: { diffId: number }) => Promise<ApiResult<ChapterDiffHistory | null>>;
   rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
   // Setting diff history (character / story background)
   commitCharacterSettingDiff: (data: {
@@ -2618,23 +2307,16 @@ export interface ElectronAPI {
     data: { title?: string; content?: string; sort?: number };
   }) => Promise<ApiResult<AiPromptTemplate>>;
   deletePromptTemplate: (data: { id: number }) => Promise<ApiResult<void>>;
-  reorderPromptTemplates: (data: { ids: number[] }) => Promise<ApiResult<void>>;
   // 本书设定（五层）
   addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
   updateSparkIdea: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
   deleteSparkIdea: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getSparkIdeasByBook: (data: { bookId: EntityId; layer?: SparkIdeaLayer }) => Promise<ApiResult<AiSparkIdea[]>>;
-  getSparkIdeasForPrompt: (data: {
-    bookId: EntityId;
-    query?: string;
-    options?: { layers?: SparkIdeaLayer[]; chapterId?: EntityId; limitPerLayer?: number; limit?: number };
-  }) => Promise<ApiResult<AiSparkIdea[]>>;
   // 伏笔记忆
   addForeshadowing: (data: { bookId: EntityId; chapterId: EntityId; content: string; type?: string; expectedChapterId?: EntityId | null }) => Promise<ApiResult<AiForeshadowing>>;
   updateForeshadowing: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
   deleteForeshadowing: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
-  getForeshadowingForPrompt: (data: { bookId: EntityId; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
   // 长期记忆
   createMemory: (data: {
     bookId: EntityId;
@@ -2745,11 +2427,6 @@ export interface ElectronAPI {
       context_window: AiContextWindow;
     };
   }) => Promise<ApiResult<string>>;
-  listModels: (data: {
-    apiKey: string;
-    baseURL?: string;
-    apiProvider?: AiApiProvider;
-  }) => Promise<ApiResult<string[]>>;
   getAgentRunSnapshot: (data: {
     runId: string;
     after?: number;
@@ -2767,9 +2444,6 @@ export interface ElectronAPI {
     signal: AbortSignal;
     onEvent: (page: NovelAnalysisStreamPage) => void | Promise<void>;
   }) => Promise<void>;
-  getAgentRunDiagnostics: (data: {
-    runId: string;
-  }) => Promise<ApiResult<AiAgentRunDiagnostics>>;
   getAgentRunPlannerDiagnostics: (data: {
     runId: string;
   }) => Promise<ApiResult<AiAgentRunPlannerDiagnostics>>;
@@ -2780,14 +2454,6 @@ export interface ElectronAPI {
     runId: string;
     after?: number;
   }) => Promise<ApiResult<AiAgentRunToolDiagnostics>>;
-  maintainAgentArtifacts: () => Promise<
-    ApiResult<AiArtifactMaintenanceResult>
-  >;
-  getAgentRunStabilityTrend: (data: {
-    runId: string;
-    scope?: "auto" | "session" | "book" | "screenplay_project" | "global";
-    limit?: number;
-  }) => Promise<ApiResult<AiAgentRunStabilityTrendReport>>;
   getLatestSessionAgentRun: (data: {
     sessionId: number;
   }) => Promise<ApiResult<{
@@ -2795,26 +2461,6 @@ export interface ElectronAPI {
     prompt: string;
     snapshot: AiAgentRunSnapshot | null;
   } | null>>;
-  captureAiErrorReport: (data: {
-    streamId: string;
-    agentRunId?: string;
-    sessionId?: number;
-    conversationId?: number;
-    bookId?: EntityId | null;
-    chapterId?: EntityId | null;
-    source?: string;
-    errorCode?: string;
-    errorMessage: string;
-    model?: string;
-    diagnostics?: Record<string, unknown>;
-  }) => Promise<ApiResult<AiErrorReport>>;
-  listAiErrorReports: (data?: {
-    status?: AiErrorReportStatus;
-    limit?: number;
-  }) => Promise<ApiResult<AiErrorReport[]>>;
-  getAiErrorReport: (data: {
-    reportId: string;
-  }) => Promise<ApiResult<AiErrorReport>>;
   submitAiErrorReport: (data: {
     reportId: string;
     userNote?: string;
@@ -2976,7 +2622,6 @@ export interface ElectronAPI {
     }) => void,
     streamId?: string,
   ) => () => void;
-  debugLog: (payload: unknown) => void;
   // 设置
   getSettings: () => Promise<ApiResult<GeneralSettings>>;
   setSettings: (data: Partial<GeneralSettings>) => Promise<ApiResult<void>>;

@@ -763,7 +763,7 @@ async def test_generation_failure_advances_with_host_fallback_without_blocking()
     assert repository.summary.version == 2
     assert repository.summary.covered_turn_count == 6
     assert result.retained_raw_turn_count == 6
-    assert "主机按回合保留的原文摘录" in repository.summary.summary
+    assert "按回合保留的原文摘录" in repository.summary.summary
     assert result.diagnostics["failureStage"] == "generation"
     assert result.diagnostics["failureType"] == "RuntimeError"
     assert result.diagnostics["fallback"] == "host_extractive"

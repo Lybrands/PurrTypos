@@ -1,18 +1,7 @@
-"""
-Provider capability normalization and SDK parameter translation.
+"""Normalize the caller's default/enabled/disabled reasoning preference.
 
-把模型"思考/推理"保留为 default/enabled/disabled 三态，再由
-本模块等价翻译成各家 SDK 的真实参数形状：
-
-  * OpenAI 兼容代理（Qwen/DashScope/智谱）→ ``extra_body.thinking={"type": ...}``
-  * Anthropic Messages API → ``thinking={"type":"enabled","budget_tokens":N}``
-
-调用方约定：
-  * options 里**优先**读 ``thinking={"type":"enabled"|"disabled"}``。
-  * 没有 thinking 字段就是 Provider default，不得改写成 disabled。
-  * 调用方**不应**再直接读 ``opts.get("thinking")``——adapter 想拿底层
-    形状时，请只通过 ``build_anthropic_thinking_param`` /
-    ``build_openai_thinking_extra_body`` 这两个翻译函数。
+OpenAI-compatible parameter shapes belong to each ModelProfile. Native
+Anthropic budget translation is shared here by its protocol adapter.
 """
 
 from __future__ import annotations
@@ -40,9 +29,9 @@ def reasoning_mode_from_options(
     if not isinstance(thinking, Mapping):
         raise ValueError("thinking must be an object")
     value = thinking.get("type")
-    if value not in {"enabled", "disabled"}:
-        raise ValueError("thinking.type must be enabled or disabled")
-    mode = ReasoningMode(value)
+    if value not in {"enabled", "adaptive", "disabled"}:
+        raise ValueError("thinking.type must be enabled, adaptive or disabled")
+    mode = ReasoningMode.ENABLED if value == "adaptive" else ReasoningMode(value)
     if legacy is not None and (
         not isinstance(legacy, bool)
         or legacy is not (mode is ReasoningMode.ENABLED)
@@ -69,18 +58,6 @@ def require_supported_reasoning_mode(
             "selected reasoning mode is incompatible with model capabilities"
         )
     return mode
-
-
-# ── OpenAI 兼容代理（Qwen/DashScope/智谱）─────────────────────────────
-
-def build_openai_thinking_extra_body(enabled: bool | None) -> dict[str, Any]:
-    """OpenAI 兼容代理用 ``extra_body.thinking`` 控制 CoT。
-
-    返回值需合并入 ``params['extra_body']``。标准 OpenAI 不识别此字段，会忽略。
-    """
-    if enabled is None:
-        return {}
-    return {"thinking": {"type": "enabled" if enabled else "disabled"}}
 
 
 # ── Anthropic Messages API ───────────────────────────────────────────

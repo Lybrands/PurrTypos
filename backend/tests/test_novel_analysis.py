@@ -834,6 +834,8 @@ async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):
     assert artifact_block.untrusted is True
     assert "限制视角" in artifact_block.content
     assert "这是当前分析快照" in artifact_block.content
+    assert revision["id"] not in artifact_block.content
+    assert revision["sections"][0]["id"] not in artifact_block.content
 
 
 async def test_analysis_planning_context_contains_only_domain_policy(db):
@@ -867,7 +869,8 @@ async def test_analysis_planning_context_contains_only_domain_policy(db):
         "novel_analysis_policy",
     ]
     assert bundle.blocks[0].content == build_novel_analysis_method_guidance()
-    assert "不要求逐项拆成计划步骤" in bundle.blocks[1].content
+    assert "用户列出的交付维度只定义结果覆盖范围" in bundle.blocks[1].content
+    assert revision["id"] not in bundle.blocks[1].content
     assert all(block.untrusted is False for block in bundle.blocks)
 
 

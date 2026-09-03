@@ -15,7 +15,7 @@ import {
   type AssistantTimelinePart,
 } from './timeline.ts'
 
-test('native Provider progress renders as live commentary without becoming answer text', () => {
+test('native Provider progress grows one stable live region from real chunks', () => {
   const progress: CanonicalOutputEvent = {
     eventId: 'agent-progress-1', runId: 'run-1', turnId: 'turn-1',
     invocationId: 'invocation-1', outputStreamId: 'stream-1', sequence: 1,
@@ -27,22 +27,48 @@ test('native Provider progress renders as live commentary without becoming answe
       text: '正在核对人物动机',
     },
   }
-  const output = reduceCanonicalOutput(initialCanonicalOutputState(), progress)
+  let output = reduceCanonicalOutput(initialCanonicalOutputState(), progress)
   const message: AgentConversationMessage = {
     role: 'assistant', content: '', canonicalOutput: output,
   }
-  const timeline = buildAssistantTimeline(message, {
+  const firstTimeline = buildAssistantTimeline(message, {
     messageIndex: 0,
     isStreaming: true,
   })
 
   assert.equal(getAgentProcessingLabel(message), '正在核对人物动机')
-  assert.deepEqual(timeline, [{
+  assert.deepEqual(firstTimeline, [{
     type: 'commentary',
     md: '正在核对人物动机',
     startedAt: Date.parse('2026-09-02T08:00:01Z'),
-    regionKey: '0-agent-progress-agent-progress-1',
+    regionKey: '0-agent-progress-stream-stream-1',
   }])
+  output = reduceCanonicalOutput(output, {
+    ...progress,
+    eventId: 'agent-progress-2',
+    sequence: 2,
+    payload: {
+      ...progress.payload,
+      sourceChunkIndex: 2,
+      text: '正在核对人物动机与关系',
+    },
+  })
+  const secondTimeline = buildAssistantTimeline({
+    ...message,
+    canonicalOutput: output,
+  }, {
+    messageIndex: 0,
+    isStreaming: true,
+  })
+  assert.equal(secondTimeline[0]?.type, 'commentary')
+  assert.equal(
+    secondTimeline[0]?.type === 'commentary' ? secondTimeline[0].md : '',
+    '正在核对人物动机与关系',
+  )
+  assert.equal(
+    secondTimeline[0]?.type === 'commentary' ? secondTimeline[0].regionKey : '',
+    firstTimeline[0]?.type === 'commentary' ? firstTimeline[0].regionKey : '',
+  )
   assert.equal(output.finalText, '')
 })
 

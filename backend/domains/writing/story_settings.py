@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping, Protocol, TypeAlias
+from typing import Any, Mapping, TypeAlias
 from urllib.parse import quote
 
 from domains.writing.story_memory import (
@@ -28,19 +28,6 @@ class PlotThreadState(StrEnum):
     ADVANCING = "advancing"
     RESOLVED = "resolved"
     ABANDONED = "abandoned"
-
-
-class StorySetting(Protocol):
-    @property
-    def target_key(self) -> str: ...
-
-    @property
-    def kind(self) -> StoryMemoryKind: ...
-
-    @property
-    def subject_id(self) -> str | None: ...
-
-    def to_payload(self) -> Mapping[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -312,7 +299,6 @@ __all__ = [
     "PlotThread",
     "PlotThreadState",
     "RelationshipState",
-    "StorySetting",
     "StorySettingChange",
     "StorySettingValue",
     "TimelineEvent",

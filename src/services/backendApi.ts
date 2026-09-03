@@ -37,10 +37,7 @@ import {
 } from './writingChatRequestReceipt'
 
 export type PlatformApiKey =
-  | 'openXmindFile'
-  | 'parseXmind'
   | 'openFilePath'
-  | 'readFileBuffer'
   | 'writeExportFiles'
   | 'writeSingleTextFile'
   | 'writeScreenplayFile'
@@ -365,9 +362,7 @@ export const backendApi: BackendApi = {
   deleteCharacterOption: (data) => apiDelete(`/character-options/${data.id}`),
 
   saveOutline: (data) => apiPost('/outlines', data),
-  getOutlines: (typeFilter) => apiGet(`/outlines${typeFilter ? `?type=${typeFilter}` : ''}`),
   getVolumeOutlines: (bookId) => apiGet(`/outlines/volume/${bookId}`),
-  getOutlineByWritingChapter: (id) => apiGet(`/outlines/by-writing-chapter/${id}`),
   getOutlineForChapter: (id) => apiGet(`/outlines/for-chapter/${id}`),
   getGlobalOutline: (bookId) => apiGet(`/outlines/global/${bookId}`),
   ensureGlobalOutline: (bookId) => apiPost(`/outlines/global/${bookId}/ensure`, {}),
@@ -380,33 +375,16 @@ export const backendApi: BackendApi = {
     apiGet(`/outlines/${data.outlineId}/history${data.limit ? `?limit=${data.limit}` : ''}`),
   getOutlineHistory: (data) => apiGet(`/outlines/history/${data.historyId}`),
   restoreOutlineHistory: (data) => apiPost(`/outlines/history/${data.historyId}/restore`, {}),
-
-  saveChapters: (data) => apiPost(`/chapters/${data.outlineId}`, { chapters: data.chapters }),
   getChapters: (data) => apiGet(`/chapters/${data.outlineId}`),
   addChapter: (data) => apiPost(`/chapters/${data.outlineId}/add`, data),
   deleteChapter: (data) => apiDelete(`/chapters/${data.id}`),
   renameChapter: (data) => apiPut(`/chapters/${data.id}/rename`, { title: data.title }),
-  updateChapterProgress: (data) =>
-    apiPut(`/chapters/${data.id}/progress`, { progress: data.progress }),
 
   saveArticle: (data) =>
     apiPut(`/articles/${data.chapterId}`, { content: data.content, source: data.source }),
   getArticle: (data) => apiGet(`/articles/${data.chapterId}`),
-  analyzeChapterStoryMemory: (data) =>
-    apiPost(`/books/${data.bookId}/chapters/${data.chapterId}/story-memory/analyze`, {
-      modelId: data.modelId || null,
-    }),
-  reviewStoryMemoryDelta: (data) =>
-    apiPost(`/story-memory/deltas/${data.deltaId}/evolution-review`, {}),
-  getStoryMemoryEvolutionReview: (data) =>
-    apiGet(`/story-memory/deltas/${data.deltaId}/evolution-review`),
   getStoryMemoryVersions: (data) =>
     apiGet(`/books/${data.bookId}/story-memory/versions?memoryKey=${encodeURIComponent(data.memoryKey)}`),
-  listStoryMemoryEvolutionReviews: (data) => {
-    const statuses = data.statuses || []
-    const query = statuses.map((value) => `status=${encodeURIComponent(value)}`).join('&')
-    return apiGet(`/books/${data.bookId}/story-memory/evolution-reviews${query ? `?${query}` : ''}`)
-  },
   resolveStoryMemoryEvolutionReview: (data) =>
     apiPost(`/story-memory/deltas/${data.deltaId}/evolution-review/resolve`, {
       resolutions: data.resolutions,
@@ -431,16 +409,10 @@ export const backendApi: BackendApi = {
   publishWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/publish`, {}),
   publishWritingMethodBatch: (data) => apiPost('/writing-methods/publish-batch', data),
   copyWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/copy`, {}),
-  setWritingMethodStatus: (data) => apiPut(`/writing-methods/${data.methodId}/status`, {
-    status: data.status,
-  }),
   deleteWritingMethod: (data) => apiDelete(`/writing-methods/${data.methodId}`),
   createWritingMethodCandidates: (data) => apiPost(
     `/novel-analyses/${data.analysisId}/writing-method-candidates`,
     { craftCardIds: data.craftCardIds ?? [] },
-  ),
-  getWritingMethodCandidateBatch: (data) => apiGet(
-    `/writing-method-candidate-batches/${data.schemeId}`,
   ),
   publishWritingMethodCandidateBatch: (data) => apiPost(
     `/writing-method-candidate-batches/${data.schemeId}/publish`,
@@ -456,9 +428,6 @@ export const backendApi: BackendApi = {
   ),
   publishWritingScheme: (data) => apiPost(`/writing-schemes/${data.schemeId}/publish`, {}),
   copyWritingScheme: (data) => apiPost(`/writing-schemes/${data.schemeId}/copy`, {}),
-  setWritingSchemeStatus: (data) => apiPut(`/writing-schemes/${data.schemeId}/status`, {
-    status: data.status,
-  }),
   deleteWritingScheme: (data) => apiDelete(`/writing-schemes/${data.schemeId}`),
   listBookWritingMethodBindings: (data) => apiGet(
     `/books/${data.bookId}/writing-method-bindings`,
@@ -485,14 +454,8 @@ export const backendApi: BackendApi = {
     `/novel-sources${data.includeArchived ? '?includeArchived=true' : ''}`,
   ),
   getNovelSource: (data) => apiGet(`/novel-sources/${data.workId}`),
-  archiveNovelSource: (data) => apiPut(`/novel-sources/${data.workId}/archive`, {
-    status: 'archived',
-  }),
   deleteNovelSource: (data) => apiDelete(`/novel-sources/${data.workId}`),
   getNovelSourceRevision: (data) => apiGet(
-    `/novel-source-revisions/${data.revisionId}`,
-  ),
-  deleteNovelSourceRevision: (data) => apiDelete(
     `/novel-source-revisions/${data.revisionId}`,
   ),
   getNovelSourceSection: (data) => {
@@ -565,7 +528,6 @@ export const backendApi: BackendApi = {
   }),
   listChapterDiff: (data) =>
     apiGet(`/chapter-diff/${data.chapterId}?limit=${data.limit ?? 50}`),
-  getChapterDiff: (data) => apiGet(`/chapter-diff/by-id/${data.diffId}`),
   rollbackChapterDiff: (data) =>
     apiPost(`/chapter-diff/by-id/${data.diffId}/rollback`, {}),
 
@@ -684,7 +646,6 @@ export const backendApi: BackendApi = {
   createPromptTemplate: (data) => apiPost('/prompt-templates', data),
   updatePromptTemplate: (data) => apiPut(`/prompt-templates/${data.id}`, data.data ?? {}),
   deletePromptTemplate: (data) => apiDelete(`/prompt-templates/${data.id}`),
-  reorderPromptTemplates: (data) => apiPost('/prompt-templates/reorder', { ids: data.ids }),
 
   addSparkIdea: (data) => apiPost('/spark-ideas', data),
   updateSparkIdea: (data) => apiPut(
@@ -702,7 +663,6 @@ export const backendApi: BackendApi = {
   ),
   getSparkIdeasByBook: (data) =>
     apiGet(`/spark-ideas/by-book?bookId=${data.bookId}${data.layer ? `&layer=${data.layer}` : ''}`),
-  getSparkIdeasForPrompt: (data) => apiPost('/spark-ideas/for-prompt', data),
 
   addForeshadowing: (data) => apiPost('/foreshadowing', data),
   updateForeshadowing: (data) => apiPut(
@@ -725,7 +685,6 @@ export const backendApi: BackendApi = {
   ),
   getForeshadowingByBook: (data) =>
     apiGet(`/foreshadowing/by-book?bookId=${data.bookId}${data.status ? `&status=${data.status}` : ''}`),
-  getForeshadowingForPrompt: (data) => apiPost('/foreshadowing/for-prompt', data),
 
   createMemory: (data) => apiPost('/memories', data),
   updateMemory: ({ id, ...data }) => apiPut(`/memories/${id}`, data),
@@ -756,7 +715,6 @@ export const backendApi: BackendApi = {
   buildMemoryContext: (data) => apiPost('/memories/context', data),
 
   generateSessionTitle: (data) => apiPost('/ai/title', data),
-  listModels: (data) => apiPost('/ai/models', data),
   getAgentRunSnapshot: (data) => {
     const params = new URLSearchParams()
     if (data.after != null) params.set('after', String(data.after))
@@ -764,34 +722,14 @@ export const backendApi: BackendApi = {
     const query = params.toString()
     return apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}${query ? `?${query}` : ''}`)
   },
-  getAgentRunDiagnostics: (data) =>
-    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/diagnostics`),
   getAgentRunPlannerDiagnostics: (data) =>
     apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/planner-diagnostics`),
   getAgentRunModelInputDiagnostics: (data) =>
     apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/model-input-diagnostics`),
   getAgentRunToolDiagnostics: (data) =>
     apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/tool-diagnostics?after=${data.after ?? 0}`),
-  maintainAgentArtifacts: () => apiPost('/ai/artifacts/maintenance', {}),
-  getAgentRunStabilityTrend: (data) => {
-    const params = new URLSearchParams()
-    if (data.scope) params.set('scope', data.scope)
-    if (data.limit != null) params.set('limit', String(data.limit))
-    const query = params.toString()
-    return apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/stability-trend${query ? `?${query}` : ''}`)
-  },
   getLatestSessionAgentRun: (data) =>
     apiGet(`/ai/session-runs/latest?sessionId=${encodeURIComponent(data.sessionId)}`),
-  captureAiErrorReport: (data) => apiPost('/ai/error-reports', data),
-  listAiErrorReports: (data = {}) => {
-    const params = new URLSearchParams()
-    if (data.status) params.set('status', data.status)
-    if (data.limit != null) params.set('limit', String(data.limit))
-    const query = params.toString()
-    return apiGet(`/ai/error-reports${query ? `?${query}` : ''}`)
-  },
-  getAiErrorReport: (data) =>
-    apiGet(`/ai/error-reports/${encodeURIComponent(data.reportId)}`),
   submitAiErrorReport: (data) =>
     apiPost(`/ai/error-reports/${encodeURIComponent(data.reportId)}/submit`, {
       userNote: data.userNote || null,
@@ -1165,14 +1103,6 @@ export const backendApi: BackendApi = {
     return () => {
       aiChunkListeners = aiChunkListeners.filter((listener) => listener !== handler)
     }
-  },
-
-  debugLog: (payload) => {
-    fetch(`${backendBaseUrl}/api/debug-log`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {})
   },
 
   getSettings: () => apiGet('/settings'),

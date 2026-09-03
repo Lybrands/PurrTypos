@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from purra.context_orchestration import ContextCompressionCoordinator
 from purra.context_strategies import ContextStrategy
 from purra.contracts import (
     AgentMessage,
@@ -34,7 +33,11 @@ from purra.api import (
     PlanningMode,
 )
 from purra.model_invocation import ModelInvocationContext
-from purra.model_protocol import InvocationOutputLimit, InvocationOutputLimitSource
+from purra.model_protocol import (
+    FeatureSupport,
+    InvocationOutputLimit,
+    InvocationOutputLimitSource,
+)
 from purra.tools import InMemoryApprovalGateway
 from purra.tools import InMemoryToolCatalog
 from purra.recovery import RecoveryPolicy
@@ -73,7 +76,8 @@ from routers.ai import (
 from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
 from tests.support.canonical_wire import (
     assert_raw_canonical_wire,
-    project_wire_events_for_legacy_assertions,
+    provider_text,
+    runtime_events,
 )
 from tests.support.planning_stream import route_planning_stream
 
@@ -366,6 +370,41 @@ async def test_static_profile_defaults_have_no_side_effects(
     assert profile.context_provider_factory() is None
     assert profile.task_admission() is None
     assert profile.create_long_task_dispatcher() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    (
+        ({}, FeatureSupport.SUPPORTED),
+        ({"responseAudience": "internal"}, FeatureSupport.UNKNOWN),
+        (
+            {"responseAudience": "internal", "progressAudience": "public"},
+            FeatureSupport.SUPPORTED,
+        ),
+    ),
+)
+async def test_composition_enables_real_provider_progress_only_for_public_scopes(
+    temp_db: DatabaseConnection,
+    metadata,
+    expected,
+):
+    profile = StaticAgentProfile(
+        id="fake",
+        domain_namespace="test.fake",
+        adapter=_FakeAgentProfile({}).adapter,
+    )
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **_kwargs: profile,),
+    )
+    request = replace(_fake_request(), tools_enabled=True, metadata=metadata)
+    try:
+        prepared = await composition.prepare_request(request)
+    finally:
+        await composition.shutdown()
+
+    assert prepared.model.capability_snapshot.protocol.public_progress is expected
 
 
 def test_profile_registry_stores_the_profile_as_the_registration():
@@ -1260,7 +1299,6 @@ async def test_custom_tools_fail_closed_without_calling_the_model(
             "请求已停止，未调用模型或执行工具。"
         ),
     }]
-    assert not any("agentRunStarted" in event for event in events)
 
 
 @pytest.mark.asyncio
@@ -1475,6 +1513,10 @@ async def test_writing_auto_direct_answer_uses_one_normal_model_call(
         for event in events
     )
     assert not any(
+        event.get("kind") == "agent.progress"
+        for event in events
+    )
+    assert not any(
         event.get("kind") == "operation.started"
         and event.get("payload", {}).get("kind") == "planning"
         for event in events
@@ -1684,12 +1726,13 @@ async def test_composed_route_uses_complete_purra(
     events = await _collect(response)
 
     assert_raw_canonical_wire(events)
-    projected = project_wire_events_for_legacy_assertions(events)
-    assert any("agentRunStarted" in event for event in projected)
-    assert any("contextBudget" in event for event in projected)
+    assert [
+        event["payload"]["status"] for event in events
+        if event.get("kind") == "run.lifecycle"
+    ] == ["running", "done"]
+    assert runtime_events(events, "context.budgeted")
     assert round_number == 1
-    assert "".join(event.get("delta", "") for event in projected) == "完成"
-    assert any("agentRunCompleted" in event for event in projected)
+    assert provider_text(events) == "完成"
     assert events[-1]["done"] is True
     assert events[-1]["model"] == "model"
     assert events[-1]["runResult"]["status"] == "done"
@@ -1801,6 +1844,18 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 ] == ["getStoryBackground"]
                 yield {
                     "choices": [{
+                        "delta": {"content": "【进展】正在"},
+                        "finish_reason": None,
+                    }],
+                }
+                yield {
+                    "choices": [{
+                        "delta": {"content": "核对故事背景"},
+                        "finish_reason": None,
+                    }],
+                }
+                yield {
+                    "choices": [{
                         "delta": {
                             "tool_calls": [{
                                 "index": 0,
@@ -1851,19 +1906,32 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         contextWindow="200k",
     ))
     events = await _collect(response)
-    projected = project_wire_events_for_legacy_assertions(events)
+    assert_raw_canonical_wire(events)
     plans = [
-        event["agentRunTodosUpdated"]
-        for event in projected
-        if "agentRunTodosUpdated" in event
+        event["payload"]["data"]
+        for event in runtime_events(events, "run.todos_updated")
     ]
 
     assert len(planner_payloads) == 2
     assert len(plans) >= 2
+    progress_events = [
+        event for event in events
+        if event.get("kind") == "agent.progress"
+    ]
+    assert [event["payload"]["text"] for event in progress_events] == [
+        "正在",
+        "正在核对故事背景",
+    ]
+    first_tool_operation = next(
+        index for index, event in enumerate(events)
+        if event.get("kind") == "operation.started"
+        and event.get("payload", {}).get("kind") == "tool"
+    )
+    assert all(events.index(event) < first_tool_operation for event in progress_events)
     root_run_ids = {
-        event["agentRunStarted"]["runId"]
-        for event in projected
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     }
     assert len(root_run_ids) == 1
     latest = plans[-1]
@@ -2037,11 +2105,10 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 
     assert round_number == 4
     assert_raw_canonical_wire(chunks)
-    projected = project_wire_events_for_legacy_assertions(chunks)
-    assert any("toolApprovalRequired" in chunk for chunk in projected)
-    assert any("toolApprovalResolved" in chunk for chunk in projected)
-    assert not any(chunk.get("toolResults") for chunk in projected)
-    assert "".join(chunk.get("delta", "") for chunk in projected) == "已保留人物"
+    assert runtime_events(chunks, "approval.requested")
+    assert runtime_events(chunks, "approval.resolved")
+    assert not runtime_events(chunks, "tool.results")
+    assert provider_text(chunks) == "已保留人物"
     assert chunks[-1]["done"] is True
     assert chunks[-1]["model"] == "model"
     assert chunks[-1]["runResult"]["status"] == "done"

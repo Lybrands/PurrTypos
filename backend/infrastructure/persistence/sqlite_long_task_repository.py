@@ -1145,16 +1145,6 @@ class SqliteLongTaskRepository:
                 await self._update_task_status(task, LongTaskStatus.PAUSED)
             return await self._require(task.id)
 
-    async def _simple_transition(self, task_id, allowed, target):
-        async with self._db.transaction(cancellation_linearizable=True):
-            task = await self._require(task_id)
-            if task.status is target:
-                return task
-            if task.status not in allowed:
-                raise ValueError(f"long task cannot transition from {task.status.value}")
-            await self._update_task_status(task, target)
-            return await self._require(task.id)
-
     async def _require(self, task_id: str) -> LongTaskRecord:
         row = await self._db.fetch_one(
             "SELECT * FROM ai_agent_long_tasks WHERE id = ?",
@@ -1356,11 +1346,6 @@ def _unit(row: dict[str, Any] | None) -> LongTaskUnitRecord:
         create_time=row.get("create_time"),
         update_time=row.get("update_time"),
     )
-
-
-def _require_worker(unit: LongTaskUnitRecord, worker_id: str) -> None:
-    if unit.worker_id != _required(worker_id, "long task worker id"):
-        raise ValueError("long task unit is owned by another worker")
 
 
 def _required(value: object, name: str) -> str:

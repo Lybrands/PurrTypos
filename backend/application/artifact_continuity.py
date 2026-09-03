@@ -233,13 +233,6 @@ class ArtifactContinuityCoordinator:
         ))
 
 
-def continuity_selection_from_target(
-    target: Mapping[str, Any],
-) -> Mapping[str, Any] | None:
-    value = target.get("artifactContinuity")
-    return value if isinstance(value, Mapping) else None
-
-
 def _parse_selection(
     value: Mapping[str, Any] | None,
 ) -> tuple[ArtifactContinuityAction, str]:
@@ -279,5 +272,4 @@ __all__ = [
     "ArtifactContinuityRecord",
     "ArtifactContinuityResolution",
     "ArtifactContinuityUnavailableError",
-    "continuity_selection_from_target",
 ]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import base64
-from collections.abc import Iterable
 from typing import Any
 
 
@@ -133,22 +132,6 @@ def proposal_occurrence_id(
         separators=(",", ":"),
     ).encode("utf-8")).decode("ascii").rstrip("=")
     return f"setting-proposal:v1:{encoded}"
-
-
-def unseen_product_chunks(
-    events: Iterable[dict[str, Any]],
-    seen_proposal_ids: set[str],
-) -> list[dict[str, Any]]:
-    chunks: list[dict[str, Any]] = []
-    for event in events:
-        proposal_id = str(event.get("proposalId") or "").strip()
-        chunk = event.get("chunk")
-        if not proposal_id or proposal_id in seen_proposal_ids:
-            continue
-        seen_proposal_ids.add(proposal_id)
-        if isinstance(chunk, dict):
-            chunks.append(chunk)
-    return chunks
 
 
 def _event(

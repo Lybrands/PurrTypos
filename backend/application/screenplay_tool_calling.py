@@ -36,6 +36,7 @@ from application.model_runtime import (
     reasoning_mode_from_options,
     run_execution_intent,
     runtime_context_window_tokens,
+    with_adapter_public_progress,
 )
 from application.run_provenance import digest_model_endpoint
 from application.screenplay_model_policy import screenplay_output_limit
@@ -88,7 +89,9 @@ class ScreenplayToolCallingService:
                 "kind": "generic",
             }
         )
-        model_request = model_request_from_runtime(runtime)
+        model_request = with_adapter_public_progress(
+            model_request_from_runtime(runtime)
+        )
         window = runtime_context_window_tokens(runtime)
         output_limit = screenplay_output_limit(
             model_request.capability_snapshot,
@@ -156,6 +159,7 @@ class ScreenplayToolCallingService:
             provenance=screenplay_run_provenance(
                 runtime,
                 user_payload,
+                model_request=model_request,
                 output_contract="screenplay_candidate_artifact",
                 tool_protocol_contract="screenplay_host_tools",
             ),
@@ -229,10 +233,11 @@ def screenplay_run_provenance(
     runtime,
     payload: Mapping[str, Any],
     *,
+    model_request,
     output_contract: str,
     tool_protocol_contract: str,
 ) -> RunProvenance:
-    request = model_request_from_runtime(runtime)
+    request = model_request
     window = runtime_context_window_tokens(runtime)
     profile = json.dumps(
         {

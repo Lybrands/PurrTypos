@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,20 +26,13 @@ from tests.support.asgi_sse import (
 )
 from tests.support.canonical_wire import (
     assert_raw_canonical_wire,
-    project_wire_event_for_legacy_assertion,
-    project_wire_events_for_legacy_assertions,
+    provider_text,
+    runtime_events,
 )
 from tests.support.planning_stream import route_planning_stream
 
 
-FAILED_MESSAGE = "Agent 计划格式无效，已安全停止。"
-BLOCKED_MESSAGE = "Agent 未完成全部计划步骤，已安全停止。"
-TERMINAL_KEYS = {
-    "agentRunCompleted",
-    "agentRunBlocked",
-    "agentRunFailed",
-    "agentRunCanceled",
-}
+TERMINAL_STATUSES = {"done", "blocked", "failed", "canceled"}
 
 
 @pytest_asyncio.fixture
@@ -125,7 +117,7 @@ def _assert_sse_wire(response: ASGIResponse) -> list[dict[str, Any]]:
     assert re.search(rb"\r?\n\r?\n\Z", response.content)
     raw = decode_sse_json(response.content)
     assert_raw_canonical_wire(raw)
-    return project_wire_events_for_legacy_assertions(raw)
+    return raw
 
 
 def _assert_exact_two_item_writing_policy(
@@ -173,60 +165,17 @@ def _assert_exact_two_item_writing_policy(
     return str(policy["content"])
 
 
-def _normalize_dynamic_ids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized = deepcopy(events)
-    run_ids: dict[str, str] = {}
-    approval_ids: dict[str, str] = {}
-    request_fingerprints: dict[str, str] = {}
-
-    def _walk(value: Any, key: str | None = None) -> Any:
-        if key == "runId" and isinstance(value, str):
-            return run_ids.setdefault(value, f"<run-{len(run_ids) + 1}>")
-        if key == "approvalId" and isinstance(value, str):
-            return approval_ids.setdefault(
-                value,
-                f"<approval-{len(approval_ids) + 1}>",
-            )
-        if key == "requestFingerprint" and isinstance(value, str):
-            return request_fingerprints.setdefault(
-                value,
-                f"<request-fingerprint-{len(request_fingerprints) + 1}>",
-            )
-        if isinstance(value, dict):
-            return {item_key: _walk(item, item_key) for item_key, item in value.items()}
-        if isinstance(value, list):
-            return [_walk(item) for item in value]
-        return value
-
-    return [_walk(event) for event in normalized]
-
-
-def _event_name(event: dict[str, Any]) -> str:
-    for key in (
-        "agentRunStarted",
-            "agentRunTodosUpdated",
-            "agentRunTodoUpdated",
-            "modelInvocation",
-                "contextBudget",
-            "delta",
-            "reasoningDelta",
-            "toolCalls",
-        "toolApprovalRequired",
-        "toolApprovalResolved",
-        "agentDelegationCreated",
-        "agentDelegationUpdated",
-        "toolIndexCompleted",
-        "toolResults",
-        "agentRunCompleted",
-        "agentRunBlocked",
-        "agentRunFailed",
-        "agentRunCanceled",
-        "done",
-        "error",
-    ):
-        if key in event:
-            return key
-    raise AssertionError(f"unclassified SSE event: {event!r}")
+def _event_names(events: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for event in events:
+        kind = event.get("kind", "")
+        if kind.startswith("operation.") or kind == "stream.committed":
+            continue
+        names.append(
+            event["payload"]["eventType"] if kind == "runtime.event"
+            else kind or ("done" if event.get("done") else "error")
+        )
+    return names
 
 
 @pytest.mark.asyncio
@@ -302,10 +251,10 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     run_id = ""
     while True:
         wire = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(wire) or {}
-        if started := projected.get("agentRunStarted"):
-            run_id = str(started["runId"])
-        if projected.get("agentRunTodosUpdated"):
+        if wire.get("kind") == "run.lifecycle":
+            assert wire["payload"]["status"] == "running"
+            run_id = wire["runId"]
+        if runtime_events([wire], "run.todos_updated"):
             break
 
     assert run_id
@@ -430,22 +379,19 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     response = await live.finish()
     live_events = _assert_sse_wire(response)
     terminal_todo_updates = {
-        event["agentRunTodoUpdated"]["stepId"]: event["agentRunTodoUpdated"][
-            "step"
-        ]
-        for event in live_events
-        if event.get("agentRunTodoUpdated", {}).get("step", {}).get("status")
-        == "done"
+        event["payload"]["data"]["step_id"]: event["payload"]["data"]["step"]
+        for event in runtime_events(live_events, "run.todo_updated")
+        if event["payload"]["data"]["step"]["status"] == "done"
     }
     assert set(terminal_todo_updates) == {
         "understand-source",
         "draft-continuation",
     }
     assert all(
-        step["resultSummary"] == "Final response covered this model step."
+        step["result_summary"] == "Final response covered this model step."
         for step in terminal_todo_updates.values()
     )
-    assert any("agentRunCompleted" in event for event in live_events)
+    _assert_terminal_exclusive(live_events, status="done")
     assert await db.fetch_all(
         "SELECT step_id, status, result_summary FROM ai_agent_run_todos "
         "WHERE run_id = ? ORDER BY sort",
@@ -744,15 +690,18 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
     response = await live.finish()
     events = _assert_sse_wire(response)
 
+    delegations = [
+        event for event in events
+        if event.get("kind") == "delegation.event"
+        and event["payload"]["eventType"] == "status"
+    ]
     created = [
-        event["agentDelegationCreated"]
-        for event in events
-        if "agentDelegationCreated" in event
+        event["payload"] for event in delegations
+        if event["payload"]["status"] == "queued"
     ]
     updated = [
-        event["agentDelegationUpdated"]
-        for event in events
-        if "agentDelegationUpdated" in event
+        event["payload"] for event in delegations
+        if event["payload"]["status"] != "queued"
     ]
     assert len(created) == 1, events
     assert [item["status"] for item in updated] == [
@@ -764,7 +713,10 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
     assert all(item["delegationId"] == delegation_id for item in updated)
     assert all(item["agentTitle"] == "证据研究 Agent" for item in updated)
     run_id = created[0]["runId"]
-    assert all(item["runId"] == run_id for item in updated)
+    assert all(
+        event["runId"] == event["payload"]["runId"] == run_id
+        for event in delegations
+    )
     assert "resultSummary" not in updated[-1]
     assert "childRunId" not in json.dumps(events)
     assert planner_calls == ["parent", "parent-replan"]
@@ -806,20 +758,17 @@ async def test_composed_run_streams_same_run_delegation_lifecycle(
 
 
 def _assert_terminal_exclusive(
-    events: list[dict[str, Any]],
-    *,
-    terminal: str,
-    result: str,
+    events: list[dict[str, Any]], *, status: str, error_code: str | None = None,
 ) -> None:
-    terminals = [
-        key
-        for event in events
-        for key in TERMINAL_KEYS
-        if key in event
-    ]
-    assert terminals == [terminal]
-    assert sum(event.get("done") is True for event in events) == (result == "done")
-    assert sum(bool(event.get("error")) for event in events) == (result == "error")
+    lifecycle = [event for event in events if event.get("kind") == "run.lifecycle"]
+    assert [event["payload"]["status"] for event in lifecycle] == ["running", status]
+    run_id = lifecycle[0]["runId"]
+    assert lifecycle[-1]["runId"] == run_id
+    assert [event for event in events if event.get("done") is True] == [events[-1]]
+    assert events[-1]["runResult"] == {
+        "runId": run_id, "status": status, "errorCode": error_code,
+    }
+    assert not any(event.get("error") for event in events)
 
 
 @pytest.mark.asyncio
@@ -904,21 +853,20 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
     )
     await live.wait_started()
     response = await live.finish()
-    events = _normalize_dynamic_ids(_assert_sse_wire(response))
+    events = _assert_sse_wire(response)
 
     assert provider_calls == 1, events
-    assert [_event_name(event) for event in events] == [
-        "agentRunStarted",
-        "contextBudget",
-        "delta",
-        "agentRunCompleted",
+    assert _event_names(events) == [
+        "run.lifecycle",
+        "context.budgeted",
+        "provider.delta_batch",
+        "run.lifecycle",
         "done",
     ]
-    assert events[2] == {"delta": "这是一个直接回答。"}
+    assert provider_text(events) == "这是一个直接回答。"
     _assert_terminal_exclusive(
         events,
-        terminal="agentRunCompleted",
-        result="done",
+        status="done",
     )
 
 
@@ -999,7 +947,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
     events = _assert_sse_wire(response)
 
     assert provider_calls == 1, events
-    assert "".join(str(event.get("delta") or "") for event in events) == refusal
+    assert provider_text(events) == refusal
     done_events = [event for event in events if event.get("done") is True]
     assert len(done_events) == 1
 
@@ -1051,30 +999,31 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
     )
     await live.wait_started()
     response = await live.finish()
-    raw_events = _assert_sse_wire(response)
+    events = _assert_sse_wire(response)
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in raw_events
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
-    events = _normalize_dynamic_ids(raw_events)
 
-    assert [_event_name(event) for event in events] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
-        "delta",
-        "agentRunTodoUpdated",
-        "agentRunCompleted",
+    assert _event_names(events) == [
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
+        "provider.delta_batch",
+        "run.todo_updated",
+        "run.lifecycle",
         "done",
     ]
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["executor"] is None
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["suggestedTools"] == []
-    assert events[3] == {"delta": "计划格式异常，先提供安全说明。"}
+    plan = runtime_events(events, "run.todos_updated")[0]["payload"]["data"]
+    assert plan["steps"] == [{
+        "id": "respond-after-invalid-plan", "title": "说明当前结果",
+        "status": "running", "type": "review",
+    }]
+    assert provider_text(events) == "计划格式异常，先提供安全说明。"
     _assert_terminal_exclusive(
         events,
-        terminal="agentRunCompleted",
-        result="done",
+        status="done",
     )
     from infrastructure.persistence.run_store import get_run
 
@@ -1088,7 +1037,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
+async def test_composed_missing_required_tool_fails_with_explicit_run_result(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1177,41 +1126,39 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     )
     await live.wait_started()
     response = await live.finish()
-    events = _normalize_dynamic_ids(_assert_sse_wire(response))
+    events = _assert_sse_wire(response)
 
     assert model_calls == 3
-    assert [_event_name(event) for event in events] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
-        "agentRunTodosUpdated",
-        "agentRunTodoUpdated",
-        "agentRunFailed",
-        "error",
+    assert _event_names(events) == [
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
+        "run.todos_updated",
+        "run.todo_updated",
+        "run.lifecycle",
+        "done",
     ]
-    assert events[1]["agentRunTodosUpdated"]["runId"] == "<run-1>"
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "pending"
-    assert events[3]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
+    plans = runtime_events(events, "run.todos_updated")
+    run_id = events[0]["runId"]
+    assert all(event["runId"] == run_id for event in plans)
+    assert plans[0]["payload"]["data"]["steps"][0]["status"] == "pending"
+    assert plans[1]["payload"]["data"]["steps"][0]["status"] == "running"
     assert "host-prerequisite" not in json.dumps(events)
-    assert events[4]["agentRunTodoUpdated"]["stepId"] == "read-characters"
-    assert events[4]["agentRunTodoUpdated"]["step"]["status"] == "failed"
-    assert (
-        events[4]["agentRunTodoUpdated"]["step"]["error"]
-        == "missing_required_tool_call"
+    update = runtime_events(events, "run.todo_updated")[0]["payload"]["data"]
+    assert update["step_id"] == "read-characters"
+    assert update["step"]["status"] == "failed"
+    assert update["step"]["error"] == "missing_required_tool_call"
+    assert events[-2]["kind"] == "run.lifecycle"
+    assert events[-2]["payload"] == {
+        "status": "failed", "error": "missing_required_tool_call",
+    }
+    assert events[-1]["model"] == "wire-model"
+    assert not any(event.get("channel") == "reasoning" for event in events)
+    assert "PRIVATE" not in json.dumps(events)
+    assert provider_text(events) == ""
+    _assert_terminal_exclusive(
+        events, status="failed", error_code="missing_required_tool_call",
     )
-    assert events[5] == {
-        "agentRunFailed": {
-            "runId": "<run-1>",
-            "status": "failed",
-            "error": "missing_required_tool_call",
-        },
-    }
-    assert events[6] == {
-        "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
-    }
-    assert not any("reasoningDelta" in event for event in events)
-    assert not any("delta" in event for event in events)
-    _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
 
 
 @pytest.mark.asyncio
@@ -1423,7 +1370,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
             assert "摘要正文按非空白可见字符计数不得超过 150 字" in (
                 messages[-1]["content"]
             )
-            assert "不得声称未经宿主验证的实际精确字数" in (
+            assert "没有可靠计数依据时不得声称实际精确字数" in (
                 messages[-1]["content"]
             )
             assert "归一化口径为 57 个字符" in messages[-1]["content"]
@@ -1466,9 +1413,9 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     events = _assert_sse_wire(response)
 
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in events
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
     assert model_round == 4
     assert len(policy_rounds) == 3
@@ -1477,8 +1424,8 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     assert "摘要前后不得重复展示或逐句改写完整原文" in policy_rounds[0]
     assert "不得声称摘要实际为某个精确字数" in policy_rounds[0]
     assert continuation_messages
-    assert not any("toolResults" in event for event in events)
-    visible_text = "".join(str(event.get("delta") or "") for event in events)
+    assert not runtime_events(events, "tool.results")
+    visible_text = provider_text(events)
     assert visible_text == repaired_response
     assert invalid_response not in visible_text
     assert chapter_text not in visible_text
@@ -1496,7 +1443,8 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
         "status": "done",
         "final_response": repaired_response,
     }
-    assert events[-1] == {"done": True, "model": "wire-model"}
+    assert events[-1]["model"] == "wire-model"
+    _assert_terminal_exclusive(events, status="done")
 
 
 @pytest.mark.asyncio
@@ -1920,9 +1868,9 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     response = await live.finish()
     raw_events = _assert_sse_wire(response)
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in raw_events
-        if "agentRunStarted" in event
+        event["runId"] for event in raw_events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
     # The second planning call repairs the initial redundant-read proposal.
     # The successful chapter read then supplies evidence for a third,
@@ -1974,17 +1922,15 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         if message.get("role") == "tool"
     )
     assert json.loads(final_tool_message["content"])["plainText"] == chapter_text
-    assert not any("toolCalls" in event for event in raw_events)
-    assert not any("toolResults" in event for event in raw_events)
-    todo_steps = next(
-        event["agentRunTodosUpdated"]["steps"]
-        for event in raw_events
-        if "agentRunTodosUpdated" in event
+    assert not runtime_events(raw_events, "tool.calls_started")
+    assert not runtime_events(raw_events, "tool.results")
+    plan = runtime_events(raw_events, "run.todos_updated")[0]["payload"]["data"]
+    todo_steps = plan["steps"]
+    assert len(todo_steps) == 2
+    assert all(
+        not {"planning_capability", "suggested_tools"}.intersection(step)
+        for step in todo_steps
     )
-    assert [step["suggestedTools"] for step in todo_steps] == [
-        [],
-        [],
-    ]
     assert "queryOutline" not in json.dumps(
         todo_steps,
         ensure_ascii=False,
@@ -2006,10 +1952,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
             "expected_tools": "[]",
         },
     ]
-    visible_text = "".join(
-        str(event.get("delta") or "")
-        for event in raw_events
-    )
+    visible_text = provider_text(raw_events)
     assert visible_text == repaired_response
     assert "违规合并草稿" not in visible_text
     assert re.findall(r"(?m)^([1-9][0-9]*)\.\s", visible_text) == ["1", "2"]
@@ -2028,7 +1971,8 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         "status": "done",
         "final_response": repaired_response,
     }
-    assert raw_events[-1] == {"done": True, "model": "wire-model"}
+    assert raw_events[-1]["model"] == "wire-model"
+    _assert_terminal_exclusive(raw_events, status="done")
 
 
 @pytest.mark.asyncio
@@ -2221,9 +2165,8 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        approval = projected.get("toolApprovalRequired")
-        if approval:
+        if runtime_events([event], "approval.requested"):
+            approval = event["payload"]["data"]
             break
 
     approval_id = approval["approvalId"]
@@ -2253,72 +2196,59 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     }
 
     response = await live.finish()
-    raw_events = _assert_sse_wire(response)
+    events = _assert_sse_wire(response)
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in raw_events
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
-    events = _normalize_dynamic_ids(raw_events)
-    names = [_event_name(event) for event in events]
+    names = _event_names(events)
 
     assert model_round == 5
     assert names[:3] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
     ]
-    assert not {"toolCalls", "toolResults", "toolIndexCompleted"}.intersection(
-        names
-    )
-    assert names[-2:] == ["agentRunCompleted", "done"]
-    requested = next(
-        event["toolApprovalRequired"]
-        for event in events
-        if "toolApprovalRequired" in event
-    )
-    resolved_event = next(
-        event["toolApprovalResolved"]
-        for event in events
-        if "toolApprovalResolved" in event
-    )
-    assert requested["runId"] == resolved_event["runId"] == "<run-1>"
-    assert requested["approvalId"] == resolved_event["approvalId"] == "<approval-1>"
+    assert not {
+        "tool.calls_started", "tool.results", "tool.call_completed",
+    }.intersection(names)
+    assert names[-2:] == ["run.lifecycle", "done"]
+    requested_wire = runtime_events(events, "approval.requested")[0]
+    resolved_wire = runtime_events(events, "approval.resolved")[0]
+    assert requested_wire["runId"] == resolved_wire["runId"] == run_id
+    requested = requested_wire["payload"]["data"]
+    resolved_event = resolved_wire["payload"]["data"]
+    assert requested["approvalId"] == resolved_event["approvalId"] == approval_id
     assert requested["toolName"] == resolved_event["toolName"] == "deleteCharacter"
     assert resolved_event["status"] == "rejected"
     assert continuation_tool_result is not None
     assert continuation_tool_result["success"] is False
     assert continuation_tool_result["errorCode"] == "approval_rejected"
+    todo_updates = [
+        event["payload"]["data"] for event in runtime_events(events, "run.todo_updated")
+    ]
     declined_todo = next(
-        event["agentRunTodoUpdated"]
-        for event in events
-        if event.get("agentRunTodoUpdated", {}).get("stepId")
-        == "delete-character"
-        and event["agentRunTodoUpdated"]["step"]["status"] == "blocked"
+        update for update in todo_updates
+        if update["step_id"] == "delete-character"
+        and update["step"]["status"] == "blocked"
     )
-    assert declined_todo["stepId"] == "delete-character"
+    assert declined_todo["step_id"] == "delete-character"
     assert declined_todo["step"]["status"] == "blocked"
-    assert declined_todo["step"]["resultSummary"] == (
+    assert declined_todo["step"]["result_summary"] == (
         "User declined approval; the planned tool was not executed."
     )
     assert declined_todo["step"]["error"] == "approval_rejected"
     assert "Planned tool step completed." not in str(declined_todo)
-    report_statuses = [
-        event["agentRunTodoUpdated"]["step"]["status"]
-        for event in events
-        if event.get("agentRunTodoUpdated", {}).get("stepId") == "report-result"
-    ]
-    assert report_statuses == ["running", "done"]
-    delete_statuses = [
-        event["agentRunTodoUpdated"]["step"]["status"]
-        for event in events
-        if event.get("agentRunTodoUpdated", {}).get("stepId")
-        == "delete-character"
-    ]
-    assert delete_statuses == ["running", "blocked"]
-    visible_text = "".join(
-        str(event.get("delta") or "") for event in events
-    )
+    assert [
+        update["step"]["status"] for update in todo_updates
+        if update["step_id"] == "report-result"
+    ] == ["running", "done"]
+    assert [
+        update["step"]["status"] for update in todo_updates
+        if update["step_id"] == "delete-character"
+    ] == ["running", "blocked"]
+    visible_text = provider_text(events)
     assert "<tool_call" not in visible_text
     assert "<function=" not in visible_text
     assert "<parameter=" not in visible_text
@@ -2327,8 +2257,9 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     assert "删除失败" not in visible_text
     assert "权限" not in visible_text
     assert "联系管理员" not in visible_text
-    assert not any("commentaryDelta" in event for event in events)
-    assert events[-1] == {"done": True, "model": "wire-model"}
+    assert provider_text(events, channel="commentary") == ""
+    assert events[-1]["model"] == "wire-model"
+    _assert_terminal_exclusive(events, status="done")
     assert model_round == 5
     character = await db.fetch_one(
         "SELECT id FROM characters WHERE id = ? AND book_id = ?",
@@ -2370,7 +2301,6 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
             "error": None,
         },
     ]
-    _assert_terminal_exclusive(events, terminal="agentRunCompleted", result="done")
 
 
 @pytest.mark.asyncio
@@ -2425,9 +2355,9 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        if projected.get("agentRunStarted"):
-            run_id = str(projected["agentRunStarted"]["runId"])
+        if event.get("kind") == "run.lifecycle":
+            assert event["payload"]["status"] == "running"
+            run_id = event["runId"]
             break
 
     await live.disconnect()
@@ -2558,13 +2488,12 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        approval = projected.get("toolApprovalRequired")
-        if approval:
+        if runtime_events([event], "approval.requested"):
+            approval = event["payload"]["data"]
             break
 
     approval_id = str(approval["approvalId"])
-    run_id = str(approval["runId"])
+    run_id = event["runId"]
     assert composition._approval_gateway.pending_count(run_id) == 1
     assert composition._approval_runs == {approval_id: run_id}
 
@@ -2619,18 +2548,20 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     # recovered from the durable Run snapshot instead.
     raw_delivered_events = decode_sse_json(disconnected.content)
     assert_raw_canonical_wire(raw_delivered_events)
-    delivered_events = _normalize_dynamic_ids(
-        project_wire_events_for_legacy_assertions(raw_delivered_events)
-    )
-    assert [_event_name(item) for item in delivered_events] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
-        "agentRunTodoUpdated",
-        "toolApprovalRequired",
+    assert _event_names(raw_delivered_events) == [
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
+        "run.todo_updated",
+        "approval.requested",
     ]
-    assert not any(TERMINAL_KEYS.intersection(item) for item in delivered_events)
-    assert not any(item.get("done") or item.get("error") for item in delivered_events)
+    assert not any(
+        event["payload"]["status"] in TERMINAL_STATUSES
+        for event in raw_delivered_events if event.get("kind") == "run.lifecycle"
+    )
+    assert not any(
+        event.get("done") or event.get("error") for event in raw_delivered_events
+    )
 
 
 @pytest.mark.asyncio
@@ -2735,13 +2666,12 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        approval = projected.get("toolApprovalRequired")
-        if approval:
+        if runtime_events([event], "approval.requested"):
+            approval = event["payload"]["data"]
             break
 
     approval_id = str(approval["approvalId"])
-    run_id = str(approval["runId"])
+    run_id = event["runId"]
     assert composition._approval_gateway.pending_count(run_id) == 1
     live.fail_next_body_send()
 

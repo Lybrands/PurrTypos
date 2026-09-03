@@ -597,7 +597,7 @@ def _continuation_canon_context(
         return {"content": "", "tokenCount": 0, "receipts": (), "included": 0, "deferred": 0}
     binding = dict(context.continuation_binding or {})
     header = (
-        "【继承正史 — 宿主冻结、只读、优先于目标书 Story Memory】\n"
+        "【继承正史 — 只读，优先于目标书 Story Memory】\n"
         "冲突时以本块硬事实为准；不得修改来源、正史快照或来源分析。"
     )
     rows: list[str] = []
@@ -851,9 +851,8 @@ def build_host_planning_facts(
         )
     if selected_evidence_statuses and not include_evidence_read_rules:
         rules.append(
-            "Host-bound explicit evidence bodies are loaded after TaskSpec "
-            "planning; do not plan tool steps solely to read those exact "
-            "selections."
+            "Explicitly selected evidence is loaded after planning; do not add "
+            "tool steps solely to read those exact selections."
         )
     if rules:
         facts["planningRules"] = rules

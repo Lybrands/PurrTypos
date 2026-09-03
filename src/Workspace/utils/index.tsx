@@ -1,5 +1,5 @@
 import { services } from '@/services'
-import type { Article, Chapter, Character, EntityId, Outline, VolumeOutline } from '../../types'
+import type { Chapter, Character, EntityId, Outline } from '../../types'
 
 // ─── 纯文本提取 ────────────────────────────────────────────────
 
@@ -21,23 +21,7 @@ export function extractTextFromLexical(json: string): string {
   }
 }
 
-/** 将章节列表格式化为层级文本（用于 AI 上下文） */
-export function formatChaptersAsText(chapters: Chapter[]): string {
-  if (!chapters.length) return ''
-  const buildTree = (parentId: EntityId | null | undefined, depth: number): string => {
-    const items = chapters.filter((c) => (c.parent_id ?? null) === (parentId ?? null))
-    return items
-      .map((c) => {
-        const indent = '  '.repeat(depth)
-        const children = buildTree(c.id, depth + 1)
-        return children ? `${indent}${c.title}\n${children}` : `${indent}${c.title}`
-      })
-      .join('\n')
-  }
-  return buildTree(null, 0)
-}
-
-// ─── 1. 批量获取章节内容 ───────────────────────────────────────
+// ─── 批量获取章节内容 ─────────────────────────────────────────
 
 export interface ChapterContent {
   chapterId: EntityId
@@ -71,96 +55,6 @@ export async function batchGetChapterContents(
     }),
   )
   return results
-}
-
-/**
- * 获取单个章节内容（便捷方法）
- * 注意：chapterId 必须是左侧写作章节目录（写作大纲 outline）下的章节 id，不能是思维导图大纲树中的节点 id。
- */
-export async function getChapterContent(
-  chapterId: EntityId,
-  title?: string,
-  maxTextLength = 12000,
-): Promise<ChapterContent | null> {
-  const res = await services.articles.getArticle({ chapterId })
-  if (!res.success || !res.data) return null
-  const raw = typeof res.data.content === 'string' ? res.data.content : ''
-  const plainText = raw ? extractTextFromLexical(raw).slice(0, maxTextLength) : ''
-  return {
-    chapterId,
-    title: title ?? '',
-    content: raw,
-    plainText,
-  }
-}
-
-// ─── 2. 批量获取大纲 ──────────────────────────────────────────
-
-export interface OutlineWithChapters {
-  outline: Outline
-  chapters: Chapter[]
-  chaptersText: string
-}
-
-export interface BookOutlines {
-  globalOutline: OutlineWithChapters | null
-  volumeOutlines: (VolumeOutline & { chapters_detail: OutlineWithChapters[] })[]
-  chapterOutlines: OutlineWithChapters[]
-  writingOutline: OutlineWithChapters | null
-}
-
-/** 给单个大纲加载其子章节列表 */
-async function loadOutlineWithChapters(outline: Outline): Promise<OutlineWithChapters> {
-  const res = await services.chapters.getChapters({ outlineId: outline.id })
-  const chapters = res.success ? res.data : []
-  return { outline, chapters, chaptersText: formatChaptersAsText(chapters) }
-}
-
-/**
- * 一次性获取指定书籍的全部大纲（总纲 + 卷大纲 + 章节大纲 + 写作大纲）
- */
-export async function getAllOutlines(bookId: EntityId): Promise<BookOutlines> {
-  const [globalRes, volumeRes, chapterRes, writingRes] = await Promise.all([
-    services.outlines.getGlobalOutline(bookId),
-    services.outlines.getVolumeOutlines(bookId),
-    services.outlines.getChapterOutlines(bookId),
-    services.outlines.getWritingOutline(bookId),
-  ])
-
-  const globalOutline =
-    globalRes.success && globalRes.data ? await loadOutlineWithChapters(globalRes.data) : null
-
-  const volumeOutlines = await Promise.all(
-    (volumeRes.success ? volumeRes.data : []).map(async (vol) => {
-      const chaptersDetail = await Promise.all(
-        (vol.chapters ?? []).map((ch) => loadOutlineWithChapters(ch)),
-      )
-      return { ...vol, chapters_detail: chaptersDetail }
-    }),
-  )
-
-  const chapterOutlines = await Promise.all(
-    (chapterRes.success ? chapterRes.data : []).map(loadOutlineWithChapters),
-  )
-  const writingOutline =
-    writingRes.success && writingRes.data ? await loadOutlineWithChapters(writingRes.data) : null
-
-  return { globalOutline, volumeOutlines, chapterOutlines, writingOutline }
-}
-
-/**
- * 获取指定大纲 ID 列表的详情（含子章节）
- */
-export async function batchGetOutlineDetails(
-  outlineIds: EntityId[],
-  allOutlines: Outline[],
-): Promise<OutlineWithChapters[]> {
-  return Promise.all(
-    outlineIds.map(async (oid) => {
-      const outline = allOutlines.find((o) => o.id === oid) ?? { id: oid, title: '' }
-      return loadOutlineWithChapters(outline)
-    }),
-  )
 }
 
 /**
@@ -215,7 +109,7 @@ export async function getWritingOutlineWithChapters(
   return { outlineId: oid, chapters }
 }
 
-// ─── 3. 批量获取人物信息 ──────────────────────────────────────
+// ─── 人物信息 ────────────────────────────────────────────────
 
 /**
  * 获取指定书籍的全部人物列表
@@ -225,7 +119,7 @@ export async function getBookCharacters(bookId: EntityId): Promise<Character[]> 
   return res.success && res.data ? res.data : []
 }
 
-// ─── 4. 获取小说背景内容 ──────────────────────────────────────
+// ─── 小说背景 ────────────────────────────────────────────────
 
 export interface StoryBackground {
   content: string
@@ -240,4 +134,3 @@ export async function getStoryBackground(bookId: EntityId): Promise<StoryBackgro
   if (!res.success || !res.data) return null
   return { content: res.data.content, updateTime: res.data.update_time }
 }
-

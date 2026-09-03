@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 import routers.screenplay_v2 as screenplay_v2_routes
+from fastapi import FastAPI
 
-from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
-from exceptions import AppError
+from exceptions import AppError, app_error_handler
+from infrastructure.screenplay.tools.query import ScreenplayToolQuery
 from routers.screenplay_v2 import (
     adjudicate_screenplay_v2_review,
     accept_screenplay_v2_revision,
@@ -44,7 +46,7 @@ from schemas.screenplay_v2 import (
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
 )
-from tests.support.screenplay_v2_driver import accept_document, create_document
+from tests.support.screenplay_v2_driver import accept_revision, seed_revision
 
 
 pytestmark = pytest.mark.asyncio
@@ -126,7 +128,7 @@ async def _seed_project_with_review(
     ]
     accepted_ids: list[str] = []
     for kind, content in chain:
-        document = await create_document(
+        revision_id = await seed_revision(
             db,
             project_id=project_id,
             kind=kind,
@@ -135,10 +137,10 @@ async def _seed_project_with_review(
             content_text=kind,
             derived_from_ids=accepted_ids[-1:],
         )
-        accepted_ids.append(str(document["id"]))
-        await accept_document(db, str(document["id"]))
+        accepted_ids.append(revision_id)
+        await accept_revision(db, revision_id)
 
-    draft = await create_document(
+    draft_id = await seed_revision(
         db,
         project_id=project_id,
         kind="scene_draft",
@@ -155,9 +157,8 @@ async def _seed_project_with_review(
         content_text="INT. 审讯室 - 日",
         derived_from_ids=accepted_ids[-1:],
     )
-    draft_id = str(draft["id"])
-    await accept_document(db, draft_id)
-    review = await create_document(
+    await accept_revision(db, draft_id)
+    review_id = await seed_revision(
         db,
         project_id=project_id,
         kind="review",
@@ -178,10 +179,103 @@ async def _seed_project_with_review(
         content_text="# 审阅报告",
         derived_from_ids=[draft_id],
     )
-    review_id = str(review["id"])
-    await accept_document(db, review_id)
+    await accept_revision(db, review_id)
     workspace = (await get_screenplay_v2_workspace(project_id))["data"]
     return project_id, draft_id, review_id, workspace
+
+
+@pytest_asyncio.fixture
+async def pdf_client(temp_db: DatabaseConnection):
+    app = FastAPI()
+    app.include_router(screenplay_v2_routes.router, prefix="/api")
+    app.add_exception_handler(AppError, app_error_handler)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+
+async def test_pdf_export_uses_accepted_main_document_not_newer_candidates(
+    temp_db: DatabaseConnection, pdf_client, monkeypatch,
+):
+    project_id, _, _, workspace = await _seed_project_with_review(
+        temp_db, issues=[],
+    )
+    await seed_revision(
+        temp_db,
+        project_id=project_id,
+        kind="scene_draft",
+        title="未接受的候选",
+        content_json={"isComplete": True},
+        content_text="这段候选正文不能被导出",
+        derived_from_ids=[workspace["workflow"]["heads"]["sceneList"]["id"]],
+    )
+    calls = []
+
+    def render(**kwargs):
+        calls.append(kwargs)
+        return b"%PDF-1.4\naccepted screenplay\n%%EOF"
+
+    monkeypatch.setattr(
+        "application.screenplay_v2_service.build_screenplay_pdf", render,
+    )
+    response = await pdf_client.post(
+        f"/api/screenplay/v2/projects/{project_id}/export/pdf",
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.content == b"%PDF-1.4\naccepted screenplay\n%%EOF"
+    assert calls == [{
+        "title": "人工审阅定稿",
+        "screenplay_format": "电影",
+        "content": "INT. 审讯室 - 日",
+    }]
+
+
+@pytest.mark.parametrize("state, expected_status, message", [
+    ("missing", 404, "剧本项目不存在"),
+    ("unaccepted", 409, "项目尚无已接受的剧本正文"),
+    ("empty", 422, "当前剧本版本没有可导出的正文"),
+])
+async def test_pdf_export_rejects_missing_or_unexportable_drafts(
+    temp_db: DatabaseConnection, pdf_client, monkeypatch,
+    state: str, expected_status: int, message: str,
+):
+    project_id, draft_id, _, _ = await _seed_project_with_review(
+        temp_db, issues=[],
+    )
+    if state == "missing":
+        project_id = "missing-project"
+    elif state == "unaccepted":
+        await temp_db.execute(
+            "DELETE FROM screenplay_project_heads WHERE revision_id = ?",
+            [draft_id],
+        )
+    else:
+        await temp_db.execute(
+            "UPDATE screenplay_revision_parts SET content_text = '  ' "
+            "WHERE revision_id = ? AND part_type = 'document' "
+            "AND part_key = 'main'",
+            [draft_id],
+        )
+
+    def unexpected_render(**kwargs):
+        pytest.fail("PDF renderer must not run without exportable accepted content")
+
+    monkeypatch.setattr(
+        "application.screenplay_v2_service.build_screenplay_pdf",
+        unexpected_render,
+    )
+    response = await pdf_client.post(
+        f"/api/screenplay/v2/projects/{project_id}/export/pdf",
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["success"] is False
+    assert message in response.json()["error"]
 
 
 async def test_legacy_review_execution_failure_is_not_materialized_as_review_content(
@@ -218,7 +312,7 @@ async def test_latest_review_lookup_is_bound_to_the_exact_draft_revision(
         issues=[],
         verdict="ready",
     )
-    second_review = await create_document(
+    second_review_id = await seed_revision(
         temp_db,
         project_id=project_id,
         kind="review",
@@ -245,7 +339,7 @@ async def test_latest_review_lookup_is_bound_to_the_exact_draft_revision(
     )
 
     assert latest is not None
-    assert latest["id"] == second_review["id"]
+    assert latest["id"] == second_review_id
     assert latest["id"] != first_review_id
     assert latest["role"] == "review"
     assert latest["inputRevisions"]["screenplayDraft"] == draft_id
@@ -257,7 +351,7 @@ async def test_latest_review_lookup_is_bound_to_the_exact_draft_revision(
     )
     response = await route(project_id, draft_id)
     assert response["success"] is True
-    assert response["data"]["id"] == second_review["id"]
+    assert response["data"]["id"] == second_review_id
 
 
 async def test_v2_project_creation_starts_with_working_copy_not_fake_revision(
@@ -1129,15 +1223,18 @@ async def test_planned_review_decision_selects_revision_not_finalization(
     }]
     assert review_state["canFinalize"] is False
 
-    writing_context = await ScreenplayAgentContextQuery(
-        temp_db
-    ).episode_writing_context(
-        project_id,
-        1,
-        draft_revision_id=draft_id,
+    reloaded = await get_screenplay_v2_workspace(project_id)
+    assert {
+        finding["id"]: finding["status"]
+        for finding in reloaded["data"]["workflow"]["review"]["findings"]
+    } == {"arc-1": "planned", "pace-1": "riskAccepted"}
+    review_document = await ScreenplayToolQuery(temp_db).read_deliverable(
+        {"projectId": project_id},
+        {"role": "review", "revisionId": review_id},
     )
-    assert [issue["id"] for issue in writing_context["reviewIssues"]] == [
-        "arc-1",
+    assert review_document["payload"]["reviewedDraftId"] == draft_id
+    assert [issue["id"] for issue in review_document["payload"]["issues"]] == [
+        "arc-1", "pace-1",
     ]
 
     with pytest.raises(AppError, match="还有 1 条审阅意见等待修订"):

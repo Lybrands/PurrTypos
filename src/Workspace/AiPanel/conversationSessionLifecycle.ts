@@ -4,11 +4,6 @@ export interface ConversationLoadToken<TSessionId> {
   identity: string
 }
 
-export interface ConversationEditToken<TSessionId> {
-  load: ConversationLoadToken<TSessionId>
-  messageKey: string
-}
-
 export interface RecoveredRunProjectionOwner<TSessionId> {
   sessionId: TSessionId
   runId: string
@@ -140,18 +135,6 @@ export function createConversationSessionLifecycle<TSessionId extends string | n
     },
     getDraft(sessionId: TSessionId): string {
       return drafts.get(sessionId) ?? ''
-    },
-    deleteDraft(sessionId: TSessionId): void {
-      drafts.delete(sessionId)
-    },
-    beginEdit(
-      load: ConversationLoadToken<TSessionId>,
-      messageKey: string,
-    ): ConversationEditToken<TSessionId> {
-      return { load, messageKey }
-    },
-    canSubmitEdit(edit: ConversationEditToken<TSessionId>): boolean {
-      return isCurrent(edit.load) && !initializing
     },
   }
 }

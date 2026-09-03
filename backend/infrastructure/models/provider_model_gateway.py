@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence
 
 import httpx
+import httpx2
+from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
+from purra_anthropic import AnthropicMessagesGateway
+from purra_openai import OpenAIChatCompletionsGateway
 
 from purra.contracts import (
     AgentMessage,
@@ -19,6 +25,7 @@ from purra.contracts import (
     ToolChoiceMode,
 )
 from purra.errors import (
+    AgentCoreError,
     ContractViolationError,
     ModelGatewayError,
     UnsupportedModelFeatureError,
@@ -26,22 +33,25 @@ from purra.errors import (
 from purra.json_values import thaw_json_mapping, thaw_json_value
 from purra.model_call_parameters import build_model_call_parameters
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
+from purra.output import MAX_AGENT_PROGRESS_CHARS
 from purra.ports import CancellationSignal
 from purra.cancellation import raise_if_stopped
 from infrastructure.models import provider_router
 from infrastructure.models.capabilities import reasoning_mode_from_options
 from purra.stream_ownership import OwnedAsyncIterator, close_async_resource
 from config import DEV_DIAGNOSTICS_ENABLED
+from constants import AGENT_PUBLIC_PROGRESS_PREFIX
 
 
 class ProviderModelGateway:
-    """Expose OpenAI/Anthropic providers through the PurrA port."""
+    """Route native services through PurrA and compatible services through business adapters."""
 
     def __init__(
         self,
         api_key: str,
         *,
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
+        public_progress_from_content: bool = False,
     ):
         self._api_key = str(api_key or "").strip()
         if not self._api_key:
@@ -49,16 +59,21 @@ class ProviderModelGateway:
         self._on_required_tool_choice_unsupported = (
             on_required_tool_choice_unsupported
         )
+        self._public_progress_from_content = bool(public_progress_from_content)
 
     def describe_invocation(
         self,
         messages: Sequence[AgentMessage],
         invocation: ModelInvocation,
     ) -> dict[str, Any]:
+        native = _uses_native_adapter(invocation)
+        options = _provider_options(invocation)
+        if native:
+            options = thaw_json_mapping(_native_invocation(invocation, options).request.options)
         parameters = build_model_call_parameters(
             messages,
             invocation,
-            provider_options=_provider_options(invocation),
+            provider_options=options,
         )
         if DEV_DIAGNOSTICS_ENABLED:
             parameters["inputMessages"] = [
@@ -67,6 +82,7 @@ class ProviderModelGateway:
                     reasoning_replay=(
                         invocation.request.protocol_capabilities.reasoning_replay
                     ),
+                    preserve_role=native,
                 )
                 for message in messages
             ]
@@ -80,6 +96,34 @@ class ProviderModelGateway:
     ) -> ModelStream:
         request = invocation.request
         options = _provider_options(invocation)
+        if _uses_native_adapter(invocation):
+            raise_if_stopped(signal)
+            native_invocation = _native_invocation(invocation, options)
+            gateway, client = self._native_gateway(invocation)
+            try:
+                result = await gateway.stream(messages, native_invocation, signal)
+            except Exception as error:
+                await close_async_resource(client)
+                raise self._request_error(invocation, error) from None
+
+            async def chunks():
+                try:
+                    async for chunk in result.chunks:
+                        yield chunk
+                except Exception as error:
+                    raise self._request_error(invocation, error) from None
+
+            projected = _project_public_progress(
+                chunks(),
+                enabled=self._public_progress_from_content and bool(invocation.tools),
+            )
+            return replace(result, chunks=OwnedAsyncIterator(
+                projected, result.chunks, client,
+                terminal_predicate=lambda chunk: (
+                    isinstance(chunk, ModelStreamChunk)
+                    and chunk.finish_reason is not None
+                ),
+            ))
         try:
             result = await provider_router.create_chat_stream(
                 self._api_key,
@@ -101,8 +145,12 @@ class ProviderModelGateway:
         if signal is not None and signal.is_set():
             await close_async_resource(result.get("stream"))
             raise_if_stopped(signal)
+        normalized = _normalize_openai_stream(result["stream"])
         return ModelStream(
-            chunks=_normalize_openai_stream(result["stream"]),
+            chunks=_project_public_progress(
+                normalized,
+                enabled=self._public_progress_from_content and bool(invocation.tools),
+            ),
             model=str(result.get("model") or request.model),
             applied_output_limit=result.get("applied_output_limit"),
         )
@@ -115,6 +163,16 @@ class ProviderModelGateway:
     ) -> ModelCompletion:
         request = invocation.request
         options = _provider_options(invocation)
+        if _uses_native_adapter(invocation):
+            raise_if_stopped(signal)
+            native_invocation = _native_invocation(invocation, options)
+            gateway, client = self._native_gateway(invocation)
+            try:
+                return await gateway.complete(messages, native_invocation, signal)
+            except Exception as error:
+                raise self._request_error(invocation, error) from None
+            finally:
+                await close_async_resource(client)
         try:
             result = await provider_router.create_chat_no_stream(
                 self._api_key,
@@ -142,11 +200,18 @@ class ProviderModelGateway:
             applied_output_limit=result.get("applied_output_limit"),
         )
 
+    def _native_gateway(self, invocation: ModelInvocation):
+        if invocation.request.provider == "anthropic":
+            client = AsyncAnthropic(api_key=self._api_key, base_url="https://api.anthropic.com")
+            return AnthropicMessagesGateway(client), client
+        client = AsyncOpenAI(api_key=self._api_key, base_url="https://api.openai.com/v1")
+        return OpenAIChatCompletionsGateway(client), client
+
     def _request_error(
         self,
         invocation: ModelInvocation,
         error: Exception,
-    ) -> ModelGatewayError:
+    ) -> AgentCoreError:
         if (
             invocation.tool_choice is ToolChoiceMode.REQUIRED
             and _is_required_tool_choice_compatibility_error(error)
@@ -156,12 +221,50 @@ class ProviderModelGateway:
             return UnsupportedModelFeatureError(
                 "required tool choice is unsupported"
             )
-        code = _provider_error_code(error)
+        error_code = getattr(error, "code", "")
+        if isinstance(error, AgentCoreError) and error_code != "upstream_stream_interrupted" and not error_code.startswith((
+            "openai_http_", "openai_transport_",
+            "anthropic_http_", "anthropic_transport_",
+        )):
+            return error
+        code = error_code if error_code == "upstream_stream_interrupted" else _provider_error_code(error)
         return ModelGatewayError(
             "model provider request failed",
             code=code,
             retryable=code == "upstream_stream_interrupted",
         )
+
+
+def _uses_native_adapter(invocation: ModelInvocation) -> bool:
+    base_url = str(invocation.request.options.get("baseURL") or "").strip().lower().rstrip("/")
+    if invocation.request.provider == "openai":
+        return base_url in {"https://api.openai.com", "https://api.openai.com/v1"}
+    if invocation.request.provider == "anthropic":
+        return base_url in {"", "https://api.anthropic.com", "https://api.anthropic.com/v1"}
+    return False
+
+
+def _native_invocation(invocation: ModelInvocation, options: dict) -> ModelInvocation:
+    options = dict(options)
+    for key in ("model", "model_profile", "baseURL", "context_window", "tools", "tool_choice"):
+        options.pop(key, None)
+    mode = invocation.reasoning_mode
+    if invocation.request.provider == "openai":
+        options.pop("thinking", None)
+        if invocation.request.protocol_capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
+            mode = ReasoningMode.DEFAULT
+    elif mode is ReasoningMode.ENABLED:
+        thinking = options.get("thinking") or {"type": "enabled"}
+        if thinking.get("type") == "enabled" and "budget_tokens" not in thinking:
+            cap = invocation.max_call_output_tokens
+            if cap is None or cap <= 1024:
+                raise UnsupportedModelFeatureError("Anthropic thinking requires an output limit above 1024")
+            options["thinking"] = {**thinking, "budget_tokens": min(32_000, max(1024, cap // 2))}
+    return replace(
+        invocation,
+        request=replace(invocation.request, options=options),
+        reasoning_mode=mode,
+    )
 
 
 def _provider_options(
@@ -269,8 +372,11 @@ def _diagnostic_provider_message(
     message: AgentMessage,
     *,
     reasoning_replay: ReasoningReplayPolicy,
+    preserve_role: bool = False,
 ) -> dict[str, Any]:
     value = _provider_message(message, reasoning_replay=reasoning_replay)
+    if preserve_role:
+        value["role"] = message.role.value
     value.pop("reasoning_content", None)
     return _redact_diagnostic_fields(value)
 
@@ -379,6 +485,57 @@ def _normalize_openai_stream(raw_stream):
     )
 
 
+def _project_public_progress(chunks, *, enabled: bool):
+    if not enabled:
+        return chunks
+
+    async def _project():
+        prefix = ""
+        prefix_matched = False
+        title = ""
+        settled = False
+        async for chunk in chunks:
+            progress = chunk.progress_delta
+            if progress:
+                settled = True
+            elif not settled and chunk.content_delta:
+                content = chunk.content_delta
+                if not prefix_matched:
+                    candidate = prefix + content
+                    if AGENT_PUBLIC_PROGRESS_PREFIX.startswith(candidate):
+                        prefix = candidate
+                        content = ""
+                    elif candidate.startswith(AGENT_PUBLIC_PROGRESS_PREFIX):
+                        prefix_matched = True
+                        content = candidate[len(AGENT_PUBLIC_PROGRESS_PREFIX):]
+                    else:
+                        settled = True
+                        content = ""
+                if prefix_matched and content:
+                    candidate = (title + content).replace("\r\n", "\n").replace("\r", "\n")
+                    first_line, separator, _remainder = candidate.partition("\n")
+                    normalized = first_line.strip()
+                    if normalized and len(normalized) <= MAX_AGENT_PROGRESS_CHARS:
+                        title = first_line
+                        progress = normalized
+                    else:
+                        settled = True
+                    if separator:
+                        settled = True
+            if chunk.tool_call_deltas:
+                settled = True
+            yield replace(chunk, progress_delta=progress)
+
+    return OwnedAsyncIterator(
+        _project(),
+        chunks,
+        terminal_predicate=lambda chunk: (
+            isinstance(chunk, ModelStreamChunk)
+            and chunk.finish_reason is not None
+        ),
+    )
+
+
 def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     """Normalize OpenAI- and Anthropic-shaped provider usage."""
 
@@ -459,31 +616,33 @@ def _normalize_finish_reason(value) -> ModelFinishReason | None:
 
 
 def _is_required_tool_choice_compatibility_error(error: Exception) -> bool:
-    status = getattr(error, "status_code", None)
-    response = getattr(error, "response", None)
-    if status is None and response is not None:
-        status = getattr(response, "status_code", None)
-    if status not in {400, 422}:
-        return False
-    text = str(error or "").lower()
-    return any(marker in text for marker in (
-        "tool_choice",
-        "tool choice",
-        "forced tool",
-        "thinking mode",
-        "extended thinking",
-    ))
+    for current in _error_chain(error):
+        status = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+        if status in {400, 422} and any(marker in str(current).lower() for marker in (
+            "tool_choice", "tool choice", "forced tool", "thinking mode", "extended thinking",
+        )):
+            return True
+    return False
 
 
-def _provider_error_code(error: Exception) -> str:
+def _error_chain(error: Exception):
     current: BaseException | None = error
     seen: set[int] = set()
-    statuses: list[int] = []
-    messages: list[str] = []
     for _ in range(8):
         if current is None or id(current) in seen:
             break
         seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _provider_error_code(error: Exception) -> str:
+    statuses: list[int] = []
+    messages: list[str] = []
+    for current in _error_chain(error):
         messages.append(str(current or "").lower())
         status = getattr(current, "status_code", None)
         response = getattr(current, "response", None)
@@ -491,9 +650,8 @@ def _provider_error_code(error: Exception) -> str:
             status = getattr(response, "status_code", None)
         if isinstance(status, int):
             statuses.append(status)
-        if isinstance(current, httpx.TransportError):
+        if isinstance(current, (httpx.TransportError, httpx2.TransportError)):
             return "upstream_stream_interrupted"
-        current = current.__cause__ or current.__context__
     combined = " ".join(messages)
     if (
         402 in statuses

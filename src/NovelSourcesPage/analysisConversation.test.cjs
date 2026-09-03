@@ -2,7 +2,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const test = require('node:test')
 const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.cjs')
-const { buildNovelAnalysisMessages, replayNovelAnalysisRun, loadNovelAnalysisConversation, NovelAnalysisConversationStream } = loadTypeScriptModule(
+const { buildNovelAnalysisMessages, NovelAnalysisConversationStream } = loadTypeScriptModule(
   path.join(__dirname, 'analysisConversation.ts'),
 )
 
@@ -19,17 +19,6 @@ const run = (overrides = {}) => ({
   ...overrides,
 })
 
-const snapshot = (events = [], overrides = {}) => ({
-  version: 1,
-  run: {
-    runId: 'analysis-run', status: 'done',
-    finalResponse: '非完成状态不得展示的内容',
-    provenance: {}, execution: { attempt: 1, cancellationRequested: false },
-    ...overrides,
-  },
-  todos: [], events, nextCursor: events.length, hasMore: false,
-})
-
 const event = (sequence, overrides = {}) => ({
   cursor: sequence,
   type: overrides.kind || 'provider.content_delta',
@@ -42,6 +31,13 @@ const event = (sequence, overrides = {}) => ({
     ...overrides,
   },
 })
+
+const replayAnalysisEvents = (run, events) => new NovelAnalysisConversationStream().apply({
+  kind: 'analysis_events', nextCursor: events.length, hasMore: false, projectionVersion: 'v1',
+  runs: [run], chunks: events.map((event, index) => ({
+    cursor: index + 1, runId: event.chunk.runId, createdAt: '', chunk: event.chunk,
+  })),
+}).message
 
 test('one analysis stream catches up dynamic units without re-reading snapshots', () => {
   const stream = new NovelAnalysisConversationStream()
@@ -77,7 +73,7 @@ test('history remains readable without a configured model or a creation timestam
 test('related unit commentary and tools replay without private results or a false root terminal', () => {
   const input = run({ relatedRuns: [{ runId: 'unit-run', status: 'failed' }] })
   const childEvent = (sequence, overrides) => event(sequence, { runId: 'unit-run', ...overrides })
-  const child = snapshot([
+  const child = [
     childEvent(1, { channel: 'commentary', outputStreamId: 'unit-commentary', payload: { delta: '核对原文中的人物关系' } }),
     childEvent(2, { source: 'runtime', kind: 'operation.started', channel: 'operation', payload: {
       operationId: 'read-input', kind: 'tool', startedAt: '2026-08-31T00:00:00Z',
@@ -88,10 +84,11 @@ test('related unit commentary and tools replay without private results or a fals
       operationId: 'read-input', status: 'failed', finishedAt: '2026-08-31T00:00:01Z', durationMs: 1000,
     } }),
     childEvent(5, { source: 'runtime', kind: 'run.lifecycle', channel: 'lifecycle', payload: { status: 'failed' } }),
-  ], { runId: 'unit-run', status: 'failed', finalResponse: 'PRIVATE_FINAL' })
-  const message = replayNovelAnalysisRun(input, snapshot([
+  ]
+  const message = replayAnalysisEvents(input, [
     event(20, { source: 'runtime', kind: 'run.lifecycle', channel: 'lifecycle', payload: { status: 'running' } }),
-  ], { status: 'running' }), 'model', [child])
+    ...child,
+  ])
   assert.equal(message.content, '')
   assert.equal(message.canonicalOutput.runStatus, 'running')
   assert.equal(message.canonicalOutput.operations['read-input'].status, 'failed')
@@ -101,41 +98,34 @@ test('related unit commentary and tools replay without private results or a fals
   assert.equal(JSON.stringify(message).includes('PRIVATE_'), false)
 })
 
-test('analysis reload exhausts child pages and caches only settled snapshots', async () => {
-  const cache = new Map()
-  const calls = []
-  const input = run({ relatedRuns: [{ runId: 'unit-run', status: 'done' }] })
-  const dependencies = { getRunSnapshot: async ({ runId, after }) => {
-    calls.push([runId, after])
-    if (runId === input.runId) return { success: true, data: snapshot([], { status: 'running' }) }
-    return { success: true, data: {
-      ...snapshot([event(after ? 2 : 1, {
-        runId, channel: 'commentary', outputStreamId: 'unit-output', payload: { delta: after ? '证据' : '核对' },
-      })], { runId, finalResponse: '' }),
-      hasMore: !after, nextCursor: after ? 2 : 1,
-    } }
-  } }
-  const first = await loadNovelAnalysisConversation(input, 'model', dependencies, cache)
-  assert.equal(first.canonicalOutput.commentaryBlocks[0].text, '核对证据')
-  assert.equal(cache.has(input.runId), false)
-  assert.equal(cache.has('unit-run'), true)
-  await loadNovelAnalysisConversation(input, 'model', dependencies, cache)
-  assert.equal(calls.filter(([id]) => id === 'unit-run').length, 2)
-  assert.equal(calls.filter(([id]) => id === input.runId).length, 2)
+test('analysis stream merges overlapping pages without duplicating public text', () => {
+  const stream = new NovelAnalysisConversationStream()
+  const chunks = [1, 2].map(sequence => ({
+    cursor: sequence,
+    runId: 'analysis-run',
+    createdAt: '',
+    chunk: event(sequence, {
+      channel: 'commentary',
+      outputStreamId: 'progress',
+      payload: { delta: sequence === 1 ? '核对' : '证据' },
+    }).chunk,
+  }))
+  const page = {
+    kind: 'analysis_events', runs: [run()],
+    nextCursor: 1, hasMore: true, projectionVersion: 'v1', chunks: [chunks[0]],
+  }
+  stream.apply(page)
+  const replayed = stream.apply({ ...page, runs: undefined, nextCursor: 2, hasMore: false, chunks })
+  assert.equal(replayed.message.canonicalOutput.commentaryBlocks[0].text, '核对证据')
 })
 
-test('leaving analysis during hydration cannot populate the next source cache', async () => {
-  let current = true
-  const cache = new Map()
-  const result = await loadNovelAnalysisConversation(run(), 'model', {
-    isCurrent: () => current,
-    getRunSnapshot: async () => {
-      current = false
-      return { success: true, data: snapshot() }
-    },
-  }, cache)
-  assert.equal(result, undefined)
-  assert.equal(cache.size, 0)
+test('a new analysis stream starts without the previous source projection', () => {
+  const first = replayAnalysisEvents(run(), [event(1)])
+  assert.equal(first.canonicalOutput.finalText, '模型的真实公开回答。')
+  const second = replayAnalysisEvents(run({ runId: 'next-run' }), [])
+  assert.equal(second.agentRunId, 'next-run')
+  assert.equal(second.content, '')
+  assert.equal(second.canonicalOutput, undefined)
 })
 
 for (const status of ['pending', 'running', 'paused', 'failed', 'canceled']) {
@@ -152,26 +142,23 @@ for (const status of ['pending', 'running', 'paused', 'failed', 'canceled']) {
   })
 }
 
-test('completed analysis uses the root Run final response during replay', () => {
-  const finalResponse = '## 故事概览\n\n红门事件连接了人物认知差与钥匙冲突。'
+test('completed analysis uses the persisted root response when no public events exist', () => {
+  const finalResponse = '故事概览：红门事件连接了人物认知差与钥匙冲突。'
   const input = run({ runStatus: 'done', taskStatus: 'completed', finalResponse })
-  const stored = snapshot()
-  stored.run.finalResponse = finalResponse
-  const replayed = replayNovelAnalysisRun(input, stored, 'model')
-  assert.equal(replayed.content, finalResponse)
+  const replayed = replayAnalysisEvents(input, [])
   assert.equal(buildNovelAnalysisMessages(input, 'model', replayed).at(-1).content, finalResponse)
   assert.equal(buildNovelAnalysisMessages(input, 'model').at(-1).content, finalResponse)
 })
 
 test('public model answer and commentary survive without summaries or private JSON', () => {
   const input = run({ runStatus: 'done', taskStatus: 'completed' })
-  const replayed = replayNovelAnalysisRun(input, snapshot([
+  const replayed = replayAnalysisEvents(input, [
     event(1, { visibility: 'private', payload: { delta: '{"facts":["private"]}' } }),
     event(2, { channel: 'commentary', outputStreamId: 'model-progress', payload: { delta: '我会先核对两个人物各自知道的信息。' } }),
     event(3, { source: 'runtime', channel: 'commentary', outputStreamId: 'model-progress', kind: 'stream.committed', payload: {} }),
     event(4),
     event(5, { source: 'runtime', kind: 'stream.committed', payload: {} }),
-  ], { finalResponse: '模型的真实公开回答。' }), 'model')
+  ])
   const assistant = buildNovelAnalysisMessages(input, 'model', replayed).at(-1)
   assert.equal(assistant.content, '模型的真实公开回答。')
   assert.equal(assistant.canonicalOutput.finalText, assistant.content)
@@ -181,7 +168,7 @@ test('public model answer and commentary survive without summaries or private JS
 
 test('live public model text is retained in the shared streaming projection', () => {
   const input = run()
-  const replayed = replayNovelAnalysisRun(input, snapshot([event(1)], { status: 'running' }), 'model')
+  const replayed = replayAnalysisEvents(input, [event(1)])
   const assistant = buildNovelAnalysisMessages(input, 'model', replayed).at(-1)
   assert.equal(assistant.canonicalOutput.finalText, '模型的真实公开回答。')
   assert.equal(assistant.streamingContent, replayed.streamingContent)
@@ -192,9 +179,7 @@ test('follow-up retains its actual persisted model answer', () => {
     interactionKind: 'follow_up', taskId: null, taskStatus: null,
     runStatus: 'done', finalResponse: '甲不知道钥匙的位置，乙知道。',
   })
-  const replayed = replayNovelAnalysisRun(input, snapshot([], {
-    finalResponse: input.finalResponse,
-  }), 'model')
+  const replayed = replayAnalysisEvents(input, [])
   assert.equal(buildNovelAnalysisMessages(input, 'model', replayed).at(-1).content, input.finalResponse)
   assert.equal(buildNovelAnalysisMessages(input, 'model').at(-1).content, input.finalResponse)
 })

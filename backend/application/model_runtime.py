@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from purra.contracts import ModelRequest, ReasoningMode, RunExecutionIntent
 from purra.model_protocol import (
+    FeatureSupport,
     FeatureRequirement,
     InvocationOutputLimit,
     TaskCapabilityRequirements,
@@ -22,6 +25,24 @@ _CONTEXT_WINDOWS = {
     "300k": 300_000,
     "1m": 1_000_000,
 }
+
+
+def with_adapter_public_progress(request: ModelRequest) -> ModelRequest:
+    """Declare the public progress records produced by the host gateway."""
+
+    protocol = request.capability_snapshot.protocol
+    if protocol.public_progress is FeatureSupport.SUPPORTED:
+        return request
+    return replace(
+        request,
+        capability_snapshot=replace(
+            request.capability_snapshot,
+            protocol=replace(
+                protocol,
+                public_progress=FeatureSupport.SUPPORTED,
+            ),
+        ),
+    )
 
 
 def model_request_from_runtime(
@@ -126,4 +147,5 @@ __all__ = [
     "reasoning_mode_from_options",
     "run_execution_intent",
     "runtime_context_window_tokens",
+    "with_adapter_public_progress",
 ]
