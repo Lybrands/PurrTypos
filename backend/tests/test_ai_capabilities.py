@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import pytest
 
+from infrastructure.models.profiles.base import ModelProfile
+
 from infrastructure.models.capabilities import (
     build_anthropic_thinking_param,
-    build_openai_thinking_extra_body,
     normalize_thinking_enabled,
 )
 
@@ -37,22 +38,22 @@ class TestNormalizeThinkingEnabled:
 
 
 # ---------------------------------------------------------------------------
-# build_openai_thinking_extra_body
+# ModelProfile.build_openai_extra_body
 # ---------------------------------------------------------------------------
 
-class TestBuildOpenAIThinkingExtraBody:
+class TestModelProfileReasoningParameters:
     def test_enabled(self):
-        assert build_openai_thinking_extra_body(True) == {
+        assert ModelProfile().build_openai_extra_body(True) == {
             "thinking": {"type": "enabled"},
         }
 
     def test_disabled(self):
-        assert build_openai_thinking_extra_body(False) == {
+        assert ModelProfile().build_openai_extra_body(False) == {
             "thinking": {"type": "disabled"},
         }
 
     def test_default_is_omitted(self):
-        assert build_openai_thinking_extra_body(None) == {}
+        assert ModelProfile().build_openai_extra_body(None) == {}
 
 
 # ---------------------------------------------------------------------------

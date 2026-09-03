@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
@@ -29,6 +30,7 @@ from schemas.screenplay_v2 import (
     UpdateScreenplayV2ProjectRequest,
     UpdateScreenplayV2WorkingCopyRequest,
 )
+from services.screenplay_pdf import build_screenplay_pdf
 
 
 _SCOPE_MODE_TO_LEGACY = {
@@ -151,6 +153,29 @@ class ScreenplayV2ProjectService:
         if not normalized_project_id:
             raise NotFoundError("剧本项目不存在")
         return await self._repository.get_workspace(normalized_project_id)
+
+    async def export_pdf(self, project_id: str) -> bytes:
+        async with self._db.transaction():
+            workspace = await self.get_workspace(project_id)
+            draft = workspace["workflow"]["heads"].get("screenplayDraft")
+            if draft is None:
+                raise AppError("项目尚无已接受的剧本正文，无法导出 PDF", 409)
+            revision = await self.get_revision(draft["id"], view="full")
+            content = next((
+                part["contentText"].strip()
+                for part in revision["parts"]
+                if part["type"] == "document" and part["key"] == "main"
+            ), "")
+            if not content:
+                raise AppError("当前剧本版本没有可导出的正文", 422)
+            project = workspace["project"]
+
+        return await asyncio.to_thread(
+            build_screenplay_pdf,
+            title=project["title"],
+            screenplay_format=legacy_format(project["format"]),
+            content=content,
+        )
 
     async def update_project(
         self,

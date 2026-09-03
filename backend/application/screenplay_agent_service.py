@@ -13,9 +13,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
 
 from purra.contracts import (
     AgentMessage,
@@ -42,10 +40,8 @@ from purra.model_protocol import FeatureRequirement, TaskCapabilityRequirements
 from purra.task_admission import (
     ExecutionMode,
     LongTaskDispatchReceipt,
-    LongTaskExecutionUpdate,
     TaskAdmissionDecision,
 )
-from purra.output import RuntimeOutputEvent
 from purra.model_protocol import resolve_invocation_output_limit
 from purra.output import (
     PublicPresentationMode,
@@ -100,7 +96,6 @@ class ScreenplayAgentService:
         unit_executor_factory: Callable[[Any], object] | None = None,
         projects,
         repository=None,
-        output_processor=None,
         track_background=None,
     ) -> None:
         self._db = db
@@ -123,7 +118,6 @@ class ScreenplayAgentService:
         )
         self._projects = projects
         self._track_background = track_background
-        self._output_processor = output_processor
         self._long_tasks = SqliteLongTaskRepository(db)
         self._operations = SqliteScreenplayOperationRepository(db)
         self._cancellation = (
@@ -478,25 +472,6 @@ class ScreenplayAgentService:
         # terminal commit closes the execution tree.  The Root projector owns
         # the atomic business settlement.
         return receipt.to_mapping()
-
-    async def _publish_task_update(
-        self,
-        turn_id: str,
-        update: LongTaskExecutionUpdate,
-    ) -> None:
-        if self._output_processor is None:
-            return
-        run_id = str(update.event.run_id or "").strip()
-        if not run_id:
-            raise RuntimeError("long task progress requires its parent Run")
-        await self._output_processor.accept_runtime_event(RuntimeOutputEvent(
-            event_id=f"long-task-{uuid4().hex}",
-            run_id=run_id,
-            turn_id=turn_id,
-            event_type=str(update.event.type),
-            payload=update.event.payload,
-            occurred_at=datetime.now(timezone.utc),
-        ))
 
     async def prepare_resume(self, operation_id: str, *, idempotency_key: str, request):
         operation = await self._operations.load(operation_id)

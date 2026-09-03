@@ -1,5 +1,3 @@
-import type { AiModelConfig } from '../../types'
-import { normalizeBaseUrl, normalizePresetContextWindow } from '../shared'
 import type { BuiltinModelProfile } from '../types'
 
 const provider = {
@@ -28,37 +26,7 @@ const preset = {
   recommended: true,
 } as const
 
-const legacyNames = new Set(['MiniMax-M3.0', preset.name])
-const knownBaseUrls = new Set([
-  'https://api.minimaxi.com/anthropic',
-  provider.baseUrl,
-])
-
-function matches(config: AiModelConfig) {
-  return legacyNames.has(config.name) && knownBaseUrls.has(normalizeBaseUrl(config.baseUrl))
-}
-
 export const minimaxM3Profile: BuiltinModelProfile = {
   provider,
   preset,
-  matches,
-  migrate(config) {
-    if (!matches(config)) return config
-    return {
-      ...config,
-      presetId: preset.id,
-      providerId: provider.id,
-      apiProvider: provider.apiProvider,
-      baseUrl: provider.baseUrl,
-      name: preset.name,
-      nickname: config.nickname === 'MiniMax M3.0' ? preset.label : config.nickname,
-      supportsThinking: preset.supportsThinking,
-      thinkingOnly: preset.thinkingOnly,
-      thinkingEnabled: config.thinkingEnabled,
-      contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
-      customizeTemperature: preset.customizeTemperature,
-      temperatureThinking: preset.temperatureThinking,
-      temperatureNonThinking: preset.temperatureNonThinking,
-    }
-  },
 }

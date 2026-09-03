@@ -307,19 +307,13 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
     const name = createSchemeName.trim()
     if (!name) return
     setCreating(true)
-    const result = await services.writingMethods.createScheme({ name, memberRevisionIds: createSchemeMembers })
+    const result = await services.writingMethods.createScheme({
+      name,
+      description: createSchemeDescription.trim(),
+      memberRevisionIds: createSchemeMembers,
+    })
     setCreating(false)
     if (!result.success || !result.data) return appMessage.error(result.error || '创建写作方案失败')
-    if (createSchemeDescription.trim()) {
-      const updateResult = await services.writingMethods.updateSchemeDraft({
-        schemeId: result.data.id,
-        expectedDraftRevision: result.data.draft_revision,
-        name,
-        description: createSchemeDescription.trim(),
-        memberRevisionIds: createSchemeMembers,
-      })
-      if (!updateResult.success) appMessage.error(updateResult.error || '方案已创建，但说明保存失败')
-    }
     setCreateSchemeOpen(false)
     setCreateSchemeName('')
     setCreateSchemeDescription('')

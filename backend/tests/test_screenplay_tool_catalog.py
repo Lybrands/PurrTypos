@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +9,6 @@ import pytest_asyncio
 
 import application.agent_composition as agent_composition_module
 import domains.screenplay_agent.candidate_projection as candidate_projection_module
-from application.agent_composition import AgentComposition
 from application.composition_factory import create_agent_composition
 from application.screenplay_agent_task_executor import (
     normalize_screenplay_candidate,
@@ -41,14 +39,10 @@ from purra.contracts import (
     ModelRequest,
     ModelStream,
     ModelStreamChunk,
-    ReasoningMode,
-    RunStatus,
     ToolCall,
     ToolCallDelta,
 )
-from purra.errors import ContractViolationError, ModelGatewayError
 from purra.artifacts.errors import ArtifactValidationError
-from purra.events import CoreEventType
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
 
@@ -87,15 +81,6 @@ def _context(
         episode_number=episode_number,
         source_book_id=source_book_id,
         source_scope=source_scope or {"mode": "whole_book"},
-    )
-
-
-async def _seed_running_root(db, root_run_id: str) -> None:
-    await db.execute(
-        "INSERT INTO ai_agent_runs "
-        "(id, session_id, status, mode, prompt, root_run_id) "
-        "VALUES (?, 1, 'running', 'agent', 'fixture root', ?)",
-        [root_run_id, root_run_id],
     )
 
 
@@ -561,15 +546,6 @@ def _tool_handler(catalog, name: str):
     return next(
         item.handler for item in catalog.registrations()
         if item.schema.name == name
-    )
-
-
-async def _canonical_public_events(db, run_id: str):
-    return await db.fetch_all(
-        "SELECT kind, payload_json FROM ai_agent_run_events "
-        "WHERE run_id = ? AND event_id IS NOT NULL "
-        "AND visibility = 'public' ORDER BY id",
-        [run_id],
     )
 
 
@@ -2150,137 +2126,6 @@ async def test_scoped_creative_brief_requires_deliverable_read_not_any_read(
             assert result.error_code is None
 
 
-class _ToolModelGateway:
-    def __init__(self, *_args, **_kwargs) -> None:
-        self.calls = 0
-        self.invocations = []
-
-    def describe_invocation(self, messages, invocation):
-        return {
-            "messageCount": len(messages),
-            "toolNames": [tool.name for tool in invocation.tools],
-        }
-
-    async def stream(self, messages, invocation, signal=None):
-        del messages, signal
-        self.invocations.append(invocation)
-        self.calls += 1
-
-        async def chunks():
-            if self.calls == 1:
-                arguments = json.dumps({
-                    "candidate": {
-                        "title": "人物驱动简报",
-                        "executionSummary": "根据项目目标形成核心取舍。",
-                        "contentText": "# 创作简报\n\n人物驱动。",
-                        "contentJson": {
-                            "fields": {
-                                "approach": "人物驱动",
-                                "premise": "一次意外重逢",
-                            },
-                        },
-                    },
-                }, ensure_ascii=False)
-                yield ModelStreamChunk(
-                    content_delta="**正在整理候选简报**\n\n已核对项目目标，准备写入候选稿。",
-                    tool_call_deltas=(ToolCallDelta(
-                        index=0,
-                        id="call-write-candidate",
-                        type="function",
-                        name="writeScreenplayCandidatePart",
-                        arguments_fragment=arguments,
-                    ),),
-                    finish_reason=ModelFinishReason.TOOL_CALLS,
-                )
-            else:
-                yield ModelStreamChunk(
-                    content_delta="候选稿已写入。",
-                    finish_reason=ModelFinishReason.STOP,
-                )
-
-        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
-
-    async def complete(self, messages, invocation, signal=None):
-        del messages, signal
-        return ModelCompletion(
-            applied_output_limit=invocation.max_call_output_tokens,
-            message={"role": "assistant", "content": "unused"},
-            model="fixture-model",
-        )
-
-
-class _ReasoningTruncationToolModelGateway:
-    def __init__(self) -> None:
-        self.invocations = []
-
-    def describe_invocation(self, messages, invocation):
-        return {
-            "messageCount": len(messages),
-            "toolNames": [tool.name for tool in invocation.tools],
-        }
-
-    async def stream(self, messages, invocation, signal=None):
-        del messages, signal
-        self.invocations.append(invocation)
-        call_number = len(self.invocations)
-
-        async def chunks():
-            if call_number == 1:
-                yield ModelStreamChunk(
-                    reasoning_delta="推理内容耗尽了本轮额度。",
-                )
-                yield ModelStreamChunk(finish_reason=ModelFinishReason.LENGTH)
-                return
-            if call_number == 2:
-                yield ModelStreamChunk(
-                    tool_call_deltas=(ToolCallDelta(
-                        index=0,
-                        id="call-read-after-reasoning-retry",
-                        type="function",
-                        name="inspectScreenplayProject",
-                        arguments_fragment="{}",
-                    ),),
-                    finish_reason=ModelFinishReason.TOOL_CALLS,
-                )
-                return
-            if call_number == 3:
-                arguments = json.dumps({
-                    "candidate": {
-                        "title": "重试后生成的简报",
-                        "executionSummary": "保持用户选择的思考模式并完成结构化写入。",
-                        "contentText": "# 创作简报\n\n重试成功。",
-                        "contentJson": {
-                            "fields": {"approach": "人物驱动"},
-                        },
-                    },
-                }, ensure_ascii=False)
-                yield ModelStreamChunk(
-                    tool_call_deltas=(ToolCallDelta(
-                        index=0,
-                        id="call-write-after-reasoning-retry",
-                        type="function",
-                        name="writeScreenplayCandidatePart",
-                        arguments_fragment=arguments,
-                    ),),
-                    finish_reason=ModelFinishReason.TOOL_CALLS,
-                )
-                return
-            yield ModelStreamChunk(
-                content_delta="候选稿已写入。",
-                finish_reason=ModelFinishReason.STOP,
-            )
-
-        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
-
-    async def complete(self, messages, invocation, signal=None):
-        del messages, signal
-        return ModelCompletion(
-            applied_output_limit=invocation.max_call_output_tokens,
-            message={"role": "assistant", "content": "unused"},
-            model="fixture-model",
-        )
-
-
 class _HostPreparedSceneModelGateway:
     def __init__(self) -> None:
         self.invocations = []
@@ -2304,68 +2149,6 @@ class _HostPreparedSceneModelGateway:
                     "场记说：\"开门 {现在}\"。\n\n"
                     "林月冲向石墙。"
                 ),
-                finish_reason=ModelFinishReason.STOP,
-            )
-
-        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
-
-    async def complete(self, messages, invocation, signal=None):
-        del messages, signal
-        return ModelCompletion(
-            applied_output_limit=invocation.max_call_output_tokens,
-            message={"role": "assistant", "content": "unused"},
-            model="fixture-model",
-        )
-
-
-class _TaskValidationRetryGateway:
-    def __init__(self) -> None:
-        self.invocations = []
-
-    def describe_invocation(self, messages, invocation):
-        return {
-            "messageCount": len(messages),
-            "toolNames": [tool.name for tool in invocation.tools],
-        }
-
-    async def stream(self, messages, invocation, signal=None):
-        del messages, signal
-        self.invocations.append(invocation)
-        call_number = len(self.invocations)
-
-        async def chunks():
-            if call_number in {1, 3}:
-                scene_id = "wrong-scene" if call_number == 1 else "scene-1"
-                arguments = json.dumps({
-                    "candidate": {
-                        "episodeNumber": 1,
-                        "reviewDimension": "continuity",
-                        "title": "第 1 集 continuity 审阅",
-                        "contentText": "发现一个连续性问题。",
-                        "contentJson": {
-                            "verdict": "revise",
-                            "issues": [{
-                                "id": "issue-1",
-                                "severity": "major",
-                                "description": "证物出现顺序不一致。",
-                                "sceneIds": [scene_id],
-                            }],
-                        },
-                    },
-                }, ensure_ascii=False)
-                yield ModelStreamChunk(
-                    tool_call_deltas=(ToolCallDelta(
-                        index=0,
-                        id=f"call-write-review-{call_number}",
-                        type="function",
-                        name="writeScreenplayCandidatePart",
-                        arguments_fragment=arguments,
-                    ),),
-                    finish_reason=ModelFinishReason.TOOL_CALLS,
-                )
-                return
-            yield ModelStreamChunk(
-                content_delta="候选审阅已写入。",
                 finish_reason=ModelFinishReason.STOP,
             )
 

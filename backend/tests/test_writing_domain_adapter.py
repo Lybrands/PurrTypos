@@ -121,7 +121,7 @@ def test_unscoped_session_binding_states_that_no_host_material_exists():
     )
 
     assert "未绑定任何作品或章节" in binding
-    assert "宿主没有注入" in binding
+    assert "没有可用的书籍正文" in binding
     assert "不得猜测" in binding
     assert "一般知识问答" in binding
 

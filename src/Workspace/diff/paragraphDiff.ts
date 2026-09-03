@@ -79,11 +79,6 @@ export function composeResult(ops: DiffOp[]): string {
   return lines.join('\n')
 }
 
-/** 待处理（pending）操作数量 */
-export function countPending(ops: DiffOp[]): number {
-  return ops.filter((o) => o.kind !== 'equal' && o.status === 'pending').length
-}
-
 export function countByStatus(ops: DiffOp[]): {
   total: number
   accepted: number

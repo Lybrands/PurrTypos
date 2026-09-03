@@ -239,9 +239,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
 
   /**
    * 删除写作章节后清理对应的 chapter / volume 大纲记录。
-   *
-   * 注意：后端 delete_chapter 不会级联删除 outline；旧实现误用 getOutlineByWritingChapter
-   * 导致每次删章节都会把整个写作大纲删掉。这里改为按章节维度精确清理。
+   * 后端不会级联删除大纲，因此按 writing_chapter_id 匹配并清理。
    */
   const handleWritingChapterDeleted = React.useCallback(async (writingChapterId: EntityId) => {
     if (bookId == null) return

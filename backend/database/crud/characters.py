@@ -1,5 +1,5 @@
 """
-Character & character_options CRUD – port from database.js.
+Character CRUD.
 """
 
 from __future__ import annotations
@@ -66,54 +66,3 @@ async def update_character(
 
 async def delete_character(db: DatabaseConnection, character_id: int) -> None:
     await db.execute("DELETE FROM characters WHERE id = ?", [character_id])
-
-
-# ── character_options ────────────────────────────────────────────
-
-async def get_character_options(
-    db: DatabaseConnection, category: str
-) -> list[dict[str, Any]]:
-    return await db.fetch_all(
-        "SELECT * FROM character_options WHERE category = ? ORDER BY sort ASC, id ASC",
-        [category],
-    )
-
-
-async def add_character_option(
-    db: DatabaseConnection, category: str, value: str
-) -> dict[str, Any] | None:
-    existing = await db.fetch_one(
-        "SELECT id FROM character_options WHERE category = ? AND value = ?",
-        [category, value],
-    )
-    if existing:
-        return existing
-    max_sort = await db.fetch_one(
-        "SELECT MAX(sort) as m FROM character_options WHERE category = ?",
-        [category],
-    )
-    sort = (int(max_sort["m"]) if max_sort and max_sort["m"] is not None else -1) + 1
-    await db.execute(
-        "INSERT INTO character_options (category, value, sort) VALUES (?, ?, ?)",
-        [category, value, sort],
-    )
-    return await db.fetch_one(
-        "SELECT * FROM character_options ORDER BY id DESC LIMIT 1"
-    )
-
-
-async def update_character_option(
-    db: DatabaseConnection, option_id: int, value: str
-) -> dict[str, Any] | None:
-    await db.execute(
-        "UPDATE character_options SET value = ? WHERE id = ?", [value, option_id]
-    )
-    return await db.fetch_one(
-        "SELECT * FROM character_options WHERE id = ?", [option_id]
-    )
-
-
-async def delete_character_option(
-    db: DatabaseConnection, option_id: int
-) -> None:
-    await db.execute("DELETE FROM character_options WHERE id = ?", [option_id])

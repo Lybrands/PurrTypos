@@ -13,7 +13,7 @@ import {
   UnorderedListIcon,
 } from '@/purr-components'
 import { htmlToMarkdown, markdownToHtml } from '@/utils/markdown'
-import { appendImportedMarkdown, looksLikeMarkdown } from './markdown'
+import { looksLikeMarkdown } from './markdown'
 import './index.scss'
 
 const LiteralTab = Extension.create({

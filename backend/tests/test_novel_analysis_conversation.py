@@ -193,7 +193,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
             block for block in planner_payload["planningContext"]
             if block["name"] == "novel_analysis_policy"
         )
-        assert "不要求逐项拆成计划步骤" in policy_context["content"]
+        assert "用户列出的交付维度只定义结果覆盖范围" in policy_context["content"]
         return {
             "applied_output_limit": options.get("max_tokens"),
             "message": {

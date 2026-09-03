@@ -33,9 +33,7 @@ import {
   clearAiDebugRuns,
   getAiDebugSnapshot,
   groupAiDebugRunsByTurn,
-  hydrateAiDebugRunSnapshot,
   recordAiDebugChunk,
-  recordAiDebugRunEvent,
   recordAiDebugRunUsageSnapshot,
   recordAgentConversationDebugChunk,
   startAiDebugRun,
@@ -547,183 +545,87 @@ test('diagnostics expose live reported usage and replace it with durable Run tot
   assert.deepEqual(aiDebugTurnTokenUsage([run]), run.tokenUsage);
 });
 
-test('persisted recovery merges todo updates without discarding the full plan', () => {
+test('conversation events merge todo updates without discarding the full plan', () => {
   clearAiDebugRuns();
-  const steps = [{
-    id: 'overview', title: '梳理故事概览', status: 'pending',
-    type: 'analyze', executor: 'model', dependsOn: [],
-  }, {
-    id: 'facts', title: '梳理事实脉络', status: 'pending',
-    type: 'analyze', executor: 'model', dependsOn: [],
-  }] as AiAgentRunSnapshot['todos'];
-  const events: AiAgentRunSnapshot['events'] = [{
-    version: 1, cursor: 1, type: 'run.todos_updated', runId: 'run-plan', payload: {},
+  const input = { runId: 'run-plan', prompt: '分析小说' };
+  const steps = [
+    { id: 'overview', title: '梳理故事概览', status: 'pending' },
+    { id: 'facts', title: '梳理事实脉络', status: 'pending' },
+  ];
+  recordAgentConversationDebugChunk({
+    ...input,
     chunk: canonicalEvent(1, {
-      runId: 'run-plan',
-      payload: { eventType: 'run.todos_updated', data: { title: '小说分析', status: 'running', steps } },
+      runId: input.runId,
+      payload: {
+        eventType: 'run.todos_updated',
+        data: { title: '小说分析', status: 'running', steps },
+      },
     }),
-  }, {
-    version: 1, cursor: 2, type: 'run.todo_updated', runId: 'run-plan', payload: {},
+  });
+  recordAgentConversationDebugChunk({
+    ...input,
     chunk: canonicalEvent(2, {
-      runId: 'run-plan',
+      runId: input.runId,
       payload: {
         eventType: 'run.todo_updated',
         data: { step_id: 'overview', step: { ...steps[0], status: 'failed' } },
       },
     }),
-  }];
-
-  hydrateAiDebugRunSnapshot({
-    snapshot: persistedSnapshot(events, {
-      runId: 'run-plan', status: 'failed', todos: steps, providerOutputEvents: 12,
-    }),
-    prompt: '分析小说',
   });
-
+  recordAgentConversationDebugChunk({
+    ...input,
+    chunk: canonicalEvent(3, {
+      runId: input.runId,
+      kind: 'run.lifecycle',
+      payload: { status: 'failed' },
+    }),
+  });
   const run = getAiDebugSnapshot().runs[0];
-  const plan = run.agentPlan as { status: string; steps: Array<{ id: string; status: string }> };
-  assert.equal(plan.status, 'failed');
-  assert.deepEqual(plan.steps.map((step) => [step.id, step.status]), [
+  const plan = run.agentPlan as { steps: Array<{ id: string; status: string }> };
+  assert.equal(run.status, 'failed');
+  assert.deepEqual(plan.steps.map(step => [step.id, step.status]), [
     ['overview', 'failed'],
     ['facts', 'pending'],
   ]);
-  assert.equal(run.providerOutputEvents, 12);
 });
 
-test('persisted recovery restores Planner calls without duplicating cursors', () => {
+test('conversation events record Planner calls and durable dispatch under one Run', () => {
   clearAiDebugRuns();
-  const initial = persistedSnapshot([
-    {
-      version: 1,
-      cursor: 1,
-      type: 'run.started',
-      runId: 'run-recovered',
-      payload: {},
-      chunk: canonicalEvent(1, {
-        runId: 'run-recovered',
-        kind: 'run.lifecycle',
-        payload: { status: 'running' },
+  const input = { runId: 'run-plan', prompt: '继续创作三集', source: '剧本 Agent' };
+  for (const [index, messageCount] of [2, 4].entries()) {
+    recordAgentConversationDebugChunk({
+      ...input,
+      chunk: modelOperation(index + 1, input.runId, 'model-' + index, {
+        phase: 'planning', messageCount,
       }),
-    },
-    {
-      version: 1,
-      cursor: 2,
-      type: 'model.call_recorded',
-      runId: 'run-recovered',
-      payload: {},
-      chunk: modelOperation(2, 'run-recovered', 'model-1', {
-        phase: 'planning',
-        messageCount: 2,
-      }),
-    },
-    {
-      version: 1,
-      cursor: 3,
-      type: 'model.call_recorded',
-      runId: 'run-recovered',
-      payload: {},
-      chunk: modelOperation(3, 'run-recovered', 'model-2', {
-        phase: 'planning',
-        messageCount: 4,
-      }),
-    },
-  ]);
-
-  hydrateAiDebugRunSnapshot({
-    snapshot: initial,
-    prompt: '继续创作三集',
-    source: '剧本 Agent',
-  });
-  hydrateAiDebugRunSnapshot({
-    snapshot: initial,
-    prompt: '继续创作三集',
-    source: '剧本 Agent',
-  });
-
-  let run = getAiDebugSnapshot().runs[0];
-  assert.equal(run.id, 'persisted-run-recovered');
-  assert.equal(run.agentRunId, 'run-recovered');
-  assert.equal(run.modelCalls.length, 2);
-  assert.deepEqual(
-    run.modelCalls.map((call) => call.parameters?.messageCount),
-    [2, 4],
-  );
-
-  hydrateAiDebugRunSnapshot({
-    snapshot: persistedSnapshot([{
-      version: 1,
-      cursor: 4,
-      type: 'long_task.dispatched',
-      runId: 'run-recovered',
-      payload: {},
-      chunk: {
-        longTaskDispatched: {
-          runId: 'run-recovered',
-          taskId: 'task-1',
-          kind: 'screenplay_draft_generation',
-          status: 'running',
-          totalUnits: 7,
-          completedUnits: 0,
-        },
+    });
+  }
+  recordAgentConversationDebugChunk({
+    ...input,
+    chunk: {
+      longTaskDispatched: {
+        runId: input.runId,
+        taskId: 'task-1',
+        kind: 'screenplay_draft_generation',
+        status: 'running',
+        totalUnits: 7,
+        completedUnits: 0,
       },
-    }], { nextCursor: 4 }),
-    prompt: '继续创作三集',
-    source: '剧本 Agent',
+    },
   });
-
-  run = getAiDebugSnapshot().runs[0];
-  assert.equal(run.status, 'dispatched');
-  assert.equal(run.finishedAt, undefined);
-  assert.equal(run.taskType, '持久化长任务 · 剧本正文分批创作');
-  assert.equal(run.modelCalls.length, 2);
-});
-
-test('persisted recovery replaces a detached partial live diagnostic copy', () => {
-  clearAiDebugRuns();
-  startAiDebugRun('live-before-detach', {
-    apiKey: 'key',
-    messages: [{ role: 'user', content: '继续创作三集' }],
-    options: { model: 'model' },
-    enableAgentTools: true,
-  });
-  recordAiDebugChunk('live-before-detach', {
-    ...canonicalEvent(1, {
-      runId: 'run-recovered',
-      kind: 'run.lifecycle',
-      payload: { status: 'running' },
-    }),
-  });
-  recordAiDebugChunk(
-    'live-before-detach',
-    modelOperation(2, 'run-recovered', 'live-model', { phase: 'generation' }),
-  );
-
-  hydrateAiDebugRunSnapshot({
-    snapshot: persistedSnapshot([{
-      version: 1,
-      cursor: 1,
-      type: 'model.call_recorded',
-      runId: 'run-recovered',
-      payload: {},
-      chunk: modelOperation(1, 'run-recovered', 'persisted-model', {
-        phase: 'planning',
-      }),
-    }]),
-    prompt: '继续创作三集',
-    source: '剧本 Agent',
-  });
-
   const runs = getAiDebugSnapshot().runs;
   assert.equal(runs.length, 1);
-  assert.equal(runs[0].id, 'persisted-run-recovered');
-  assert.deepEqual(runs[0].modelCalls.map((call) => call.phase), ['model']);
+  assert.equal(runs[0].agentRunId, input.runId);
+  assert.deepEqual(runs[0].modelCalls.map(call => call.parameters?.messageCount), [2, 4]);
+  assert.equal(runs[0].status, 'dispatched');
+  assert.equal(runs[0].finishedAt, undefined);
 });
 
-test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', () => {
+test('a terminal Run event cannot be reopened by late screenplay chunks', () => {
   clearAiDebugRuns();
   const input = {
-    runId: 'run-terminal-race',
-    turnId: 'turn-terminal-race',
+    runId: 'run-terminal',
+    turnId: 'turn-terminal',
     sessionId: 9,
     prompt: '继续创作下一集',
     model: 'model',
@@ -732,31 +634,25 @@ test('a terminal Snapshot cannot be reopened by late screenplay chunk replay', (
     ...input,
     chunk: providerDelta(1, input.runId, 'commentary', '实时片段'),
   });
-
-  hydrateAiDebugRunSnapshot({
-    snapshot: persistedSnapshot([], {
-      runId: input.runId,
-      status: 'done',
-    }),
-    turnId: input.turnId,
-    prompt: input.prompt,
-    source: '剧本 Agent 对话',
-  });
-  const completed = getAiDebugSnapshot().runs[0];
-  const finishedAt = completed.finishedAt;
-  assert.equal(completed.id, 'persisted-run-terminal-race');
-  assert.equal(completed.status, 'completed');
-  assert.equal(completed.commentary, '实时片段');
-  assert.ok(finishedAt);
-
   recordAgentConversationDebugChunk({
     ...input,
-    chunk: providerDelta(2, input.runId, 'final', '晚到的历史片段'),
+    chunk: canonicalEvent(2, {
+      runId: input.runId,
+      kind: 'run.lifecycle',
+      payload: { status: 'done' },
+    }),
+  });
+  const finishedAt = getAiDebugSnapshot().runs[0].finishedAt;
+  assert.ok(finishedAt);
+  recordAgentConversationDebugChunk({
+    ...input,
+    chunk: providerDelta(3, input.runId, 'final', '晚到的历史片段'),
   });
   const runs = getAiDebugSnapshot().runs;
   assert.equal(runs.length, 1);
   assert.equal(runs[0].status, 'completed');
   assert.equal(runs[0].finishedAt, finishedAt);
+  assert.equal(runs[0].commentary, '实时片段');
   assert.equal(runs[0].output, '晚到的历史片段');
 });
 
@@ -962,19 +858,19 @@ test("same-Run delegated model activity stays under its owning Run", () => {
   });
   recordAiDebugChunk("screenplay-workflow", { done: true });
 
-  recordAiDebugRunEvent("run-root", canonicalEvent(1, {
+  recordAiDebugChunk("screenplay-workflow", canonicalEvent(1, {
     runId: "run-root",
     kind: "run.lifecycle",
     payload: { status: "running" },
   }));
-  recordAiDebugRunEvent(
-    "run-root",
+  recordAiDebugChunk(
+    "screenplay-workflow",
     modelOperation(2, "run-root", "delegated-model", {
       phase: "generation",
       round: 1,
     }),
   );
-  recordAiDebugRunEvent("run-root", { done: true });
+  recordAiDebugChunk("screenplay-workflow", { done: true, runResult: { runId: "run-root", status: "done" } });
 
   const run = getAiDebugSnapshot().runs[0];
   assert.equal(run.agentRunId, "run-root");

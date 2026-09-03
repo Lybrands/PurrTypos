@@ -26,9 +26,6 @@ class WritingMethodService:
     async def get_method(self, method_id: str):
         return await self._repository.get_method(method_id)
 
-    async def search_published_methods(self, query: str, *, limit: int = 8):
-        return await self._repository.search_published_methods(query, limit=limit)
-
     async def create_method(self, **values):
         return await self._repository.create_method(_method_draft(**values))
 

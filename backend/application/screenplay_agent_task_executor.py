@@ -28,6 +28,7 @@ from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from application.screenplay_structured_call import ScreenplayStructuredCallService
 from application.screenplay_checkpoint_planning import ScreenplayCheckpointPlanner
 from application.screenplay_tool_calling import ScreenplayToolCallingService
+from application.screenplay_step_skills import with_screenplay_step_skill
 from application.screenplay_part_contracts import (
     ScreenplayPartContract,
     resolve_screenplay_part_contract,
@@ -99,6 +100,19 @@ _REVIEW_ISSUE_FIELDS = frozenset({
     "description",
     "sceneIds",
 })
+_DEPENDENCY_READ_INSTRUCTION = (
+    "依据 dependencyPartKeys 对应的全部依赖正文；缺失项用 partKeys 调用 "
+    "readScreenplayTaskDependencies 读取。"
+)
+_CANDIDATE_WRITE_INSTRUCTION = (
+    "按示例保留对象字段和绑定身份，填写实际内容；正文与结构化结果一致。"
+    "调用 writeScreenplayCandidatePart，以 candidate 参数提交上述对象。"
+)
+_SOURCE_DIGEST_CONSTRAINTS = (
+    "各数组最多 24 项，无信息时为空，key 或字符串在同数组内唯一。"
+    "plotThreads.state 取 opened（提出）、advanced（推进或部分解决）、"
+    "resolved（明确解决）；状态变化写入 summary。"
+)
 
 
 class StructurePartSplit(RuntimeError):
@@ -318,7 +332,9 @@ class ScreenplayTaskModelCalls:
         result = await self._tool_calls.run_candidate(
             runtime=runtime,
             session_id=int(task["sessionId"]),
-            system_instruction=_scene_tool_instruction(episode_number, scene_id),
+            system_instruction=with_screenplay_step_skill(
+                contract, _scene_tool_instruction(episode_number, scene_id),
+            ),
             user_payload=payload,
             domain_context=await self._domain_context(
                 task,
@@ -386,7 +402,9 @@ class ScreenplayTaskModelCalls:
         result = await self._tool_calls.run_candidate(
             runtime=runtime,
             session_id=int(task["sessionId"]),
-            system_instruction=_episode_metadata_tool_instruction(episode_number),
+            system_instruction=with_screenplay_step_skill(
+                contract, _episode_metadata_tool_instruction(episode_number),
+            ),
             user_payload=user_payload,
             domain_context=await self._domain_context(
                 task,
@@ -434,10 +452,13 @@ class ScreenplayTaskModelCalls:
         result = await self._tool_calls.run_candidate(
             runtime=runtime,
             session_id=int(task["sessionId"]),
-            system_instruction=_review_dimension_tool_instruction(
-                episode_number,
-                dimension,
-                tuple(unit_input.get("sceneIds") or ()),
+            system_instruction=with_screenplay_step_skill(
+                contract,
+                _review_dimension_tool_instruction(
+                    episode_number,
+                    dimension,
+                    tuple(unit_input.get("sceneIds") or ()),
+                ),
             ),
             user_payload={
                 "task": "review_screenplay_dimension",
@@ -675,7 +696,7 @@ class ScreenplayTaskModelCalls:
         result = await self._tool_calls.run_candidate(
             runtime=runtime,
             session_id=int(task["sessionId"]),
-            system_instruction=system_instruction,
+            system_instruction=with_screenplay_step_skill(contract, system_instruction),
             user_payload={
                 "task": "create_screenplay_document_section",
                 "targetRole": role,
@@ -1537,11 +1558,10 @@ def _completed_part_outputs(
 
 
 def _scene_tool_instruction(episode_number: int, scene_id: str) -> str:
-    return f"""你是专业剧本编剧，只创作第 {episode_number} 集中的场景 {scene_id}。
-使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext 获取，再按需通过可用工具读取其他集、项目文档或原作依据。
-如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取；不得根据 Part key 猜测其内容。
-材料齐备后完成创作，不得扩大到其他场景或重新规划任务。
-最终回复只输出当前场景的完整可拍摄剧本文本。不得输出 JSON、Markdown 代码块、过程说明、整集或其他场景。场景身份和写入由宿主负责。"""
+    return f"""创作第 {episode_number} 集的场景 {json.dumps(scene_id, ensure_ascii=False)}，遵循 instruction、constraints、preserve 和绑定的场景计划。
+缺少当前集材料时调用 getScreenplayEpisodeContext；补充依据沿用 evidenceDescriptor 绑定版本，其他集仅用于连续性核对。
+{_DEPENDENCY_READ_INSTRUCTION}
+最终回复只输出当前场景的完整可拍摄剧本文本。"""
 
 
 def _host_scene_candidate_template(
@@ -1558,10 +1578,12 @@ def _candidate_artifact_identity(
 
 
 def _episode_metadata_tool_instruction(episode_number: int) -> str:
-    return f"""你只负责整理第 {episode_number} 集的短元数据，不生成或复述剧本正文。
-必须调用 readScreenplayTaskDependencies，读取 dependencyPartKeys 指向的已完成场景 Part，再形成以下对象：
+    return f"""根据第 {episode_number} 集已完成的场景，生成集标题和连续性摘要。
+{_DEPENDENCY_READ_INSTRUCTION}
+按 sceneIds 顺序总结已发生的结果与未完成事项。
+候选对象：
 {{"episodeNumber":{episode_number},"title":"简洁集标题","continuitySummary":"供下一集续写的连续性摘要"}}
-最终必须调用 writeScreenplayCandidatePart 写入该对象；不得只在回复中打印 JSON，不得附加其他字段。"""
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _review_dimension_tool_instruction(
@@ -1569,12 +1591,17 @@ def _review_dimension_tool_instruction(
     dimension: str,
     scene_ids: Sequence[str],
 ) -> str:
-    issue_limit = len(tuple(dict.fromkeys(scene_ids)))
-    return f"""你是剧本审阅 Agent，只审阅第 {episode_number} 集的 {dimension} 维度。
-使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext 读取，再按需读取其他集或项目文档，依据已提供或读取的材料审阅。
-构造以下候选对象：
-{{"episodeNumber":{episode_number},"reviewDimension":"{dimension}","title":"第 {episode_number} 集 {dimension} 审阅","contentText":"当前维度的 Markdown 审阅意见","contentJson":{{"verdict":"ready|revise|major_rework","issues":[{{"id":"维度内唯一 ID","severity":"critical|major|minor","description":"具体问题与修改方向","sceneIds":["场景ID"]}}]}}}}
-问题只能引用这些场景 ID：{list(scene_ids)}。本维度最多提交 {issue_limit} 个问题，不得超过当前集场景数；没有问题时 issues=[] 且 verdict=ready。最终必须调用 writeScreenplayCandidatePart 写入候选对象，不得只在回复中打印 JSON。"""
+    unique_scene_ids = tuple(dict.fromkeys(scene_ids))
+    issue_limit = len(unique_scene_ids)
+    example_scene_ids = json.dumps(unique_scene_ids[:1], ensure_ascii=False)
+    return f"""审阅第 {episode_number} 集绑定场景的 {dimension} 维度。
+使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext。草稿与场景计划分别绑定 reviewedDraftId、evidenceDescriptor.reviewInputRef.scenePlanRevisionId；按需读取其他集或项目文档核对。
+候选对象：
+{{"episodeNumber":{episode_number},"reviewDimension":{json.dumps(dimension, ensure_ascii=False)},"title":{json.dumps(f'第 {episode_number} 集 {dimension} 审阅', ensure_ascii=False)},"contentText":"当前维度的审阅结论及其依据","contentJson":{{"verdict":"revise","issues":[{{"id":"issue-1","severity":"major","description":"具体表现、造成的影响与修改方向","sceneIds":{example_scene_ids}}}]}}}}
+issues 按影响排序，同因合并，最多提交 {issue_limit} 个问题；sceneIds 只引用 {json.dumps(unique_scene_ids, ensure_ascii=False)}。
+severity：critical（破坏核心逻辑或人物成立）、major（明显影响理解或推进）、minor（局部表达或格式）。verdict：ready（无问题，issues=[]）、revise（局部修改）、major_rework（重构关键逻辑或连续段落）。
+问题须有材料依据；关键审阅材料缺失时停止提交并说明缺失。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _validate_review_dimension_candidate(
@@ -1672,8 +1699,8 @@ def _validate_review_dimension_candidate(
 def _creative_brief_section_example(section_key: str) -> dict[str, Any]:
     examples = {
         "positioning": {"fields": {
-            "approach": "人物驱动的创作方法",
-            "format": "竖屏短剧",
+            "approach": "本项目的创作路径与改编取向",
+            "format": "已确认的作品形式",
             "audience": "目标观众",
             "tone": "整体调性",
         }},
@@ -1713,6 +1740,7 @@ def _creative_brief_section_tool_instruction(section_key: str) -> str:
     )
     character_limit = (
         f"coreCharacters 必须包含 1 至 {_MAX_CREATIVE_BRIEF_CHARACTERS} 项；"
+        "人物 key 只用字母、数字、点、下划线或连字符，长度 1 至 128，并保持唯一。"
         if section_key == "characters"
         else ""
     )
@@ -1725,12 +1753,14 @@ def _creative_brief_section_tool_instruction(section_key: str) -> str:
             else ""
         )
     )
-    return f"""你只生成 creativeBrief 文档中的 {section_key} 章节。
-参考 evidenceDescriptor.acceptedRevisionIds，通过 readScreenplayDeliverable 按需读取项目材料；指定 revisionId 可查阅其他已有版本。不得虚构已读取材料。
-如果 dependencyPartKeys 非空，必须调用 readScreenplayTaskDependencies 读取这些直接依赖；不得根据 Part key 猜测内容。
-构造以下候选对象：
+    return f"""生成 creativeBrief 的 {section_key} 章节，遵循 instruction、constraints、preserve 和项目已确认的创作条件。
+缺少项目依据时，按 evidenceDescriptor.acceptedRevisionIds 绑定的 role、revisionId 调用 readScreenplayDeliverable。
+{_DEPENDENCY_READ_INSTRUCTION}
+候选对象：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的紧凑 Markdown 正文","contentJson":{content_json}}}
-contentJson 的顶层与嵌套字段必须和示例完全一致。{character_limit}{list_limit}不得输出其他章节、完整简报、分集、场景或对白。最终必须调用 writeScreenplayCandidatePart 写入候选对象；不得打印工具参数、Run/Task/Artifact ID 或私有推理。"""
+contentJson 字符串非空，列表内容不重复。{character_limit}{list_limit}
+区分创作提案、原作事实与用户已确认的决定。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _document_section_tool_instruction(role: str, section_key: str) -> str:
@@ -1746,23 +1776,22 @@ def _document_section_tool_instruction(role: str, section_key: str) -> str:
     content_json = schemas.get((role, section_key))
     if content_json is None:
         raise ValueError("screenplay_part_contract_unknown")
-    return f"""你只生成 {role} 文档中的 {section_key} 章节。
-优先使用已提供的读取结果；缺少材料时调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 获取完成本章节所需的项目交付物或原作依据。不得把描述符当作正文。
-如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取；不得根据 Part key 猜测内容。
-构造以下候选对象：
+    return f"""生成 {role} 文档的 {section_key} 章节。
+缺少依据时，通过可用工具读取 evidenceDescriptor 绑定的 role、revisionId 正文。
+候选对象：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{content_json}}}
-contentJson 必须是可与同一文档其他章节确定性合并的顶层片段；不得输出其他章节或完整文档。最终必须调用 writeScreenplayCandidatePart 写入候选对象，不得只在回复中打印 JSON。"""
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _source_digest_schema(identity: str) -> str:
     return (
         '{"chapterId":' + json.dumps(identity, ensure_ascii=False)
-        + ',"summary":"紧凑事件边界",'
+        + ',"summary":"本范围的事件、状态与必要条件",'
         '"characters":[{"key":"来源人物键","state":"状态变化"}],'
-        '"events":[{"key":"事件键","summary":"事件","consequence":"后果"}],'
+        '"events":[{"key":"事件键","summary":"事件","consequence":"已呈现的后果或尚未呈现"}],'
         '"worldFacts":[{"key":"事实键","summary":"规则或设定"}],'
         '"themes":["主题信号"],'
-        '"plotThreads":[{"key":"线索键","state":"opened|advanced|resolved"}],'
+        '"plotThreads":[{"key":"线索键","state":"opened"}],'
         '"adaptationRisks":["改编风险"]}'
     )
 
@@ -1774,72 +1803,77 @@ def _source_chapter_digest_tool_instruction(
     chapter_index: int,
 ) -> str:
     section_key = f"source_digest:chapter:{chapter_id}"
-    return f"""你只分析宿主绑定的一个授权叶子章节：第 {chapter_index} 章《{chapter_title}》。
-使用已提供的章节正文；缺失时调用 readSourceChapters 读取章节 {json.dumps(chapter_id, ensure_ascii=False)}；需要核对上下文时，可按需读取授权范围内的其他章节。
-构造以下候选对象：
+    return f"""提取第 {chapter_index} 章（{json.dumps(chapter_title, ensure_ascii=False)}）的事实摘要，范围为绑定的 chapterId。
+缺少本章正文时调用 readSourceChapters；其他授权章节仅作理解本章的上下文。
+候选对象：
 {{"sectionKey":{json.dumps(section_key, ensure_ascii=False)},"title":"当前章节事实摘要","contentText":"只包含本章事件边界的紧凑摘要","contentJson":{_source_digest_schema(chapter_id)}}}
-contentJson 只能包含示例中的八个字段；数组应紧凑、键唯一，不得复制长原文，不得生成分集、场景、对白或改编成稿。最终必须调用 writeScreenplayCandidatePart；不得输出工具参数、Run/Task/Artifact ID 或私有推理。"""
+{_SOURCE_DIGEST_CONSTRAINTS}
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _source_digest_reduction_tool_instruction(digest_id: str) -> str:
     section_key = digest_id.replace("source-analysis:", "source_digest:", 1)
-    return f"""你只归并当前单元的直接原作摘要依赖，不读取原文，也不创建新的故事事实。
-必须调用 readScreenplayTaskDependencies，一次读取 dependencyPartKeys 中全部 1 至 12 个直接依赖；不得根据 Part key 猜测内容。
-构造以下候选对象：
-{{"sectionKey":{json.dumps(section_key, ensure_ascii=False)},"title":"原作事实归并摘要","contentText":"直接依赖的紧凑无损归并摘要","contentJson":{_source_digest_schema(digest_id)}}}
-contentJson 只能包含示例中的八个字段。合并同键事实并保留冲突或状态变化，不得新增人物、事件、设定、主题或改编结论，不得输出逐章复述。最终必须调用 writeScreenplayCandidatePart；不得输出 Schema 之外的内部标识或私有推理。"""
+    return f"""归并当前单元的直接原作摘要依赖，保留事实、变化和已有分析依据。
+{_DEPENDENCY_READ_INSTRUCTION}
+候选对象：
+{{"sectionKey":{json.dumps(section_key, ensure_ascii=False)},"title":"原作事实归并摘要","contentText":"保留关键事实、变化和依据的归并摘要","contentJson":{_source_digest_schema(digest_id)}}}
+{_SOURCE_DIGEST_CONSTRAINTS}
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _source_analysis_section_tool_instruction(section_key: str) -> str:
     configurations = {
         "characters": (
             '{"characters":[]}',
-            "只分析原作人物及其状态、关系和叙事功能；不得重设计剧本人物或复述完整故事。",
+            "分析原作人物的状态、关系和叙事功能。",
         ),
         "story": (
             '{"story":{"beats":[],"openThreads":[]}}',
-            "只梳理有证据的故事节拍与未闭合线索；不得逐字复述原文或设计分集。",
+            "梳理故事节拍与未闭合线索。",
         ),
         "world": (
             '{"world":{"rules":[],"locations":[],"factions":[]}}',
-            "只整理有证据的规则、地点和阵营；不得补写无证据的新设定。",
+            "整理规则、地点和阵营。",
         ),
         "themes": (
             '{"themes":[]}',
-            "只提炼主题信号；不得输出人物档案、逐章摘要或完整故事。",
+            "提炼主题及其解释范围，证据不足时保留为候选信号。",
         ),
         "adaptation_risks": (
             '{"adaptationRisks":[]}',
-            "只识别改编风险；不得直接写改编成稿、分集或场景。",
+            "识别改编风险。",
         ),
     }
     config = configurations.get(section_key)
     if config is None:
         raise ValueError("screenplay_part_contract_unknown")
     content_json, boundary = config
-    return f"""你只生成原作分析文档中的 {section_key} 章节。
-必须调用 readScreenplayTaskDependencies，一次读取 dependencyPartKeys 中全部直接摘要依赖；不得调用原作正文工具，也不得根据 Part key 猜测内容。
-构造以下候选对象：
+    return f"""生成原作分析文档的 {section_key} 章节。{boundary}
+{_DEPENDENCY_READ_INSTRUCTION}
+依据直接摘要分析，结论附具体依据与必要的不确定性。
+候选对象：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的 Markdown 正文","contentJson":{content_json}}}
-contentJson 顶层及嵌套字段必须与示例完全一致。{boundary}
-最终必须调用 writeScreenplayCandidatePart；不得输出其他分析章节、工具参数、Run/Task/Artifact ID 或私有推理。"""
+数组填写本节分析条目，无依据时为空。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _structure_episode_plan_index_tool_instruction() -> str:
-    return """你只确定分集结构的索引，不写完整分集内容。
-优先使用已提供的读取结果；缺少材料时调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 读取已接受创作简报、原作分析，并按需读取原作结构或正文。不得把原作章节数直接等同于剧集数；应依据项目格式、叙事容量、主线阶段和用户约束确定集数。
-如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取。
-构造以下候选对象：
-{"sectionKey":"episode_plan:index","title":"分集索引","contentText":"简短的分集索引 Markdown","contentJson":{"episodes":[{"number":1,"id":"ep01","title":"集标题","summary":"本集叙事边界与核心推进","sourceChapterIds":["实际读取过的 chapterId"]}]}}
-集号必须从 1 连续递增，最多 100 集；id、title、summary 必须唯一且简洁。这里只提交用于后续逐集生成的轻量索引，不得展开场景或长篇正文。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
+    return f"""依据项目形式、主线阶段和用户约束划分各集边界，生成分集索引。
+缺少项目依据时，按 evidenceDescriptor 绑定的 role、revisionId 调用 readScreenplayDeliverable。
+{_DEPENDENCY_READ_INSTRUCTION}
+候选对象：
+{{"sectionKey":"episode_plan:index","title":"分集索引","contentText":"简短的分集索引 Markdown","contentJson":{{"episodes":[{{"number":1,"id":"ep01","title":"集标题","summary":"本集叙事边界与核心推进","sourceChapterIds":[]}}]}}}}
+episodes 包含 1 至 {_MAX_STRUCTURE_EPISODES} 集，number 从 1 连续递增；id、title、summary 各自唯一且非空。sourceChapterIds 只填读取结果中可确认的授权章节 ID，无对应原作章节时为空。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _structure_series_arc_index_tool_instruction() -> str:
-    return """你只确定全剧主线的阶段索引，不写分集、场景或完整阶段正文。
-优先使用已提供的读取结果；缺少材料时调用可用的读取工具，按 evidenceDescriptor 中的精确 revisionId 获取已接受材料；如 dependencyPartKeys 非空，使用已提供的依赖正文，缺失时调用 readScreenplayTaskDependencies 读取直接依赖。
-构造以下候选对象：
-{"sectionKey":"series_arc:index","title":"全剧阶段索引","contentText":"简短的阶段索引 Markdown","contentJson":{"phases":[{"key":"稳定的英文或数字键","title":"阶段标题","objective":"该阶段的叙事目标"}]}}
-阶段必须按叙事顺序排列，数量 1 到 12；key、title 必须唯一。不得包含 episodes、scenes、sceneText 或对白。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
+    return f"""生成全剧主线的阶段索引。
+缺少创作依据时，按 evidenceDescriptor 绑定的 role、revisionId 调用 readScreenplayDeliverable。
+候选对象：
+{{"sectionKey":"series_arc:index","title":"全剧阶段索引","contentText":"简短的阶段索引 Markdown","contentJson":{{"phases":[{{"key":"phase-1","title":"阶段标题","objective":"该阶段的叙事目标"}}]}}}}
+phases 按叙事顺序排列，包含 1 至 {_MAX_STRUCTURE_PHASES} 项。key、title 各自唯一且非空；key 长度 1 至 128，只用字母、数字、点、下划线或连字符；objective 非空。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _structure_series_arc_phase_tool_instruction(
@@ -1848,12 +1882,13 @@ def _structure_series_arc_phase_tool_instruction(
     key = str(entry.get("key") or "")
     title = str(entry.get("title") or "")
     objective = str(entry.get("objective") or "")
-    return f"""你只生成全剧主线中的阶段 {title}。
-阶段索引已经固定身份：key={key}、title={title}、objective={objective}。不得改变这些值，也不得输出其他阶段。
-使用已提供的阶段索引；缺失时调用 readScreenplayTaskDependencies 读取 dependencyPartKeys 中的阶段索引；需要已接受创作简报或原作分析时，按 evidenceDescriptor 中的精确 revisionId 调用交付物读取工具。
-构造以下候选对象：
+    return f"""展开阶段索引中 key={json.dumps(key, ensure_ascii=False)} 的阶段，保留绑定的 key、title、objective。
+{_DEPENDENCY_READ_INSTRUCTION}
+需要补充项目依据时，按 evidenceDescriptor 中绑定的 role 和 revisionId 调用 readScreenplayDeliverable。
+候选对象：
 {{"sectionKey":"series_arc:phase:{key}","title":{json.dumps(title, ensure_ascii=False)},"contentText":"当前阶段的 Markdown 正文","contentJson":{{"seriesArc":{{"phases":[{{"key":{json.dumps(key, ensure_ascii=False)},"title":{json.dumps(title, ensure_ascii=False)},"objective":{json.dumps(objective, ensure_ascii=False)},"centralConflict":"阶段核心冲突","turningPoint":"阶段关键转折","exitState":"阶段结束状态"}}]}}}}}}
-contentJson 只能包含当前阶段；不得包含 episodes、scenes、sceneText 或对白。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
+seriesArc.phases 只含当前阶段，各字段非空，内容展开既定目标。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _structure_episode_plan_fragment_tool_instruction(
@@ -1864,20 +1899,22 @@ def _structure_episode_plan_fragment_tool_instruction(
     title = str(entry.get("title") or "")
     episode_id_json = json.dumps(episode_id, ensure_ascii=False)
     title_json = json.dumps(title, ensure_ascii=False)
-    return f"""你只生成分集结构中的第 {number} 集。
-分集索引已经固定本集身份：number={number}、id={episode_id}、title={title}。不得改变集数、ID、标题，也不得输出其他集。
-使用已提供的分集索引和依赖正文；缺失时调用 readScreenplayTaskDependencies 读取 dependencyPartKeys 中的材料；需要原作依据时再按 evidenceDescriptor 调用对应读取工具。不得根据 Part key 猜测内容。
-构造以下候选对象：
+    return f"""生成第 {number} 集的分集结构，保留索引绑定的 number、id、title。
+{_DEPENDENCY_READ_INSTRUCTION}
+候选对象：
 {{"sectionKey":"episode_plan:episode-{number}","title":"第 {number} 集分集结构","contentText":"当前集分集结构的 Markdown 正文","contentJson":{{"episodes":[{{"number":{number},"id":{episode_id_json},"title":{title_json},"summary":"本集完整梗概","objective":"本集目标","conflict":"核心冲突","turn":"关键转折","hook":"集末钩子"}}]}}}}
-contentJson.episodes 必须且只能包含当前一集。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
+episodes 只含当前集，各字段非空；梗概、目标、冲突、转折与钩子相互一致。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _structure_character_arcs_index_tool_instruction() -> str:
-    return """你只确定需要人物弧设计的核心人物索引，不写完整人物弧。
-必须调用 readScreenplayTaskDependencies 分批读取 dependencyPartKeys 中已完成的分集结构；需要项目或原作身份依据时调用相应读取工具。
-构造以下候选对象：
-{"sectionKey":"character_arcs:index","title":"核心人物索引","contentText":"简短的人物索引 Markdown","contentJson":{"characters":[{"key":"稳定的英文或数字键","name":"人物姓名"}]}}
-只选择 1 到 12 名确实需要跨集变化的核心人物；key、name 必须唯一。不得在索引中写人物弧正文、分集或场景。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
+    return f"""依据已完成的分集结构，确定需要人物弧设计的核心人物索引。
+{_DEPENDENCY_READ_INSTRUCTION}
+需要核对人物身份时，按 evidenceDescriptor 中绑定的 role 和 revisionId 调用 readScreenplayDeliverable。
+候选对象：
+{{"sectionKey":"character_arcs:index","title":"核心人物索引","contentText":"简短的人物索引 Markdown","contentJson":{{"characters":[{{"key":"character-1","name":"人物姓名"}}]}}}}
+选择 1 至 {_MAX_STRUCTURE_CHARACTERS} 名需要跟踪跨集目标、选择或变化的核心人物。key、name 各自唯一且非空；key 长度 1 至 128，只用字母、数字、点、下划线或连字符。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _structure_character_arc_tool_instruction(
@@ -1885,21 +1922,22 @@ def _structure_character_arc_tool_instruction(
 ) -> str:
     key = str(entry.get("key") or "")
     name = str(entry.get("name") or "")
-    return f"""你只生成 {name} 的人物弧。
-人物索引已经固定身份：key={key}、name={name}。不得改变人物身份，也不得输出其他人物。
-必须调用 readScreenplayTaskDependencies 分批读取 dependencyPartKeys 中的人物索引和分集结构，不得根据 Part key 猜测内容。
-构造以下候选对象：
+    return f"""只生成人物 {json.dumps(name, ensure_ascii=False)} 的人物弧，沿用人物索引绑定的 key={json.dumps(key, ensure_ascii=False)}。
+{_DEPENDENCY_READ_INSTRUCTION}
+依据已有分集事实描述起始状态、欲望、关键选择与结束状态。
+候选对象：
 {{"sectionKey":"character_arcs:character:{key}","title":{json.dumps(name + '人物弧', ensure_ascii=False)},"contentText":"当前人物弧的 Markdown 正文","contentJson":{{"characterArcs":[{{"key":{json.dumps(key, ensure_ascii=False)},"startState":"起始状态","desire":"核心欲望","turningEpisodes":["ep01"],"endState":"结束状态"}}]}}}}
-turningEpisodes 只能引用已读取分集的 id。contentJson 只能包含当前人物。最终必须调用 writeScreenplayCandidatePart 写入候选对象。"""
+characterArcs 只含当前人物，各字段非空。turningEpisodes 至少一项，引用承载关键选择或转变的实际分集 id，按叙事顺序排列并去重。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
-    return f"""你只规划已采纳结构中的第 {episode_number} 集场景。
-使用已提供的当前集结构；缺失时调用 readScreenplayDeliverable，使用 role=structure、evidenceDescriptor 中的 structureRevisionId 和 episodeNumber={episode_number} 获取当前集结构；需要全局依据时，可继续读取其他集或项目文档。
-如果 dependencyPartKeys 非空，使用已提供的依赖正文；缺失时调用 readScreenplayTaskDependencies 读取。
-构造以下候选对象：
-{{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"全局唯一场景 ID","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突","turn":"转折","synopsis":"场景梗概"}}]}}}}
-只提交当前集，场景顺序必须可直接用于后续剧本创作。最终必须调用 writeScreenplayCandidatePart 写入候选对象，不得只在回复中打印 JSON。"""
+    return f"""规划第 {episode_number} 集场景，遵循已采纳结构的目标与叙事边界。
+缺少当前集结构时，调用 readScreenplayDeliverable，使用 role=structure、evidenceDescriptor.structureRevisionId 和 episodeNumber={episode_number}；其他集或项目文档按需用于连续性核对。
+候选对象：
+{{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"ep{episode_number}-scene-1","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突或实际阻力","turn":"局势变化或本场形成的新条件","synopsis":"场景梗概"}}]}}}}
+scenes 非空，按出场顺序排列，只含当前集；id 全剧唯一，修订保留原 id，新场景可用集号加场内序号。
+{_CANDIDATE_WRITE_INSTRUCTION}"""
 
 
 def _validate_document_section_candidate(
@@ -2892,11 +2930,9 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
 
 
 def _final_response_instruction() -> str:
-    return """
-你负责为已经完成校验、但尚未向用户公布的剧本候选稿撰写最终答复。
-直接回应用户原始请求，准确总结真正完成的候选内容和覆盖范围；如果合适，再说明这些内容仍可继续编辑。
-只能依据输入中的公开事实，不得声称候选稿已经采纳，不得编造版本号、链接或未提供的结果。
-不得复述剧本正文。"""
+    return """用简短自然语言回应 request，完成情况仅依据 candidates 中的公开事实。
+结合 target 说明候选交付物及其章节或集数范围；审阅可概括已提供的结论和问题数量。
+结果仍为待采纳候选。答复聚焦交付结果，不复述正文或执行细节。"""
 
 
 def _public_candidate_fact(

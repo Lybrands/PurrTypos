@@ -1,5 +1,3 @@
-import type { AiModelConfig } from '../../types'
-import { normalizeBaseUrl, normalizePresetContextWindow } from '../shared'
 import type { BuiltinModelProfile } from '../types'
 
 const provider = {
@@ -28,26 +26,7 @@ const preset = {
   recommended: true,
 } as const
 
-function matches(config: AiModelConfig) {
-  return config.name === preset.name && normalizeBaseUrl(config.baseUrl) === provider.baseUrl
-}
-
 export const mimoV2_5ProProfile: BuiltinModelProfile = {
   provider,
   preset,
-  matches,
-  migrate(config) {
-    if (!matches(config)) return config
-    return {
-      ...config,
-      presetId: preset.id,
-      providerId: provider.id,
-      apiProvider: provider.apiProvider,
-      baseUrl: provider.baseUrl,
-      supportsThinking: preset.supportsThinking,
-      thinkingOnly: preset.thinkingOnly,
-      thinkingEnabled: config.thinkingEnabled ?? preset.thinkingEnabled,
-      contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
-    }
-  },
 }

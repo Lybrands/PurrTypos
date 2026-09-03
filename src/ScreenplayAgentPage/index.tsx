@@ -223,11 +223,6 @@ const DOCUMENT_STAGE_GROUPS: Array<{
   { stage: 'review', kinds: ['review'] },
 ]
 
-function documentStageForKind(
-  kind: ScreenplayDocument['kind'],
-): ScreenplayDocumentStage | null {
-  return DOCUMENT_STAGE_GROUPS.find((group) => group.kinds.includes(kind))?.stage ?? null
-}
 const SERIES_FORMATS = new Set<ScreenplayFormat>(['连续剧', '竖屏短剧'])
 const BOOK_BRIEF_STEPS: PurrStepItem<BriefStepKey>[] = [
   { key: 'basics', title: '基础设置' },
@@ -801,11 +796,6 @@ export default function ScreenplayAgentPage({
     ) ?? null
   ), [activeConversationOperation, activeConversationTask, agentConversationState])
   const latestConversationTurn = agentConversationState?.turns.at(-1) ?? null
-  const latestConversationTask = latestConversationTurn
-    ? agentConversationState?.tasks.find(
-      (task) => task.turnId === latestConversationTurn.id,
-    )
-    : undefined
   const latestConversationOperation = latestConversationTurn
     ? agentConversationState?.operations.find(
       (operation) => operation.turnId === latestConversationTurn.id,
@@ -1690,7 +1680,7 @@ export default function ScreenplayAgentPage({
     setProjectLoading(true)
     setStage('project')
     try {
-      const [documents, , sessionResult, workspace] = await Promise.all([
+      const [, , sessionResult, workspace] = await Promise.all([
         loadProjectDocuments(project.id),
         loadProjectSourceRefs(project.id),
         services.screenplay.getOrCreateScreenplaySession({

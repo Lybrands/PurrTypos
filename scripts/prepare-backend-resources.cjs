@@ -15,8 +15,11 @@ const purraRequirements = path.join(backendSrc, 'requirements-purra.txt')
 const runtimeRequirements = path.join(backendSrc, 'requirements-runtime.txt')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
-const PURRA_WHEEL_REQUIREMENT = './backend/vendor/purra-0.5.0-py3-none-any.whl'
-const PURRA_WHEEL_SHA256 = 'c623b959aa4fc2d09799ccc298dc753f7e59f316aa517511896a34824ad92b0b'
+const PURRA_WHEEL_HASHES = {
+  './backend/vendor/purra-0.5.0-py3-none-any.whl': '54205c17c840dd28d2748dd237514ce280cb98ef388131ad6862f36c8fa97f7b',
+  './backend/vendor/purra_openai-0.5.0-py3-none-any.whl': '0519aca750861206564431fd50153db669c56dd713d575ec2a658f577e76faf4',
+  './backend/vendor/purra_anthropic-0.5.0-py3-none-any.whl': 'b26b999470a7d4e29bc92478fd86527cb332fc0801a1356b7157d1705634dff9',
+}
 
 const SKIP_NAMES = new Set([
   'dist',
@@ -75,7 +78,7 @@ function localPurraRequirements() {
     .map((line) => line.replace(/\s+#.*$/, '').trim())
     .filter(Boolean)
     .map((line) => {
-      if (line === PURRA_WHEEL_REQUIREMENT) {
+      if (Object.hasOwn(PURRA_WHEEL_HASHES, line)) {
         const wheel = path.resolve(root, line)
         if (!fs.existsSync(wheel)) {
           throw new Error(`Local PurrA wheel does not exist: ${wheel}`)
@@ -83,7 +86,7 @@ function localPurraRequirements() {
         const digest = crypto.createHash('sha256')
           .update(fs.readFileSync(wheel))
           .digest('hex')
-        if (digest !== PURRA_WHEEL_SHA256) {
+        if (digest !== PURRA_WHEEL_HASHES[line]) {
           throw new Error(`Local PurrA wheel SHA-256 mismatch: ${digest}`)
         }
         return wheel

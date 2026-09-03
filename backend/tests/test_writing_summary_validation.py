@@ -126,7 +126,7 @@ def test_summary_validator_rejects_unverified_exact_count_claims(
 
     assert result.violation_code == "writing_summary_unverified_exact_count"
     assert result.details["claimedCharacters"] in {16, 139, 150}
-    assert "\u672a\u7ecf\u5bbf\u4e3b\u9a8c\u8bc1" in str(result.repair_guidance)
+    assert "没有可靠计数依据" in str(result.repair_guidance)
 
 
 def test_summary_validator_accepts_a_user_supplied_upper_bound_label():

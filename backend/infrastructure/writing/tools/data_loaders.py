@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from database.crud.articles import get_article
 from database.crud.chapters import get_chapters
 from database.crud.outlines import (
     get_chapter_outlines,
@@ -15,56 +14,12 @@ from database.crud.outlines import (
     get_volume_outlines,
 )
 from utils.outline_text import collect_text_outline_entries
-from utils.text import extract_text_from_lexical, format_chapters_as_text
+from utils.text import extract_text_from_lexical
 
 
 # ---------------------------------------------------------------------------
 # Outline loaders
 # ---------------------------------------------------------------------------
-
-async def _load_outline_with_chapters(db, outline: dict) -> dict:
-    chapters = await get_chapters(db, outline["id"])
-    return {
-        "outline": outline,
-        "chapters": chapters,
-        "chaptersText": format_chapters_as_text(chapters),
-    }
-
-
-async def _load_all_outlines_for_book(db, book_id: str) -> dict:
-    global_res = await get_global_outline(db, book_id)
-    volume_res = await get_volume_outlines(db, book_id)
-    chapter_res = await get_chapter_outlines(db, book_id)
-    writing_res = await get_writing_outline(db, book_id)
-
-    global_outline = (
-        await _load_outline_with_chapters(db, global_res)
-        if global_res
-        else None
-    )
-    volume_outlines = []
-    for vol in volume_res or []:
-        chapters_detail = []
-        for chapter in vol.get("chapters") or []:
-            chapters_detail.append(
-                await _load_outline_with_chapters(db, chapter)
-            )
-        volume_outlines.append({**vol, "chapters_detail": chapters_detail})
-    chapter_outlines = []
-    for outline in chapter_res or []:
-        chapter_outlines.append(await _load_outline_with_chapters(db, outline))
-    writing_outline = (
-        await _load_outline_with_chapters(db, writing_res)
-        if writing_res
-        else None
-    )
-    return {
-        "globalOutline": global_outline,
-        "volumeOutlines": volume_outlines,
-        "chapterOutlines": chapter_outlines,
-        "writingOutline": writing_outline,
-    }
-
 
 async def _get_available_outlines(db, book_id: str) -> list[dict]:
     result: list[dict] = []
@@ -169,14 +124,6 @@ async def _query_outline(
 # ---------------------------------------------------------------------------
 # Chapter loaders
 # ---------------------------------------------------------------------------
-
-async def _read_chapter_plain_full(db, chapter_id: str) -> dict | None:
-    row = await get_article(db, chapter_id)
-    if not row:
-        return None
-    raw = row.get("content") or ""
-    return {"plainTextFull": extract_text_from_lexical(raw) if raw else ""}
-
 
 async def _read_writing_chapters_for_book(
     db,

@@ -1,10 +1,8 @@
 import type {
   ScreenplayDocumentKind,
-  ScreenplayDocumentProposal,
   ScreenplayDocument,
   ScreenplayDocumentEpisode,
   ScreenplayDraftEpisode,
-  ScreenplayRevisionRef,
   ScreenplayV2RevisionDetail,
 } from '../types'
 
@@ -17,41 +15,6 @@ const PROPOSAL_KINDS = new Set<ScreenplayDocumentKind>([
   'scene_draft',
   'review',
 ])
-
-export function proposalFromRevision(
-  reference: ScreenplayRevisionRef,
-  revision: ScreenplayV2RevisionDetail,
-): ScreenplayDocumentProposal {
-  if (
-    revision.id !== reference.revisionId
-    || revision.projectId !== reference.projectId
-    || revision.role !== reference.role
-  ) {
-    throw new Error('Revision 引用与返回内容不一致')
-  }
-  const kind = String(revision.summary.proposalKind || '') as ScreenplayDocumentKind
-  if (!PROPOSAL_KINDS.has(kind)) {
-    throw new Error('Revision 缺少可识别的剧本产物类型')
-  }
-  const main = revision.parts.find(
-    (part) => part.type === 'document' && part.key === 'main',
-  )
-  if (!main) throw new Error('Revision 缺少主文档 Part')
-  const derivedFromIds = Array.isArray(revision.summary.derivedFromIds)
-    ? revision.summary.derivedFromIds.map(String).filter(Boolean)
-    : []
-  return {
-    kind,
-    title: String(
-      revision.summary.title
-      || `${reference.role} v${reference.revisionNo}`,
-    ),
-    contentJson: main.payload,
-    contentText: main.contentText,
-    derivedFromIds,
-    sourceRunId: revision.finalizingRunId || reference.sourceRunId,
-  }
-}
 
 function revisionKind(revision: ScreenplayV2RevisionDetail): ScreenplayDocumentKind {
   const kind = String(revision.summary.proposalKind || '') as ScreenplayDocumentKind

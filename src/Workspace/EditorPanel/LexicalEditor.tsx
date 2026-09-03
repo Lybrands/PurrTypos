@@ -9,7 +9,6 @@ import { type EditorState, type LexicalEditor } from 'lexical'
 import { HeadingNode } from '@lexical/rich-text'
 import { ListNode, ListItemNode } from '@lexical/list'
 import { ListPlugin } from '@lexical/react/LexicalListPlugin'
-import type { EntityId } from '../../types'
 import { editorStateToText, reformatArticleText } from './plugins/editorText'
 import { EditorHandlePlugin, type LexicalEditorHandle } from './plugins/EditorHandlePlugin'
 import { IdleDetectPlugin } from './plugins/IdleDetectPlugin'
@@ -25,7 +24,6 @@ export type { LexicalEditorHandle }
 
 interface LexicalEditorProps {
   value: string
-  chapterId: EntityId | null
   onChange: (text: string) => void
   onKeyTrigger?: (key: string, rect: DOMRect) => void
   placeholder?: string
@@ -65,7 +63,6 @@ const theme = {
 
 const LexicalEditorComponentInner = React.forwardRef<LexicalEditorHandle, LexicalEditorProps>(function LexicalEditorComponentInner({
   value,
-  chapterId,
   onChange,
   onKeyTrigger,
   placeholder = '开始写作...',

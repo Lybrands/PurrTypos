@@ -46,7 +46,6 @@ from database.connection import DatabaseConnection
 from domains.screenplay_agent import (
     ContinuationStartLost,
     OperationUsage,
-    ScreenplayIntentAction,
     ScreenplayOperationCreateCommand,
     ScreenplayRootStartLost,
 )
@@ -72,7 +71,6 @@ from infrastructure.screenplay.agent_continuation_begin_projector import (
     ScreenplayContinuationBeginProjector,
 )
 from purra.contracts import (
-    RuntimeLimits,
     AgentMessage,
     ModelCompletion,
     ModelFinishReason,
@@ -85,7 +83,6 @@ from purra.contracts import (
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.ports import RunCommit
-from purra.api import AgentCore
 from purra.errors import (
     ContractViolationError,
     ModelGatewayError,
@@ -98,20 +95,10 @@ from purra.long_tasks import (
     LongTaskUnitSpec,
     RecipeLongTaskDispatcher,
 )
-from purra.tools import InMemoryToolCatalog
-from domains.screenplay_agent.adapter import (
-    ScreenplayExecutionStateFactory,
-    ScreenplayHostContextProvider,
-    ScreenplayToolLoopPolicy,
-)
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
-from infrastructure.persistence.agent_output_publisher import (
-    InProcessAgentOutputPublisher,
-)
-from infrastructure.persistence.run_execution_store import SqliteRunControlStore
 from infrastructure.persistence.orphan_run_monitor import monitor_orphaned_runs
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from exceptions import AppError
@@ -134,42 +121,6 @@ async def screenplay_db(tmp_path: Path):
         yield db
     finally:
         await db.close()
-
-
-class _CoreComposition:
-    def __init__(self, db, gateway) -> None:
-        self._gateway = gateway
-        self._runs = SqliteRunRepository(db)
-        self._outputs = SqliteAgentOutputRepository(
-            db,
-            run_repository=self._runs,
-        )
-        self._publisher = InProcessAgentOutputPublisher()
-        self._leases = SqliteRunControlStore(db)
-
-    def create_core_for_request(self, request, api_key):
-        del request, api_key
-        return AgentCore(
-            runtime_limits=RuntimeLimits(max_run_output_tokens=None),
-            model_gateway=self._gateway,
-            run_repository=self._runs,
-            planning_policy=ScreenplayToolLoopPolicy(),
-            context_provider=ScreenplayHostContextProvider(),
-            execution_state_factory=ScreenplayExecutionStateFactory(),
-            tool_catalog=InMemoryToolCatalog(()),
-            output_repository=self._outputs,
-            output_publisher=self._publisher,
-            execution_lease_store=self._leases,
-            execution_owner_id=self._runs.owner_id,
-            execution_lease_duration_ms=self._runs.lease_duration_ms,
-        )
-
-    def bind_run_profile(self, request, options):
-        del request
-        return options
-
-    def release_core(self, core) -> None:
-        del core
 
 
 class _Resolver:
@@ -533,9 +484,9 @@ async def test_public_final_response_is_a_bound_model_run_with_public_output(
 
     assert result.text == "第 4 集候选稿已经完成，主要冲突也已推进。"
     model_context = "\n".join(str(message.content) for message in gateway.calls[0][0])
-    assert model_context.count("【最终答复规则】") == 1
-    assert "【公开工作进展规则】" not in model_context
-    assert "不得声称候选稿已经采纳" in model_context
+    assert model_context.count("【最终答复】") == 1
+    assert "【进展标题】" not in model_context
+    assert "结果仍为待采纳候选" in model_context
     assert bound_runs == [result.run_id]
     assert await screenplay_db.fetch_one(
         "SELECT binding_namespace, binding_aggregate_id, binding_command_id, "
@@ -572,76 +523,6 @@ async def test_public_final_response_is_a_bound_model_run_with_public_output(
 
 async def _capture_run(run_ids: list[str], run_id: str) -> None:
     run_ids.append(run_id)
-
-
-class _ReviewResolver:
-    async def resolve(self, **kwargs):
-        assert kwargs["intent"].action is ScreenplayIntentAction.REVIEW
-        return ResolvedScreenplayTask(
-            target_role="review",
-            episode_numbers=(1,),
-            episode_scene_ids={1: ("scene-1",)},
-            reviewed_draft_id="sprev-draft",
-        )
-
-
-class _ReviewUnitExecutor:
-    def __init__(self, db) -> None:
-        self._parts = ScreenplayPartArtifactQuery(db)
-
-    async def execute(self, context, signal=None):
-        del signal
-        if context.unit.id == "compose-final-response":
-            output = {
-                "finalResponse": "当前完整剧本已审阅，可以查看正式审阅报告。",
-            }
-        elif context.unit.id.endswith(":validation"):
-            output = {
-                "title": "第 1 集审阅",
-                "executionSummary": "已完成五个维度的审阅。",
-                "contentText": "第 1 集审阅正文。",
-                "contentJson": {
-                    "verdict": "ready",
-                    "issues": [],
-                    "issueCount": 0,
-                    "criticalIssueCount": 0,
-                    "reviewedEpisode": 1,
-                    "reviewedDraftId": "sprev-draft",
-                    "reviewedContentDigest": "sha256:review-input",
-                    "reviewDimensions": [
-                        "continuity",
-                        "character_arc",
-                        "structure_rhythm",
-                        "dialogue",
-                        "format",
-                    ],
-                    "reviewStatus": "completed",
-                    "inputContractVersion": 2,
-                    "partReceipts": [
-                        "receipt-continuity",
-                        "receipt-character-arc",
-                        "receipt-structure-rhythm",
-                        "receipt-dialogue",
-                        "receipt-format",
-                    ],
-                },
-            }
-        else:
-            output = {"partId": context.unit.id}
-        ref = await self._parts.write_host_part(
-            project_id=str(context.task.owner_id),
-            task_id=context.task.id,
-            unit_id=context.unit.id,
-            semantic_key=str(context.unit.semantic_key),
-            part_kind=str(context.unit.metadata.get("unitKind") or ""),
-            output=output,
-        )
-        return LongTaskUnitResult(
-            output_ref=ref.output_ref,
-            run_id=ref.run_id,
-            artifact_digest=ref.content_digest,
-            validation_receipt=ref.validation_receipt,
-        )
 
 
 async def _finalization_fixture(db):
@@ -4151,8 +4032,8 @@ async def test_screenplay_formal_turn_records_tool_child_run_under_root(
     child_input = "\n".join(
         str(message.content) for message in gateway.calls[-2][0]
     )
-    assert "【公开工作进展规则】" in child_input
-    assert "【最终答复规则】" not in child_input
+    assert "【进展标题】" in child_input
+    assert "【最终答复】" not in child_input
     assert len(snapshot["operations"]) == 1
     operation = snapshot["operations"][0]
     task = snapshot["tasks"][0]

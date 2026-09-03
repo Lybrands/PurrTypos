@@ -1,4 +1,3 @@
-import React from 'react'
 import { EditIcon, PurrButton, PurrTooltip } from '@/purr-components'
 import './MessageActionButton.scss'
 

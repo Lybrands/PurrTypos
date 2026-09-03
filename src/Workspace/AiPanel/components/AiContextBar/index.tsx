@@ -1,4 +1,3 @@
-import React from "react";
 import { PurrButton, PurrPopover, PurrTooltip } from '@/purr-components';
 import "./index.scss";
 import { LinkIcon, StoryContextIcon } from '@/purr-components';

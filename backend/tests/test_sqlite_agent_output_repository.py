@@ -18,7 +18,6 @@ from purra.api import (
 )
 from purra.contracts import (
     ModelFinishReason,
-    RunBinding,
     RunCreateParams,
     RunStatus,
 )
@@ -911,6 +910,82 @@ async def test_committed_private_tool_stream_publishes_replayable_commentary(
         match="rejects Provider tool calls",
     ):
         await repository.publish_stream_content_as_final("output-tool-1")
+
+
+@pytest.mark.asyncio
+async def test_live_agent_progress_replaces_delayed_commentary_promotion(
+    output_db,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    await repository.open_stream(_private_tool_stream(run_id))
+    occurred_at = datetime.now(timezone.utc)
+    entries = [
+        {
+            "sourceChunkIndex": 1,
+            "sourcePartIndex": 0,
+            "kind": OutputEventKind.PROVIDER_CONTENT_DELTA.value,
+            "payload": {"delta": "正在核对资料"},
+        },
+        {
+            "sourceChunkIndex": 1,
+            "sourcePartIndex": 3,
+            "kind": OutputEventKind.PROVIDER_PROGRESS_DELTA.value,
+            "payload": {"delta": "正在核对资料"},
+        },
+    ]
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id="output-tool-1",
+        invocation_id="invocation-tool-1",
+        source_event_key=(
+            "provider-batch:invocation-tool-1:diagnostic:private:1:1"
+        ),
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_DELTA_BATCH,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={
+            "schemaVersion": PROVIDER_DELTA_BATCH_SCHEMA,
+            "sourceChunkStart": 1,
+            "sourceChunkEnd": 1,
+            "entries": entries,
+            "payloadDigest": provider_delta_batch_digest(entries),
+        },
+        occurred_at=occurred_at,
+    ))
+    progress = await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id="output-tool-1",
+        invocation_id="invocation-tool-1",
+        source_event_key="agent-progress:invocation-tool-1:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.AGENT_PROGRESS,
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "schemaVersion": AGENT_PROGRESS_SCHEMA,
+            "text": "正在核对资料",
+            "sourceChunkIndex": 1,
+        },
+        occurred_at=occurred_at,
+    ))
+    await repository.append_event(_private_tool_call(run_id))
+    await repository.commit_stream(
+        "output-tool-1",
+        ModelFinishReason.TOOL_CALLS,
+    )
+
+    assert await repository.publish_stream_content_as_commentary(
+        "output-tool-1"
+    ) == ()
+    replay = await repository.list_session_events(
+        session_id=7,
+        after_cursor=0,
+    )
+    assert [event for _cursor, event in replay] == [progress]
 
 
 @pytest.mark.asyncio

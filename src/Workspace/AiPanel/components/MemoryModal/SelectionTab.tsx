@@ -1,4 +1,3 @@
-import React from 'react'
 import { PurrCheckbox } from '@/purr-components'
 import { PurrEmpty, PurrSpin } from '@/purr-components'
 import type { MemoryModalController } from './useMemoryModal'

@@ -1,4 +1,3 @@
-import React from 'react'
 import { createPurrIcon } from './PurrIcon'
 
 export const AimIcon = createPurrIcon('AimIcon', <>
@@ -26,11 +25,6 @@ export const ArrowUpIcon = createPurrIcon('ArrowUpIcon', <>
 export const BookIcon = createPurrIcon('BookIcon', <>
   <path d="M6.5 3h12.25A1.25 1.25 0 0 1 20 4.25V21H6.5A2.5 2.5 0 0 1 4 18.5v-13A2.5 2.5 0 0 1 6.5 3Z" />
   <path d="M7.75 3v14M6.5 17H20M6.5 17a2 2 0 0 0 0 4" />
-</>)
-
-export const TableGridIcon = createPurrIcon('TableGridIcon', <>
-  <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
-  <path d="M3.5 9.5h17M9 9.5V20M15 9.5V20" />
 </>)
 
 export const BulbIcon = createPurrIcon('BulbIcon', <>
@@ -236,12 +230,6 @@ export const PlusIcon = createPurrIcon('PlusIcon', <>
   <path d="M12 4v16M4 12h16" />
 </>)
 
-export const ProfileIcon = createPurrIcon('ProfileIcon', <>
-  <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
-  <circle cx="8.5" cy="9.5" r="2" />
-  <path d="M5.5 15.5c.6-1.8 1.6-2.75 3-2.75s2.4.95 3 2.75M14 9.5h3.5M14 14h3" />
-</>)
-
 const pushpinGlyph = <>
   <path d="M9 3h6l-.75 5 3 3v2H13v7l-1 1-1-1v-7H6.75v-2l3-3Z" />
 </>
@@ -261,11 +249,6 @@ export const OutlineIcon = createPurrIcon('OutlineIcon', <>
   <path d="M4 4.5h1.5v5M3.5 9.5h3M10.5 7H20" />
   <path d="M4.5 11.5v2a2 2 0 0 0 2 2" />
   <path d="M9.5 14a1.5 1.5 0 0 1 3 0c0 1.2-3 2.25-3 4h3.25M15.5 16H20" />
-</>)
-
-export const HeadingIcon = createPurrIcon('HeadingIcon', <>
-  <path d="M4 5v14M14 5v14M4 12h10" />
-  <path d="M17 11.5 19 10v9M17 19h4" />
 </>)
 
 export const RedoIcon = createPurrIcon('RedoIcon', <>

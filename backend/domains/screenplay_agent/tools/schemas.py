@@ -100,8 +100,8 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "minLength": 1,
                 "maxLength": 120,
                 "description": (
-                    "只能使用 inspectSourceStructure.chapterId 或 "
-                    "readSourceOutline.chapterId，不能使用 outlineId。"
+                    "当前授权范围内的 chapterId，可来自任务绑定、"
+                    "inspectSourceStructure 或 readSourceOutline 的章节标识。"
                 ),
             },
             "minItems": 1,

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
 MethodType = Literal["primary", "technique"]
-BindingType = Literal["method", "scheme"]
 
 
 class WritingMethodError(ValueError):
@@ -68,7 +67,7 @@ def clean_ids(values: Sequence[str]) -> tuple[str, ...]:
 
 
 __all__ = [
-    "BindingType", "MethodDraft", "MethodType", "SchemeDraft",
+    "MethodDraft", "MethodType", "SchemeDraft",
     "WritingMethodConflictError", "WritingMethodError",
     "WritingMethodNotFoundError", "WritingMethodReferenceError",
     "canonical_json", "clean_ids", "content_digest", "members_digest",

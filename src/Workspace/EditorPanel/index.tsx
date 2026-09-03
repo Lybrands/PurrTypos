@@ -464,7 +464,6 @@ export default function EditorPanel({
               ref={lexicalEditorRef}
               key={chapterId}
               value={content}
-              chapterId={chapterId}
               onChange={handleContentChange}
               onKeyTrigger={handleKeyTrigger}
               placeholder={`开始写作「${chapterTitle}」... 提示：输入 \\ 可唤起 AI 助手`}

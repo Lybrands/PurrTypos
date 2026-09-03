@@ -19,7 +19,6 @@ test('A hydration and edit cannot commit after switching to B', () => {
   const lifecycle = createConversationSessionLifecycle<number>()
   const a = lifecycle.beginLoad(7)
   lifecycle.setDraft(7, 'A 草稿')
-  const editA = lifecycle.beginEdit(a, 'client:turn-a:user')
 
   const b = lifecycle.beginLoad(8)
   lifecycle.setDraft(8, 'B 草稿')
@@ -27,7 +26,7 @@ test('A hydration and edit cannot commit after switching to B', () => {
   assert.equal(lifecycle.finishLoad(b), true)
   assert.equal(lifecycle.canAct(b), true)
   assert.equal(lifecycle.finishLoad(a), false)
-  assert.equal(lifecycle.canSubmitEdit(editA), false)
+  assert.equal(lifecycle.canAct(a), false)
   assert.equal(lifecycle.getDraft(8), 'B 草稿')
   assert.equal(lifecycle.getDraft(7), 'A 草稿')
 })
@@ -36,25 +35,23 @@ test('committed switch cancels editor and pending viewport work by identity', ()
   const lifecycle = createConversationSessionLifecycle<number>()
   const a = lifecycle.beginLoad(7)
   lifecycle.finishLoad(a)
-  const editA = lifecycle.beginEdit(a, 'conversation:1:user')
   const b = lifecycle.beginLoad(8)
 
   assert.notEqual(a.identity, b.identity)
   assert.equal(lifecycle.currentIdentity(), b.identity)
-  assert.equal(lifecycle.canSubmitEdit(editA), false)
+  assert.equal(lifecycle.canAct(a), false)
 })
 
 test('switching from A to no session invalidates late hydration and edits', () => {
   const lifecycle = createConversationSessionLifecycle<number>()
   const a = lifecycle.beginLoad(7)
-  const editA = lifecycle.beginEdit(a, 'conversation:1:user')
 
   lifecycle.invalidate()
 
   assert.equal(lifecycle.currentToken(), undefined)
   assert.equal(lifecycle.isCurrent(a), false)
   assert.equal(lifecycle.finishLoad(a), false)
-  assert.equal(lifecycle.canSubmitEdit(editA), false)
+  assert.equal(lifecycle.canAct(a), false)
 })
 
 test('stable projection read retries across every runtime revision change', async () => {

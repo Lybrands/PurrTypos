@@ -1,4 +1,3 @@
-import React from 'react'
 import { PurrButton, PurrModal } from '@/purr-components'
 import { PurrTabs } from '@/purr-components'
 import ManageTab from './ManageTab'

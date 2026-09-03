@@ -58,7 +58,6 @@ from purra.model_protocol import (
 )
 from purra.ports import (
     ModelGateway,
-    RuntimeObserver,
     ToolExecutionGateway,
     ToolRegistration,
 )

@@ -296,7 +296,7 @@ class MemoryContextAssembler:
         token_budget: int,
     ) -> MemoryContextPack:
         budget = max(0, int(token_budget))
-        sections = ["【本轮记忆上下文 — 由宿主按 TaskSpec 召回】"]
+        sections = ["【本轮相关记忆】"]
         if story.text:
             sections.extend(("\n## 权威 Story Memory", story.text))
         if semantic.text:

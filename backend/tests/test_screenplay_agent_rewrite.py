@@ -11,11 +11,9 @@ import pytest
 import pytest_asyncio
 
 import application.model_runtime as model_runtime
-import application.screenplay_structured_call as screenplay_structured_call
 import application.screenplay_tool_calling as screenplay_tool_calling
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
-    RuntimeLimits,
     AgentMessage,
     AgentRunResult,
     AgentRunRequest,
@@ -23,12 +21,7 @@ from purra.contracts import (
     DomainContext,
     RunCreateParams,
     RunStatus,
-    ModelCompletion,
-    ModelFinishReason,
-    ModelStream,
-    ModelStreamChunk,
     ModelRequest,
-    PlanningCapabilities,
     ReasoningMode,
     StepExecutor,
     StepStatus,
@@ -38,11 +31,9 @@ from purra.contracts import (
     TaskStep,
     ToolRiskLevel,
 )
-from purra.api import AgentCore
 from purra.artifacts import ArtifactStatus
 from purra.events import AgentEvent, CoreEventType
-from purra.tools import InMemoryToolCatalog
-from purra.errors import ContractViolationError, ModelGatewayError
+from purra.errors import ModelGatewayError
 from purra.ports import RunCommit
 from purra.cancellation import OperationCanceled
 from purra.json_values import thaw_json_mapping
@@ -66,7 +57,6 @@ from application.screenplay_agent_profile import (
     _ready_checkpoint_keys,
 )
 from application.composition_factory import create_agent_composition
-from application.agent_run_service import AgentRunService
 from application.model_runtime import model_request_from_runtime
 from application.screenplay_agent_stream import (
     ScreenplayCanonicalOutputQuery,
@@ -160,14 +150,8 @@ from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
-from infrastructure.persistence.agent_output_publisher import (
-    InProcessAgentOutputPublisher,
-)
-from infrastructure.persistence.run_execution_store import SqliteRunControlStore
-from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from domains.screenplay_agent.adapter import (
     ScreenplayExecutionStateFactory,
-    ScreenplayHostContextProvider,
     ScreenplayToolLoopPolicy,
 )
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
@@ -2750,78 +2734,6 @@ async def test_screenplay_root_context_rejects_non_object_stage_command():
         ))
 
 
-class _CoreComposition:
-    def __init__(self, db, gateway) -> None:
-        self.provider_capabilities = ProviderCapabilityCache()
-        self._gateway = gateway
-        self._runs = SqliteRunRepository(db)
-        self._outputs = SqliteAgentOutputRepository(
-            db,
-            run_repository=self._runs,
-        )
-        self._publisher = InProcessAgentOutputPublisher()
-        self._leases = SqliteRunControlStore(db)
-        self.last_request = None
-
-    @property
-    def output_repository(self):
-        return self._outputs
-
-    def create_core_for_request(self, request, api_key, **kwargs):
-        self.last_request = request
-        del api_key
-        kwargs.pop("on_required_tool_choice_unsupported", None)
-        context_provider = kwargs.pop(
-            "context_provider_override",
-            ScreenplayHostContextProvider(),
-        )
-        return AgentCore(
-            runtime_limits=RuntimeLimits(max_run_output_tokens=None),
-            model_gateway=self._gateway,
-            run_repository=self._runs,
-            planning_policy=ScreenplayToolLoopPolicy(),
-            context_provider=context_provider,
-            execution_state_factory=ScreenplayExecutionStateFactory(),
-            tool_catalog=InMemoryToolCatalog(()),
-            output_repository=self._outputs,
-            output_publisher=self._publisher,
-            execution_lease_store=self._leases,
-            execution_owner_id=self._runs.owner_id,
-            execution_lease_duration_ms=self._runs.lease_duration_ms,
-            **kwargs,
-        )
-
-    def create_response_judge_policies(self, request):
-        del request
-        return ()
-
-    def bind_run_profile(self, request, options):
-        del request
-        if options.binding is None:
-            return options
-        return replace(
-            options,
-            binding=replace(
-                options.binding,
-                attributes={
-                    **dict(options.binding.attributes),
-                    "agentProfile": "screenplay-agent",
-                    "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-                },
-            ),
-        )
-
-    def release_core(self, core) -> None:
-        del core
-
-    def observe_event(self, event) -> None:
-        del event
-
-
-def _core_composition(db, gateway):
-    return _CoreComposition(db, gateway)
-
-
 async def _public_text_events(db, run_id: str | None = None):
     where = "AND run_id = ?" if run_id else ""
     return await db.fetch_all(
@@ -4602,7 +4514,7 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
 
     facts = bundle.diagnostics["hostPlanningFacts"]
     serialized = json.dumps(thaw_json_mapping(facts), ensure_ascii=False)
-    assert facts["project"]["id"] == project_id
+    assert "id" not in facts["project"]
     assert facts["stageCommand"] == command.to_mapping()
     assert "sourceAnalysis" in facts["availableDeliverables"]
     assert facts["acceptedDeliverables"][0]["role"] == "sourceAnalysis"
@@ -4619,6 +4531,9 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
     assert "parentRevisionId" not in serialized
     assert "contentText" not in serialized
     assert '"content"' not in serialized
+    assert project_id not in serialized
+    assert "book-planning-leakage" not in serialized
+    assert "chapter-planning-leakage" not in serialized
     for forbidden in (
         "sprev-derived-private",
         "sprev-input-private",
@@ -5541,58 +5456,6 @@ async def test_review_failure_is_projected_from_the_operation_part():
     }
 
 
-class _ModelGateway:
-    def __init__(self, api_key: str) -> None:
-        assert api_key == "secret"
-        self.invocations = []
-        self.calls = []
-
-    def describe_invocation(self, messages, invocation):
-        return {
-            "messageCount": len(messages),
-            "model": invocation.request.model,
-        }
-
-    async def stream(self, messages, invocation, signal=None):
-        del signal
-        self.calls.append((tuple(messages), invocation))
-        self.invocations.append(invocation)
-
-        async def chunks():
-            yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
-
-        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model=invocation.request.model)
-
-    async def complete(self, messages, invocation, signal=None):
-        del messages, signal
-        self.invocations.append(invocation)
-        return ModelCompletion(
-            applied_output_limit=invocation.max_call_output_tokens,
-            message=AgentMessage(role="assistant", content="{}"),
-            model=invocation.request.model,
-            finish_reason=ModelFinishReason.STOP,
-        )
-
-
-class _ScriptedModelGateway(_ModelGateway):
-    def __init__(self, api_key: str, rounds) -> None:
-        super().__init__(api_key)
-        self.rounds = list(rounds)
-
-    async def stream(self, messages, invocation, signal=None):
-        del signal
-        self.calls.append((tuple(messages), invocation))
-        self.invocations.append(invocation)
-        round_chunks = self.rounds.pop(0)
-
-        async def chunks():
-            for chunk in round_chunks:
-                yield chunk
-
-        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model=invocation.request.model)
-
-
-
 async def test_screenplay_stream_replays_canonical_output_journal(
     temp_db: DatabaseConnection,
 ):
@@ -5950,37 +5813,6 @@ async def test_review_episode_context_reads_the_requested_immutable_revision(
     assert context["currentDraft"]["sceneTexts"][0]["contentText"] == (
         "指定旧版本正文"
     )
-
-
-class _StructuredDraftModels:
-    async def run_json(self, **kwargs):
-        payload = kwargs["user_payload"]
-        number = int(payload["episodeNumber"])
-        if kwargs["phase"] == "screenplay_scene_generation":
-            scene = payload["scenePlan"]
-            value = kwargs["validate"]({
-                "sceneId": payload["sceneId"],
-                "processSummary": (
-                    f"场景 {payload['sceneId']} 推演：完成目标与转折。"
-                ),
-                "sceneText": f"{scene['heading']}\n\n第 {number} 集正文",
-            })
-            return StructuredModelResult(value, f"run-scene-{payload['sceneId']}")
-        assert kwargs["phase"] == "screenplay_episode_metadata"
-        value = kwargs["validate"]({
-            "episodeNumber": number,
-            "title": f"第 {number} 集",
-            "executionSummary": f"完成第 {number} 集场景推进与连续性校验。",
-            "continuitySummary": f"第 {number} 集连续性",
-        })
-        return StructuredModelResult(value, f"run-metadata-{number}")
-
-    async def run_public_text(self, **kwargs):
-        del kwargs
-        return PublicModelResult(
-            "第 1 至 2 集候选稿已经完成。可以在候选稿区域查看并继续编辑。",
-            "run-final-response",
-        )
 
 
 class _CheckpointingToolCalls:
@@ -6414,49 +6246,6 @@ async def test_source_analysis_parts_read_only_bound_identities_and_propagate_ru
     ]
 
 
-class _IncrementalEpisodeContext:
-    async def episode_manifest(self, project_id, episode_number):
-        assert project_id and episode_number == 1
-        return {
-            "sceneListId": "scene-list-head",
-            "sceneIds": ("scene-1", "scene-2"),
-        }
-
-    async def episode_writing_context(
-        self,
-        project_id,
-        episode_number,
-        *,
-        draft_revision_id=None,
-    ):
-        assert project_id and episode_number == 1
-        assert draft_revision_id == "draft-head"
-        return {
-            "sceneListId": "scene-list-head",
-            "scenePlans": {
-                "scene-1": {"id": "scene-1", "objective": "建立危机"},
-                "scene-2": {"id": "scene-2", "objective": "完成转折"},
-            },
-            "currentDraftScenes": {
-                "scene-1": "scene-1 的旧稿",
-                "scene-2": "scene-2 的旧稿",
-            },
-            "previousEpisodeContinuity": None,
-            "reviewRevisionId": "review-head",
-            "reviewIssues": [{
-                "id": "issue-1",
-                "severity": "major",
-                "description": "本集需要统一格式并压缩篇幅。",
-                "relatedSceneIds": ["scene-1"],
-                "crossEpisodeSceneIds": [],
-            }],
-            "acceptedGuidance": {
-                "creativeBrief": {"fields": {"format": "竖屏短剧"}},
-                "structureEpisode": {"number": 1, "summary": "危机出现"},
-            },
-        }
-
-
 class _EvidenceCheckpointOnlyContext:
     def __getattr__(self, name):
         raise AssertionError(f"generation refetched evidence via {name}")
@@ -6684,36 +6473,6 @@ async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
     assert [key for _, key, _ in tool_calls.calls] == ["scene-2"]
     assert task["units"][1]["output"]["sceneText"] == "scene-1 正文"
     assert unit.get("output") is None
-
-
-class _IncrementalReviewContext:
-    async def available_episode_numbers(self, project_id, **kwargs):
-        assert project_id and kwargs["draft_revision_id"] == "draft-head"
-        return {"draft": (1, 2), "sceneList": (1, 2), "remaining": ()}
-
-    async def episode_context(self, project_id, episode_number, **kwargs):
-        assert project_id and kwargs["draft_revision_id"] == "draft-head"
-        return {
-            "episode": {
-                "episodeNumber": episode_number,
-                "scenes": [{
-                    "id": f"scene-{episode_number}",
-                    "objective": "核对真实正文",
-                }],
-            },
-            "previousEpisode": (
-                {"continuitySummary": "上一集连续性"}
-                if episode_number > 1 else None
-            ),
-            "currentDraft": {
-                "episodeNumber": episode_number,
-                "sceneIds": [f"scene-{episode_number}"],
-                "sceneTexts": [{
-                    "sceneId": f"scene-{episode_number}",
-                    "contentText": f"第 {episode_number} 集真实正文",
-                }],
-            },
-        }
 
 
 async def test_review_dimension_parts_aggregate_host_side(

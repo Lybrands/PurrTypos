@@ -126,18 +126,6 @@ export function mergeHydratedBookRun(
   }
 }
 
-/**
- * Rebuilds Book turns from the authoritative Run journal. The stored
- * Conversation remains the fallback for legacy/non-Agent turns only.
- */
-export async function hydrateBookConversations(
-  rows: Conversation[],
-  dependencies: BookConversationHydrationDependencies,
-): Promise<AgentConversationMessage[] | undefined> {
-  const result = await hydrateBookConversationReadModel(rows, dependencies)
-  return result?.messages
-}
-
 export async function hydrateBookConversationReadModel(
   rows: Conversation[],
   dependencies: BookConversationHydrationDependencies,
