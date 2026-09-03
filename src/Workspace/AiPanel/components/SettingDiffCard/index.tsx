@@ -1,4 +1,3 @@
-import React from 'react'
 import { PurrButton, PurrCard, PurrSpace, PurrTag } from '@/purr-components'
 import {
   CheckIcon,

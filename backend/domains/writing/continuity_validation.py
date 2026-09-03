@@ -1014,7 +1014,7 @@ def _atomic_repair_guidance(
 
 def _grounding_repair_guidance(expected_item_count: int) -> str:
     return (
-        "连续性审阅中的 A/B 必须逐字来自本轮宿主提供的真实来源：A 只能从"
+        "连续性审阅中的 A/B 必须逐字来自本轮真实来源：A 只能从"
         "关联大纲正文或 queryOutline 结果中选择，B 只能从 getChapterContent "
         "正文结果中选择。不得根据候选回答、常识或记忆补造证据。请重新输出恰好 "
         f"{expected_item_count} 个四行检查项，每侧只引用能在对应来源中直接找到的"

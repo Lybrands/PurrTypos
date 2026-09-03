@@ -11,7 +11,10 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import purra
+import purra_anthropic
 import purra_mem0
+import purra_openai
+import pytest
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -20,14 +23,20 @@ PURRA_VERSION = "0.5.0"
 PURRA_MEM0_VERSION = "0.5.0"
 PURRA_REQUIREMENTS = (
     "./backend/vendor/purra-0.5.0-py3-none-any.whl",
+    "./backend/vendor/purra_openai-0.5.0-py3-none-any.whl",
+    "./backend/vendor/purra_anthropic-0.5.0-py3-none-any.whl",
     "-e ../purra/integrations/mem0/python[managed]",
 )
-PURRA_WHEEL_SHA256 = (
-    "0d380d4d65f1378574c940e2c35b6f7de8f23c147d299e56b5376c6ee1e535b4"
-)
+PURRA_WHEEL_SHA256 = {
+    "purra": "54205c17c840dd28d2748dd237514ce280cb98ef388131ad6862f36c8fa97f7b",
+    "purra_openai": "0519aca750861206564431fd50153db669c56dd713d575ec2a658f577e76faf4",
+    "purra_anthropic": "b26b999470a7d4e29bc92478fd86527cb332fc0801a1356b7157d1705634dff9",
+}
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
-    "openai>=1.90.0,<3",
+    "httpx2>=2.7.0,<3",
+    "openai==3.7.0",
+    "anthropic==1.3.0",
     "pydantic>=2.9.0,<3",
 }
 ALLOWED_PROVIDER_COMPOSITION = {
@@ -103,7 +112,8 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
-def test_purra_is_loaded_from_the_pinned_local_wheel():
+@pytest.mark.parametrize("package", [purra, purra_openai, purra_anthropic])
+def test_purra_is_loaded_from_the_pinned_local_wheel(package):
     requirements = tuple(
         line.strip()
         for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
@@ -111,23 +121,39 @@ def test_purra_is_loaded_from_the_pinned_local_wheel():
         ).splitlines()
         if line.strip()
     )
-    wheel_path = BACKEND_DIR / "vendor" / "purra-0.5.0-py3-none-any.whl"
-    package_path = Path(purra.__file__).resolve()
-    distribution = metadata.distribution("purra")
+    name = package.__name__
+    wheel_path = BACKEND_DIR / "vendor" / f"{name}-{PURRA_VERSION}-py3-none-any.whl"
+    package_path = Path(package.__file__).resolve()
+    distribution = metadata.distribution(name)
     distribution_root = Path(distribution.locate_file("")).resolve()
 
     assert requirements == PURRA_REQUIREMENTS
-    assert hashlib.sha256(wheel_path.read_bytes()).hexdigest() == PURRA_WHEEL_SHA256
-    assert metadata.version("purra") == PURRA_VERSION
+    assert hashlib.sha256(wheel_path.read_bytes()).hexdigest() == PURRA_WHEEL_SHA256[name]
+    assert metadata.version(name) == PURRA_VERSION
     direct_url = json.loads(distribution.read_text("direct_url.json"))
     installed_from = Path(unquote(urlparse(direct_url["url"]).path)).resolve()
     assert installed_from == wheel_path.resolve()
-    assert direct_url["archive_info"]["hashes"]["sha256"] == PURRA_WHEEL_SHA256
-    assert package_path == distribution_root / "purra" / "__init__.py"
+    assert direct_url["archive_info"]["hashes"]["sha256"] == PURRA_WHEEL_SHA256[name]
+    assert package_path == distribution_root / name / "__init__.py"
     assert "site-packages" in package_path.parts
     assert not package_path.is_relative_to((ROOT_DIR.parent / "purra").resolve())
     assert "/packages/purra/src/" not in package_path.as_posix()
     assert not (ROOT_DIR / "packages" / "purra").exists()
+
+    script = (ROOT_DIR / "scripts" / "prepare-backend-resources.cjs").read_text(encoding="utf-8")
+    assert PURRA_WHEEL_SHA256[name] in script
+    assert f"./backend/vendor/{wheel_path.name}" in script
+
+
+def test_provider_gateway_exports_come_from_installed_wheels():
+    for package, gateway in (
+        (purra_openai, purra_openai.OpenAIChatCompletionsGateway),
+        (purra_openai, purra_openai.OpenAIResponsesGateway),
+        (purra_anthropic, purra_anthropic.AnthropicMessagesGateway),
+    ):
+        assert Path(inspect.getfile(gateway)).resolve().is_relative_to(
+            Path(package.__file__).resolve().parent
+        )
 
 
 def test_planning_mode_and_public_progress_contracts_come_from_installed_wheel():

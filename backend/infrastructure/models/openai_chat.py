@@ -38,7 +38,7 @@ def _create_client(api_key: str, base_url: str | None) -> AsyncOpenAI:
     url = normalize_base_url(base_url)
     if not url:
         raise ValueError("请填写接口地址")
-    return AsyncOpenAI(api_key=api_key, base_url=url)
+    return AsyncOpenAI(api_key=api_key, base_url=url, max_retries=0)
 
 
 # ── Non-streaming chat ──────────────────────────────────────────

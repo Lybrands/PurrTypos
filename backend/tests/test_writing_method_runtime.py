@@ -6,7 +6,6 @@ import pytest
 
 from application.writing_agent_profile import WritingAgentProfile
 from application.request_mapping import to_writing_agent_request
-from application.writing_method_history import read_writing_method_run_history
 from application.writing_method_service import WritingMethodService
 from database.connection import DatabaseConnection
 from domains.writing.context import WritingContextProvider, writing_context_claims
@@ -25,11 +24,11 @@ from purra.contracts import (
     MessageOrigin,
     MessageRole,
     ModelRequest,
-    RunBinding,
     TaskContextRequest,
     TaskSpec,
 )
 from purra.evidence import CONTEXT_EVIDENCE_RECEIPTS_KEY, RunEvidenceStore
+from purra.json_values import thaw_json_mapping
 from routers.ai import _writing_chat_request_digest
 from schemas.ai import ChatStreamRequest
 
@@ -234,21 +233,16 @@ async def test_task_context_selects_technique_and_emits_durable_receipts(db):
         round_limit=4,
         evidence_state=store.checkpoint_mapping(),
     )
-    history = read_writing_method_run_history(
-        binding=RunBinding(
-            namespace="writing.chat.request",
-            aggregate_id="1",
-            command_id="turn-1",
-            attributes={"writingMethodBindingSnapshot": {
-                "bindingSnapshotDigest": snapshot["bindingSnapshotDigest"]
-            }},
-        ),
-        checkpoint=AgentExecutionCheckpoint.from_mapping(checkpoint.to_mapping()),
+    restored = AgentExecutionCheckpoint.from_mapping(checkpoint.to_mapping())
+    restored_store = RunEvidenceStore.from_checkpoint_mapping(
+        thaw_json_mapping(restored.evidence_state)
     )
-    assert history["actualUsageReceipts"][1]["metadata"]["reason"] == "task_selected"
-    assert "metadata" not in history["actualUsageReceipts"][1]["metadata"]
-    assert history["bindingSnapshot"]["bindingSnapshotDigest"] == snapshot["bindingSnapshotDigest"]
-    assert [item["itemId"] for item in history["actualUsageReceipts"]] == [
+    receipts = [receipt.to_mapping() for receipt in restored_store.context_receipts()]
+    binding = WritingAgentProfile(db, skills_dir=BACKEND_DIR / "skills").run_binding_attributes(request)
+    assert receipts[1]["metadata"]["reason"] == "task_selected"
+    assert "metadata" not in receipts[1]["metadata"]
+    assert binding["writingMethodBindingSnapshot"]["bindingSnapshotDigest"] == snapshot["bindingSnapshotDigest"]
+    assert [item["itemId"] for item in receipts] == [
         primary["id"], technique["id"]
     ]
 

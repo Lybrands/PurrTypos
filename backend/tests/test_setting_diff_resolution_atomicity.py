@@ -16,7 +16,6 @@ from application.agent_composition import (
 )
 from infrastructure.persistence.run_store import create_run
 from application.book_conversation_product_projection import (
-    BookSettingResolutionConflictError,
     persist_setting_diff_resolution,
 )
 from routers.setting_diff import (

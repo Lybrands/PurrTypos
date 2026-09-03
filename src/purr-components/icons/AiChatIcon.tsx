@@ -1,4 +1,3 @@
-import React from 'react'
 import { createPurrIcon } from './PurrIcon'
 
 export const AiChatIcon = createPurrIcon('AiChatIcon', <>

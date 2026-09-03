@@ -20,12 +20,6 @@ export function bookAttachmentKeys(
   return keys
 }
 
-export function bookAttachmentKey(
-  message: AgentConversationMessage,
-): string | undefined {
-  return bookAttachmentKeys(message)[0]
-}
-
 export function getBookAssistantAttachmentsForMessage(
   store: BookAssistantAttachmentStore,
   message: AgentConversationMessage,

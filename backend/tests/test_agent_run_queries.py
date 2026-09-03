@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,20 +11,14 @@ from fastapi import FastAPI
 from application.agent_run_queries import AgentRunQueryService
 from application.writing_proposal_read_model import (
     SqliteWritingProposalReadModel,
-    unseen_product_chunks,
 )
 from application.agent_composition import set_agent_composition
-from application.agent_composition import get_agent_composition
-from application.agent_cancellation_service import AgentCancellationService
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from database.crud.screenplay_project_deletion import (
     delete_screenplay_project_data,
 )
 from dependencies import set_db
-from domains.screenplay_agent.agent_context import (
-    SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-)
 from infrastructure.persistence.run_store import (
     create_run,
     get_latest_run_for_session,
@@ -41,10 +34,6 @@ from infrastructure.persistence.run_execution_store import now_ms
 from infrastructure.persistence.sqlite_run_snapshot_reader import (
     SqliteRunSnapshotReader,
 )
-from infrastructure.persistence.sqlite_delegation_repository import (
-    SqliteDelegationRepository,
-)
-from purra.errors import ContractViolationError
 from routers.ai import router as ai_router
 from tests.support.asgi_sse import request_json
 from purra.output import (
@@ -465,17 +454,6 @@ async def test_setting_diff_projection_preserves_interleaved_tool_occurrences(
         event["payload"]["proposed"]["content"]
         for event in snapshot["productEvents"]
     ] == ["新 A", "新 B"]
-
-
-async def test_live_product_projection_emits_each_snapshot_occurrence_once():
-    events = [
-        {"proposalId": "run:call:0", "chunk": {"proposedSettingDiff": {"proposalId": "run:call:0"}}},
-        {"proposalId": "run:call:2", "chunk": {"proposedSettingDiff": {"proposalId": "run:call:2"}}},
-    ]
-    seen = {"run:call:0"}
-
-    assert unseen_product_chunks(events, seen) == [events[1]["chunk"]]
-    assert unseen_product_chunks(events, seen) == []
 
 
 async def test_latest_session_run_route_returns_prompt_and_snapshot(temp_db):

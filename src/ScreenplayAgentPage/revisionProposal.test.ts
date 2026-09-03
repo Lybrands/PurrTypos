@@ -1,23 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type {
-  ScreenplayRevisionRef,
-  ScreenplayV2RevisionDetail,
-} from '../types.ts'
+import type { ScreenplayV2RevisionDetail } from '../types.ts'
 import {
   documentEpisodesFromRevision,
-  proposalFromRevision,
+  documentFromRevision,
 } from './revisionProposal.ts'
-
-const reference: ScreenplayRevisionRef = {
-  schemaVersion: 1,
-  projectId: 'project-1',
-  taskId: 'task-1',
-  revisionId: 'revision-1',
-  role: 'sceneList',
-  revisionNo: 2,
-  sourceRunId: 'run-live',
-}
 
 const revision = {
   id: 'revision-1',
@@ -37,7 +24,7 @@ const revision = {
   createdAt: null,
   schemaVersion: 1,
   createdBy: 'agent',
-  inputRevisions: {},
+  inputRevisions: { structure: 'structure-1' },
   parts: [{
     type: 'document',
     key: 'main',
@@ -49,23 +36,20 @@ const revision = {
   sources: [],
 } as ScreenplayV2RevisionDetail
 
-test('hydrates a native proposal exclusively from immutable Revision content', () => {
-  const proposal = proposalFromRevision(reference, revision)
-  assert.equal(proposal.kind, 'scene_list')
-  assert.equal(proposal.title, '场景规划候选')
-  assert.deepEqual(proposal.contentJson, { scenes: [{ id: 'scene-1' }] })
-  assert.deepEqual(proposal.derivedFromIds, ['structure-1'])
-  assert.equal(proposal.sourceRunId, 'run-persisted')
+test('projects a document from immutable Revision content and input references', () => {
+  const document = documentFromRevision(revision)
+  assert.equal(document.id, revision.id)
+  assert.equal(document.project_id, revision.projectId)
+  assert.equal(document.kind, 'scene_list')
+  assert.equal(document.title, '场景规划候选')
+  assert.deepEqual(document.content_json, { scenes: [{ id: 'scene-1' }] })
+  assert.equal(document.content_text, '第一场')
+  assert.deepEqual(document.derived_from_ids, ['structure-1'])
 })
 
-test('rejects a Revision returned for a different reference', () => {
-  assert.throws(
-    () => proposalFromRevision(
-      { ...reference, revisionId: 'revision-other' },
-      revision,
-    ),
-    /引用与返回内容不一致/,
-  )
+test('document projection rejects missing content and unknown document kinds', () => {
+  assert.throws(() => documentFromRevision({ ...revision, parts: [] }), /缺少主文档/)
+  assert.throws(() => documentFromRevision({ ...revision, summary: {} }), /产物类型/)
 })
 
 test('derives scene-list episode item ids from native episode parts', () => {

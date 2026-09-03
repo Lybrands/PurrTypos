@@ -812,15 +812,6 @@ class SqliteScreenplayAgentRepository:
             raise NotFoundError("剧本 Agent Turn 不存在")
         return row
 
-    async def _operation_for_turn(
-        self,
-        turn_id: str,
-    ) -> Mapping[str, Any] | None:
-        return await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
-            [turn_id],
-        )
-
     async def _require_owned_turn(self, turn_id: str) -> Mapping[str, Any]:
         turn = await self._require_turn(turn_id)
         if (

@@ -387,12 +387,6 @@
     word-break: break-word;
   }
 
-  .story-memory-review-center {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
   .story-memory-policy-grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -475,29 +469,6 @@
       white-space: pre-wrap;
       word-break: break-word;
     }
-  }
-
-  .story-memory-review-toolbar {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    align-items: center;
-
-    .purr-select {
-      width: 120px;
-    }
-  }
-
-  .story-memory-review-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .story-memory-review-item {
-    display: block;
-    padding: 0;
-    border: 0;
   }
 
   .story-memory-review-card {

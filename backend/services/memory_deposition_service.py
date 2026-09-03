@@ -35,19 +35,6 @@ async def resolve_book_id_for_chapter(db: Any, chapter_id: str | None) -> str | 
     return str(book_id) if book_id else None
 
 
-async def resolve_book_id_for_session(db: Any, session_id: int | None) -> str | None:
-    if session_id is None:
-        return None
-    row = await db.fetch_one(
-        "SELECT book_id, chapter_id FROM ai_sessions WHERE id = ?", [session_id]
-    )
-    if not row:
-        return None
-    if row.get("book_id"):
-        return str(row["book_id"])
-    return await resolve_book_id_for_chapter(db, row.get("chapter_id"))
-
-
 async def record_chapter_diff_candidate(
     db: Any, *, chapter_id: str, diff_id: int | None, before_text: str,
     after_text: str, source: str, accepted_segments: int,
@@ -406,5 +393,5 @@ __all__ = [
     "record_explicit_conversation_memory", "record_inline_article_candidate",
     "record_manual_background", "record_manual_character",
     "record_manual_entity", "record_outline_plan",
-    "resolve_book_id_for_chapter", "resolve_book_id_for_session",
+    "resolve_book_id_for_chapter",
 ]

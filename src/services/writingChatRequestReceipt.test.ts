@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { AiWritingChatRequestReceipt } from '../types.ts'
 import {
-  cancelAfterWritingRequestReservation,
   replayWritingChatPostUntilObserved,
   reserveWritingChatRequest,
 } from './writingChatRequestReceipt.ts'
@@ -16,12 +15,6 @@ const accepted = (requestId: string): AiWritingChatRequestReceipt => ({
   rejectionCode: null,
   revision: 1,
 })
-
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((next) => { resolve = next })
-  return { promise, resolve }
-}
 
 test('reserve replays the same request identity after the response is lost', async () => {
   const attempts: string[] = []
@@ -74,51 +67,6 @@ test('reserve retry loop stops when its owning stream is aborted', async () => {
     { name: 'AbortError' },
   )
   assert.equal(attempts, 1)
-})
-
-test('stop before reserve response waits for durable acceptance then cancels once', async () => {
-  const reservation = deferred<{
-    kind: 'accepted'
-    receipt: AiWritingChatRequestReceipt
-  }>()
-  const canceled: string[] = []
-
-  const pending = cancelAfterWritingRequestReservation({
-    requestId: 'request-stop',
-    reservation: reservation.promise,
-    cancel: async (requestId) => {
-      canceled.push(requestId)
-      return accepted(requestId)
-    },
-  })
-  await Promise.resolve()
-  assert.deepEqual(canceled, [])
-
-  reservation.resolve({
-    kind: 'accepted',
-    receipt: accepted('request-stop'),
-  })
-  await pending
-  assert.deepEqual(canceled, ['request-stop'])
-})
-
-test('stop after an explicit non-acceptance does not issue a phantom cancel', async () => {
-  let cancelCalls = 0
-  const result = await cancelAfterWritingRequestReservation({
-    requestId: 'request-invalid',
-    reservation: Promise.resolve({
-      kind: 'rejected',
-      error: 'invalid',
-      status: 400,
-    }),
-    cancel: async () => {
-      cancelCalls += 1
-      return accepted('request-invalid')
-    },
-  })
-
-  assert.equal(result, undefined)
-  assert.equal(cancelCalls, 0)
 })
 
 test('an accepted request replays POST when the response is lost before headers', async () => {

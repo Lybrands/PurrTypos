@@ -353,7 +353,7 @@ export function buildAssistantTimeline(
           type: "commentary",
           md: narration,
           startedAt: Date.parse(progress.occurredAt),
-          regionKey: `${messageIndex}-agent-progress-${progress.eventId}`,
+          regionKey: `${messageIndex}-agent-progress-stream-${progress.outputStreamId}`,
         },
       });
     });

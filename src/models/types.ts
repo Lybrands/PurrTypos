@@ -1,4 +1,4 @@
-import type { AiBuiltinProviderId, AiContextWindow, AiModelConfig } from '../types'
+import type { AiBuiltinProviderId, AiContextWindow } from '../types'
 
 export interface AiBuiltinProvider {
   id: AiBuiltinProviderId
@@ -30,6 +30,4 @@ export interface AiModelPreset {
 export interface BuiltinModelProfile {
   provider: AiBuiltinProvider
   preset: AiModelPreset
-  matches(config: AiModelConfig): boolean
-  migrate(config: AiModelConfig): AiModelConfig
 }

@@ -43,11 +43,7 @@ class SqliteWritingMethodRepository:
         return result
 
     async def get_method(self, method_id: str) -> dict[str, Any]:
-        row = await self._db.fetch_one(
-            "SELECT * FROM writing_methods WHERE id = ?", [method_id]
-        )
-        if row is None:
-            raise WritingMethodNotFoundError("写作方法不存在")
+        row = await self._require_method(method_id)
         result = _method_row(row)
         result["revisions"] = [
             _method_revision_row(item)
@@ -231,11 +227,7 @@ class SqliteWritingMethodRepository:
         return [_scheme_row(row) for row in rows]
 
     async def get_scheme(self, scheme_id: str) -> dict[str, Any]:
-        row = await self._db.fetch_one(
-            "SELECT * FROM writing_schemes WHERE id = ?", [scheme_id]
-        )
-        if row is None:
-            raise WritingMethodNotFoundError("写作方案不存在")
+        row = await self._require_scheme(scheme_id)
         result = _scheme_row(row)
         revisions = await self._db.fetch_all(
             "SELECT * FROM writing_scheme_revisions WHERE scheme_id = ? "

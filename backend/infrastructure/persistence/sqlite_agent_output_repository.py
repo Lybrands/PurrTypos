@@ -610,6 +610,11 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError(
                     "commentary publication requires a Provider tool call"
                 )
+            if any(
+                row.get("kind") == OutputEventKind.AGENT_PROGRESS.value
+                for row in scoped
+            ):
+                return ()
             rows = [
                 row for row in scoped
                 if row.get("channel") == OutputChannel.DIAGNOSTIC.value

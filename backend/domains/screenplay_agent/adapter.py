@@ -233,10 +233,30 @@ class ScreenplayHostContextProvider:
             raise TypeError("screenplay planning context must be an object")
         facts = dict(loaded)
         project = facts.get("project")
+        project = dict(project) if isinstance(project, Mapping) else {}
+        source = project.get("source")
+        source = dict(source) if isinstance(source, Mapping) else {}
+        source_scope = source.get("scope")
         facts["project"] = {
-            **(dict(project) if isinstance(project, Mapping) else {}),
-            "id": context.project_id,
+            key: project[key]
+            for key in ("title", "format", "brief", "stage")
+            if project.get(key) not in (None, "")
         }
+        if source:
+            facts["project"]["source"] = {
+                **{
+                    key: source[key]
+                    for key in ("type", "bookTitle")
+                    if source.get(key) not in (None, "")
+                },
+                **({
+                    "scope": {
+                        key: source_scope[key]
+                        for key in ("mode", "count")
+                        if source_scope.get(key) not in (None, "")
+                    },
+                } if isinstance(source_scope, Mapping) else {}),
+            }
         facts["planningRules"] = [build_screenplay_planning_policy()]
         facts.pop("stageCommand", None)
         if context.stage_command is not None:

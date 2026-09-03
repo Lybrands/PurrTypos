@@ -1,4 +1,3 @@
-import React from 'react'
 import { PurrButton, PurrInput, PurrPopconfirm, PurrSelect } from '@/purr-components'
 import { PurrEmpty, PurrSpin } from '@/purr-components'
 import { CheckIcon, CloseIcon, DeleteIcon, EditIcon } from '@/purr-components'

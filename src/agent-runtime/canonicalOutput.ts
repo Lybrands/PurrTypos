@@ -340,19 +340,22 @@ function appendAgentProgress(
     || !Number.isSafeInteger(sourceChunkIndex)
     || sourceChunkIndex < 1
   ) return state
+  const progress = {
+    eventId: event.eventId,
+    outputStreamId,
+    invocationId,
+    sourceChunkIndex,
+    text,
+    sequence: event.sequence,
+    occurredAt: event.occurredAt,
+  }
   return {
     ...state,
     agentProgress: [
-      ...state.agentProgress,
-      {
-        eventId: event.eventId,
-        outputStreamId,
-        invocationId,
-        sourceChunkIndex,
-        text,
-        sequence: event.sequence,
-        occurredAt: event.occurredAt,
-      },
+      ...state.agentProgress.filter(
+        (item) => item.outputStreamId !== outputStreamId,
+      ),
+      progress,
     ],
   }
 }
@@ -371,16 +374,6 @@ export function canonicalProviderTextDelta(event: CanonicalOutputEvent): string 
       ? stringValue(entry.payload.delta)
       : '')
     .join('')
-}
-
-export function replayCanonicalOutput(
-  events: readonly CanonicalOutputEvent[],
-  afterSequence = 0,
-): CanonicalOutputState {
-  return events.reduce(
-    reduceCanonicalOutput,
-    initialCanonicalOutputState(afterSequence),
-  )
 }
 
 function appendCommentary(

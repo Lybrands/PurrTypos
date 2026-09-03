@@ -22,7 +22,6 @@ const {
 )
 const {
   countQueuedForSession,
-  getSessionActivityLabel,
   getSettledSessionActivity,
 } = loadTypeScriptModule(
   path.join(__dirname, 'chatQueue.ts'),
@@ -414,17 +413,9 @@ test('queued chat activity stays pending until the final queued turn completes',
     getSettledSessionActivity('completed', queuedCount),
     { state: 'queued', queuedCount: 2 },
   )
-  assert.equal(
-    getSessionActivityLabel({ state: 'running', queuedCount }),
-    '生成中 · 2 条排队',
-  )
   assert.deepEqual(
     getSettledSessionActivity('completed', 0),
     { state: 'completed', queuedCount: 0 },
-  )
-  assert.equal(
-    getSessionActivityLabel({ state: 'completed', queuedCount: 0 }),
-    '已完成',
   )
 })
 

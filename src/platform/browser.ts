@@ -1,9 +1,7 @@
 import JSZip from 'jszip'
-import type { ApiResult, ElectronAPI, StoryBackgroundAttachment, XmindSheet } from '../types'
+import type { ApiResult, StoryBackgroundAttachment } from '../types'
 import { backendBaseUrl } from '../services/httpClient'
 import type { PlatformApi } from './types'
-
-const selectedFiles = new Map<string, File>()
 
 function failure<T>(error: string): ApiResult<T> {
   return { success: false, data: undefined as T, error }
@@ -131,34 +129,6 @@ async function downloadBackendFile(
 }
 
 export const browserPlatformApi: PlatformApi = {
-  openXmindFile: async () => {
-    const [file] = await chooseFiles('.xmind')
-    if (!file) return null
-    const token = `browser-file://${crypto.randomUUID()}/${file.name}`
-    selectedFiles.set(token, file)
-    return token
-  },
-
-  parseXmind: async (filePath) => {
-    const file = selectedFiles.get(filePath)
-    if (!file) return failure<XmindSheet[]>('浏览器文件授权已失效，请重新选择文件')
-    try {
-      const zip = await JSZip.loadAsync(await file.arrayBuffer())
-      const contentEntry = zip.file('content.json')
-      if (!contentEntry) return failure<XmindSheet[]>('XMind 文件中不存在 content.json')
-      const content = JSON.parse(await contentEntry.async('text')) as XmindSheet[]
-      return { success: true, data: content }
-    } catch (error) {
-      return failure(error instanceof Error ? error.message : String(error))
-    }
-  },
-
-  readFileBuffer: async (filePath) => {
-    const file = selectedFiles.get(filePath)
-    if (!file) return failure<Uint8Array>('浏览器文件授权已失效，请重新选择文件')
-    return { success: true, data: new Uint8Array(await file.arrayBuffer()) }
-  },
-
   openFilePath: async () => failure<void>('浏览器不能直接打开本地路径，请使用下载或上传功能'),
 
   writeExportFiles: async ({ entries, exportAsZip }) => {
@@ -189,7 +159,7 @@ export const browserPlatformApi: PlatformApi = {
 
   exportScreenplayPdf: ({ projectId, defaultName }) =>
     downloadBackendFile(
-      `/api/screenplay-projects/${encodeURIComponent(projectId)}/export/pdf`,
+      `/api/screenplay/v2/projects/${encodeURIComponent(projectId)}/export/pdf`,
       { method: 'POST' },
       `${defaultName.replace(/\.pdf$/i, '')}.pdf`,
     ),
@@ -345,5 +315,3 @@ export const browserPlatformApi: PlatformApi = {
     return ''
   },
 }
-
-export type BrowserPlatformApi = Pick<ElectronAPI, keyof PlatformApi>

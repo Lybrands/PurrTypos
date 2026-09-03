@@ -63,16 +63,3 @@ async def add_story_background_attachment(
             [att_id],
         )
     return None
-
-
-async def delete_story_background_attachment(
-    db: DatabaseConnection, att_id: int
-) -> str | None:
-    row = await db.fetch_one(
-        "SELECT stored_path FROM story_background_attachments WHERE id = ?",
-        [att_id],
-    )
-    await db.execute(
-        "DELETE FROM story_background_attachments WHERE id = ?", [att_id]
-    )
-    return row["stored_path"] if row else None

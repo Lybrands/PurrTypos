@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from constants import OUTLINE_TYPE_LABEL
 from database.crud.outlines import (
     get_chapter_outlines,
     get_global_outline,
@@ -72,26 +71,3 @@ async def collect_text_outline_entries(
         entries.sort(key=lambda e: order.get(str(e["id"]), 999))
 
     return entries
-
-
-def format_text_outline_for_agent(
-    entries: list[dict], max_length: int = 32000
-) -> str:
-    if not entries:
-        return (
-            "（暂无文本大纲：各大纲的「文本大纲」标签页中尚未填写内容，"
-            "或 outlineIds 与本书无匹配项。）"
-        )
-    parts = []
-    for e in entries:
-        label = OUTLINE_TYPE_LABEL.get(e.get("type", ""), e.get("type", "大纲"))
-        title = e.get("title", "未命名")
-        parts.append(f"【{label} · {title}】大纲ID:{e['id']}\n{e['markdown']}")
-
-    text = "\n\n---\n\n".join(parts)
-    if len(text) > max_length:
-        text = (
-            text[:max_length]
-            + "\n…（已截断；可缩小 outlineIds 范围或调大 maxTextLength 分批获取）"
-        )
-    return text

@@ -75,7 +75,3 @@ export const apiPatch = <T>(path: string, body: unknown) =>
 
 export const apiDelete = <T>(path: string) =>
   requestJson<T>(`/api${path}`, { method: 'DELETE' })
-
-export async function fetchBackend(path: string, options: RequestInit = {}) {
-  return fetch(`${backendBaseUrl}${path}`, options)
-}

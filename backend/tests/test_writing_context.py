@@ -225,6 +225,6 @@ async def test_explicit_evidence_planning_keeps_manifest_without_loading_bodies(
         "locatorAvailableToExecution": False,
     }]
     rules = " ".join(facts["planningRules"])
-    assert "loaded after TaskSpec planning" in rules
+    assert "Explicitly selected evidence is loaded after planning" in rules
     assert "may require another search" not in rules
     assert "listOutlines may be used" not in rules

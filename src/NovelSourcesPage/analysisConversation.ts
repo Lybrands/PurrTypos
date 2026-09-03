@@ -1,6 +1,5 @@
 import type { AgentConversationMessage } from '../agent-runtime/contracts.ts'
-import { loadCompleteAgentRunSnapshot, replayAgentRunSnapshot } from '../agent-runtime/runSnapshotHydration.ts'
-import type { AiAgentRunSnapshot, AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
+import type { AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
 import { AgentChunkReplay } from '../agent-runtime/chunkReplay.ts'
 import type { AiStreamChunk } from '../agent-runtime/chunkHandlers/types.ts'
 import { buildNovelAnalysisTaskPlan, buildNovelAnalysisTiming } from './analysisTaskPlan.ts'
@@ -60,49 +59,6 @@ function analysisErrorMessage(run: NovelAnalysisRun) {
   if (code === 'model_invocation_failed') return '模型调用中断，可以保留当前任务并重试。'
   if (code === 'user_paused_novel_analysis') return '任务由你暂停，恢复后会从未完成的步骤继续。'
   return `分析未完成：${code}`
-}
-
-export function replayNovelAnalysisRun(
-  run: NovelAnalysisRun,
-  snapshot: AiAgentRunSnapshot,
-  model: string,
-  relatedSnapshots: AiAgentRunSnapshot[] = [],
-): AgentConversationMessage {
-  return replayAgentRunSnapshot({
-    snapshot,
-    prompt: run.prompt || '',
-    turnId: `novel-analysis:${run.commandId || run.runId}`,
-    model,
-    relatedSnapshots,
-  })
-}
-
-export async function loadNovelAnalysisConversation(
-  run: NovelAnalysisRun,
-  model: string,
-  dependencies: Parameters<typeof loadCompleteAgentRunSnapshot>[1],
-  settledSnapshots = new Map<string, AiAgentRunSnapshot>(),
-): Promise<AgentConversationMessage | undefined> {
-  const ids = [...new Set([run.runId, ...(run.relatedRuns ?? []).map((item) => item.runId)])]
-  const snapshots = new Map<string, AiAgentRunSnapshot>()
-  const isCurrent = dependencies.isCurrent ?? (() => true)
-  let next = 0
-  await Promise.all(Array.from({ length: Math.min(4, ids.length) }, async () => {
-    while (isCurrent()) {
-      const id = ids[next++]
-      if (!id) return
-      const snapshot = settledSnapshots.get(id)
-        ?? await loadCompleteAgentRunSnapshot(id, dependencies)
-      if (!snapshot || !isCurrent()) return
-      snapshots.set(id, snapshot)
-      if (snapshot.run.status !== 'running') settledSnapshots.set(id, snapshot)
-    }
-  }))
-  const root = snapshots.get(run.runId)
-  if (!root || !isCurrent()) return undefined
-  return replayNovelAnalysisRun(run, root, model, ids.slice(1).flatMap(
-    (id) => snapshots.get(id) ? [snapshots.get(id)!] : [],
-  ))
 }
 
 export function buildNovelAnalysisMessages(

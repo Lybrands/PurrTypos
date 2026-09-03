@@ -1,18 +1,8 @@
-import React from 'react'
 import { PanelToggleIcon } from '@/purr-components'
 import { PurrButton, PurrTooltip } from '@/purr-components'
 import type { EntityId } from '../../types'
 import ChapterSection from './ChapterSection'
 import './index.scss'
-
-/**
- * 兼容旧外层调用：原 OutlineSection 中用于「同步章节-大纲选中」的 payload。
- * 大纲分组已合并进章节分组（辅助面板形式），此类型保留为空壳。
- */
-export interface ChapterOutlineSelectInfo {
-  title: string
-  writingChapterId?: EntityId | null
-}
 
 export interface DirectorNotebookProps {
   bookTitle: string

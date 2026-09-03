@@ -11,7 +11,6 @@ export {
   type UseChatSubmitParams,
 } from "./useChatSubmit";
 export {
-  getSessionActivityLabel,
   type ChatSessionActivity,
   type ChatSessionActivityState,
 } from "./chatQueue";

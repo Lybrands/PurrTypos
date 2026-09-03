@@ -1,7 +1,6 @@
 import type { AiApiProvider, AiContextWindow, AiModelConfig } from '../types'
 import { contextWindowTokens } from './shared'
-import { getBuiltinProvider, getModelPreset } from './registry'
-import type { AiModelPreset } from './types'
+import { getModelPreset } from './registry'
 
 export function normalizeApiProvider(value: unknown): AiApiProvider {
   return value === 'anthropic' || value === 'zai' ? value : 'openai'
@@ -51,33 +50,5 @@ export function applyModelRuntimeConfigPatch(
     ...config,
     ...patch,
     thinkingOnly: config.thinkingOnly,
-  }
-}
-
-export function createConfigFromPreset(params: {
-  id: string
-  preset: AiModelPreset
-  apiKey: string
-  nickname?: string
-}): AiModelConfig {
-  const provider = getBuiltinProvider(params.preset.providerId)
-  if (!provider) throw new Error(`未知的内置模型服务商：${params.preset.providerId}`)
-
-  return {
-    id: params.id,
-    presetId: params.preset.id,
-    providerId: params.preset.providerId,
-    apiProvider: provider.apiProvider,
-    name: params.preset.name,
-    nickname: params.nickname?.trim() || params.preset.label,
-    supportsThinking: params.preset.supportsThinking,
-    thinkingOnly: params.preset.thinkingOnly,
-    thinkingEnabled: params.preset.thinkingEnabled,
-    contextWindow: params.preset.contextWindow,
-    customizeTemperature: params.preset.customizeTemperature,
-    temperatureThinking: params.preset.temperatureThinking,
-    temperatureNonThinking: params.preset.temperatureNonThinking,
-    apiKey: params.apiKey.trim(),
-    baseUrl: provider.baseUrl,
   }
 }

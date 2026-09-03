@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  bookAttachmentKey,
+  bookAttachmentKeys,
   createBookAssistantAttachmentManager,
   getBookAssistantAttachmentsForMessage,
   reduceBookAssistantAttachment,
@@ -94,7 +94,7 @@ const bindings: BookConversationBindings = {
 
 test('setting diff is stored outside the generic message', () => {
   const message = { role: 'assistant' as const, content: '', clientTurnId: 'turn-1' }
-  const next = reduceBookAssistantAttachment({}, bookAttachmentKey(message), {
+  const next = reduceBookAssistantAttachment({}, bookAttachmentKeys(message)[0], {
     proposalId: 'proposal-1',
     sessionKey: 'character:1',
     kind: 'character',
@@ -107,24 +107,24 @@ test('setting diff is stored outside the generic message', () => {
 })
 
 test('attachment keys prefer live turn, then persisted conversation and replay run', () => {
-  assert.equal(bookAttachmentKey({
+  assert.equal(bookAttachmentKeys({
     role: 'assistant',
     content: '',
     clientTurnId: 'turn-1',
     conversationId: 12,
     agentRunId: 'run-12',
-  }), 'client:turn-1')
-  assert.equal(bookAttachmentKey({
+  })[0], 'client:turn-1')
+  assert.equal(bookAttachmentKeys({
     role: 'assistant',
     content: '',
     conversationId: 12,
     agentRunId: 'run-12',
-  }), 'conversation:12')
-  assert.equal(bookAttachmentKey({
+  })[0], 'conversation:12')
+  assert.equal(bookAttachmentKeys({
     role: 'assistant',
     content: '',
     agentRunId: 'run-12',
-  }), 'run:run-12')
+  })[0], 'run:run-12')
 })
 
 test('attachment without a stable turn identity is ignored instead of leaking across turns', () => {
@@ -138,7 +138,7 @@ test('attachment without a stable turn identity is ignored instead of leaking ac
     }],
   }
 
-  assert.equal(bookAttachmentKey({ role: 'assistant', content: '' }), undefined)
+  assert.equal(bookAttachmentKeys({ role: 'assistant', content: '' })[0], undefined)
   assert.equal(reduceBookAssistantAttachment(current, undefined, {
     proposalId: 'proposal-2',
     sessionKey: 'background:1',
@@ -376,7 +376,7 @@ test('API message falls through an empty conversation key to its run alias', () 
     conversationId: 999,
     agentRunId: 'run-fallback-alias',
   }
-  assert.equal(bookAttachmentKey(rebuilt), 'conversation:999')
+  assert.equal(bookAttachmentKeys(rebuilt)[0], 'conversation:999')
   assert.equal(
     getBookAssistantAttachmentsForMessage(
       manager.getSnapshot(),

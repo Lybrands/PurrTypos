@@ -8,7 +8,6 @@ from zipfile import ZipFile
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
 from exceptions import AppError
 
 from database.connection import DatabaseConnection

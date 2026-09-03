@@ -1,16 +1,12 @@
 import json
 
-import pytest
-
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     ContextBudget,
-    DomainContext,
     ModelRequest,
     PlannerLimits,
     PlanningCapabilities,
-    PlanningConstraints,
     PlanningResult,
     StepExecutor,
     StepType,
@@ -21,7 +17,6 @@ from purra.contracts import (
 from purra.planner import build_planner_messages
 from domains.agent_policy import (
     build_agent_final_response_policy,
-    build_agent_public_progress_policy,
 )
 from application.shared_agent_context import with_shared_agent_context
 from domains.screenplay_agent.adapter import (
@@ -295,7 +290,20 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     async def load_context(project_id: str):
         assert project_id == "project-1"
         return {
-            "project": {"id": "wrong-project", "stage": "sourceAnalysis"},
+            "project": {
+                "id": "wrong-project",
+                "stage": "sourceAnalysis",
+                "source": {
+                    "type": "book",
+                    "bookId": "private-book-id",
+                    "bookTitle": "公开书名",
+                    "scope": {
+                        "mode": "selected",
+                        "count": 2,
+                        "chapterIds": ["private-chapter-id"],
+                    },
+                },
+            },
             "stageCommand": {
                 "kind": "stage_action",
                 "action": "review",
@@ -341,10 +349,18 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
         "screenplay_planning_facts",
     ]
     assert all(block.untrusted is False for block in bundle.blocks)
-    assert facts["project"]["id"] == "project-1"
+    assert "id" not in facts["project"]
+    assert facts["project"]["source"] == {
+        "type": "book",
+        "bookTitle": "公开书名",
+        "scope": {"mode": "selected", "count": 2},
+    }
     assert facts["stageCommand"] == stage_command
     assert facts["planningRules"] == [policy]
     assert planner_facts["planningRules"] == [policy]
+    assert "project-1" not in planning_content
+    assert "private-book-id" not in planning_content
+    assert "private-chapter-id" not in planning_content
     assert "最少且不重复" in policy
     assert "1 至 8" not in policy
     assert "stepBindings" not in policy

@@ -1,6 +1,5 @@
 import type {
   ScreenplayProject,
-  ScreenplayDocumentKind,
   ScreenplayFormat,
   ScreenplaySourceKind,
   ScreenplaySourceScope,
@@ -8,7 +7,6 @@ import type {
   ScreenplayV2DeliverableRole,
   ScreenplayV2Format,
   ScreenplayV2Project,
-  ScreenplayV2RevisionSummary,
   ScreenplayV2Workspace,
 } from '../types'
 
@@ -116,24 +114,6 @@ export function screenplaySourceToV2(
   }
 }
 
-export function deliverableRoleForProposal(
-  kind: ScreenplayDocumentKind,
-): ScreenplayV2DeliverableRole {
-  const roleByKind: Record<
-    ScreenplayDocumentKind,
-    ScreenplayV2DeliverableRole
-  > = {
-    source_analysis: 'sourceAnalysis',
-    creative_brief: 'creativeBrief',
-    beat_sheet: 'structure',
-    episode_outline: 'structure',
-    scene_list: 'sceneList',
-    scene_draft: 'screenplayDraft',
-    review: 'review',
-  }
-  return roleByKind[kind]
-}
-
 export interface RevisionLibraryTarget {
   role: ScreenplayV2DeliverableRole
   revisionId: string
@@ -146,35 +126,6 @@ export function revisionLibraryTarget(
     role: artifact.role,
     revisionId: artifact.revisionId,
   } : null
-}
-
-export function findWorkspaceRevision(input: {
-  workspace: ScreenplayV2Workspace | null
-  role: ScreenplayV2DeliverableRole
-  revisionId?: string | null
-  taskId?: string | null
-  finalizingRunId?: string | null
-}): ScreenplayV2RevisionSummary | null {
-  if (!input.workspace) return null
-  const revisions = [
-    ...input.workspace.candidates,
-    ...Object.values(input.workspace.workflow.heads).filter(
-      (revision): revision is ScreenplayV2RevisionSummary => revision != null,
-    ),
-  ]
-  const referenced = revisions.find((revision) => (
-    Boolean(input.revisionId) && revision.id === input.revisionId
-  ))
-  if (referenced) return referenced
-  return revisions.find((revision) => (
-    revision.role === input.role
-    && Boolean(input.finalizingRunId)
-    && revision.finalizingRunId === input.finalizingRunId
-  )) ?? revisions.find((revision) => (
-    revision.role === input.role
-    && Boolean(input.taskId)
-    && revision.agentTaskId === input.taskId
-  )) ?? null
 }
 
 export function createScreenplayCommandId(prefix: string): string {

@@ -1,4 +1,3 @@
-import React from 'react'
 import { SunIcon, MoonIcon } from '@/purr-components'
 import { PurrButton } from '@/purr-components'
 import { useTheme } from '../../contexts/ThemeContext'

@@ -155,7 +155,7 @@ export function useBookConversationExtensions({
         ) : null}
       </>
     ),
-    renderAssistantAttachment: (message, index) => {
+    renderAssistantAttachment: (message) => {
       const cards = message.isError
         ? []
         : getBookAssistantAttachmentsForMessage(attachments, message)

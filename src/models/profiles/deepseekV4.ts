@@ -1,9 +1,4 @@
-import type { AiModelConfig } from '../../types'
-import {
-  normalizeBaseUrl,
-  normalizePresetContextWindow,
-} from '../shared'
-import type { AiModelPreset, BuiltinModelProfile } from '../types'
+import type { BuiltinModelProfile } from '../types'
 
 const provider = {
   id: 'deepseek',
@@ -12,11 +7,6 @@ const provider = {
   baseUrl: 'https://api.deepseek.com',
   keyPlaceholder: '请输入 DeepSeek API Key',
 } as const
-
-const knownBaseUrls = new Set([
-  provider.baseUrl,
-  `${provider.baseUrl}/v1`,
-])
 
 const sharedPreset = {
   providerId: provider.id,
@@ -40,34 +30,7 @@ const flashPreset = {
   recommended: true,
 } as const
 
-function createProfile(preset: AiModelPreset): BuiltinModelProfile {
-  const matches = (config: AiModelConfig) => (
-    config.name === preset.name
-    && knownBaseUrls.has(normalizeBaseUrl(config.baseUrl))
-  )
-
-  return {
-    provider,
-    preset,
-    matches,
-    migrate(config) {
-      if (!matches(config)) return config
-      return {
-        ...config,
-        presetId: preset.id,
-        providerId: provider.id,
-        apiProvider: provider.apiProvider,
-        baseUrl: provider.baseUrl,
-        supportsThinking: preset.supportsThinking,
-        thinkingOnly: preset.thinkingOnly,
-        thinkingEnabled: config.thinkingEnabled ?? preset.thinkingEnabled,
-        contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
-        customizeTemperature: preset.customizeTemperature,
-        temperatureThinking: preset.temperatureThinking,
-        temperatureNonThinking: preset.temperatureNonThinking,
-      }
-    },
-  }
+export const deepseekV4FlashProfile: BuiltinModelProfile = {
+  provider,
+  preset: flashPreset,
 }
-
-export const deepseekV4FlashProfile = createProfile(flashPreset)

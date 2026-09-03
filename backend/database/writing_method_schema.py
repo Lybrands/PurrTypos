@@ -2,17 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-
-
-def _json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def _digest(markdown: str, metadata: dict) -> str:
-    payload = _json({"markdown": markdown, "metadata": metadata})
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+from domains.writing.methods import canonical_json, content_digest, members_digest
 
 
 _BUILTIN_METHODS = (
@@ -162,8 +152,8 @@ async def _seed_builtins(db) -> None:
                 "VALUES (?, ?, ?, ?, ?, 'builtin', 1, 'active', ?, ?, 0, ?)",
                 [
                     item["id"], item["name"], item["description"],
-                    item["method_type"], _json(item["tags"]), item["markdown"],
-                    _json(metadata), item["revision_id"],
+                    item["method_type"], canonical_json(item["tags"]), item["markdown"],
+                    canonical_json(metadata), item["revision_id"],
                 ],
             )
             await db.execute(
@@ -173,9 +163,9 @@ async def _seed_builtins(db) -> None:
                 "VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     item["revision_id"], item["id"], item["name"],
-                    item["description"], item["method_type"], _json(item["tags"]),
-                    item["markdown"], _json(metadata),
-                    _digest(item["markdown"], metadata),
+                    item["description"], item["method_type"], canonical_json(item["tags"]),
+                    item["markdown"], canonical_json(metadata),
+                    content_digest(item["markdown"], metadata),
                 ],
             )
         scheme = _BUILTIN_SCHEME
@@ -186,7 +176,7 @@ async def _seed_builtins(db) -> None:
             "VALUES (?, ?, ?, ?, 0, 'builtin', 1, 'active', ?)",
             [
                 scheme["id"], scheme["name"], scheme["description"],
-                _json(scheme["member_revision_ids"]), scheme["revision_id"],
+                canonical_json(scheme["member_revision_ids"]), scheme["revision_id"],
             ],
         )
         await db.execute(
@@ -195,8 +185,8 @@ async def _seed_builtins(db) -> None:
             "VALUES (?, ?, 1, ?, ?, ?, ?)",
             [
                 scheme["revision_id"], scheme["id"], scheme["name"],
-                scheme["description"], _json({"schemaVersion": 1, "builtin": True}),
-                hashlib.sha256(_json(scheme["member_revision_ids"]).encode("utf-8")).hexdigest(),
+                scheme["description"], canonical_json({"schemaVersion": 1, "builtin": True}),
+                members_digest(scheme["member_revision_ids"]),
             ],
         )
         for ordinal, revision_id in enumerate(scheme["member_revision_ids"]):

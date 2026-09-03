@@ -1,2 +1,4 @@
 ./backend/vendor/purra-0.5.0-py3-none-any.whl
+./backend/vendor/purra_openai-0.5.0-py3-none-any.whl
+./backend/vendor/purra_anthropic-0.5.0-py3-none-any.whl
 -e ../purra/integrations/mem0/python[managed]

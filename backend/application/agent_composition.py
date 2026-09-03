@@ -63,8 +63,8 @@ from application.agent_profile_registry import (
     AgentProfile,
     AgentProfileRegistry,
 )
-from application.run_execution_control import RunExecutionSession
 from application.shared_agent_context import with_shared_agent_context
+from application.model_runtime import with_adapter_public_progress
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from infrastructure.persistence.run_store import runtime_limits_from_mapping
 from infrastructure.models.model_conversation_summarizer import (
@@ -109,6 +109,16 @@ from config import AGENT_APPROVAL_TIMEOUT_SECONDS
 
 
 logger = logging.getLogger(__name__)
+
+
+def _uses_adapter_public_progress(request: AgentRunRequest) -> bool:
+    return bool(
+        request.tools_enabled
+        and (
+            request.metadata.get("responseAudience") != "internal"
+            or request.metadata.get("progressAudience") == "public"
+        )
+    )
 
 
 def _host_component_bindings(profile_id: str):
@@ -352,7 +362,13 @@ class AgentComposition:
 
         profile = self._profile_registry.for_request(request)
         prepared = await profile.prepare_request(request)
-        return request if prepared is None else prepared
+        resolved = request if prepared is None else prepared
+        if _uses_adapter_public_progress(resolved):
+            resolved = replace(
+                resolved,
+                model=with_adapter_public_progress(resolved.model),
+            )
+        return resolved
 
     async def resolve_context_claims(
         self,
@@ -391,6 +407,7 @@ class AgentComposition:
         context_provider_override: ContextProvider | None = None,
         long_task_executor=None,
         evidence_validator=None,
+        public_progress_from_content: bool = False,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -399,6 +416,7 @@ class AgentComposition:
             on_required_tool_choice_unsupported=(
                 on_required_tool_choice_unsupported
             ),
+            public_progress_from_content=public_progress_from_content,
         )
         profile_id = str(agent_profile or "").strip()
         profile = self._profile_registry.require(profile_id)
@@ -551,6 +569,10 @@ class AgentComposition:
         )
         if callable(validator_hook) and "evidence_validator" not in kwargs:
             kwargs["evidence_validator"] = validator_hook(request)
+        kwargs.setdefault(
+            "public_progress_from_content",
+            _uses_adapter_public_progress(request),
+        )
         return self.create_core(
             api_key,
             agent_profile=profile.id,
@@ -604,14 +626,6 @@ class AgentComposition:
             raise RuntimeError("Agent composition has been shut down")
         profile = self._profile_registry.for_request(request)
         return profile.response_judge_policies(request)
-
-    def create_execution_session(self, signal) -> RunExecutionSession:
-        return RunExecutionSession(
-            self._execution_lease_store,
-            owner_id=self._repository.owner_id,
-            lease_duration_ms=self._repository.lease_duration_ms,
-            external_signal=signal,
-        )
 
     def observe_event(self, event: AgentEvent) -> None:
         if self._closed:
