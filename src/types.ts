@@ -1443,6 +1443,13 @@ export interface AiAgentRunSnapshot {
     };
     activity?: {
       modelAttemptCount: number;
+      usage?: {
+        inputTokens: number;
+        outputTokens: number;
+        reasoningTokens: number;
+        totalTokens: number;
+        unreportedAttempts: number;
+      };
       providerOutputEvents: number;
       providerOutputBytes: number;
     };
@@ -1936,6 +1943,90 @@ export interface AiAgentRunDiagnostics {
   artifacts: AiAgentRunArtifactMetrics;
   artifactMaintenance: AiArtifactMaintenanceSnapshot;
   [key: string]: unknown;
+}
+
+export interface AiPlannerModelOutputDiagnostic {
+  runId: string;
+  invocationId: string;
+  outputStreamId: string;
+  operationId: string;
+  revision: number;
+  attempt: number;
+  model?: string | null;
+  status: "open" | "committed" | "aborted";
+  finishReason?: string | null;
+  errorCode?: string | null;
+  rawContent: string;
+  rawContentCharacters: number;
+  rawContentTruncated: boolean;
+  contentDeltaCount: number;
+  contentDeltaConflict: boolean;
+  progressRecords: Array<{
+    eventId?: string | null;
+    sequence?: number | null;
+    recordIndex: number;
+    revision: number;
+    attempt: number;
+    text: string;
+    sourceStart: number;
+    sourceEnd: number;
+    occurredAt?: string | null;
+  }>;
+  timing: Record<string, unknown>;
+}
+
+export interface AiAgentRunPlannerDiagnostics {
+  runId: string;
+  outputs: AiPlannerModelOutputDiagnostic[];
+}
+
+export interface AiModelInputDiagnostic {
+  eventRowId: number;
+  phase: string;
+  count: number;
+  round?: number | null;
+  logicalRound?: number | null;
+  attempt?: number | null;
+  revision?: number | null;
+  provider?: string | null;
+  model?: string | null;
+  captured: boolean;
+  messages: Array<Record<string, unknown>>;
+  recordedAt?: string | null;
+}
+
+export interface AiAgentRunModelInputDiagnostics {
+  runId: string;
+  calls: AiModelInputDiagnostic[];
+}
+
+export interface AiDiagnosticPreview {
+  text: string;
+  characters: number;
+  truncated: boolean;
+}
+
+export interface AiToolCallDiagnostic {
+  runId: string;
+  toolCallId: string;
+  eventRowId: number;
+  name?: string;
+  startedAt?: string;
+  completedAt?: string;
+  status?: 'completed' | 'failed';
+  outcome?: string;
+  cached?: boolean;
+  approvalStatus?: string;
+  arguments?: AiDiagnosticPreview;
+  result?: AiDiagnosticPreview;
+  error?: AiDiagnosticPreview;
+}
+
+export interface AiAgentRunToolDiagnostics {
+  runId: string;
+  calls: AiToolCallDiagnostic[];
+  nextCursor: number;
+  hasMore: boolean;
 }
 
 export interface ElectronAPI {
@@ -2679,6 +2770,16 @@ export interface ElectronAPI {
   getAgentRunDiagnostics: (data: {
     runId: string;
   }) => Promise<ApiResult<AiAgentRunDiagnostics>>;
+  getAgentRunPlannerDiagnostics: (data: {
+    runId: string;
+  }) => Promise<ApiResult<AiAgentRunPlannerDiagnostics>>;
+  getAgentRunModelInputDiagnostics: (data: {
+    runId: string;
+  }) => Promise<ApiResult<AiAgentRunModelInputDiagnostics>>;
+  getAgentRunToolDiagnostics: (data: {
+    runId: string;
+    after?: number;
+  }) => Promise<ApiResult<AiAgentRunToolDiagnostics>>;
   maintainAgentArtifacts: () => Promise<
     ApiResult<AiArtifactMaintenanceResult>
   >;

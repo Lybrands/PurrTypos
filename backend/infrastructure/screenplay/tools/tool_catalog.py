@@ -15,6 +15,10 @@ from infrastructure.screenplay.tools.candidate_artifact import (
     ScreenplayCandidateArtifacts,
 )
 from infrastructure.screenplay.tools.query import ScreenplayToolQuery
+from infrastructure.screenplay.tools.read_cache import cached_screenplay_read
+from infrastructure.screenplay.tools.read_evidence import (
+    consumed_task_part_keys, has_prepared_read, record_prepared_source_receipts,
+)
 
 
 def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
@@ -28,7 +32,9 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
         async def handler(state, arguments, signal):
             del signal
             try:
-                result = await method(state.domain, arguments)
+                result, from_cache = await cached_screenplay_read(
+                    db, tool_name, method, state.domain, arguments,
+                )
             except ScreenplayToolInputError as error:
                 return _input_error(error)
             refs = query.source_refs(tool_name, result)
@@ -40,7 +46,7 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
                     tool_name=tool_name,
                     refs=refs,
                 )
-            return {"content": _encode(result)}
+            return {"content": _encode(result), "fromCache": from_cache}
 
         return handler
 
@@ -59,10 +65,8 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
                 )
                 else read_operations
             )
-            if dependency_keys and not await _has_successful_read_operation(
-                db,
-                str(state.run_id or ""),
-                {"readScreenplayTaskDependencies": None},
+            if dependency_keys and not set(dependency_keys).issubset(
+                await consumed_task_part_keys(db, str(state.run_id or ""))
             ):
                 raise ScreenplayToolInputError(
                     "The candidate cannot be written before its dependencies are read.",
@@ -109,6 +113,7 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
                         "successful result, then retry writeScreenplayCandidatePart."
                     ),
                 )
+            await record_prepared_source_receipts(db, state.run_id, str(state.domain["projectId"]))
             result = await candidates.write(state, arguments)
         except ScreenplayToolInputError as error:
             return _input_error(error)
@@ -162,6 +167,8 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
 async def _has_successful_read_operation(db, run_id: str, read_operations) -> bool:
     if not run_id:
         return False
+    if await has_prepared_read(db, run_id, read_operations):
+        return True
     placeholders = ",".join("?" for _ in read_operations)
     row = await db.fetch_one(
         "SELECT 1 AS present FROM ai_agent_run_events AS started "

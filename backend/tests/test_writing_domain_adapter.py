@@ -15,6 +15,7 @@ from purra.contracts import (
     ModelRequest,
     TaskSpec,
     TaskContextRequest,
+    ToolPlanningRequirement,
 )
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.associated_context import (
@@ -23,7 +24,7 @@ from domains.writing.associated_context import (
     OutlineContextFact,
 )
 from domains.writing.context import (
-    WRITING_AGENT_POLICY_CONTEXT,
+    WRITING_DOMAIN_POLICY_CONTEXT,
     WRITING_BINDING_CONTEXT,
     WRITING_EVIDENCE_POLICY_CONTEXT,
     WRITING_RETRIEVAL_CONTEXT,
@@ -351,6 +352,9 @@ def test_writing_adapter_builds_a_closed_complete_catalog():
         writing_method_recommendation_requested=True,
     )) == names - {"readContinuationSourceSection"}
     assert len({id(registration.handler) for registration in registrations}) == len(names)
+    assert {
+        registration.planning_requirement for registration in registrations
+    } == {ToolPlanningRequirement.OPTIONAL}
 
 
 @pytest.mark.asyncio
@@ -494,7 +498,7 @@ async def test_writing_staged_recall_uses_resolved_task_spec_query():
 
     planning = await provider.build_planning_context(request, budget)
     assert [block.name for block in planning.blocks] == [
-        WRITING_AGENT_POLICY_CONTEXT,
+        WRITING_DOMAIN_POLICY_CONTEXT,
         "writing_planning_facts",
     ]
     assert planning.diagnostics["planningContextMode"] == "lightweight_manifest"

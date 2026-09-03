@@ -55,7 +55,7 @@ class ChatStreamRequest(BaseModel):
     selectedForeshadowingIds: Optional[List[Any]] = None
     writingMethodOverrides: Optional[WritingMethodOverrides] = None
     chatAgentMode: Optional[str] = None
-    planningMode: Literal["reactive", "planned"] = "reactive"
+    planningMode: Optional[Literal["reactive", "planned"]] = None
     contextWindow: Optional[str] = None
     # Enhanced renderer history fence. These immutable IDs are part of the
     # request digest and are rechecked both when reserving and claiming.

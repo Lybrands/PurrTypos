@@ -199,6 +199,201 @@ async def test_diagnostics_endpoint_includes_stability_and_artifact_metrics(
     assert maintenance["requiresAttention"] is False
 
 
+async def test_planner_diagnostics_returns_exact_model_content_without_reasoning(
+    temp_db: DatabaseConnection,
+):
+    from infrastructure.persistence.run_store import create_run
+    from routers.ai import get_agent_run_planner_diagnostics
+
+    run_id = await create_run(
+        temp_db,
+        session_id=1,
+        prompt="分析小说",
+        mode="novel_analysis",
+    )
+    invocation_id = "planner-invocation"
+    stream_id = "planner-output"
+
+    async def insert_event(
+        sequence: int,
+        kind: str,
+        payload: dict,
+        *,
+        invocation: str = invocation_id,
+        output_stream: str = stream_id,
+        visibility: str = "private",
+    ) -> None:
+        await temp_db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, payload_json, event_id, invocation_id, "
+            "output_stream_id, sequence, source, kind, channel, visibility, "
+            "source_event_key) VALUES (?, ?, ?, ?, ?, ?, ?, 'provider', ?, "
+            "'diagnostic', ?, ?)",
+            [
+                run_id,
+                kind,
+                json.dumps(payload, ensure_ascii=False),
+                f"event-{sequence}",
+                invocation,
+                output_stream,
+                sequence,
+                kind,
+                visibility,
+                f"source-{sequence}",
+            ],
+        )
+
+    await insert_event(1, "stream.opened", {
+        "outputProtocol": "purra.planning-stream/v1",
+        "planningScope": {
+            "runId": run_id,
+            "operationId": "planning-operation",
+            "revision": 0,
+        },
+        "planningAttempt": 0,
+        "model": "planner-model",
+    })
+    await insert_event(2, "provider.delta_batch", {
+        "entries": [{
+            "sourceChunkIndex": 1,
+            "sourcePartIndex": 1,
+            "kind": "provider.reasoning_delta",
+            "payload": {"delta": "private chain of thought"},
+        }, {
+            "sourceChunkIndex": 3,
+            "sourcePartIndex": 0,
+            "kind": "provider.content_delta",
+            "payload": {"delta": "\n{\"v\":1,\"type\":\"plan\"}"},
+        }],
+    })
+    await insert_event(3, "planning.progress", {
+        "recordIndex": 1,
+        "revision": 0,
+        "attempt": 0,
+        "text": "模型正在组织分析步骤",
+        "sourceStart": 0,
+        "sourceEnd": 37,
+    }, visibility="public")
+    await insert_event(4, "provider.delta_batch", {
+        "entries": [{
+            "sourceChunkIndex": 2,
+            "sourcePartIndex": 0,
+            "kind": "provider.content_delta",
+            "payload": {"delta": "{\"v\":1,\"type\":\"progress\"}"},
+        }],
+    })
+    await insert_event(5, "model.diagnostics", {
+        "firstPublicProgressMs": 120,
+        "planReceivedMs": 180,
+        "gatewayStartedAtMs": 999,
+    })
+    await insert_event(6, "stream.committed", {"finishReason": "stop"})
+
+    # A normal model stream in the same Run must not enter Planner diagnostics.
+    await insert_event(
+        7,
+        "stream.opened",
+        {"outputProtocol": "text", "model": "runtime-model"},
+        invocation="runtime-invocation",
+        output_stream="runtime-output",
+    )
+    await insert_event(
+        8,
+        "provider.delta_batch",
+        {"entries": [{
+            "sourceChunkIndex": 1,
+            "sourcePartIndex": 0,
+            "kind": "provider.content_delta",
+            "payload": {"delta": "normal answer"},
+        }]},
+        invocation="runtime-invocation",
+        output_stream="runtime-output",
+    )
+
+    response = await get_agent_run_planner_diagnostics(run_id)
+
+    assert response["success"] is True
+    outputs = response["data"]["outputs"]
+    assert len(outputs) == 1
+    output = outputs[0]
+    assert output["model"] == "planner-model"
+    assert output["status"] == "committed"
+    assert output["finishReason"] == "stop"
+    assert output["rawContent"] == (
+        '{"v":1,"type":"progress"}\n'
+        '{"v":1,"type":"plan"}'
+    )
+    assert output["contentDeltaCount"] == 2
+    assert output["contentDeltaConflict"] is False
+    assert output["progressRecords"][0]["text"] == "模型正在组织分析步骤"
+    assert output["timing"] == {
+        "firstPublicProgressMs": 120,
+        "planReceivedMs": 180,
+    }
+    wire = json.dumps(response, ensure_ascii=False)
+    assert "private chain of thought" not in wire
+    assert "gatewayStartedAtMs" not in wire
+    assert "normal answer" not in wire
+
+
+async def test_model_input_diagnostics_returns_captured_provider_messages(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+):
+    import config
+    from infrastructure.persistence.run_store import create_run
+    from routers.ai import get_agent_run_model_input_diagnostics
+
+    monkeypatch.setattr(config, "DEV_DIAGNOSTICS_ENABLED", True)
+    run_id = await create_run(
+        temp_db,
+        session_id=1,
+        prompt="用户原始输入",
+        mode="novel_analysis",
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json) VALUES (?, ?, ?)",
+        [
+            run_id,
+            "model.call_recorded",
+            json.dumps({
+                "phase": "planning",
+                "count": 1,
+                "attempt": 0,
+                "parameters": {
+                    "provider": "openai",
+                    "model": "model",
+                    "inputMessages": [
+                        {
+                            "role": "system",
+                            "content": "内置小说分析方法",
+                            "apiKey": "must-not-leak",
+                        },
+                        {"role": "user", "content": "用户原始输入"},
+                    ],
+                },
+            }, ensure_ascii=False),
+        ],
+    )
+
+    response = await get_agent_run_model_input_diagnostics(run_id)
+
+    assert response["success"] is True
+    calls = response["data"]["calls"]
+    assert len(calls) == 1
+    assert calls[0]["phase"] == "planning"
+    assert calls[0]["captured"] is True
+    assert calls[0]["messages"] == [
+        {
+            "role": "system",
+            "content": "内置小说分析方法",
+            "apiKey": "<redacted>",
+        },
+        {"role": "user", "content": "用户原始输入"},
+    ]
+
+
 async def test_diagnostics_aggregates_durable_task_run_evidence(
     temp_db: DatabaseConnection,
 ):

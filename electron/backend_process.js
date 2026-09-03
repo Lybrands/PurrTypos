@@ -79,6 +79,10 @@ function createBackendProcessManager({
       PURRTYPOS_DATA_DIR: app.getPath('userData'),
       PURRTYPOS_SKILLS_DIR: skillsDir,
       PURRTYPOS_PORT: String(port),
+      PURRTYPOS_DEV_DIAGNOSTICS: (
+        processEnv.PURRTYPOS_DEV_DIAGNOSTICS
+        ?? (app.isPackaged ? '0' : '1')
+      ),
     }
     const frozen = app.isPackaged ? getFrozenBackendExe(backendDir) : null
 

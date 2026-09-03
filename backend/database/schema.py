@@ -2419,4 +2419,10 @@ async def init_schema(db: DatabaseConnection) -> None:
     # repeated startup, and a legacy-database upgrade on the same code path.
     await init_screenplay_v2_runtime_schema(db)
 
+    from database.screenplay_tool_cache_schema import init_screenplay_tool_cache_schema
+
+    await init_screenplay_tool_cache_schema(db)
+    from database.writing_tool_cache_schema import init_writing_tool_cache_schema
+    await init_writing_tool_cache_schema(db)
+
     # TODO: migrateEntityIdsToText8 – placeholder for entity ID migration

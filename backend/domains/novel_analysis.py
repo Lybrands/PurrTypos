@@ -17,6 +17,21 @@ NOVEL_ANALYSIS_SCHEMA_VERSION = 1
 NOVEL_ANALYSIS_ARTIFACT_KIND = "novel_source_analysis_candidate"
 NOVEL_ANALYSIS_REVIEW_ARTIFACT_KIND = "novel_source_analysis_review"
 NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX = "novel-analysis-artifact://"
+NOVEL_ANALYSIS_CRAFT_CATEGORIES = {
+    "narrative_structure": "叙事结构",
+    "characterization": "人物塑造",
+    "point_of_view": "视角与信息控制",
+    "pacing_and_tension": "节奏与张力",
+    "language_and_style": "语言与文风",
+    "dialogue": "对话设计",
+    "imagery_and_atmosphere": "意象与氛围",
+    "theme_and_symbolism": "主题与象征",
+}
+
+
+def novel_analysis_craft_category_label(value: object) -> str:
+    key = str(value or "").strip()
+    return NOVEL_ANALYSIS_CRAFT_CATEGORIES.get(key, "其他写作技法")
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,21 +331,37 @@ def compile_novel_analysis_recipe(
         "coverage_report",
         "build_review_artifact",
     )
-    if len(planned) > len(stage_order):
-        raise ValueError("novel analysis plan has too many steps")
     stage_by_kind = {
         kind: index for index, kind in enumerate(stage_order)
     }
+    if len(planned) <= len(stage_order):
+        planner_step_ids = tuple(
+            planned[min(
+                stage_by_kind[kind] * len(planned) // len(stage_order),
+                len(planned) - 1,
+            )]
+            for _, kind, _, _ in specs
+        )
+    else:
+        if len(planned) > len(specs):
+            raise ValueError(
+                "novel analysis execution recipe has fewer units than the "
+                "model-authored plan"
+            )
+        planner_step_ids = tuple(
+            planned[min(
+                index * len(planned) // len(specs),
+                len(planned) - 1,
+            )]
+            for index in range(len(specs))
+        )
     steps = tuple(
         ExecutionRecipeStep(
             id=unit_id,
             kind=kind,
             depends_on=dependencies,
             executor="novel_analysis",
-            plan_step_id=planned[min(
-                stage_by_kind[kind] * len(planned) // len(stage_order),
-                len(planned) - 1,
-            )],
+            plan_step_id=planner_step_id,
             max_attempts=2 if kind in {
                 "extract_section",
                 "normalize_entities",
@@ -338,13 +369,14 @@ def compile_novel_analysis_recipe(
             } else 1,
             metadata=dict(metadata),
         )
-        for unit_id, kind, dependencies, metadata in specs
+        for (unit_id, kind, dependencies, metadata), planner_step_id in zip(
+            specs,
+            planner_step_ids,
+        )
     )
     mapped = {step.plan_step_id for step in steps}
     if mapped != set(planned):
-        # A planner may emit more todos than the minimum recipe has units. Fail
-        # closed instead of silently claiming work that the recipe cannot map.
-        raise ValueError("novel analysis plan has too many steps")
+        raise ValueError("novel analysis execution recipe did not cover the plan")
     canonical = {
         "schemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
         "sections": list(sections),
@@ -396,6 +428,7 @@ def novel_analysis_model_call_count(recipe: ExecutionRecipe) -> int:
 __all__ = [
     "NOVEL_ANALYSIS_ARTIFACT_KIND",
     "NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX",
+    "NOVEL_ANALYSIS_CRAFT_CATEGORIES",
     "NOVEL_ANALYSIS_DOMAIN_NAMESPACE",
     "NOVEL_ANALYSIS_REVIEW_ARTIFACT_KIND",
     "NOVEL_ANALYSIS_SCHEMA_VERSION",
@@ -404,4 +437,5 @@ __all__ = [
     "canonical_digest",
     "compile_novel_analysis_recipe",
     "novel_analysis_model_call_count",
+    "novel_analysis_craft_category_label",
 ]

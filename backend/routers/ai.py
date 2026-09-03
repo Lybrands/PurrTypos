@@ -460,6 +460,74 @@ async def get_agent_run_diagnostics(run_id: str):
     return {"success": True, "data": report}
 
 
+@router.get("/ai/agent-runs/{run_id}/planner-diagnostics")
+async def get_agent_run_planner_diagnostics(run_id: str):
+    """Return persisted Planner model content to the developer inspector."""
+
+    from dependencies import get_db
+    from infrastructure.persistence.planner_diagnostics import (
+        read_planner_model_outputs,
+    )
+    from infrastructure.persistence.run_store import get_run
+
+    db = get_db()
+    if await get_run(db, run_id) is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    return {
+        "success": True,
+        "data": {
+            "runId": run_id,
+            "outputs": await read_planner_model_outputs(db, run_id),
+        },
+    }
+
+
+@router.get("/ai/agent-runs/{run_id}/model-input-diagnostics")
+async def get_agent_run_model_input_diagnostics(run_id: str):
+    """Return exact Provider input messages captured in development."""
+
+    from config import DEV_DIAGNOSTICS_ENABLED
+    from dependencies import get_db
+    from infrastructure.persistence.model_input_diagnostics import (
+        read_model_input_diagnostics,
+    )
+    from infrastructure.persistence.run_store import get_run
+
+    if not DEV_DIAGNOSTICS_ENABLED:
+        return {"success": False, "error": "模型输入诊断只在开发环境启用"}
+    db = get_db()
+    if await get_run(db, run_id) is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    return {
+        "success": True,
+        "data": {
+            "runId": run_id,
+            "calls": await read_model_input_diagnostics(db, run_id),
+        },
+    }
+
+
+@router.get("/ai/agent-runs/{run_id}/tool-diagnostics")
+async def get_agent_run_tool_diagnostics(run_id: str, after: int = 0):
+    """Read private tool IO only through the development diagnostics gate."""
+    from config import DEV_DIAGNOSTICS_ENABLED
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
+    from infrastructure.persistence.tool_diagnostics import read_tool_diagnostics
+
+    if not DEV_DIAGNOSTICS_ENABLED:
+        return {"success": False, "error": "工具调用诊断只在开发环境启用"}
+    if after < 0:
+        return {"success": False, "error": "诊断游标不能为负数"}
+    db = get_db()
+    if await get_run(db, run_id) is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    return {
+        "success": True,
+        "data": await read_tool_diagnostics(db, run_id, after=after),
+    }
+
+
 @router.post("/ai/artifacts/maintenance")
 async def maintain_agent_artifacts():
     """Safely reap invalid leases without enabling content retention GC."""

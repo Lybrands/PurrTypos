@@ -22,6 +22,7 @@ from purra.ports import CancellationSignal, ToolRegistration
 from purra.tools import InMemoryToolCatalog
 
 from domains.screenplay.source_scope import is_restricted_source_scope
+from domains.screenplay_agent.contracts import SCREENPLAY_DELIVERABLE_LABELS
 from domains.screenplay_agent.agent_context import (
     SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
     ScreenplayAgentDomainContext,
@@ -91,15 +92,16 @@ _ROLE_TOOLS = {
     "review": frozenset(SCREENPLAY_TOOL_SCHEMAS),
 }
 _TOOL_PROFILES = {
-    "draft_scene": _DRAFT_SOURCE_TOOLS | _DEPENDENCY_READ_TOOL | {
+    "draft_scene": _PROJECT_TOOLS | _DRAFT_SOURCE_TOOLS | _DEPENDENCY_READ_TOOL | {
         "getScreenplayEpisodeContext",
     },
     "episode_metadata": _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL,
-    "review_dimension": frozenset({
+    "review_dimension": _PROJECT_TOOLS | frozenset({
         "getScreenplayEpisodeContext",
         "writeScreenplayCandidatePart",
     }),
     "source_chapter_digest": frozenset({
+        "inspectSourceStructure",
         "readSourceChapters",
         "writeScreenplayCandidatePart",
     }),
@@ -109,8 +111,7 @@ _TOOL_PROFILES = {
     "source_analysis_section": (
         _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
     ),
-    "creative_brief_section": frozenset({
-        "readScreenplayDeliverable",
+    "creative_brief_section": _PROJECT_TOOLS | frozenset({
         "readScreenplayTaskDependencies",
         "writeScreenplayCandidatePart",
     }),
@@ -123,7 +124,8 @@ _TOOL_PROFILES = {
         | _CANDIDATE_WRITE_TOOL
     ),
     "episode_plan_fragment": (
-        {"readSourceChapters"} | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
+        {"inspectSourceStructure", "readSourceChapters"}
+        | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
     ),
     "character_arcs_index": (
         _PROJECT_TOOLS | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
@@ -131,10 +133,7 @@ _TOOL_PROFILES = {
     "character_arc_fragment": (
         _PROJECT_TOOLS | _DEPENDENCY_READ_TOOL | _CANDIDATE_WRITE_TOOL
     ),
-    "scene_list_episode": frozenset({
-        "readScreenplayDeliverable",
-        "writeScreenplayCandidatePart",
-    }),
+    "scene_list_episode": _PROJECT_TOOLS | _CANDIDATE_WRITE_TOOL,
     "final_response": frozenset(),
 }
 _DISPLAY_NAMES = {
@@ -182,24 +181,92 @@ def screenplay_tool_display_names(
     tool_name: str,
     *,
     episode_number: int | None = None,
+    deliverable_role: str | None = None,
+    task_episode_number: int | None = None,
+    read_targets: tuple[str, ...] = (),
+    search_query: str | None = None,
 ) -> dict[str, str]:
     normalized_name = str(tool_name or "")
     label = _DISPLAY_NAMES.get(normalized_name)
+    if normalized_name == "readScreenplayDeliverable":
+        target = SCREENPLAY_DELIVERABLE_LABELS.get(deliverable_role, "剧本交付物")
+        if episode_number is not None and episode_number > 0:
+            label = f"读取第 {episode_number} 集{target}"
+        elif task_episode_number is not None and task_episode_number > 0:
+            label = f"为第 {task_episode_number} 集读取{target}"
+        else:
+            label = f"读取{target}"
+        return {"zh-CN": label}
     if episode_number is not None and episode_number > 0:
         template = _EPISODE_DISPLAY_NAMES.get(normalized_name)
         if template is not None:
             label = template.format(episode=episode_number)
+    if label and read_targets:
+        if normalized_name == "readScreenplayTaskDependencies":
+            label = _DISPLAY_NAMES[normalized_name]
+        targets = "、".join(_display_text(value, 48) for value in read_targets[:2])
+        if len(read_targets) > 2:
+            targets += f"等 {len(read_targets)} 项"
+        label += f"：{targets}"
+    if label and search_query:
+        label += f"：{_display_text(search_query)}"
     return {"zh-CN": label} if label else {}
 
 
-def _operation_display_params(state, arguments, tool_call) -> dict[str, int]:
-    del tool_call
+def _display_text(value: str, limit: int = 72) -> str:
+    text = " ".join(value.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _dependency_display_target(key: str, state) -> str:
+    episode = state.domain.get("boundEpisodeNumber")
+    scene_ids = state.domain.get("sceneIds") or ()
+    prefix = f"draft:{episode}:"
+    if key.startswith(prefix) and key[len(prefix):] in scene_ids:
+        return f"第 {episode} 集第 {scene_ids.index(key[len(prefix):]) + 1} 场产出"
+    parts = key.split(":", 2)
+    if len(parts) == 3 and parts[0] == "draft" and parts[1].isdigit() and int(parts[1]) > 0:
+        return f"第 {int(parts[1])} 集场景 {_display_text(parts[2], 24)} 产出"
+    return _display_text(key, 48)
+
+
+def _operation_display_params(state, arguments, tool_call) -> dict[str, Any]:
     value = arguments.get("episodeNumber")
+    if tool_call.name == "readScreenplayDeliverable":
+        params = {}
+        role = arguments.get("role")
+        if isinstance(role, str) and role in SCREENPLAY_DELIVERABLE_LABELS:
+            params["deliverableRole"] = role
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            params["episodeNumber"] = value
+        bound = state.domain.get("boundEpisodeNumber")
+        if isinstance(bound, int) and not isinstance(bound, bool) and bound > 0:
+            params["taskEpisodeNumber"] = bound
+        return params
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         value = state.domain.get("boundEpisodeNumber")
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return {}
-    return {"episodeNumber": value}
+        value = None
+    params = {"episodeNumber": value} if value is not None else {}
+    if tool_call.name == "readScreenplayTaskDependencies":
+        keys = arguments.get("partKeys")
+        if isinstance(keys, (list, tuple)):
+            params["readTargets"] = [
+                _dependency_display_target(key, state) for key in keys if isinstance(key, str)
+            ]
+    elif tool_call.name == "readSourceChapters":
+        chapters = (state.domain.get("sourceScope") or {}).get("chapters") or ()
+        titles = {part["id"]: part.get("title") or part["id"]
+                  for part in chapters if isinstance(part, Mapping) and part.get("id")}
+        params["readTargets"] = [
+            _display_text(str(titles.get(key, key)), 48)
+            for key in arguments.get("chapterIds", ()) if isinstance(key, str)
+        ]
+    elif tool_call.name in {"searchSourceText", "searchScreenplayDeliverables", "querySourceStoryFacts"}:
+        query = arguments.get("query")
+        if isinstance(query, str) and query.strip():
+            params["searchQuery"] = _display_text(query)
+    return params
 
 
 def build_screenplay_tool_catalog(
@@ -284,6 +351,7 @@ def _adapt_handler(tool_name: str, handler):
         effect = result.get("effect")
         return ToolHandlerResult(
             content=content,
+            from_cache=bool(result.get("fromCache", False)),
             effects=(
                 (DomainEffect(type=str(effect[0]), payload=dict(effect[1])),)
                 if isinstance(effect, tuple) and len(effect) == 2

@@ -34,6 +34,11 @@ def _env_optional_non_negative_float(key: str) -> float | None:
     return value
 
 
+def _env_flag(key: str, default: bool = False) -> bool:
+    raw = _env(key, "1" if default else "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 # Paths
 DATA_DIR: Path = Path(_env("PURRTYPOS_DATA_DIR", ""))
 SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
@@ -41,6 +46,7 @@ SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
 # Server
 HOST: str = _env("PURRTYPOS_HOST", "127.0.0.1")
 PORT: int = int(_env("PURRTYPOS_PORT", "18321"))
+DEV_DIAGNOSTICS_ENABLED: bool = _env_flag("PURRTYPOS_DEV_DIAGNOSTICS")
 
 # Protected calls fail closed after this many seconds without a human decision.
 # Keep the default deliberately short so abandoned confirmations fail closed.

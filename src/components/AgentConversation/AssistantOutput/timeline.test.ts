@@ -7,12 +7,44 @@ import {
   buildAssistantTimeline,
   executionPanelHasTerminalError,
   getCanonicalOperationStatusText,
+  getActiveOperationLabel,
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getOperationGroupProgress,
   groupConsecutiveWorkSteps,
   type AssistantTimelinePart,
 } from './timeline.ts'
+
+test('native Provider progress renders as live commentary without becoming answer text', () => {
+  const progress: CanonicalOutputEvent = {
+    eventId: 'agent-progress-1', runId: 'run-1', turnId: 'turn-1',
+    invocationId: 'invocation-1', outputStreamId: 'stream-1', sequence: 1,
+    source: 'provider', kind: 'agent.progress', channel: 'commentary', visibility: 'public',
+    occurredAt: '2026-09-02T08:00:01Z', emittedAt: '2026-09-02T08:00:01Z',
+    payload: {
+      schemaVersion: 'purra.agent-progress/v1',
+      sourceChunkIndex: 1,
+      text: '正在核对人物动机',
+    },
+  }
+  const output = reduceCanonicalOutput(initialCanonicalOutputState(), progress)
+  const message: AgentConversationMessage = {
+    role: 'assistant', content: '', canonicalOutput: output,
+  }
+  const timeline = buildAssistantTimeline(message, {
+    messageIndex: 0,
+    isStreaming: true,
+  })
+
+  assert.equal(getAgentProcessingLabel(message), '正在核对人物动机')
+  assert.deepEqual(timeline, [{
+    type: 'commentary',
+    md: '正在核对人物动机',
+    startedAt: Date.parse('2026-09-02T08:00:01Z'),
+    regionKey: '0-agent-progress-agent-progress-1',
+  }])
+  assert.equal(output.finalText, '')
+})
 
 test('planning uses public narration instead of an executable operation row', () => {
   for (const phase of ['planning', 'replanning']) {
@@ -170,6 +202,51 @@ test('canonical timeline filters model operations, localizes tools, and groups c
   assert.equal(getExecutionPanelPresentation(visible, {
     isStreaming: true,
   }).title, '正在进行')
+  assert.equal(
+    getActiveOperationLabel(visible),
+    '重试 读取剧本交付物',
+  )
+})
+
+test('screenplay read labels retain the requested episode and task purpose after completion', () => {
+  for (const [toolName, label] of [
+    ['readScreenplayDeliverable', '读取第 2 集场景表'],
+    ['readScreenplayDeliverable', '为第 1 集读取创作简报'],
+    ['readScreenplayDeliverable', '读取原作分析'],
+    ['readScreenplayTaskDependencies', '读取任务依赖：第 1 集第 1 场产出'],
+    ['readScreenplayTaskDependencies', '读取任务依赖：第 1 集第 2 场产出'],
+    ['searchSourceText', '为第 1 集检索原文：母亲 庆功宴 起床'],
+    ['readSourceChapters', '为第 1 集读取原文章节：第1章 清河桥'],
+  ]) {
+    const event: CanonicalOutputEvent = {
+      eventId: 'read-start', runId: 'run-1', turnId: null,
+      invocationId: null, outputStreamId: null, sequence: 1,
+      source: 'runtime', kind: 'operation.started', channel: 'operation', visibility: 'public',
+      occurredAt: '2026-09-03T00:00:00Z', emittedAt: '2026-09-03T00:00:00Z',
+      payload: {
+        operationId: 'read-1', kind: 'tool',
+        display: { labelParams: {
+          toolName, displayNames: { 'zh-CN': label },
+        } },
+      },
+    }
+    let output = reduceCanonicalOutput(initialCanonicalOutputState(), event)
+    for (const isStreaming of [true, false]) {
+      if (!isStreaming) {
+        output = reduceCanonicalOutput(output, {
+          ...event, eventId: 'read-finish', sequence: 2, kind: 'operation.finished',
+          payload: { operationId: 'read-1', status: 'succeeded' },
+        })
+      }
+      const parts = buildAssistantTimeline({
+        role: 'assistant', content: '', canonicalOutput: output,
+      }, { messageIndex: 0, isStreaming })
+      const operations = parts.filter((part) => part.type === 'operation')
+      assert.deepEqual(operations.map((part) => part.label), [label])
+      assert.equal(getExecutionPanelPresentation(operations, { isStreaming }).title,
+        isStreaming ? '正在进行' : '已完成')
+    }
+  }
 })
 
 test('canonical timeline retains compaction and sequenced delegation without duplicating operations', () => {
@@ -537,7 +614,7 @@ test('execution panel covers active empty work and completed visible operations'
       active: false,
       autoOpen: false,
       stepCount: 1,
-      title: '执行了 1 个步骤',
+      title: '已完成',
     },
   )
   assert.deepEqual(
@@ -547,7 +624,7 @@ test('execution panel covers active empty work and completed visible operations'
       active: false,
       autoOpen: false,
       stepCount: 0,
-      title: '用时',
+      title: '已完成',
     },
   )
 })
@@ -703,6 +780,54 @@ test('execution progress counts only visible rows at the active frontier', () =>
     active: false,
     parallel: false,
   })
+})
+
+test('execution panel title stays a status while tool rows retain their labels', () => {
+  const parts: AssistantTimelinePart[] = [{
+    type: 'tools',
+    segmentIndex: 0,
+    isLive: true,
+    segment: {
+      commentaryBlockIndex: null,
+      labels: ['读取人物资料', '检查人物弧光', '写入候选稿'],
+      completedToolCount: 1,
+    },
+  }]
+
+  assert.equal(
+    getActiveOperationLabel(parts.filter(
+      (part): part is Extract<AssistantTimelinePart, { type: 'tools' }> =>
+        part.type === 'tools',
+    )),
+    '检查人物弧光',
+  )
+  assert.equal(
+    getExecutionPanelPresentation(parts, { isStreaming: true }).title,
+    '正在进行',
+  )
+  assert.equal(
+    getExecutionPanelPresentation(parts, { isStreaming: false }).title,
+    '已完成',
+  )
+})
+
+test('execution panel does not describe failed or interrupted runs as completed', () => {
+  for (const [status, title] of [
+    ['failed', '执行失败'],
+    ['blocked', '执行失败'],
+    ['canceled', '已取消'],
+    ['paused', '已暂停'],
+  ]) {
+    assert.equal(getExecutionPanelPresentation([], {
+      isStreaming: false,
+      durationMs: 1000,
+      status,
+    }).title, title)
+  }
+  assert.equal(getExecutionPanelPresentation([], {
+    isStreaming: false,
+    hasError: true,
+  }).title, '执行失败')
 })
 
 test('consecutive legacy operations collapse into one step group', () => {

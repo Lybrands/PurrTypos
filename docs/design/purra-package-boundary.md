@@ -11,6 +11,11 @@
 
 ## 公开面
 
+PurrTypos 各 Agent 的材料准备遵循
+[业务公共编排规范](agent-read-reuse-contract.md)。读取缓存、材料去重、预装和
+业务证据准入由宿主实现，使用既有 PurrA 上下文与证据接口。该项接入待实现，
+不涉及框架源码、公开契约或依赖版本变更。
+
 - `purra.api`：完整 Agent Run 的唯一执行入口；
 - `purra.model_execution`：宿主模型型 Hook 的受管无工具调用入口；
 - `purra.model_invocation`：Composition Root 装配受管 invocation 的公开契约；
@@ -64,13 +69,17 @@ JSON 修复只允许处理“供应商已正常结束，但完整输出不符合
 
 ## 打包
 
-- 开发和测试通过 `-e ../purra` 安装本地 0.5.0，仍从公共 Python 包导入；
+- 开发和测试安装仓库内固定的
+  `backend/vendor/purra-0.5.0-py3-none-any.whl`，不从相邻源码 checkout 导入；
 - PyInstaller 分析当前 Python 环境中安装的 PurrA，无需注入源码路径；
-- Electron / Web 分发从同一目录进行非可编辑安装，把实际包文件放入后端资源；
+- Electron / Web 分发在安装前校验 wheel SHA-256
+  `0d380d4d65f1378574c940e2c35b6f7de8f23c147d299e56b5376c6ee1e535b4`，
+  再把实际包文件放入后端资源；
 - 框架包本身不依赖 FastAPI、Pydantic、模型 SDK 或数据库驱动。
 
-本地源码是唯一依赖来源，不再回退到 PyPI 0.4.1。CI 或其他开发机器必须先准备
-同级 PurrA 0.5.0 仓库；发布框架、推送分支与远端 CI 验证不属于本地切换。
+Core 的本地 wheel 是唯一依赖来源，不回退到 PyPI 或相邻 PurrA 源码。当前
+`purra-mem0` 集成仍从同级仓库的独立 Python 包安装；它不能改变 Core 的实际导入
+路径。发布框架、推送分支与远端 CI 验证不属于本地切换。
 
 ## 0.5.0 输出契约
 
@@ -125,12 +134,20 @@ Provider/存储配置、现有数据分工、来源修改与撤回事件、检�
 ## 0.5.0 Planner 协议流接入（2026-09-01）
 
 Planner 是 Composition 提供给 Agent 的能力，不是 Run 的隐式开关。每个
-`AgentRunRequest` 都使用 `PlanningMode`：普通写作请求默认 `REACTIVE`，只有请求
-显式传入 `planningMode=planned` 才规划；剧本根 Run 和小说来源分析根 Run 根据
-固定业务动作选择 `PLANNED`；剧本执行单元、结构化/最终响应、小说分析执行单元和
-追问均选择 `REACTIVE`。工具存在、Agent 模式和 PlanningPolicy 都不参与模式判断。
-显式 Planned 但 Composition 未配置 Planner 时保留 Core 的
-`planning_unavailable` 失败关闭语义。
+`AgentRunRequest` 都使用 `PlanningMode`：普通写作请求省略 `planning_mode` 并使用
+Core 默认的 `AUTO`。第一次普通模型调用可以直接回答、调用普通业务工具，或调用
+PurrA 私有 `request_plan` 提升到受管 Planner；宿主不增加复杂度分类调用。
+剧本根 Run 因固定 Durable 准入契约选择 `PLANNED`；小说来源分析根 Run 使用
+`AUTO`，由模型直接回答、使用普通工具或通过私有 `request_plan` 请求受管规划。
+剧本执行单元、结构化/最终响应、小说分析执行单元和追问因明确禁止重复规划选择
+`REACTIVE`。工具存在、Agent 模式和 PlanningPolicy 都不参与模式判断。显式
+Planned 但 Composition 未配置 Planner 时保留 Core 的 `planning_unavailable`
+失败关闭语义。
+
+`request_plan` 不注册到业务 ToolCatalog，不进入业务 Tool Executor、公开 canonical
+事件、SSE 或 UI。只有产品契约明确要求副作用前必须通过计划准入的工具才使用
+`planning_requirement=ToolPlanningRequirement.REQUIRED`；现有 Writing 工具继续由
+PROPOSE、审批、作用域和幂等边界约束，不因风险等级被批量升级为 required。
 
 PlanningPolicy 只在已经选择 Planned 后提供步骤、工具、fallback 和 validator 等
 约束。宿主不保留 `ReactivePlanningPolicy`、`ToolPlanningPolicy`、`should_plan`
@@ -162,3 +179,31 @@ planning progress；按真实 `eventId` 去重并按 `sequence` 续读。时间�
 说明、完整计划收到、校验及完成时间。Provider Adapter 没有 HTTP/SDK 证据时，
 request sent、first byte 和 HTTP attempt 保持空值；宿主不从阶段时间推测模型
 thinking，也不把 prompt、计划正文、reasoning、密钥或 headers 提升到公共流。
+
+### Auto 直接回答与提升边界
+
+Auto 的首次调用同时拿到普通业务工具和私有 `request_plan` 时，Provider 输出先按
+private stream 持久化。若本轮没有工具调用并直接形成答案，Core 从同一已提交 stream
+原样投影 public final canonical event，不增加 tool-free 模型调用，也不重新生成文案。
+final 投影拒绝包含 Provider tool call 的 stream；`request_plan` 控制、参数、reasoning
+和原始 Provider stream 始终保持 private。模型在请求规划时同时写出的用户说明会从
+同一已提交 stream 原样投影为 public commentary，并在 Planner operation 之前提交；
+没有模型正文时不补造说明。
+
+动态 delegation 在首次 runtime 准备阶段绑定根 Run，并跨 `request_plan` 提升继续
+使用同一绑定；planned runtime 不再重复绑定，Run 结束时仍只释放一次。
+`test_writing_auto_direct_answer_uses_one_normal_model_call`、
+`test_writing_auto_request_plan_uses_shared_core_and_public_progress` 和 SQLite final 投影
+测试覆盖真实 Writing Composition、持久化、公开事件及幂等回放。PurrTypos 没有增加
+兼容 wrapper、双轨执行、业务复杂度判断或强制 Writing 全部进入 Planned。
+
+### 普通 Agent 的公开阶段进展
+
+普通模型流使用 `purra.agent-progress/v1` 的 `agent.progress`，与 Planner 的
+`planning.progress` 分开。PurrA Core 只接受 Provider Adapter 明确提供的
+`ModelStreamChunk.progress_delta`：先持久化 private Provider 来源，再发布 public
+projection。PurrTypos 的 SQLite 仓库逐字核对 Run、invocation、stream 和 source chunk，
+SSE、历史回放和前端时间线消费同一条 canonical event。当前 PurrTypos 的 Provider
+profiles 全部声明 `public_progress=unavailable`，因此不会从 reasoning、普通正文、固定
+步骤、定时器或额外模型调用伪造阶段文案；只有以后某个 Provider Adapter 具备独立原生
+进展通道并明确声明支持后，纯模型阶段才会出现这类事件。

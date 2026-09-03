@@ -151,6 +151,7 @@ export interface ExecutionLogStepGroupProps {
   completedDurationMs: number;
   activeStartedAt?: number;
   active?: boolean;
+  activeLabel?: string;
   hasError?: boolean;
   children: React.ReactNode;
 }
@@ -161,6 +162,7 @@ export function ExecutionLogStepGroup({
   completedDurationMs,
   activeStartedAt,
   active = false,
+  activeLabel,
   hasError = false,
   children,
 }: ExecutionLogStepGroupProps) {
@@ -199,8 +201,16 @@ export function ExecutionLogStepGroup({
         {hasError ? (
           <AlertCircleIcon className="work-log-step-group__error-icon" />
         ) : null}
-        <span>{active ? "正在执行" : "执行了"}</span>
-        <span className="work-log-step-group__count">{stepCount} 个步骤</span>
+        <span>
+          {active
+            ? activeLabel
+              ? `正在执行 ${activeLabel}`
+              : "正在执行"
+            : "执行了"}
+        </span>
+        {!active ? (
+          <span className="work-log-step-group__count">{stepCount} 个步骤</span>
+        ) : null}
         {totalDurationMs > 0 ? (
           <span className="work-log-step-group__duration">
             · {formatDuration(totalDurationMs)}

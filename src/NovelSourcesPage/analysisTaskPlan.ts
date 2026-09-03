@@ -52,46 +52,28 @@ function unitStatus(
   return 'pending'
 }
 
-export function buildNovelAnalysisTaskPlan(run: NovelAnalysisRun): AiTaskPlan {
+export function buildNovelAnalysisTaskPlan(run: NovelAnalysisRun): AiTaskPlan | undefined {
   const semanticPlan = run.analysisPlan
-  if (semanticPlan?.steps.length) {
-    return {
-      runId: run.runId,
-      title: semanticPlan.title || '分析计划',
-      goal: semanticPlan.goal || semanticPlan.taskSpec?.goal,
-      status: taskStatus(run),
-      steps: semanticPlan.steps.map((step) => {
-        const units = (run.units || []).filter(
-          (unit) => unit.plannerStepId === step.id,
-        )
-        return {
-          id: step.id,
-          title: step.title,
-          description: step.description,
-          type: step.type === 'review' ? 'review' : 'analyze',
-          executor: step.executor === 'tool' ? 'tool' : 'model',
-          dependsOn: step.dependsOn,
-          status: unitStatus(units),
-          error: units.find((unit) => unit.errorCode)?.errorCode || undefined,
-        }
-      }),
-    }
-  }
-
+  if (!semanticPlan?.steps.length) return undefined
   return {
     runId: run.runId,
-    title: '分析进度',
-    goal: '形成可审核的事实脉络和写作技法',
+    title: semanticPlan.title,
+    goal: semanticPlan.goal || semanticPlan.taskSpec?.goal,
     status: taskStatus(run),
-    steps: (run.units || []).map((unit) => ({
-      id: unit.unitId,
-      title: unit.title,
-      type: unit.kind === 'build_review_artifact' ? 'review' : 'analyze',
-      executor: unit.kind === 'validate_evidence' || unit.kind === 'coverage_report'
-        ? 'tool'
-        : 'model',
-      status: unitStatus([unit]),
-      error: unit.errorCode || undefined,
-    })),
+    steps: semanticPlan.steps.map((step) => {
+      const units = (run.units || []).filter(
+        (unit) => unit.plannerStepId === step.id,
+      )
+      return {
+        id: step.id,
+        title: step.title,
+        description: step.description,
+        type: step.type === 'review' ? 'review' : 'analyze',
+        executor: step.executor === 'tool' ? 'tool' : 'model',
+        dependsOn: step.dependsOn,
+        status: unitStatus(units),
+        error: units.find((unit) => unit.errorCode)?.errorCode || undefined,
+      }
+    }),
   }
 }

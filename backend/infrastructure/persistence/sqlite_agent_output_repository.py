@@ -25,6 +25,7 @@ from purra.errors import ContractViolationError, RunCommitProjectionError
 from purra.json_values import thaw_json_mapping
 from purra.normalization import non_negative_int, positive_int, required_text
 from purra.output import (
+    AGENT_PROGRESS_SCHEMA,
     AgentOutputEvent,
     AgentOutputEventDraft,
     AgentOutputIntent,
@@ -657,6 +658,106 @@ class SqliteAgentOutputRepository:
             )
             return commentary, committed
 
+    async def publish_stream_content_as_final(
+        self,
+        output_stream_id: str,
+    ) -> tuple[AgentOutputEvent, ...]:
+        stream_id = required_text(output_stream_id, "output stream id")
+        async with self._db.transaction(cancellation_linearizable=True):
+            stream = await self._require_stream(stream_id)
+            if stream["status"] != "committed":
+                raise ContractViolationError(
+                    "only a committed model stream can publish final output"
+                )
+            spec = _stream_spec(stream)
+            if spec.output_protocol is not None:
+                raise ContractViolationError(
+                    "planning streams cannot be promoted to final"
+                )
+            if spec.intent is not AgentOutputIntent.STRUCTURED_PRIVATE:
+                raise ContractViolationError(
+                    "only private model content can be promoted to final"
+                )
+
+            final_key = f"provider:{spec.invocation_id}:final"
+            committed_key = f"stream:{stream_id}:final:committed"
+            existing_final = await self._db.fetch_one(
+                "SELECT * FROM ai_agent_run_events WHERE source_event_key = ?",
+                [final_key],
+            )
+            existing_commit = await self._db.fetch_one(
+                "SELECT * FROM ai_agent_run_events WHERE source_event_key = ?",
+                [committed_key],
+            )
+            if existing_final is not None or existing_commit is not None:
+                if existing_final is None or existing_commit is None:
+                    raise ContractViolationError(
+                        "partial final publication already exists"
+                    )
+                return _event(existing_final), _event(existing_commit)
+
+            scoped = await self._db.fetch_all(
+                "SELECT kind, payload_json, occurred_at, channel, visibility "
+                "FROM ai_agent_run_events WHERE output_stream_id = ? "
+                "AND source = ? ORDER BY sequence, id",
+                [stream_id, OutputSource.PROVIDER.value],
+            )
+            if any(_row_has_tool_call_delta(row) for row in scoped):
+                raise ContractViolationError(
+                    "final publication rejects Provider tool calls"
+                )
+            rows = [
+                row
+                for row in scoped
+                if row.get("channel") == OutputChannel.DIAGNOSTIC.value
+                and row.get("visibility") == OutputVisibility.PRIVATE.value
+                and row.get("kind")
+                in {
+                    OutputEventKind.PROVIDER_CONTENT_DELTA.value,
+                    OutputEventKind.PROVIDER_DELTA_BATCH.value,
+                }
+            ]
+            content = "".join(_provider_text(row) for row in rows)
+            if not content.strip():
+                return ()
+
+            final = await self._append_event_in_transaction(
+                AgentOutputEventDraft.public_text(
+                    run_id=spec.run_id,
+                    turn_id=spec.turn_id,
+                    output_stream_id=spec.output_stream_id,
+                    invocation_id=spec.invocation_id,
+                    source_event_key=final_key,
+                    source=OutputSource.PROVIDER,
+                    channel=OutputChannel.FINAL,
+                    delta=content,
+                    occurred_at=datetime.fromisoformat(
+                        str(rows[0]["occurred_at"])
+                    ),
+                ),
+                allow_committed_stream=True,
+            )
+            await self._project_final_conversation(spec)
+            committed = await self._append_event_in_transaction(
+                AgentOutputEventDraft(
+                    run_id=spec.run_id,
+                    turn_id=spec.turn_id,
+                    output_stream_id=spec.output_stream_id,
+                    invocation_id=spec.invocation_id,
+                    source_event_key=committed_key,
+                    source=OutputSource.RUNTIME,
+                    kind=OutputEventKind.STREAM_COMMITTED,
+                    channel=OutputChannel.FINAL,
+                    visibility=OutputVisibility.PUBLIC,
+                    payload={
+                        "finishReason": str(stream.get("finish_reason") or "")
+                    },
+                    occurred_at=_now(),
+                ),
+                allow_committed_stream=True,
+            )
+            return final, committed
+
     async def abort_stream(
         self,
         output_stream_id: str,
@@ -1039,6 +1140,8 @@ class SqliteAgentOutputRepository:
                 )
         if draft.kind is OutputEventKind.PLANNING_PROGRESS:
             await self._validate_planning_projection(draft)
+        if draft.kind is OutputEventKind.AGENT_PROGRESS:
+            await self._validate_agent_progress_projection(draft)
         is_domain_effect = draft.kind is OutputEventKind.DOMAIN_EFFECT
         if is_domain_effect != (draft.source is OutputSource.DOMAIN):
             raise ContractViolationError(
@@ -1337,6 +1440,49 @@ class SqliteAgentOutputRepository:
                 "planning projection does not match Provider source"
             ) from error
 
+    async def _validate_agent_progress_projection(
+        self,
+        draft: AgentOutputEventDraft,
+    ) -> None:
+        payload = thaw_json_mapping(draft.payload)
+        chunk_index = payload.get("sourceChunkIndex")
+        if (
+            draft.source is not OutputSource.PROVIDER
+            or draft.channel is not OutputChannel.COMMENTARY
+            or draft.visibility is not OutputVisibility.PUBLIC
+            or payload.get("schemaVersion") != AGENT_PROGRESS_SCHEMA
+            or type(chunk_index) is not int
+            or draft.source_event_key
+            != f"agent-progress:{draft.invocation_id}:{chunk_index}"
+        ):
+            raise ContractViolationError("agent progress projection scope mismatch")
+        run = await self._db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [draft.run_id],
+        )
+        if run is None or run.get("status") != RunStatus.RUNNING.value:
+            raise ContractViolationError(
+                "terminal Run cannot accept agent progress"
+            )
+        rows = await self._db.fetch_all(
+            "SELECT kind, payload_json FROM ai_agent_run_events "
+            "WHERE run_id = ? AND invocation_id = ? AND source = ? "
+            "ORDER BY sequence, id",
+            [draft.run_id, draft.invocation_id, OutputSource.PROVIDER.value],
+        )
+        expected = next(
+            (
+                _provider_progress_at_chunk(row, chunk_index)
+                for row in rows
+                if _provider_progress_at_chunk(row, chunk_index) is not None
+            ),
+            None,
+        )
+        if expected != payload.get("text"):
+            raise ContractViolationError(
+                "agent progress projection does not match Provider source"
+            )
+
     async def _require_event_by_source_key(
         self,
         source_event_key: str,
@@ -1465,6 +1611,7 @@ def _json_mapping(value: object) -> dict[str, Any]:
 _PROVIDER_OUTPUT_BUDGET_KINDS = frozenset({
     OutputEventKind.PROVIDER_CONTENT_DELTA,
     OutputEventKind.PROVIDER_REASONING_DELTA,
+    OutputEventKind.PROVIDER_PROGRESS_DELTA,
     OutputEventKind.PROVIDER_TOOL_CALL_DELTA,
     OutputEventKind.PROVIDER_DELTA_BATCH,
 })
@@ -1501,6 +1648,29 @@ def _provider_text(row: Mapping[str, Any]) -> str:
         and entry.get("kind") == OutputEventKind.PROVIDER_CONTENT_DELTA.value
         and isinstance(entry.get("payload"), dict)
     )
+
+
+def _provider_progress_at_chunk(
+    row: Mapping[str, Any],
+    source_chunk_index: int,
+) -> str | None:
+    payload = _json_mapping(row.get("payload_json"))
+    if row.get("kind") != OutputEventKind.PROVIDER_DELTA_BATCH.value:
+        return None
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if (
+            isinstance(entry, dict)
+            and entry.get("kind")
+            == OutputEventKind.PROVIDER_PROGRESS_DELTA.value
+            and entry.get("sourceChunkIndex") == source_chunk_index
+            and isinstance(entry.get("payload"), dict)
+        ):
+            value = str(entry["payload"].get("delta") or "")
+            return value or None
+    return None
 
 
 def _row_has_tool_call_delta(row: Mapping[str, Any]) -> bool:

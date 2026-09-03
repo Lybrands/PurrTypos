@@ -33,6 +33,7 @@ class ModelProfile:
     tool_calling = FeatureSupport.SUPPORTED
     required_tool_choice = FeatureSupport.SUPPORTED
     parallel_tool_calls = FeatureSupport.SUPPORTED
+    public_progress = FeatureSupport.UNAVAILABLE
 
     def matches(self, model: str, base_url: str | None) -> bool:
         return (
@@ -70,6 +71,7 @@ class ModelProfile:
             tool_calling=self.tool_calling,
             required_tool_choice=self.required_tool_choice,
             parallel_tool_calls=self.parallel_tool_calls,
+            public_progress=self.public_progress,
             json_schema_level=(
                 "json_object" if self.supports_json_object_output else "unknown"
             ),

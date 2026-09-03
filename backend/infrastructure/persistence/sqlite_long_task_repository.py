@@ -204,6 +204,26 @@ class SqliteLongTaskRepository:
         )
         return tuple(_task(row) for row in rows)
 
+    async def find_by_idempotency_key(
+        self,
+        namespace: str,
+        idempotency_key: str,
+    ) -> LongTaskRecord | None:
+        normalized_namespace = _required(namespace, "long task namespace")
+        normalized_key = _required(
+            idempotency_key,
+            "long task idempotency key",
+        )
+        rows = await self._db.fetch_all(
+            "SELECT * FROM ai_agent_long_tasks WHERE namespace = ? "
+            "AND CAST(json_extract(metadata_json, '$.idempotencyKey') AS TEXT) = ? "
+            "ORDER BY update_time DESC LIMIT 2",
+            [normalized_namespace, normalized_key],
+        )
+        if len(rows) > 1:
+            raise ValueError("long task idempotency key conflicts")
+        return _task(rows[0]) if rows else None
+
     async def find_active(
         self,
         *,

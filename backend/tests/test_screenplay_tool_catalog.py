@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,10 +16,14 @@ from application.screenplay_agent_task_executor import (
     normalize_screenplay_candidate,
 )
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
+from application.screenplay_tool_calling import ScreenplayToolCallingService
+from application.screenplay_agent_stream import _with_screenplay_tool_display_names
+from domains.screenplay_agent.adapter import ScreenplayExecutionStateFactory
 from database.connection import DatabaseConnection
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.tools.catalog import (
     build_screenplay_tool_catalog as build_domain_catalog,
+    screenplay_tool_display_names,
 )
 from domains.screenplay_agent.tools.schemas import SCREENPLAY_TOOL_SCHEMAS
 from infrastructure.screenplay import (
@@ -117,6 +122,89 @@ def test_screenplay_tool_operations_project_only_the_bound_episode_number():
             arguments_json="{}",
         ),
     ) == {"episodeNumber": 7}
+
+
+@pytest.mark.parametrize(
+    "arguments,bound,expected_params,expected_label",
+    [
+        ({"role": "sceneList", "episodeNumber": 2}, 1,
+         {"deliverableRole": "sceneList", "episodeNumber": 2, "taskEpisodeNumber": 1},
+         "读取第 2 集场景表"),
+        ({"role": "creativeBrief"}, 1,
+         {"deliverableRole": "creativeBrief", "taskEpisodeNumber": 1},
+         "为第 1 集读取创作简报"),
+        ({"role": "sourceAnalysis"}, None,
+         {"deliverableRole": "sourceAnalysis"}, "读取原作分析"),
+        ({"role": "structure", "episodeNumber": True}, False,
+         {"deliverableRole": "structure"}, "读取分集结构"),
+    ],
+)
+def test_deliverable_display_distinguishes_read_episode_and_task_episode(
+    arguments, bound, expected_params, expected_label,
+):
+    async def handler(state, arguments, signal):
+        return {"content": "{}"}
+
+    catalog = build_domain_catalog(
+        handlers={name: handler for name in SCREENPLAY_TOOL_SCHEMAS}
+    )
+    registration = next(
+        item for item in catalog.registrations()
+        if item.schema.name == "readScreenplayDeliverable"
+    )
+    params = registration.operation_display_params(
+        ExecutionState(domain={"boundEpisodeNumber": bound, "private": "secret"}),
+        {**arguments, "private": "secret"},
+        ToolCall(id="read", name="readScreenplayDeliverable", arguments_json="{}"),
+    )
+    assert params == expected_params
+    assert screenplay_tool_display_names(
+        "readScreenplayDeliverable",
+        episode_number=params.get("episodeNumber"),
+        deliverable_role=params.get("deliverableRole"),
+        task_episode_number=params.get("taskEpisodeNumber"),
+    ) == {"zh-CN": expected_label}
+
+
+@pytest.mark.parametrize("name,arguments,label", [
+    ("readScreenplayTaskDependencies", {"partKeys": ["draft:1:scene-z"]},
+     "读取任务依赖：第 1 集第 1 场产出"),
+    ("readScreenplayTaskDependencies", {"partKeys": ["draft:1:scene-a"]},
+     "读取任务依赖：第 1 集第 2 场产出"),
+    ("readScreenplayTaskDependencies", {"partKeys": ["draft:2:scene-z"]},
+     "读取任务依赖：第 2 集场景 scene-z 产出"),
+    ("searchSourceText", {"query": "母亲\n庆功宴\t起床", "limit": 8},
+     "为第 1 集检索原文：母亲 庆功宴 起床"),
+    ("searchSourceText", {"query": "网吧 通宵 回家", "limit": 8},
+     "为第 1 集检索原文：网吧 通宵 回家"),
+    ("readSourceChapters", {"chapterIds": ["chapter-b", "chapter-a"]},
+     "为第 1 集读取原文章节：第2章 迷途、第1章 清河桥"),
+])
+def test_screenplay_read_display_uses_requested_targets_and_manifest_order(name, arguments, label):
+    request = replace(_request(_context(episode_number=1, source_scope={
+        "mode": "whole_book", "chapters": [
+            {"id": "chapter-a", "title": "第1章 清河桥"},
+            {"id": "chapter-b", "title": "第2章 迷途"},
+        ],
+    })), metadata={"screenplaySceneIds": ["scene-z", "scene-a"]})
+    state = ScreenplayExecutionStateFactory().create(request)
+
+    async def handler(state, arguments, signal):
+        raise AssertionError("display must not execute a tool")
+
+    catalog = build_domain_catalog(handlers={key: handler for key in SCREENPLAY_TOOL_SCHEMAS})
+    registration = next(item for item in catalog.registrations() if item.schema.name == name)
+    params = registration.operation_display_params(
+        state, {**arguments, "private": "PRIVATE_CONTENT"},
+        ToolCall(id="call", name=name, arguments_json=json.dumps(arguments)),
+    )
+    chunk = _with_screenplay_tool_display_names({
+        "kind": "operation.started", "payload": {
+            "kind": "tool", "display": {"labelParams": {"toolName": name, **params}},
+        },
+    })
+    assert chunk["payload"]["display"]["labelParams"]["displayNames"] == {"zh-CN": label}
+    assert "PRIVATE_CONTENT" not in json.dumps(chunk)
 
 
 async def _seed_task_dependency(
@@ -622,7 +710,7 @@ async def test_source_analysis_profiles_expose_only_their_required_tools(
     )))
 
     assert chapter_tools == frozenset({
-        "readSourceChapters",
+        "inspectSourceStructure", "readSourceChapters",
         "writeScreenplayCandidatePart",
     })
     assert reduction_tools == frozenset({
@@ -632,7 +720,7 @@ async def test_source_analysis_profiles_expose_only_their_required_tools(
     assert section_tools == reduction_tools
 
 
-async def test_source_chapter_digest_run_scope_cannot_read_a_sibling_chapter(
+async def test_explicit_source_authorization_cannot_read_a_sibling_chapter(
     screenplay_tool_db,
 ):
     await _install_source_project(screenplay_tool_db, restricted=False)
@@ -802,8 +890,9 @@ async def test_part_tool_profiles_expose_only_their_declared_capabilities(
     )))
 
     assert "readSourceChapters" in draft
-    assert "inspectScreenplayProject" not in draft
-    assert "readScreenplayDeliverable" not in draft
+    assert "getScreenplayEpisodeContext" in draft
+    assert "inspectScreenplayProject" in draft
+    assert "readScreenplayDeliverable" in draft
     assert "readScreenplayTaskDependencies" in draft
     assert "writeScreenplayCandidatePart" not in draft
     assert metadata == {
@@ -811,15 +900,16 @@ async def test_part_tool_profiles_expose_only_their_declared_capabilities(
         "writeScreenplayCandidatePart",
     }
     assert review == {
+        "inspectScreenplayProject", "readScreenplayDeliverable", "searchScreenplayDeliverables",
         "getScreenplayEpisodeContext",
         "writeScreenplayCandidatePart",
     }
     assert scene_list == {
-        "readScreenplayDeliverable",
+        "inspectScreenplayProject", "searchScreenplayDeliverables", "readScreenplayDeliverable",
         "writeScreenplayCandidatePart",
     }
     assert document == {
-        "readScreenplayDeliverable",
+        "inspectScreenplayProject", "searchScreenplayDeliverables", "readScreenplayDeliverable",
         "readScreenplayTaskDependencies",
         "writeScreenplayCandidatePart",
     }
@@ -840,8 +930,8 @@ async def test_task_dependency_tool_schema_is_model_owned_and_bounded(
     )
     schema = registration.schema.parameters
 
-    assert set(schema["properties"]) == {"partKeys"}
-    assert schema["required"] == ["partKeys"]
+    assert set(schema["properties"]) == {"partKeys", "cursor", "limit"}
+    assert schema["required"] == []
     assert schema["properties"]["partKeys"]["minItems"] == 1
     assert schema["properties"]["partKeys"]["maxItems"] == 12
     assert schema["properties"]["partKeys"]["uniqueItems"] is True
@@ -926,7 +1016,13 @@ async def test_task_dependency_read_rejects_scope_status_and_cardinality_errors(
         "UPDATE ai_agent_long_task_units SET dependencies_json = '[]' "
         "WHERE task_id = 'screenplay-task' AND unit_id = 'generate-deliverable'"
     )
-    await rejected(allowed, ["section:premise"])
+    unrestricted = await read(ExecutionState(domain=allowed, run_id="run-current"), {
+        "partKeys": ["section:premise"],
+    })
+    assert unrestricted.error_code is None
+    assert json.loads(unrestricted.content)["dependencies"][0]["partKey"] == "section:premise"
+    catalog_page = await read(ExecutionState(domain=allowed, run_id="run-current"), {})
+    assert [item["partKey"] for item in json.loads(catalog_page.content)["parts"]] == ["section:premise"]
 
     wrong_project = dict(allowed)
     wrong_project["projectId"] = "another-project"
@@ -939,42 +1035,31 @@ async def test_task_dependency_read_rejects_scope_status_and_cardinality_errors(
     await rejected(wrong_unit, ["section:premise"])
 
 
-async def test_candidate_completion_requires_the_recorded_dependency_read(
-    screenplay_tool_db,
-):
+async def test_candidate_completion_requires_content_of_required_parts(screenplay_tool_db):
     projector = ScreenplayCandidateCompletionProjector(
-        screenplay_tool_db,
-        candidate_normalizer=normalize_screenplay_candidate,
+        screenplay_tool_db, candidate_normalizer=normalize_screenplay_candidate,
     )
     scope = {"dependencyPartKeys": ["section:premise"]}
 
-    with pytest.raises(ValueError, match="dependencies were not read"):
-        await projector._validate_dependency_read("run-dependency-read", scope)
+    async def record(payload, error=None):
+        await screenplay_tool_db.execute(
+            "INSERT INTO ai_agent_run_events (run_id, event_type, payload_json) "
+            "VALUES ('run-dependency-read', 'tool.results', ?)",
+            [json.dumps({"results": [{
+                "tool_name": "readScreenplayTaskDependencies", "error": error,
+                "content": json.dumps(payload),
+            }]})],
+        )
 
-    operation_id = "operation-read-dependency"
-    await screenplay_tool_db.execute(
-        "INSERT INTO ai_agent_run_events "
-        "(run_id, event_type, payload_json, event_id, sequence, source, kind, "
-        "channel, visibility, source_event_key) VALUES "
-        "(?, 'operation.started', ?, 'event-dependency-started', 1, 'runtime', "
-        "'operation.started', 'operation', 'public', 'dependency-started'), "
-        "(?, 'operation.finished', ?, 'event-dependency-finished', 2, 'runtime', "
-        "'operation.finished', 'operation', 'public', 'dependency-finished')",
-        [
-            "run-dependency-read",
-            json.dumps({
-                "operationId": operation_id,
-                "kind": "tool",
-                "display": {"labelParams": {
-                    "toolCallId": "call-read-dependency",
-                    "toolName": "readScreenplayTaskDependencies",
-                }},
-            }),
-            "run-dependency-read",
-            json.dumps({"operationId": operation_id, "status": "succeeded"}),
-        ],
-    )
-
+    for payload, error in (
+        ({"parts": [{"partKey": "section:premise"}]}, None),
+        ({"dependencies": [{"partKey": "section:other"}]}, None),
+        ({"dependencies": [{"partKey": "section:premise"}]}, "failed"),
+    ):
+        await record(payload, error)
+        with pytest.raises(ValueError, match="dependencies were not read"):
+            await projector._validate_dependency_read("run-dependency-read", scope)
+    await record({"dependencies": [{"partKey": "section:premise"}]})
     await projector._validate_dependency_read("run-dependency-read", scope)
 
 
@@ -1007,7 +1092,7 @@ async def test_draft_scene_completion_evidence_requires_episode_context_read(
                 json.dumps({
                     "operationId": operation_id,
                     "kind": "tool",
-                    "display": {"labelParams": {"toolName": tool_name}},
+                    "display": {"labelParams": {"toolName": tool_name, "episodeNumber": 2}},
                 }),
                 f"event-draft-read-start-{sequence}",
                 sequence * 2 - 1,
@@ -1024,6 +1109,12 @@ async def test_draft_scene_completion_evidence_requires_episode_context_read(
             "getScreenplayEpisodeContext",
         )
         assert has_episode_context is (tool_name == "getScreenplayEpisodeContext")
+    assert await projector._has_successful_tool_read(
+        "run-draft-read", "getScreenplayEpisodeContext", episode_number=2,
+    )
+    assert not await projector._has_successful_tool_read(
+        "run-draft-read", "getScreenplayEpisodeContext", episode_number=1,
+    )
 
 
 async def test_candidate_artifact_stores_long_content_only_once(
@@ -1494,6 +1585,13 @@ async def test_deliverable_search_uses_only_accepted_heads_and_typed_revisions(
 
     assert old_matches == []
     assert current_matches[0]["revisionId"] == "revision-head"
+    assert current_matches[0]["accepted"] is True
+    history = json.loads((await search(state, {
+        "query": "冲突", "includeHistory": True,
+    })).content)["matches"]
+    assert [(item["revisionId"], item["accepted"]) for item in history] == [
+        ("revision-head", True), ("revision-old", False),
+    ]
 
     wrong_role = await _tool_handler(
         catalog,
@@ -1505,7 +1603,7 @@ async def test_deliverable_search_uses_only_accepted_heads_and_typed_revisions(
     )
 
 
-async def test_creative_brief_deliverable_read_is_bound_to_exact_revision_scope(
+async def test_deliverable_read_uses_reference_defaults_and_allows_other_versions(
     screenplay_tool_db,
 ):
     await screenplay_tool_db.execute(
@@ -1554,11 +1652,13 @@ async def test_creative_brief_deliverable_read_is_bound_to_exact_revision_scope(
     wrong_role = await read(state, {"role": "sourceAnalysis"})
 
     assert json.loads(bound.content)["revisionId"] == "brief-bound"
-    assert old.error_code == "tool_input_invalid"
-    assert wrong_role.error_code == "tool_input_invalid"
+    assert old.error_code is None
+    assert json.loads(old.content)["revisionId"] == "brief-old"
+    assert wrong_role.error_code is None
+    assert json.loads(wrong_role.content)["available"] is False
 
 
-async def test_scene_list_structure_read_is_bound_to_one_revision_and_episode(
+async def test_scene_list_structure_read_can_select_any_episode_or_full_document(
     screenplay_tool_db,
 ):
     await screenplay_tool_db.execute(
@@ -1607,7 +1707,9 @@ async def test_scene_list_structure_read_is_bound_to_one_revision_and_episode(
         run_id="run-scene-list-episode-2",
     )
 
-    bound = json.loads((await read(state, {"role": "structure"})).content)
+    full = json.loads((await read(state, {"role": "structure"})).content)
+    assert len(full["payload"]["episodes"]) == 2
+    bound = json.loads((await read(state, {"role": "structure", "episodeNumber": 2})).content)
     wrong_episode = await read(
         state,
         {"role": "structure", "episodeNumber": 1},
@@ -1622,12 +1724,15 @@ async def test_scene_list_structure_read_is_bound_to_one_revision_and_episode(
         "episode": {"number": 2, "title": "第二集-structure-bound"},
     }
     assert bound["contentText"] == ""
-    assert wrong_episode.error_code == "tool_input_invalid"
-    assert wrong_revision.error_code == "tool_input_invalid"
+    assert wrong_episode.error_code is None
+    assert json.loads(wrong_episode.content)["payload"]["episode"]["number"] == 1
+    assert wrong_revision.error_code is None
+    assert json.loads(wrong_revision.content)["revisionId"] == "structure-old"
 
 
-async def test_episode_context_is_bound_to_host_episode_and_revisions(
+async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
     screenplay_tool_db,
+    monkeypatch,
 ):
     await screenplay_tool_db.execute(
         "INSERT INTO screenplay_projects "
@@ -1670,6 +1775,13 @@ async def test_episode_context_is_bound_to_host_episode_and_revisions(
                 f"part-{role}",
             ],
         )
+    await screenplay_tool_db.execute(
+        "INSERT INTO screenplay_revision_parts "
+        "(revision_id, part_type, part_key, position, payload_json, content_text, content_digest) "
+        "SELECT revision_id, 'episode', '2', 2, ?, '', 'second-episode' "
+        "FROM screenplay_revision_parts WHERE part_key = '1'",
+        [json.dumps({"episodeNumber": 2, "scenes": [{"id": "scene-2"}], "title": "第二集"})],
+    )
     catalog = build_screenplay_tool_catalog(db=screenplay_tool_db)
     read = _tool_handler(catalog, "getScreenplayEpisodeContext")
     state = ExecutionState(
@@ -1688,7 +1800,7 @@ async def test_episode_context_is_bound_to_host_episode_and_revisions(
     )
 
     bound = json.loads((await read(state, {"episodeNumber": 1})).content)
-    wrong_episode = await read(state, {"episodeNumber": 2})
+    other_episode = await read(state, {"episodeNumber": 2})
     wrong_revision = await read(state, {
         "episodeNumber": 1,
         "draftRevisionId": "draft-other",
@@ -1696,8 +1808,176 @@ async def test_episode_context_is_bound_to_host_episode_and_revisions(
 
     assert bound["sceneListId"] == "scene-list-bound"
     assert bound["currentDraft"]["title"] == "绑定草稿"
-    assert wrong_episode.error_code == "tool_input_invalid"
+    assert other_episode.error_code is None
+    assert json.loads(other_episode.content)["episode"]["episodeNumber"] == 2
     assert wrong_revision.error_code == "tool_input_invalid"
+    episode_catalog = await _tool_handler(catalog, "readScreenplayDeliverable")(
+        state, {"role": "sceneList"},
+    )
+    assert json.loads(episode_catalog.content)["episodeNumbers"] == [1, 2]
+    assert json.loads(episode_catalog.content)["requiresEpisodeNumber"] is True
+
+    current_read = _tool_handler(catalog, "getScreenplayEpisodeContext")
+    current = await current_read(state, {})
+    assert current.error_code is None
+    assert json.loads(current.content) == bound
+    for invalid_args in (
+        {"draftRevisionId": "scene-list-bound"},
+    ):
+        rejected = await current_read(state, invalid_args)
+        assert rejected.error_code == "tool_input_invalid"
+    unbound = await current_read(
+        ExecutionState(domain={"projectId": "screenplay-project"}), {},
+    )
+    assert unbound.error_code == "tool_input_invalid"
+    schema = next(
+        item.schema for item in catalog.registrations()
+        if item.schema.name == "getScreenplayEpisodeContext"
+    )
+    assert set(schema.parameters["properties"]) == {"episodeNumber", "draftRevisionId", "sceneListRevisionId"}
+    assert schema.parameters["required"] == []
+    assert schema.parameters["additionalProperties"] is False
+
+    await screenplay_tool_db.execute(
+        "INSERT INTO screenplay_revisions "
+        "(id, project_id, deliverable_id, revision_no, content_digest, created_by) "
+        "SELECT 'scene-list-alternate', project_id, deliverable_id, 2, 'alternate', 'test' "
+        "FROM screenplay_revisions WHERE id = 'scene-list-bound'"
+    )
+    await screenplay_tool_db.execute(
+        "INSERT INTO screenplay_revision_parts "
+        "(revision_id, part_type, part_key, position, payload_json, content_text, content_digest) "
+        "SELECT 'scene-list-alternate', part_type, part_key, position, payload_json, content_text, content_digest "
+        "FROM screenplay_revision_parts WHERE revision_id = 'scene-list-bound'"
+    )
+    alternate = await read(state, {"episodeNumber": 2, "sceneListRevisionId": "scene-list-alternate"})
+    assert alternate.error_code is None
+    assert json.loads(alternate.content)["sceneListId"] == "scene-list-alternate"
+    await screenplay_tool_db.execute(
+        "INSERT INTO screenplay_projects (id, title) VALUES ('other-project', '其他项目')"
+    )
+    foreign = ExecutionState(domain={**dict(state.domain), "projectId": "other-project"})
+    assert (await read(foreign, {"episodeNumber": 1})).error_code == "tool_input_invalid"
+    foreign_deliverable = await _tool_handler(catalog, "readScreenplayDeliverable")(
+        foreign, {"role": "sceneList", "revisionId": "scene-list-bound", "episodeNumber": 1},
+    )
+    assert foreign_deliverable.error_code == "tool_input_invalid"
+
+    class EpisodeGateway(_HostPreparedSceneModelGateway):
+        reuse_prepared = False
+
+        async def stream(self, messages, invocation, signal=None):
+            if self.reuse_prepared:
+                assert not any(message.role.value == "tool" for message in messages)
+                supplied = "\n".join(str(message.content) for message in messages)
+                assert '"tool":"getScreenplayEpisodeContext"' in supplied
+                assert '"episodeNumber":1' in supplied
+                assert 'scene-list-bound' in supplied
+                return await super().stream(messages, invocation, signal)
+            if self.invocations:
+                results = [
+                    message.content for message in messages
+                    if message.role.value == "tool"
+                ]
+                assert len(results) == len(self.invocations)
+                assert all('scene-list-bound' in str(content) for content in results)
+                assert json.loads(results[0])["episode"]["episodeNumber"] == 2
+                assert all(json.loads(content)["episode"]["episodeNumber"] == 1 for content in results[1:])
+            if len(self.invocations) == 3:
+                return await super().stream(messages, invocation, signal)
+            self.invocations.append(invocation)
+            assert "getScreenplayEpisodeContext" in {
+                tool.name for tool in invocation.tools
+            }
+
+            async def chunks():
+                yield ModelStreamChunk(
+                    tool_call_deltas=(ToolCallDelta(
+                        index=0, id=f"call-current-episode-{len(self.invocations)}", type="function",
+                        name="getScreenplayEpisodeContext",
+                        arguments_fragment=json.dumps({"episodeNumber": 2 if len(self.invocations) == 1 else 1}),
+                    ),),
+                    finish_reason=ModelFinishReason.TOOL_CALLS,
+                )
+
+            return ModelStream(
+                applied_output_limit=invocation.max_call_output_tokens,
+                chunks=chunks(), model="fixture-model",
+            )
+
+    gateway = EpisodeGateway()
+    monkeypatch.setattr(
+        agent_composition_module, "ProviderModelGateway", lambda *a, **kw: gateway,
+    )
+    composition = create_agent_composition(screenplay_tool_db)
+    try:
+        candidate = await ScreenplayToolCallingService(
+            screenplay_tool_db, composition=composition,
+        ).run_candidate(
+            runtime=ScreenplayAgentRuntimeRequest.model_validate({
+                "apiKey": "fixture-key", "apiProvider": "openai",
+                "options": {
+                    "model": "deepseek-v4-flash",
+                    "model_profile": "deepseek:deepseek-v4-flash",
+                    "max_tokens": 4096,
+                },
+            }),
+            session_id=1,
+            system_instruction="读取当前分集后创作场景。",
+            user_payload={"sceneId": "scene-1"},
+            domain_context=_context(
+                target_role="screenplayDraft", expected_part_type="scene",
+                expected_part_key="scene-1", tool_access="draft_scene",
+                episode_number=1,
+                deliverable_revision_scope={"sceneList": "scene-list-bound"},
+            ),
+            conversation_turn_id="turn-bound-scene",
+            host_candidate_template={"sceneId": "scene-1"},
+            candidate_validation_contract={
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene", "expectedSceneId": "scene-1",
+            },
+        )
+        assert candidate.candidate["payload"]["sceneId"] == "scene-1"
+        assert len(gateway.invocations) == 4
+        events = await screenplay_tool_db.fetch_all(
+            "SELECT payload_json FROM ai_agent_run_events "
+            "WHERE event_type = 'tool.call_completed' ORDER BY id"
+        )
+        results = [json.loads(row["payload_json"]) for row in events]
+        assert len(results) == 3
+        assert results[-1]["fromCache"] is True
+        gateway.reuse_prepared = True
+        next_candidate = await ScreenplayToolCallingService(
+            screenplay_tool_db, composition=composition,
+        ).run_candidate(
+            runtime=ScreenplayAgentRuntimeRequest.model_validate({
+                "apiKey": "fixture-key", "apiProvider": "openai",
+                "options": {"model": "deepseek-v4-flash",
+                            "model_profile": "deepseek:deepseek-v4-flash", "max_tokens": 4096},
+            }),
+            session_id=1, system_instruction="创作当前场景。",
+            user_payload={"sceneId": "scene-2"},
+            domain_context=replace(_context(
+                target_role="screenplayDraft", expected_part_type="scene",
+                expected_part_key="scene-2", tool_access="draft_scene", episode_number=1,
+                deliverable_revision_scope={"sceneList": "scene-list-bound"},
+            ), unit_id="generate-next-scene"),
+            conversation_turn_id="turn-next-scene",
+            host_candidate_template={"sceneId": "scene-2"},
+            candidate_validation_contract={
+                "protocol": "purrtypos.screenplay.candidate-validation/v1",
+                "kind": "scene", "expectedSceneId": "scene-2",
+            },
+        )
+        assert next_candidate.candidate["payload"]["sceneId"] == "scene-2"
+        assert len(gateway.invocations) == 5
+        count = await screenplay_tool_db.fetch_one(
+            "SELECT COUNT(*) AS total FROM ai_agent_run_events WHERE event_type = 'tool.call_completed'"
+        )
+        assert count["total"] == 3
+    finally:
+        await composition.shutdown()
 
 
 async def test_original_creative_brief_with_explicit_empty_scope_can_write_without_read(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from purra.contracts import PlanningMode
+from purra.api import PlanningMode
 
 from application.request_mapping import to_writing_agent_request
 from application.screenplay_agent_service import _root_request
@@ -23,9 +23,18 @@ def _writing_request(**overrides):
     )
 
 
-def test_writing_agent_mode_and_tools_do_not_enable_planner():
+def test_writing_agent_mode_and_tools_keep_core_auto_default():
     request = to_writing_agent_request(
         _writing_request(),
+        {"model": "test-model"},
+    )
+
+    assert request.planning_mode is PlanningMode.AUTO
+
+
+def test_writing_request_can_explicitly_select_reactive_execution():
+    request = to_writing_agent_request(
+        _writing_request(planningMode="reactive"),
         {"model": "test-model"},
     )
 
@@ -41,7 +50,7 @@ def test_writing_request_can_explicitly_select_planned_execution():
     assert request.planning_mode is PlanningMode.PLANNED
 
 
-def test_screenplay_root_is_a_deterministic_planned_business_action():
+def test_screenplay_root_uses_auto_planning():
     runtime = ScreenplayAgentRuntimeRequest(
         apiKey="test-key",
         options={
@@ -61,4 +70,4 @@ def test_screenplay_root_is_a_deterministic_planned_business_action():
         runtime,
     )
 
-    assert request.planning_mode is PlanningMode.PLANNED
+    assert request.planning_mode is PlanningMode.AUTO

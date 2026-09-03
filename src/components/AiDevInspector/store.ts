@@ -72,6 +72,16 @@ export interface AiDebugModelCall {
   parameters?: Record<string, unknown>;
 }
 
+export interface AiDebugTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  unreportedAttempts: number;
+  modelAttempts: number;
+  complete: boolean;
+}
+
 export interface AiDebugMessage {
   role: string;
   content: unknown;
@@ -128,6 +138,7 @@ export interface AiDebugRun {
   tools: AiDebugTool[];
   events: AiDebugEvent[];
   eventCount: number;
+  tokenUsage?: AiDebugTokenUsage;
   contextBudget?: unknown;
   contextCompaction?: unknown;
   agentRunId?: string;
@@ -165,6 +176,41 @@ export interface AiDebugConversationLifecycle {
   authoritativeRunId?: string;
 }
 
+/** Root execution identity for one turn, if the journal has established it. */
+export function aiDebugTurnRootRunId(
+  group: AiDebugTurnGroup | undefined,
+): string | undefined {
+  if (!group) return undefined;
+  const declaredRoots = [...new Set(
+    group.runs
+      .map((run) => String(run.conversationRootRunId || "").trim())
+      .filter(Boolean),
+  )];
+  if (declaredRoots.length === 1) return declaredRoots[0];
+  if (declaredRoots.length > 1) return undefined;
+  if (group.runs.length === 1) {
+    return String(group.runs[0].agentRunId || "").trim() || undefined;
+  }
+  return undefined;
+}
+
+/** Stable identity for one user turn; never falls back to an arbitrary child Run. */
+export function aiDebugTurnDiagnosticId(
+  group: AiDebugTurnGroup | undefined,
+): string {
+  if (!group) return "idle";
+  const rootRunId = aiDebugTurnRootRunId(group);
+  if (rootRunId) return rootRunId;
+  if (group.runs.length === 1) {
+    const run = group.runs[0];
+    return run.turnId || run.id;
+  }
+  const turnIds = [...new Set(
+    group.runs.map((run) => String(run.turnId || "").trim()).filter(Boolean),
+  )];
+  return turnIds.length === 1 ? turnIds[0] : group.key;
+}
+
 const MAX_TURNS = 20;
 const MAX_EVENTS_PER_RUN = 200;
 const SENSITIVE_KEY =
@@ -175,6 +221,53 @@ const FINAL_STATUSES = new Set<AiDebugRunStatus>([
   "failed",
 ]);
 const DEBUG_STORE_ENABLED = import.meta.env?.DEV !== false;
+
+export function isAiDebugRunActive(run: AiDebugRun | undefined): boolean {
+  return Boolean(run && !FINAL_STATUSES.has(run.status));
+}
+
+export function aiDebugCurrentRunId(runs: readonly AiDebugRun[]): string | undefined {
+  return [...runs]
+    .filter(isAiDebugRunActive)
+    .sort((left, right) => (
+      right.startedAt - left.startedAt
+      || right.updatedAt - left.updatedAt
+      || right.id.localeCompare(left.id)
+    ))[0]?.id;
+}
+
+export function aiDebugTurnTokenUsage(
+  runs: readonly AiDebugRun[],
+): AiDebugTokenUsage | undefined {
+  const usages = runs.flatMap((run) => run.tokenUsage ? [run.tokenUsage] : []);
+  if (!usages.length) return undefined;
+  const total = usages.reduce<AiDebugTokenUsage>((sum, usage) => ({
+    inputTokens: sum.inputTokens + usage.inputTokens,
+    outputTokens: sum.outputTokens + usage.outputTokens,
+    reasoningTokens: sum.reasoningTokens + usage.reasoningTokens,
+    totalTokens: sum.totalTokens + usage.totalTokens,
+    unreportedAttempts: sum.unreportedAttempts + usage.unreportedAttempts,
+    modelAttempts: sum.modelAttempts + usage.modelAttempts,
+    complete: sum.complete && usage.complete,
+  }), {
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    unreportedAttempts: 0,
+    modelAttempts: 0,
+    complete: true,
+  });
+  const everyRunSettled = runs.every((run) => {
+    if (isAiDebugRunActive(run)) return false;
+    const observedModelCalls = run.modelCalls.reduce(
+      (count, call) => count + call.count,
+      0,
+    );
+    return observedModelCalls === 0 || run.tokenUsage?.complete === true;
+  });
+  return { ...total, complete: total.complete && everyRunSettled };
+}
 
 let state: AiDebugState = {
   runs: [],
@@ -223,10 +316,21 @@ export function groupAiDebugRunsByTurn(runs: AiDebugRun[]): AiDebugTurnGroup[] {
     });
   }
   return [...groups.values()]
-    .map((group) => ({
-      ...group,
-      runs: [...group.runs].sort((left, right) => right.startedAt - left.startedAt),
-    }))
+    .map((group) => {
+      const runs = [...group.runs].sort((left, right) => right.startedAt - left.startedAt);
+      const rootRunId = aiDebugTurnRootRunId({ ...group, runs });
+      const rootRun = rootRunId
+        ? runs.find((run) => run.agentRunId === rootRunId)
+        : undefined;
+      return {
+        ...group,
+        runs,
+        sessionId: rootRun?.sessionId ?? group.sessionId,
+        conversationId: rootRun?.conversationId ?? group.conversationId,
+        source: rootRun?.source || group.source,
+        prompt: (rootRun && latestUserPrompt(rootRun)) || group.prompt,
+      };
+    })
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
@@ -542,8 +646,8 @@ function upsertTools(
         batchIndex: tools.length,
         index: 0,
         name: String(params?.toolName || "工具操作"),
-        argumentsText: "{}",
-        argumentsValue: {},
+        argumentsText: "",
+        argumentsValue: undefined,
         status: "running",
         cached: false,
         startedAt: Date.parse(String(chunk.payload.startedAt || chunk.occurredAt)),
@@ -734,6 +838,52 @@ function canonicalRuntimeData(event: CanonicalOutputEvent | null): {
   return { eventType, data: data as Record<string, unknown> };
 }
 
+function nonNegativeUsageInteger(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function persistedTokenUsage(
+  activity: AiAgentRunSnapshot['run']['activity'],
+  complete: boolean,
+): AiDebugTokenUsage | undefined {
+  const usage = activity?.usage;
+  if (!usage) return undefined;
+  const inputTokens = nonNegativeUsageInteger(usage.inputTokens);
+  const outputTokens = nonNegativeUsageInteger(usage.outputTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    reasoningTokens: nonNegativeUsageInteger(usage.reasoningTokens),
+    totalTokens: nonNegativeUsageInteger(usage.totalTokens) || inputTokens + outputTokens,
+    unreportedAttempts: nonNegativeUsageInteger(usage.unreportedAttempts),
+    modelAttempts: nonNegativeUsageInteger(activity?.modelAttemptCount),
+    complete,
+  };
+}
+
+function runtimeTokenUsage(
+  current: AiDebugTokenUsage | undefined,
+  runtimeData: ReturnType<typeof canonicalRuntimeData>,
+  modelAttempts: number,
+): AiDebugTokenUsage | undefined {
+  if (current?.complete || runtimeData?.eventType !== 'context.usage_recorded') {
+    return current;
+  }
+  const inputTokens = nonNegativeUsageInteger(runtimeData.data.actualInputTokens);
+  const outputTokens = nonNegativeUsageInteger(runtimeData.data.actualOutputTokens);
+  return {
+    inputTokens,
+    outputTokens,
+    reasoningTokens: nonNegativeUsageInteger(runtimeData.data.reasoningOutputTokens),
+    totalTokens: nonNegativeUsageInteger(runtimeData.data.actualTotalTokens)
+      || inputTokens + outputTokens,
+    unreportedAttempts: 0,
+    modelAttempts,
+    complete: false,
+  };
+}
+
 function mergeDebugAgentPlan(
   current: unknown,
   runtimeData: ReturnType<typeof canonicalRuntimeData>,
@@ -909,6 +1059,10 @@ export function hydrateAiDebugRunSnapshot(data: {
         payload: { runId },
       }],
       eventCount: 1,
+      tokenUsage: persistedTokenUsage(
+        snapshot.run.activity,
+        snapshot.run.status !== 'running',
+      ),
       agentRunId: runId,
       agentPlan: snapshot.todos.length
         ? { status: snapshot.run.status, steps: snapshot.todos }
@@ -963,9 +1117,26 @@ export function hydrateAiDebugRunSnapshot(data: {
         : run.agentPlan,
       providerOutputEvents: snapshot.run.activity?.providerOutputEvents
         ?? run.providerOutputEvents,
+      tokenUsage: persistedTokenUsage(snapshot.run.activity, terminal)
+        ?? run.tokenUsage,
       persistedEventCursor: Math.max(nextCursor, snapshot.nextCursor),
     };
   });
+}
+
+/** Apply the durable per-Run usage counters without replaying the Run again. */
+export function recordAiDebugRunUsageSnapshot(
+  snapshot: AiAgentRunSnapshot,
+): void {
+  if (!DEBUG_STORE_ENABLED) return;
+  const runId = String(snapshot.run.runId || '').trim();
+  if (!runId) return;
+  const usage = persistedTokenUsage(
+    snapshot.run.activity,
+    snapshot.run.status !== 'running',
+  );
+  if (!usage) return;
+  replaceRunByAgentRunId(runId, (run) => ({ ...run, tokenUsage: usage }));
 }
 
 export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void {
@@ -1000,6 +1171,11 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),
       eventCount: run.eventCount + 1,
+      tokenUsage: runtimeTokenUsage(
+        run.tokenUsage,
+        runtimeData,
+        run.modelCalls.reduce((count, call) => count + call.count, 0),
+      ),
       contextBudget: runtimeData?.eventType.startsWith("context.")
         ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
         : run.contextBudget,
@@ -1111,6 +1287,11 @@ export function recordAiDebugRunEvent(
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),
       eventCount: run.eventCount + 1,
+      tokenUsage: runtimeTokenUsage(
+        run.tokenUsage,
+        runtimeData,
+        run.modelCalls.reduce((count, call) => count + call.count, 0),
+      ),
       contextBudget: runtimeData?.eventType.startsWith("context.")
         ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
         : run.contextBudget,
