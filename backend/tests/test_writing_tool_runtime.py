@@ -233,13 +233,15 @@ async def test_failed_evidence_read_keeps_the_current_plan():
 
 @pytest.mark.asyncio
 async def test_two_catalogs_keep_explicit_db_dependencies_isolated(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
     from infrastructure.writing.tools.handlers import story_background_tools
 
     global_db = object()
-    first_db = object()
-    second_db = object()
+    first_db = DatabaseConnection(tmp_path / "first")
+    second_db = DatabaseConnection(tmp_path / "second")
+    await first_db.init()
+    await second_db.init()
     monkeypatch.setattr(dependencies, "_db_instance", global_db)
     observed: list[tuple[object, str]] = []
 
@@ -251,16 +253,18 @@ async def test_two_catalogs_keep_explicit_db_dependencies_isolated(
     monkeypatch.setattr(
         story_background_tools, "get_story_background", _get_story_background
     )
-    first = _registration(first_db, "getStoryBackground")
-    second = _registration(second_db, "getStoryBackground")
-
-    await asyncio.gather(
-        first.handler(ExecutionState(domain={"bookId": "first"}), {}),
-        second.handler(ExecutionState(domain={"bookId": "second"}), {}),
-    )
-
-    assert set(observed) == {(first_db, "first"), (second_db, "second")}
-    assert dependencies.get_db() is global_db
+    try:
+        first = _registration(first_db, "getStoryBackground")
+        second = _registration(second_db, "getStoryBackground")
+        await asyncio.gather(
+            first.handler(ExecutionState(domain={"bookId": "first"}), {}),
+            second.handler(ExecutionState(domain={"bookId": "second"}), {}),
+        )
+        assert set(observed) == {(first_db, "first"), (second_db, "second")}
+        assert dependencies.get_db() is global_db
+    finally:
+        await first_db.close()
+        await second_db.close()
 
 
 @pytest.mark.asyncio

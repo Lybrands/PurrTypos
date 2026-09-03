@@ -5,6 +5,7 @@ from __future__ import annotations
 from purra.contracts import ModelRequest, ReasoningMode, RunExecutionIntent
 from purra.model_protocol import (
     FeatureRequirement,
+    InvocationOutputLimit,
     TaskCapabilityRequirements,
     preflight_capabilities,
 )
@@ -85,6 +86,23 @@ def runtime_context_window_tokens(runtime) -> int:
     return _CONTEXT_WINDOWS[key]
 
 
+def fit_output_limit_to_context(
+    limit: InvocationOutputLimit,
+    context_window: int,
+) -> InvocationOutputLimit:
+    """Keep an otherwise valid Provider limit from consuming the input window."""
+
+    window = int(context_window)
+    if limit.max_tokens < window:
+        return limit
+    input_reserve = max(4_096, window // 4)
+    return InvocationOutputLimit(
+        max_tokens=window - input_reserve,
+        source=limit.source,
+        profile_max_tokens=limit.profile_max_tokens,
+    )
+
+
 def run_execution_intent(
     request: ModelRequest,
     reasoning_mode: ReasoningMode,
@@ -104,6 +122,7 @@ def run_execution_intent(
 
 __all__ = [
     "model_request_from_runtime",
+    "fit_output_limit_to_context",
     "reasoning_mode_from_options",
     "run_execution_intent",
     "runtime_context_window_tokens",

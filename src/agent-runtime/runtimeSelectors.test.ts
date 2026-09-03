@@ -463,7 +463,7 @@ test('novel-analysis timing resumes the shared ticker and freezes terminal durat
   }, startedAt + 20000, 30000), { durationMs: 9250 })
 })
 
-test('pending novel-analysis protocol units stay pending', () => {
+test('novel-analysis protocol units never masquerade as a model plan', () => {
   const plan = buildNovelAnalysisTaskPlan({
     runId: 'run-1', runStatus: 'running', commandId: 'command-1',
     taskId: 'task-1', taskStatus: 'running', taskRevision: 1,
@@ -477,7 +477,7 @@ test('pending novel-analysis protocol units stay pending', () => {
     }],
   })
 
-  assert.deepEqual(plan.steps.map((step) => step.status), ['running', 'pending'])
+  assert.equal(plan, undefined)
 })
 
 test('novel-analysis semantic steps aggregate mapped durable units', () => {
@@ -507,6 +507,7 @@ test('novel-analysis semantic steps aggregate mapped durable units', () => {
     }],
   })
 
+  assert.ok(plan)
   assert.equal(plan.title, '人物与因果分析')
   assert.deepEqual(plan.steps.map((step) => step.status), ['done', 'running'])
 })

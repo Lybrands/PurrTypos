@@ -75,6 +75,16 @@ export type CanonicalPlanningProgress = {
   occurredAt: string
 }
 
+export type CanonicalAgentProgress = {
+  eventId: string
+  outputStreamId: string
+  invocationId: string
+  sourceChunkIndex: number
+  text: string
+  sequence: number
+  occurredAt: string
+}
+
 export type CanonicalDelegation = {
   delegationId: string
   firstSequence: number
@@ -112,6 +122,7 @@ export type CanonicalOutputState = {
   commentaryText: string
   commentaryBlocks: CanonicalCommentaryBlock[]
   planningProgress: CanonicalPlanningProgress[]
+  agentProgress: CanonicalAgentProgress[]
   operations: Record<string, CanonicalOperation>
   operationOrder: string[]
   delegations: Record<string, CanonicalDelegation>
@@ -142,6 +153,7 @@ export function initialCanonicalOutputState(
     commentaryText: '',
     commentaryBlocks: [],
     planningProgress: [],
+    agentProgress: [],
     operations: {},
     operationOrder: [],
     delegations: {},
@@ -233,6 +245,10 @@ export function reduceCanonicalOutput(
     return appendPlanningProgress(next, event)
   }
 
+  if (event.kind === 'agent.progress') {
+    return appendAgentProgress(next, event)
+  }
+
   if (event.kind === 'stream.committed' || event.kind === 'stream.aborted') {
     next = settleStream(next, event)
   }
@@ -295,6 +311,44 @@ function appendPlanningProgress(
         revision,
         attempt,
         recordIndex,
+        text,
+        sequence: event.sequence,
+        occurredAt: event.occurredAt,
+      },
+    ],
+  }
+}
+
+function appendAgentProgress(
+  state: CanonicalOutputState,
+  event: CanonicalOutputEvent,
+): CanonicalOutputState {
+  if (
+    event.source !== 'provider'
+    || event.channel !== 'commentary'
+    || event.payload.schemaVersion !== 'purra.agent-progress/v1'
+  ) return state
+  const text = stringValue(event.payload.text)
+  const outputStreamId = event.outputStreamId ?? ''
+  const invocationId = event.invocationId ?? ''
+  const sourceChunkIndex = numberValue(event.payload.sourceChunkIndex)
+  if (
+    !text
+    || !outputStreamId
+    || !invocationId
+    || sourceChunkIndex == null
+    || !Number.isSafeInteger(sourceChunkIndex)
+    || sourceChunkIndex < 1
+  ) return state
+  return {
+    ...state,
+    agentProgress: [
+      ...state.agentProgress,
+      {
+        eventId: event.eventId,
+        outputStreamId,
+        invocationId,
+        sourceChunkIndex,
         text,
         sequence: event.sequence,
         occurredAt: event.occurredAt,

@@ -1,17 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AiAgentRunSnapshot } from "../../types.ts";
+import { mergeToolDiagnostics } from './toolDiagnostics.ts';
+
+test('tool diagnostics merge paged IO without conflating calls or Runs', () => {
+  const args = { text: '{"chapter":1}', characters: 13, truncated: false };
+  const result = { text: '', characters: 0, truncated: false };
+  const calls = mergeToolDiagnostics([
+    { runId: 'a', toolCallId: 'same', eventRowId: 1, arguments: args },
+    { runId: 'b', toolCallId: 'same', eventRowId: 2, arguments: args },
+  ], [
+    { runId: 'a', toolCallId: 'same', eventRowId: 3, result, status: 'failed' },
+  ]);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].arguments, args);
+  assert.equal(calls[0].result, result);
+  assert.equal(calls[0].status, 'failed');
+  assert.equal(calls[0].eventRowId, 1);
+  assert.equal(calls[1].result, undefined);
+  const replayed = mergeToolDiagnostics(calls, [
+    { runId: 'a', toolCallId: 'same', eventRowId: 1, arguments: args },
+  ]);
+  assert.deepEqual(replayed, calls);
+});
 import type { CanonicalOutputEvent } from "../../agent-runtime/canonicalOutput.ts";
 import {
   aiDebugConversationLifecycle,
+  aiDebugCurrentRunId,
+  aiDebugTurnTokenUsage,
+  aiDebugTurnDiagnosticId,
+  aiDebugTurnRootRunId,
   clearAiDebugRuns,
   getAiDebugSnapshot,
   groupAiDebugRunsByTurn,
   hydrateAiDebugRunSnapshot,
   recordAiDebugChunk,
   recordAiDebugRunEvent,
+  recordAiDebugRunUsageSnapshot,
   recordAgentConversationDebugChunk,
   startAiDebugRun,
+  type AiDebugRun,
 } from "./store.ts";
 
 function canonicalEvent(
@@ -123,6 +151,56 @@ test('diagnostics group multiple Runs under their conversation turn', () => {
   );
 });
 
+test('a grouped turn takes its label and prompt from the Root Run', () => {
+  clearAiDebugRuns();
+  startAiDebugRun('root-stream', {
+    apiKey: 'key',
+    sessionId: 7,
+    messages: [{ role: 'user', content: '分析整部小说' }],
+    options: { model: 'model' },
+  }, {
+    turnId: 'turn-root-label',
+    conversationRootRunId: 'run-root-label',
+    source: '小说来源分析',
+  });
+  recordAiDebugChunk('root-stream', canonicalEvent(1, {
+    runId: 'run-root-label',
+    kind: 'run.lifecycle',
+    payload: { status: 'running' },
+  }));
+  startAiDebugRun('child-stream', {
+    apiKey: 'key',
+    sessionId: 7,
+    messages: [{ role: 'user', content: '提取人物关系' }],
+    options: { model: 'model' },
+  }, {
+    turnId: 'turn-root-label',
+    conversationRootRunId: 'run-root-label',
+    source: '事实分析 Agent',
+  });
+
+  const turn = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs)[0];
+  assert.equal(turn.source, '小说来源分析');
+  assert.equal(turn.prompt, '分析整部小说');
+});
+
+test('the latest active Run is the current expanded execution segment', () => {
+  const run = (
+    id: string,
+    status: AiDebugRun["status"],
+    startedAt: number,
+  ) => ({ id, status, startedAt, updatedAt: startedAt }) as AiDebugRun;
+  assert.equal(aiDebugCurrentRunId([
+    run("root", "thinking", 1),
+    run("past", "completed", 2),
+    run("current", "tool", 3),
+  ]), "current");
+  assert.equal(aiDebugCurrentRunId([
+    run("done", "completed", 1),
+    run("failed", "failed", 2),
+  ]), undefined);
+});
+
 test('conversation lifecycle follows the root Run instead of a child model finish', () => {
   clearAiDebugRuns();
   const input = {
@@ -183,6 +261,48 @@ test('conversation lifecycle follows the root Run instead of a child model finis
   assert.equal(lifecycle.status, 'completed');
   assert.equal(lifecycle.ended, true);
   assert.equal(lifecycle.endReason, '正常完成');
+});
+
+test('diagnostic footer identity stays on the Root Run across child selection', () => {
+  const root = {
+    id: 'agent-run-root',
+    agentRunId: 'run-root',
+    conversationRootRunId: 'run-root',
+    turnId: 'turn-root',
+  } as AiDebugRun;
+  const child = {
+    id: 'agent-run-child',
+    agentRunId: 'run-child',
+    conversationRootRunId: 'run-root',
+    turnId: 'turn-root',
+  } as AiDebugRun;
+  const base = {
+    key: 'session:7:turn:turn-root',
+    startedAt: 1,
+    updatedAt: 2,
+    source: '小说来源分析',
+    prompt: '分析小说',
+  };
+
+  assert.equal(aiDebugTurnDiagnosticId({ ...base, runs: [root, child] }), 'run-root');
+  assert.equal(aiDebugTurnDiagnosticId({ ...base, runs: [child, root] }), 'run-root');
+  assert.equal(aiDebugTurnDiagnosticId({ ...base, runs: [child] }), 'run-root');
+  assert.equal(aiDebugTurnRootRunId({ ...base, runs: [root, child] }), 'run-root');
+  assert.equal(aiDebugTurnRootRunId({ ...base, runs: [child] }), 'run-root');
+});
+
+test('multi-Run legacy turns fall back to their shared Turn ID', () => {
+  const run = (id: string) => ({ id, turnId: 'legacy-turn' }) as AiDebugRun;
+  const turn = {
+    key: 'session:7:turn:legacy-turn',
+    runs: [run('agent-child-one'), run('agent-child-two')],
+    startedAt: 1,
+    updatedAt: 2,
+    source: 'Agent 历史恢复',
+    prompt: '',
+  };
+  assert.equal(aiDebugTurnDiagnosticId(turn), 'legacy-turn');
+  assert.equal(aiDebugTurnRootRunId(turn), undefined);
 });
 
 test('conversation lifecycle preserves the root terminal error code', () => {
@@ -308,6 +428,8 @@ function persistedSnapshot(
     hasMore?: boolean;
     todos?: AiAgentRunSnapshot['todos'];
     providerOutputEvents?: number;
+    modelAttemptCount?: number;
+    usage?: Partial<NonNullable<NonNullable<AiAgentRunSnapshot['run']['activity']>['usage']>>;
   } = {},
 ): AiAgentRunSnapshot {
   const status = options.status ?? 'running';
@@ -328,7 +450,14 @@ function persistedSnapshot(
         cancellationRequested: false,
       },
       activity: {
-        modelAttemptCount: 0,
+        modelAttemptCount: options.modelAttemptCount ?? 0,
+        usage: {
+          inputTokens: options.usage?.inputTokens ?? 0,
+          outputTokens: options.usage?.outputTokens ?? 0,
+          reasoningTokens: options.usage?.reasoningTokens ?? 0,
+          totalTokens: options.usage?.totalTokens ?? 0,
+          unreportedAttempts: options.usage?.unreportedAttempts ?? 0,
+        },
         providerOutputEvents: options.providerOutputEvents ?? 0,
         providerOutputBytes: 0,
       },
@@ -352,6 +481,71 @@ function persistedSnapshot(
     hasMore: options.hasMore ?? false,
   };
 }
+
+test('diagnostics expose live reported usage and replace it with durable Run totals', () => {
+  clearAiDebugRuns();
+  startAiDebugRun('usage-stream', {
+    apiKey: 'key',
+    messages: [{ role: 'user', content: '分析小说' }],
+    options: { model: 'model' },
+    enableAgentTools: true,
+  });
+  recordAiDebugChunk('usage-stream', modelOperation(1, 'run-usage', 'model-1'));
+  recordAiDebugChunk('usage-stream', canonicalEvent(2, {
+    runId: 'run-usage',
+    payload: {
+      eventType: 'context.usage_recorded',
+      data: {
+        actualInputTokens: 1200,
+        actualOutputTokens: 80,
+        actualTotalTokens: 1280,
+        reasoningOutputTokens: 25,
+      },
+    },
+  }));
+
+  let run = getAiDebugSnapshot().runs[0];
+  assert.deepEqual(run.tokenUsage, {
+    inputTokens: 1200,
+    outputTokens: 80,
+    reasoningTokens: 25,
+    totalTokens: 1280,
+    unreportedAttempts: 0,
+    modelAttempts: 1,
+    complete: false,
+  });
+
+  recordAiDebugChunk('usage-stream', canonicalEvent(3, {
+    runId: 'run-usage',
+    kind: 'run.lifecycle',
+    payload: { status: 'done' },
+  }));
+
+  recordAiDebugRunUsageSnapshot(persistedSnapshot([], {
+    runId: 'run-usage',
+    status: 'done',
+    modelAttemptCount: 3,
+    usage: {
+      inputTokens: 3600,
+      outputTokens: 240,
+      reasoningTokens: 75,
+      totalTokens: 3840,
+      unreportedAttempts: 1,
+    },
+  }));
+
+  run = getAiDebugSnapshot().runs[0];
+  assert.deepEqual(run.tokenUsage, {
+    inputTokens: 3600,
+    outputTokens: 240,
+    reasoningTokens: 75,
+    totalTokens: 3840,
+    unreportedAttempts: 1,
+    modelAttempts: 3,
+    complete: true,
+  });
+  assert.deepEqual(aiDebugTurnTokenUsage([run]), run.tokenUsage);
+});
 
 test('persisted recovery merges todo updates without discarding the full plan', () => {
   clearAiDebugRuns();
@@ -650,6 +844,8 @@ test("debug store does not treat a successful tool message as an error", () => {
   assert.equal(tool.status, "completed");
   assert.equal(tool.errorCode, undefined);
   assert.equal(tool.errorMessage, undefined);
+  assert.equal(tool.argumentsValue, undefined);
+  assert.equal(tool.result, undefined);
 });
 
 test("debug store identifies a durable screenplay chunk", () => {

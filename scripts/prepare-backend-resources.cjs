@@ -4,6 +4,7 @@
  * - Otherwise: copy backend source (excluding venv, PyInstaller output, caches) for Python-at-runtime.
  */
 const fs = require('fs')
+const crypto = require('crypto')
 const path = require('path')
 const { spawnSync } = require('child_process')
 
@@ -14,6 +15,8 @@ const purraRequirements = path.join(backendSrc, 'requirements-purra.txt')
 const runtimeRequirements = path.join(backendSrc, 'requirements-runtime.txt')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
+const PURRA_WHEEL_REQUIREMENT = './backend/vendor/purra-0.5.0-py3-none-any.whl'
+const PURRA_WHEEL_SHA256 = 'c623b959aa4fc2d09799ccc298dc753f7e59f316aa517511896a34824ad92b0b'
 
 const SKIP_NAMES = new Set([
   'dist',
@@ -72,9 +75,22 @@ function localPurraRequirements() {
     .map((line) => line.replace(/\s+#.*$/, '').trim())
     .filter(Boolean)
     .map((line) => {
+      if (line === PURRA_WHEEL_REQUIREMENT) {
+        const wheel = path.resolve(root, line)
+        if (!fs.existsSync(wheel)) {
+          throw new Error(`Local PurrA wheel does not exist: ${wheel}`)
+        }
+        const digest = crypto.createHash('sha256')
+          .update(fs.readFileSync(wheel))
+          .digest('hex')
+        if (digest !== PURRA_WHEEL_SHA256) {
+          throw new Error(`Local PurrA wheel SHA-256 mismatch: ${digest}`)
+        }
+        return wheel
+      }
       const match = line.match(/^-e\s+(.+?)(\[[^\]]+\])?$/)
       if (!match) {
-        throw new Error(`Only local editable PurrA requirements are allowed: ${line}`)
+        throw new Error(`Unsupported local PurrA requirement: ${line}`)
       }
       const source = path.resolve(root, match[1])
       if (!fs.existsSync(source)) {

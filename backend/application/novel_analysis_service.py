@@ -12,19 +12,19 @@ from uuid import uuid4
 from purra.api import (
     AgentCoreRunOptions,
     DurableTaskContinuation,
+    PlanningMode,
     RunRecoverySnapshot,
 )
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
     MessageRole,
-    PlanningMode,
     RunBinding,
     StepStatus,
 )
 from purra.long_tasks import LongTaskRunRelation
 from purra.json_values import thaw_json_mapping
-from purra.model_protocol import InvocationOutputLimit, resolve_invocation_output_limit
+from purra.model_protocol import resolve_invocation_output_limit
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
@@ -39,11 +39,13 @@ from purra.task_admission import (
 from application.agent_cancellation_service import AgentCancellationService
 from application.agent_run_service import AgentRunService
 from application.model_runtime import (
+    fit_output_limit_to_context,
     model_request_from_runtime,
     reasoning_mode_from_options,
     runtime_context_window_tokens,
 )
 from application.novel_analysis_artifacts import NovelAnalysisArtifactStore
+from domains.novel_analysis_public_facts import NovelAnalysisPublicFactsProvider
 from application.novel_analysis_executor import NovelAnalysisTaskUnitExecutor
 from application.novel_analysis_source import NovelAnalysisSourceReader
 from domains.novel_analysis import (
@@ -123,6 +125,7 @@ class NovelAnalysisService:
         self._runs = AgentRunService(composition) if composition is not None else None
         self._source = NovelAnalysisSourceReader(db)
         self._artifacts = NovelAnalysisArtifactStore(db)
+        self._public_facts = NovelAnalysisPublicFactsProvider(db)
         self._long_tasks = SqliteLongTaskRepository(db)
         self._run_repository = SqliteRunRepository(db)
         self._cancellation = (
@@ -322,12 +325,7 @@ class NovelAnalysisService:
             model_request.capability_snapshot,
             model_request.options.get("max_tokens"),
         )
-        if output_limit.max_tokens >= window:
-            output_limit = InvocationOutputLimit(
-                max_tokens=max(1_024, window // 4),
-                source=output_limit.source,
-                profile_max_tokens=output_limit.profile_max_tokens,
-            )
+        output_limit = fit_output_limit_to_context(output_limit, window)
         request = AgentRunRequest(
             messages=(AgentMessage(
                 role=MessageRole.USER,
@@ -340,7 +338,6 @@ class NovelAnalysisService:
             mode="novel_source_analysis",
             context_window=window,
             tools_enabled=False,
-            planning_mode=PlanningMode.PLANNED,
             metadata={
                 "failedResumeAttempts": failed_resume_attempts,
             },
@@ -365,9 +362,10 @@ class NovelAnalysisService:
                         },
                     ),
                     response_transaction_policy=ResponseTransactionPolicy(
-                        mode=ResponseTransactionMode.DIRECT_LIVE,
-                        public_presentation=PublicPresentationMode.NONE,
+                        mode=ResponseTransactionMode.VALIDATED_RESULT,
+                        public_presentation=PublicPresentationMode.MODEL_LIVE,
                     ),
+                    committed_result_facts_provider=self._public_facts,
                     durable_continuation=durable_continuation,
                 ),
                 signal=asyncio.Event(),
@@ -409,12 +407,7 @@ class NovelAnalysisService:
             model_request.capability_snapshot,
             model_request.options.get("max_tokens"),
         )
-        if output_limit.max_tokens >= window:
-            output_limit = InvocationOutputLimit(
-                max_tokens=max(1_024, window // 4),
-                source=output_limit.source,
-                profile_max_tokens=output_limit.profile_max_tokens,
-            )
+        output_limit = fit_output_limit_to_context(output_limit, window)
         request = AgentRunRequest(
             messages=(AgentMessage(role=MessageRole.USER, content=prompt),),
             model=model_request,
@@ -554,11 +547,7 @@ class NovelAnalysisService:
                     or None
                 ),
                 "prompt": str(row.get("prompt") or ""),
-                "finalResponse": (
-                    str(row.get("final_response") or "")
-                    if binding_attributes.get("interactionKind") == "follow_up"
-                    else ""
-                ),
+                "finalResponse": str(row.get("final_response") or ""),
                 "taskId": task_id or None,
                 "taskStatus": str(row.get("task_status") or "") or None,
                 "taskRevision": row.get("task_revision"),

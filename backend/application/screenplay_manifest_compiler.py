@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from domains.screenplay_agent.contracts import (
-    ScreenplayIntent,
-    ScreenplayPlanBinding,
-    ScreenplayPlanPhase,
-)
+from domains.screenplay_agent.contracts import ScreenplayIntent
 from domains.screenplay_agent.manifest import (
     ScreenplayArtifactManifest,
     ScreenplayPartKind,
@@ -96,7 +92,6 @@ def compile_screenplay_manifest(
     document_sections: Sequence[str] = (),
     source_chapters: Sequence[Mapping[str, object]] = (),
     original_request: str | None = None,
-    plan_bindings: Sequence[ScreenplayPlanBinding] = (),
     plan_steps: Sequence[TaskStep],
 ) -> CompiledScreenplayManifest:
     scenes = {
@@ -136,19 +131,9 @@ def compile_screenplay_manifest(
         common=common,
         original_request=original_request,
     )
-    bindings = _order_bindings_by_root_plan(
-        tuple(plan_bindings) or intent.plan_bindings,
+    part_step_ids, mapping_digest = _bind_parts_to_plan(
+        parts,
         plan_steps,
-    )
-    part_step_ids, binding_digest = _bind_parts_to_plan(
-        parts,
-        bindings,
-        target_role=target_role,
-    )
-    parts = _apply_public_step_barriers(
-        parts,
-        part_step_ids,
-        bindings,
     )
     canonical = {
         "artifactKind": target_role,
@@ -189,11 +174,11 @@ def compile_screenplay_manifest(
             max_parallelism=parallelism,
             metadata={
                 "targetRole": target_role,
-                "recipeVersion": 6,
+                "recipeVersion": 7,
                 "manifestId": manifest.id,
                 "manifestDigest": manifest.digest,
                 "assemblyStrategy": strategy,
-                "planBindingDigest": binding_digest,
+                "planMappingDigest": mapping_digest,
             },
         ),
     )
@@ -624,9 +609,8 @@ def _append_terminal_parts(parts, *, target_role, common, original_request):
     terminal_dependencies = tuple(
         part.id for part in parts if part.kind is ScreenplayPartKind.VALIDATION
     )
-    final_id = "compose-final-response"
     parts.append(_part(
-        final_id,
+        "compose-final-response",
         ScreenplayPartKind.FINAL_RESPONSE,
         len(parts),
         terminal_dependencies,
@@ -743,36 +727,21 @@ def _recipe_step(part, *, target_role, plan_step_id):
     )
 
 
-def _bind_parts_to_plan(parts, bindings, *, target_role):
-    if not bindings or any(
-        not isinstance(binding, ScreenplayPlanBinding)
-        for binding in bindings
-    ):
-        raise ValueError("screenplay Manifest requires plan bindings")
-    by_phase = {
-        phase: tuple(
-            binding.step_id for binding in bindings if binding.phase is phase
+def _bind_parts_to_plan(parts, plan_steps):
+    steps = tuple(plan_steps)
+    if not steps or any(not isinstance(step, TaskStep) for step in steps):
+        raise ValueError("screenplay Manifest requires validated Root plan steps")
+    if len({step.id for step in steps}) != len(steps):
+        raise ValueError("screenplay Root plan step ids must be unique")
+    if len(steps) > len(parts):
+        raise ValueError(
+            "screenplay Root plan contains more semantic steps than executable work"
         )
-        for phase in ScreenplayPlanPhase
+    mapped = {
+        part.id: steps[index * len(steps) // len(parts)].id
+        for index, part in enumerate(parts)
     }
-    parts_by_phase = {
-        phase: tuple(
-            part for part in parts
-            if _part_phase(part, target_role=target_role) is phase
-        )
-        for phase in ScreenplayPlanPhase
-    }
-    mapped: dict[str, str] = {}
-    for phase in ScreenplayPlanPhase:
-        step_ids = by_phase[phase]
-        phase_parts = parts_by_phase[phase]
-        if bool(step_ids) != bool(phase_parts) or len(step_ids) > len(phase_parts):
-            raise ValueError(
-                f"screenplay plan phase {phase.value} cannot cover Manifest Parts"
-            )
-        for index, part in enumerate(phase_parts):
-            mapped[part.id] = step_ids[index * len(step_ids) // len(phase_parts)]
-    digest_source = [binding.to_mapping() for binding in bindings]
+    digest_source = [step.id for step in steps]
     digest = "sha256:" + hashlib.sha256(json.dumps(
         digest_source,
         ensure_ascii=False,
@@ -781,79 +750,6 @@ def _bind_parts_to_plan(parts, bindings, *, target_role):
         allow_nan=False,
     ).encode("utf-8")).hexdigest()
     return mapped, digest
-
-
-def _order_bindings_by_root_plan(bindings, plan_steps):
-    steps = tuple(plan_steps)
-    if not steps or any(not isinstance(step, TaskStep) for step in steps):
-        raise ValueError("screenplay Manifest requires validated Root plan steps")
-    by_id = {binding.step_id: binding for binding in bindings}
-    step_ids = tuple(step.id for step in steps)
-    if len(by_id) != len(bindings) or set(by_id) != set(step_ids):
-        raise ValueError("screenplay bindings must match validated Root plan steps")
-    return tuple(by_id[step_id] for step_id in step_ids)
-
-
-def _apply_public_step_barriers(parts, part_step_ids, bindings):
-    """Make private recipe progress obey the model-authored Root step order."""
-
-    ordered_step_ids = tuple(dict.fromkeys(
-        binding.step_id for binding in bindings
-    ))
-    parts_by_id = {part.id: part for part in parts}
-    groups = {
-        step_id: tuple(
-            part for part in parts
-            if part_step_ids[part.id] == step_id
-        )
-        for step_id in ordered_step_ids
-    }
-    rewritten: dict[str, ScreenplayPartSpec] = {}
-    previous_terminals: tuple[str, ...] = ()
-    for step_id in ordered_step_ids:
-        group = groups[step_id]
-        group_ids = {part.id for part in group}
-        depended_on_within_group = {
-            dependency
-            for part in group
-            for dependency in part.dependencies
-            if dependency in group_ids
-        }
-        for part in group:
-            internal = tuple(
-                dependency
-                for dependency in part.dependencies
-                if dependency in group_ids
-            )
-            dependencies = (
-                tuple(dict.fromkeys((*internal, *previous_terminals)))
-                if not internal
-                else internal
-            )
-            rewritten[part.id] = replace(part, dependencies=dependencies)
-        previous_terminals = tuple(
-            part.id for part in group
-            if part.id not in depended_on_within_group
-        )
-    if set(rewritten) != set(parts_by_id):
-        raise ValueError("screenplay public plan barriers left Parts unbound")
-    return tuple(
-        rewritten[part.id]
-        for step_id in ordered_step_ids
-        for part in groups[step_id]
-    )
-
-
-def _part_phase(part, *, target_role):
-    if part.kind is ScreenplayPartKind.EVIDENCE:
-        return ScreenplayPlanPhase.EVIDENCE
-    if part.kind is ScreenplayPartKind.REVIEW_DIMENSION:
-        return ScreenplayPlanPhase.REVIEW
-    if part.kind is ScreenplayPartKind.FINAL_RESPONSE:
-        return ScreenplayPlanPhase.DELIVERY
-    if part.kind is ScreenplayPartKind.VALIDATION and target_role == "review":
-        return ScreenplayPlanPhase.REVIEW
-    return ScreenplayPlanPhase.CREATION
 
 
 def _display_title(part, metadata):

@@ -50,12 +50,21 @@ export function getAgentProcessingLabel(
     }
     const invocationId = activeOperation?.invocationId
     if (invocationId) {
+      const providerProgress = [...canonical.agentProgress]
+        .reverse()
+        .find((item) => item.invocationId === invocationId)
+      const providerTitle = publicAgentProgressNarration(providerProgress?.text)
+      if (providerTitle) return providerTitle
       const modelTitle = [...canonical.commentaryBlocks]
         .reverse()
         .find((block) => !block.aborted && block.invocationId === invocationId)
       const title = publicAgentProgressNarration(modelTitle?.text)
       if (title) return title
     }
+    const latestProgress = publicAgentProgressNarration(
+      canonical.agentProgress.at(-1)?.text,
+    )
+    if (latestProgress) return latestProgress
   }
   return '正在思考'
 }

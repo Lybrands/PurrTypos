@@ -17,6 +17,9 @@ from domains.screenplay_agent.candidate_projection import (
 from infrastructure.screenplay.tools.candidate_artifact import (
     ScreenplayCandidateArtifacts,
 )
+from infrastructure.screenplay.tools.read_evidence import (
+    consumed_task_part_keys, has_prepared_read, record_prepared_source_receipts,
+)
 
 
 class ScreenplayCandidateCompletionError(RunCommitProjectionError):
@@ -84,12 +87,14 @@ class ScreenplayCandidateCompletionProjector:
             ):
                 raise ValueError("candidate projection contract is invalid")
             await self._validate_started_event(run_id, turn_id)
+            await record_prepared_source_receipts(self._db, run_id, str(scope["projectId"]))
             await self._validate_dependency_read(run_id, scope)
             if (
                 str(scope.get("toolAccess") or "") == "draft_scene"
                 and not await self._has_successful_tool_read(
                     run_id,
                     "getScreenplayEpisodeContext",
+                    episode_number=scope.get("boundEpisodeNumber"),
                 )
             ):
                 raise ValueError("draft scene episode context was not read")
@@ -158,9 +163,8 @@ class ScreenplayCandidateCompletionProjector:
             raise ValueError("candidate dependency scope is invalid")
         if not dependency_part_keys:
             return
-        if not await self._has_successful_tool_read(
-            run_id,
-            "readScreenplayTaskDependencies",
+        if not set(dependency_part_keys).issubset(
+            await consumed_task_part_keys(self._db, run_id)
         ):
             raise ValueError("candidate dependencies were not read")
 
@@ -168,7 +172,11 @@ class ScreenplayCandidateCompletionProjector:
         self,
         run_id: str,
         tool_name: str,
+        *,
+        episode_number: int | None = None,
     ) -> bool:
+        if await has_prepared_read(self._db, run_id, {tool_name}, episode_number=episode_number):
+            return True
         row = await self._db.fetch_one(
             "SELECT 1 AS present FROM ai_agent_run_events AS started "
             "JOIN ai_agent_run_events AS finished "
@@ -182,9 +190,11 @@ class ScreenplayCandidateCompletionProjector:
             "AND json_extract("
             "started.payload_json, '$.display.labelParams.toolName'"
             ") = ? "
+            "AND (? IS NULL OR json_extract(started.payload_json, "
+            "'$.display.labelParams.episodeNumber') = ?) "
             "AND json_extract(finished.payload_json, '$.status') = 'succeeded' "
             "LIMIT 1",
-            [run_id, tool_name],
+            [run_id, tool_name, episode_number, episode_number],
         )
         return row is not None
 

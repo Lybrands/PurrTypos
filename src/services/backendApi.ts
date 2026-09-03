@@ -766,6 +766,12 @@ export const backendApi: BackendApi = {
   },
   getAgentRunDiagnostics: (data) =>
     apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/diagnostics`),
+  getAgentRunPlannerDiagnostics: (data) =>
+    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/planner-diagnostics`),
+  getAgentRunModelInputDiagnostics: (data) =>
+    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/model-input-diagnostics`),
+  getAgentRunToolDiagnostics: (data) =>
+    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/tool-diagnostics?after=${data.after ?? 0}`),
   maintainAgentArtifacts: () => apiPost('/ai/artifacts/maintenance', {}),
   getAgentRunStabilityTrend: (data) => {
     const params = new URLSearchParams()

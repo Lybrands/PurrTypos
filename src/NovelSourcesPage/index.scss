@@ -441,21 +441,13 @@
 .novel-analysis-result-list .agent-markdown { color: var(--text-secondary); font-size: 11px; }
 .novel-analysis-result-list .agent-markdown > :first-child { margin-top: 0; }
 .novel-analysis-result-list .agent-markdown > :last-child { margin-bottom: 0; }
+.novel-analysis-skill-groups { display: grid; gap: 14px; }
+.novel-analysis-skill-group { display: grid; gap: 7px; }
+.novel-analysis-skill-group > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.novel-analysis-skill-group > header strong { font-size: 12px; }
+.novel-analysis-skill-group > header span { color: var(--text-muted); font-size: 10px; }
 .novel-analysis-result-empty { margin: 0; color: var(--text-muted); font-size: 11px; }
 .novel-analysis-result-actions { justify-content: flex-end; }
-.novel-method-candidate-review { display: grid; gap: 12px; }
-.novel-method-candidate-review > p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.65; }
-.novel-method-candidate-review-toolbar { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 12px; }
-.novel-method-candidate-review-toolbar > span { color: var(--text-muted); font-size: 11px; }
-.novel-method-candidate-review-toolbar > div { display: flex; gap: 2px; }
-.novel-method-candidate-review-list { display: grid; gap: 7px; }
-.novel-method-candidate-review-item { display: flex; padding: 8px 8px 8px 12px; align-items: center; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-surface); gap: 8px; }
-.novel-method-candidate-review-item:hover { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); background: var(--bg-hover); }
-.novel-method-candidate-review-item > .purr-checkbox { min-width: 0; margin: 0; align-items: flex-start; flex: 1; }
-.novel-method-candidate-review-item > .purr-checkbox > span:last-child { display: grid; min-width: 0; flex: 1; gap: 4px; }
-.novel-method-candidate-review-item strong { font-size: 12px; }
-.novel-method-candidate-review-item small { overflow: hidden; color: var(--text-secondary); font-size: 11px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
-.novel-method-candidate-review-item em { color: var(--text-muted); font-size: 9px; font-style: normal; }
 
 .novel-source-busy { position: fixed; right: 28px; bottom: 28px; display: grid; width: 44px; height: 44px; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elevated); box-shadow: var(--shadow-md); place-items: center; }
 .novel-sources-loading { display: grid; min-height: 240px; place-items: center; }

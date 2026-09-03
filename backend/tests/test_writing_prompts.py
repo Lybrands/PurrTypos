@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from domains.agent_output_policy import build_agent_public_progress_policy
+from domains.agent_policy import (
+    build_agent_final_response_policy,
+    build_agent_public_progress_policy,
+)
 from domains.writing.prompts import (
-    build_writing_agent_policy,
+    build_writing_planning_policy,
     frame_untrusted_writing_context,
 )
 
@@ -23,19 +26,19 @@ EXPECTED_WRITING_AGENT_POLICY = (
 )
 
 
-def test_writing_agent_policy_defines_the_complete_dynamic_planning_contract():
-    assert build_writing_agent_policy() == (
-        EXPECTED_WRITING_AGENT_POLICY + build_agent_public_progress_policy()
-    )
-    assert "面向用户的状态标题" in build_writing_agent_policy()
-    assert "不得包含 Run、Task、Turn" in build_writing_agent_policy()
+def test_writing_policy_contains_only_domain_rules():
+    policy = build_writing_planning_policy()
+
+    assert policy == EXPECTED_WRITING_AGENT_POLICY.rstrip()
+    assert build_agent_public_progress_policy() not in policy
+    assert build_agent_final_response_policy() not in policy
 
 
 def test_writing_agent_policy_does_not_embed_untrusted_user_or_story_material():
     user_material = "请把月门改成只能在晴天开启"
     chapter_material = "雨夜里，月门在第三声钟响后开启。"
 
-    policy = build_writing_agent_policy()
+    policy = build_writing_planning_policy()
     framed = frame_untrusted_writing_context({
         "userRequest": user_material,
         "chapterBody": chapter_material,
@@ -48,7 +51,7 @@ def test_writing_agent_policy_does_not_embed_untrusted_user_or_story_material():
 
 
 def test_writing_agent_policy_does_not_duplicate_evidence_delivery_rules():
-    policy = build_writing_agent_policy()
+    policy = build_writing_planning_policy()
 
     assert "exactReviewItemCount" not in policy
     assert "summaryMaxCharacters" not in policy

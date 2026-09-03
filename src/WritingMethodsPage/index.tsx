@@ -42,8 +42,10 @@ function analysisSourceRef(method: WritingMethod) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue
     const sourceRef = value as Record<string, unknown>
     const analysisId = String(sourceRef.analysisId ?? '')
-    const craftCardId = String(sourceRef.craftCardId ?? '')
-    if (analysisId && craftCardId) return { analysisId, craftCardId }
+    const craftCardIds = Array.isArray(sourceRef.craftCardIds)
+      ? sourceRef.craftCardIds.map(String).filter(Boolean)
+      : [String(sourceRef.craftCardId ?? '')].filter(Boolean)
+    if (analysisId && craftCardIds.length) return { analysisId, craftCardIds }
   }
   return null
 }
@@ -123,11 +125,19 @@ export default function WritingMethodsPage({ onBack, onHome }: Props) {
         revisionId: result.data.sourceRevisionId,
       })
       if (!revision.success || !revision.data) throw new Error(revision.error || '来源原文已经不存在')
-      const card = result.data.craftCards.find((item) => item.id === sourceRef.craftCardId)
-      if (!card) throw new Error('来源分析中的写作技法已经不存在')
+      const cards = result.data.craftCards.filter(
+        (item) => item.id && sourceRef.craftCardIds.includes(item.id),
+      )
+      if (!cards.length) throw new Error('来源分析中的写作技法已经不存在')
+      const evidence = Array.from(new Map(
+        cards.flatMap((card) => card.evidence).map((item) => [
+          `${item.sectionId}:${item.locator?.start ?? ''}:${item.excerptDigest ?? item.excerpt}`,
+          item,
+        ]),
+      ).values())
       setEvidenceView({
         title: `${method.name} · 原文证据`,
-        evidence: card.evidence,
+        evidence,
         sourceWorkId: revision.data.work_id,
         sourceRevisionId: result.data.sourceRevisionId,
       })

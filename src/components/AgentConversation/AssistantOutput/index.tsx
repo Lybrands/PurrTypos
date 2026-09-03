@@ -21,6 +21,7 @@ import {
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getCanonicalOperationStatusText,
+  getActiveOperationLabel,
   getOperationGroupProgress,
   groupConsecutiveWorkSteps,
   executionPanelHasTerminalError,
@@ -246,6 +247,8 @@ function AssistantOutputInner({
   const executionPanel = getExecutionPanelPresentation(executionLogParts, {
     isStreaming,
     durationMs: message.durationMs,
+    status: message.canonicalOutput?.runStatus ?? message.taskPlan?.status,
+    hasError: executionPanelHasTerminalError(message),
   });
   const executionPanelLogKey = getExecutionPanelLogKey(message)
     ?? `message-${index}-execution-log`;
@@ -377,6 +380,7 @@ function AssistantOutputInner({
             .map(operationPartActiveStartedAt)
             .find((startedAt) => startedAt != null)}
           active={part.parts.some(operationPartIsActive)}
+          activeLabel={getActiveOperationLabel(part.parts)}
           hasError={workLogHasError(part.parts)}
         >
           {part.parts.map((item, itemIndex) => renderOperationPart(

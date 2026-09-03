@@ -4,6 +4,7 @@ import pytest
 
 from application.writing_method_candidates import WritingMethodCandidateService
 from database.connection import DatabaseConnection
+from domains.writing.methods import WritingMethodConflictError
 
 
 @pytest.fixture
@@ -17,13 +18,23 @@ async def db(tmp_path):
         "('analysis-candidate', 'source-rev-1', 1, 0, 1, 'analysis-digest', '{}')"
     )
     for card_id, title, body in (
-        ("card-1", "递进揭示", "先隐藏真相。原文秘密句。再逐层揭示。"),
-        ("card-2", "场景反差", "用安静场景承托冲突。"),
+        (
+            "card-1",
+            "递进揭示",
+            "## 写作逻辑\n先隐藏关键信息。原文秘密句。再逐层揭示。"
+            "\n\n## 风格特征\n克制、递进。",
+        ),
+        (
+            "card-2",
+            "延迟回答",
+            "## 写作逻辑\n延迟回答核心疑问。"
+            "\n\n## 风格特征\n悬念感明确。",
+        ),
     ):
         await connection.execute(
             "INSERT INTO novel_source_craft_cards "
             "(id, analysis_id, card_kind, title, body_markdown, metadata_json, "
-            "status, content_digest) VALUES (?, 'analysis-candidate', 'technique', "
+            "status, content_digest) VALUES (?, 'analysis-candidate', 'pacing_and_tension', "
             "?, ?, '{}', 'verified', ?)",
             [card_id, title, body, f"digest-{card_id}"],
         )
@@ -44,14 +55,33 @@ async def test_verified_cards_create_reviewable_drafts_without_copying_evidence(
         "analysis-candidate"
     )
     assert batch["bindingChanged"] is False
-    assert len(batch["methods"]) == 2
-    first = next(item for item in batch["methods"] if item["source_ref"]["craftCardId"] == "card-1")
+    assert len(batch["methods"]) == 1
+    first = batch["methods"][0]
+    assert first["source_ref"]["craftCardIds"] == ["card-1", "card-2"]
     assert first["source_ref"]["analysisDigest"] == "analysis-digest"
     assert "原文秘密句。" not in first["draft_markdown"]
-    assert "原文证据见来源分析档案" in first["draft_markdown"]
+    assert "## 递进揭示" in first["draft_markdown"]
+    assert "## 延迟回答" in first["draft_markdown"]
     assert batch["scheme"]["source_ref"]["candidateMethodIds"] == [
         item["id"] for item in batch["methods"]
     ]
+
+
+async def test_legacy_fragment_cards_cannot_be_published_as_a_writing_skill(db):
+    before = await db.fetch_one("SELECT COUNT(*) AS count FROM writing_methods")
+    await db.execute(
+        "UPDATE novel_source_craft_cards SET body_markdown = '夹带具体情节的旧描述' "
+        "WHERE id = 'card-1'"
+    )
+
+    with pytest.raises(WritingMethodConflictError, match="重新分析"):
+        await WritingMethodCandidateService(db).create_from_analysis(
+            "analysis-candidate"
+        )
+
+    assert await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM writing_methods"
+    ) == before
 
 
 async def test_candidate_publish_is_atomic_and_never_binds_a_book(db):
@@ -59,8 +89,8 @@ async def test_candidate_publish_is_atomic_and_never_binds_a_book(db):
     batch = await service.create_from_analysis("analysis-candidate")
     method_ids = [item["id"] for item in batch["methods"]]
     published = await service.publish_batch(batch["scheme"]["id"], method_ids=method_ids)
-    assert len(published["methodRevisions"]) == 2
-    assert len(published["schemeRevision"]["members"]) == 2
+    assert len(published["methodRevisions"]) == 1
+    assert len(published["schemeRevision"]["members"]) == 1
     assert published["schemeRevision"]["metadata"]["sourceRef"]["analysisId"] == (
         "analysis-candidate"
     )
@@ -92,7 +122,7 @@ async def test_publish_failure_rolls_back_every_candidate_revision(db, monkeypat
     with pytest.raises(RuntimeError, match="scheme publish failed"):
         await service.publish_batch(batch["scheme"]["id"], method_ids=method_ids)
     assert await db.fetch_one(
-        "SELECT COUNT(*) AS count FROM writing_method_revisions WHERE method_id IN (?, ?)",
+        "SELECT COUNT(*) AS count FROM writing_method_revisions WHERE method_id = ?",
         method_ids,
     ) == {"count": 0}
     assert await db.fetch_one(

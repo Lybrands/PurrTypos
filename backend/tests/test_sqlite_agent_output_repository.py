@@ -29,6 +29,7 @@ from purra.errors import (
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.output import (
+    AGENT_PROGRESS_SCHEMA,
     AgentOutputEventDraft,
     AgentOutputIntent,
     OutputChannel,
@@ -37,7 +38,9 @@ from purra.output import (
     OutputSource,
     OutputStreamSpec,
     OutputVisibility,
+    PROVIDER_DELTA_BATCH_SCHEMA,
     RunLifecycleOutputDraft,
+    provider_delta_batch_digest,
 )
 from purra.ports import RunCommit
 from purra.testing import assert_host_adapters_conform
@@ -473,6 +476,101 @@ async def test_planning_stream_identity_and_provider_progress_are_replayable(
 
 
 @pytest.mark.asyncio
+async def test_agent_progress_requires_exact_persisted_provider_source(
+    output_db,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    invocation_id = "answer-invocation-1"
+    stream_id = "answer-stream-1"
+    occurred_at = datetime.now(timezone.utc)
+    await repository.open_stream(OutputStreamSpec(
+        output_stream_id=stream_id,
+        run_id=run_id,
+        turn_id="turn-1",
+        invocation_id=invocation_id,
+        intent=AgentOutputIntent.FINAL_PUBLIC,
+        commit_mode=OutputCommitMode.LIVE,
+    ))
+    entries = [{
+        "sourceChunkIndex": 1,
+        "sourcePartIndex": 3,
+        "kind": OutputEventKind.PROVIDER_PROGRESS_DELTA.value,
+        "payload": {"delta": "正在核对人物动机"},
+    }]
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key=(
+            "provider-batch:answer-invocation-1:diagnostic:private:1:1"
+        ),
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_DELTA_BATCH,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={
+            "schemaVersion": PROVIDER_DELTA_BATCH_SCHEMA,
+            "sourceChunkStart": 1,
+            "sourceChunkEnd": 1,
+            "entries": entries,
+            "payloadDigest": provider_delta_batch_digest(entries),
+        },
+        occurred_at=occurred_at,
+    ))
+    progress = await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key="agent-progress:answer-invocation-1:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.AGENT_PROGRESS,
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "schemaVersion": AGENT_PROGRESS_SCHEMA,
+            "text": "正在核对人物动机",
+            "sourceChunkIndex": 1,
+        },
+        occurred_at=occurred_at,
+    ))
+
+    with pytest.raises(
+        ContractViolationError,
+        match="does not match Provider source",
+    ):
+        await repository.append_event(AgentOutputEventDraft(
+            run_id=run_id,
+            turn_id="turn-1",
+            output_stream_id=stream_id,
+            invocation_id=invocation_id,
+            source_event_key="agent-progress:answer-invocation-1:2",
+            source=OutputSource.PROVIDER,
+            kind=OutputEventKind.AGENT_PROGRESS,
+            channel=OutputChannel.COMMENTARY,
+            visibility=OutputVisibility.PUBLIC,
+            payload={
+                "schemaVersion": AGENT_PROGRESS_SCHEMA,
+                "text": "伪造的阶段",
+                "sourceChunkIndex": 2,
+            },
+            occurred_at=occurred_at,
+        ))
+
+    replay = await repository.list_session_events(session_id=7, after_cursor=0)
+    assert [
+        event for _, event in replay
+        if event.kind is OutputEventKind.AGENT_PROGRESS
+    ] == [progress]
+    assert all(
+        event.kind is not OutputEventKind.PROVIDER_DELTA_BATCH
+        for _, event in replay
+    )
+
+
+@pytest.mark.asyncio
 async def test_schema_backfills_historical_canonical_root_journal(tmp_path: Path):
     original = DatabaseConnection(tmp_path)
     await original.init()
@@ -808,6 +906,65 @@ async def test_committed_private_tool_stream_publishes_replayable_commentary(
             after_cursor=0,
         )
     ) == published
+    with pytest.raises(
+        ContractViolationError,
+        match="rejects Provider tool calls",
+    ):
+        await repository.publish_stream_content_as_final("output-tool-1")
+
+
+@pytest.mark.asyncio
+async def test_committed_private_answer_publishes_exact_replayable_final(
+    output_db,
+):
+    db, run_id, _runs = output_db
+    repository = _repository(db)
+    await repository.open_stream(_private_tool_stream(run_id))
+    await repository.append_event(_private_tool_content(
+        run_id,
+        source_event_key="provider:answer:1",
+        text="直接",
+    ))
+    await repository.append_event(_private_tool_content(
+        run_id,
+        source_event_key="provider:answer:2",
+        text="回答。",
+    ))
+    private_commit = await repository.commit_stream(
+        "output-tool-1",
+        ModelFinishReason.STOP,
+    )
+
+    published = await repository.publish_stream_content_as_final(
+        "output-tool-1"
+    )
+    repeated = await repository.publish_stream_content_as_final(
+        "output-tool-1"
+    )
+    run = await db.fetch_one(
+        "SELECT conversation_id, final_response FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    )
+    conversation = await db.fetch_one(
+        "SELECT response FROM ai_conversations WHERE id = ?",
+        [run["conversation_id"]],
+    )
+
+    assert repeated == published
+    assert len(published) == 2
+    final, committed = published
+    assert final.sequence > private_commit.sequence
+    assert final.source is OutputSource.PROVIDER
+    assert final.kind is OutputEventKind.PROVIDER_CONTENT_DELTA
+    assert final.channel is OutputChannel.FINAL
+    assert final.visibility is OutputVisibility.PUBLIC
+    assert final.payload == {"delta": "直接回答。"}
+    assert committed.sequence > final.sequence
+    assert committed.kind is OutputEventKind.STREAM_COMMITTED
+    assert committed.channel is OutputChannel.FINAL
+    assert committed.visibility is OutputVisibility.PUBLIC
+    assert run["final_response"] == "直接回答。"
+    assert conversation == {"response": "直接回答。"}
 
 
 @pytest.mark.asyncio

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import json
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import purra
 import purra_mem0
@@ -17,8 +19,11 @@ BACKEND_DIR = ROOT_DIR / "backend"
 PURRA_VERSION = "0.5.0"
 PURRA_MEM0_VERSION = "0.5.0"
 PURRA_REQUIREMENTS = (
-    "-e ../purra",
+    "./backend/vendor/purra-0.5.0-py3-none-any.whl",
     "-e ../purra/integrations/mem0/python[managed]",
+)
+PURRA_WHEEL_SHA256 = (
+    "0d380d4d65f1378574c940e2c35b6f7de8f23c147d299e56b5376c6ee1e535b4"
 )
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
@@ -98,7 +103,7 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
-def test_purra_is_loaded_from_the_local_editable_distribution():
+def test_purra_is_loaded_from_the_pinned_local_wheel():
     requirements = tuple(
         line.strip()
         for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
@@ -106,30 +111,38 @@ def test_purra_is_loaded_from_the_local_editable_distribution():
         ).splitlines()
         if line.strip()
     )
+    wheel_path = BACKEND_DIR / "vendor" / "purra-0.5.0-py3-none-any.whl"
     package_path = Path(purra.__file__).resolve()
+    distribution = metadata.distribution("purra")
+    distribution_root = Path(distribution.locate_file("")).resolve()
 
     assert requirements == PURRA_REQUIREMENTS
+    assert hashlib.sha256(wheel_path.read_bytes()).hexdigest() == PURRA_WHEEL_SHA256
     assert metadata.version("purra") == PURRA_VERSION
-    source = (ROOT_DIR.parent / "purra").resolve()
-    direct_url = json.loads(metadata.distribution("purra").read_text("direct_url.json"))
-    assert direct_url == {"url": source.as_uri(), "dir_info": {"editable": True}}
-    assert package_path == source / "src" / "purra" / "__init__.py"
+    direct_url = json.loads(distribution.read_text("direct_url.json"))
+    installed_from = Path(unquote(urlparse(direct_url["url"]).path)).resolve()
+    assert installed_from == wheel_path.resolve()
+    assert direct_url["archive_info"]["hashes"]["sha256"] == PURRA_WHEEL_SHA256
+    assert package_path == distribution_root / "purra" / "__init__.py"
+    assert "site-packages" in package_path.parts
+    assert not package_path.is_relative_to((ROOT_DIR.parent / "purra").resolve())
     assert "/packages/purra/src/" not in package_path.as_posix()
     assert not (ROOT_DIR / "packages" / "purra").exists()
 
 
-def test_planning_mode_and_public_progress_contracts_come_from_sibling_purra():
-    from purra.contracts import AgentRunRequest, PlanningMode
+def test_planning_mode_and_public_progress_contracts_come_from_installed_wheel():
+    from purra.api import PlanningMode
+    from purra.contracts import AgentRunRequest
     from purra.output import AgentOutputEvent, OutputEventKind
 
-    source = (ROOT_DIR.parent / "purra" / "src" / "purra").resolve()
+    source = Path(metadata.distribution("purra").locate_file("purra")).resolve()
     exported = (AgentRunRequest, PlanningMode, AgentOutputEvent, OutputEventKind)
 
     assert all(
         Path(inspect.getfile(contract)).resolve().is_relative_to(source)
         for contract in exported
     )
-    assert AgentRunRequest.__dataclass_fields__["planning_mode"].default is PlanningMode.REACTIVE
+    assert AgentRunRequest.__dataclass_fields__["planning_mode"].default is PlanningMode.AUTO
     assert OutputEventKind.PLANNING_PROGRESS.value == "planning.progress"
 
 

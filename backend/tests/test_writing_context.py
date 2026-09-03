@@ -17,24 +17,37 @@ from purra.contracts import (
 from purra.json_values import thaw_json_mapping
 from purra.testing import assert_context_provider_conforms
 from domains.writing.context import (
-    WRITING_AGENT_POLICY_CONTEXT,
+    WRITING_DOMAIN_POLICY_CONTEXT,
     WRITING_RETRIEVAL_CONTEXT,
     WritingContextProvider,
     writing_context_claims,
 )
 from domains.writing.contracts import WritingDomainContext
-from domains.writing.prompts import build_writing_agent_policy
+from domains.writing.prompts import (
+    build_writing_planning_policy,
+)
+from application.shared_agent_context import (
+    AGENT_FINAL_RESPONSE_CONTEXT,
+    AGENT_PUBLIC_PROGRESS_CONTEXT,
+    with_shared_agent_context,
+)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("task_specific", [False, True])
-async def test_execution_context_retains_public_progress_policy(task_specific):
+async def test_execution_context_retains_shared_agent_behavior(task_specific):
     from purra.engine.context_capability import ContextCapability
     from purra.context_strategies import ContextStrategy
-    from domains.agent_output_policy import build_agent_public_progress_policy
+    from domains.agent_policy import (
+        build_agent_final_response_policy,
+        build_agent_public_progress_policy,
+    )
 
     request = _request()
-    capability = ContextCapability(ContextStrategy.STAGED, WritingContextProvider())
+    capability = ContextCapability(
+        ContextStrategy.STAGED,
+        with_shared_agent_context(WritingContextProvider()),
+    )
     planning = await capability.build_initial(request, _budget(request), None)
     task = TaskContextRequest(
         task_spec=TaskSpec(goal="核对当前章节"), include_response_context=True,
@@ -42,10 +55,17 @@ async def test_execution_context_retains_public_progress_policy(task_specific):
     execution, _ = await capability.build_execution(
         request, _budget(request), planning, task, None,
     )
-    policies = [block for block in execution.blocks if block.name == WRITING_AGENT_POLICY_CONTEXT]
-    assert len(policies) == 1
-    assert not policies[0].untrusted
-    assert build_agent_public_progress_policy() in policies[0].content
+    by_name = {block.name: block for block in execution.blocks}
+    assert not by_name[AGENT_PUBLIC_PROGRESS_CONTEXT].untrusted
+    assert by_name[AGENT_PUBLIC_PROGRESS_CONTEXT].content == (
+        build_agent_public_progress_policy()
+    )
+    assert by_name[AGENT_FINAL_RESPONSE_CONTEXT].content == (
+        build_agent_final_response_policy()
+    )
+    assert by_name[WRITING_DOMAIN_POLICY_CONTEXT].content == (
+        build_writing_planning_policy()
+    )
 
 
 def _request(
@@ -121,11 +141,12 @@ async def test_planning_context_keeps_existing_host_book_chapter_binding_trusted
         _budget(request),
     )
 
-    assert WRITING_AGENT_POLICY_CONTEXT == "writing_agent_policy"
+    assert WRITING_DOMAIN_POLICY_CONTEXT == "writing_domain_policy"
     assert len(bundle.blocks) == 2
     policy = bundle.blocks[0]
-    assert policy.name == "writing_agent_policy"
-    assert policy.content == build_writing_agent_policy()
+    assert policy.name == WRITING_DOMAIN_POLICY_CONTEXT
+    assert policy.content == build_writing_planning_policy()
+    assert "必须给出最终答复" not in policy.content
     assert policy.token_count == estimate_json_tokens(policy.content)
     assert policy.untrusted is False
     assert override not in policy.content
@@ -136,7 +157,7 @@ async def test_planning_context_keeps_existing_host_book_chapter_binding_trusted
         "singleChapterToolsMayOmitChapterId": True,
     }
     assert bundle.diagnostics["hostPlanningFacts"]["planningRules"][0] == (
-        build_writing_agent_policy()
+        build_writing_planning_policy()
     )
     assert override not in json.dumps(
         thaw_json_mapping(bundle.diagnostics),

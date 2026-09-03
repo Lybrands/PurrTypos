@@ -138,6 +138,18 @@ def _run_view(
         },
         "activity": {
             "modelAttemptCount": int(run.get("model_attempt_count") or 0),
+            "usage": {
+                "inputTokens": int(run.get("input_tokens") or 0),
+                "outputTokens": int(run.get("output_tokens") or 0),
+                "reasoningTokens": int(run.get("reasoning_tokens") or 0),
+                "totalTokens": (
+                    int(run.get("input_tokens") or 0)
+                    + int(run.get("output_tokens") or 0)
+                ),
+                "unreportedAttempts": int(
+                    run.get("unreported_usage_attempts") or 0
+                ),
+            },
             "providerOutputEvents": int(run.get("provider_output_events") or 0),
             "providerOutputBytes": int(run.get("provider_output_bytes") or 0),
         },

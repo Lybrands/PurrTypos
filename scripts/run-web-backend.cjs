@@ -50,6 +50,7 @@ const child = spawn(
       PURRTYPOS_DATA_DIR: process.env.PURRTYPOS_DATA_DIR || userDataDir(),
       PURRTYPOS_SKILLS_DIR: path.join(projectRoot, 'backend', 'skills'),
       PURRTYPOS_PORT: process.env.PURRTYPOS_PORT || '18321',
+      PURRTYPOS_DEV_DIAGNOSTICS: process.env.PURRTYPOS_DEV_DIAGNOSTICS || '1',
     },
     stdio: 'inherit',
   },

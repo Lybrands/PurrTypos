@@ -150,6 +150,8 @@ async def test_run_snapshot_pages_events_with_a_stable_cursor(temp_db):
     run_id = await _seed_run(temp_db)
     await temp_db.execute(
         "UPDATE ai_agent_runs SET model_attempt_count = 2, "
+        "unreported_usage_attempts = 1, input_tokens = 1200, "
+        "output_tokens = 80, reasoning_tokens = 25, "
         "provider_output_events = 12, provider_output_bytes = 3456 WHERE id = ?",
         [run_id],
     )
@@ -162,6 +164,13 @@ async def test_run_snapshot_pages_events_with_a_stable_cursor(temp_db):
     assert first["run"]["status"] == "running"
     assert first["run"]["activity"] == {
         "modelAttemptCount": 2,
+        "usage": {
+            "inputTokens": 1200,
+            "outputTokens": 80,
+            "reasoningTokens": 25,
+            "totalTokens": 1280,
+            "unreportedAttempts": 1,
+        },
         "providerOutputEvents": 12,
         "providerOutputBytes": 3456,
     }

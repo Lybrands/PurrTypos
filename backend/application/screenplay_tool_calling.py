@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from purra.api import AgentCoreRunOptions
+from purra.api import AgentCoreRunOptions, PlanningMode
 from purra.artifacts import ArtifactStatus
 from purra.contracts import (
     AgentMessage,
@@ -17,7 +17,6 @@ from purra.contracts import (
     AgentRunResult,
     MessageOrigin,
     MessageRole,
-    PlanningMode,
     RunBinding,
     RunProvenance,
     RunStatus,
@@ -32,6 +31,7 @@ from purra.output import (
 from application.agent_run_service import AgentRunService
 from application.durable_agent_run import run_durable_agent_unit
 from application.model_runtime import (
+    fit_output_limit_to_context,
     model_request_from_runtime,
     reasoning_mode_from_options,
     run_execution_intent,
@@ -75,7 +75,6 @@ class ScreenplayToolCallingService:
         user_payload: Mapping[str, Any],
         domain_context: ScreenplayAgentDomainContext,
         conversation_turn_id: str,
-        output_token_cap: int,
         bind_run: BindRun | None = None,
         candidate_validation_contract: Mapping[str, Any] | None = None,
         host_candidate_template: Mapping[str, Any] | None = None,
@@ -94,8 +93,8 @@ class ScreenplayToolCallingService:
         output_limit = screenplay_output_limit(
             model_request.capability_snapshot,
             model_request.options.get("max_tokens"),
-            part_cap=output_token_cap,
         )
+        output_limit = fit_output_limit_to_context(output_limit, window)
         bound_context = ScreenplayAgentDomainContext(
             project_id=domain_context.project_id,
             task_id=domain_context.task_id,
@@ -135,7 +134,16 @@ class ScreenplayToolCallingService:
             context_window=window,
             tools_enabled=True,
             planning_mode=PlanningMode.REACTIVE,
-            metadata={"locale": domain_context.locale},
+            metadata={
+                "locale": domain_context.locale,
+                "responseAudience": "internal",
+                "progressAudience": "public",
+                "screenplaySceneIds": list(
+                    user_payload.get("sceneIds")
+                    or (user_payload.get("evidenceDescriptor") or {}).get("sceneIds")
+                    or ()
+                ),
+            },
         )
         command_id = f"{domain_context.task_id}:{domain_context.unit_id}"
         options = AgentCoreRunOptions(
@@ -143,7 +151,7 @@ class ScreenplayToolCallingService:
             output_limit=output_limit,
             default_context_window_tokens=window,
             force_planned_tool_choice=False,
-            require_tool_call=True,
+            require_tool_call=False,
             reasoning_mode=reasoning_mode_from_options(runtime.options),
             provenance=screenplay_run_provenance(
                 runtime,

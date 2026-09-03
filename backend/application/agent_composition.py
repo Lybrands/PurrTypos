@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
@@ -63,7 +64,9 @@ from application.agent_profile_registry import (
     AgentProfileRegistry,
 )
 from application.run_execution_control import RunExecutionSession
+from application.shared_agent_context import with_shared_agent_context
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
+from infrastructure.persistence.run_store import runtime_limits_from_mapping
 from infrastructure.models.model_conversation_summarizer import (
     ModelBackedConversationSummarizer,
 )
@@ -111,7 +114,10 @@ logger = logging.getLogger(__name__)
 def _host_component_bindings(profile_id: str):
     prefix = f"purrtypos.{str(profile_id or '').strip()}"
     return {
-        role: AgentComponentBinding(f"{prefix}.{role}", "1")
+        role: AgentComponentBinding(
+            f"{prefix}.{role}",
+            "2" if role == "contextProvider" else "1",
+        )
         for role in (
             "contextProvider",
             "conversationCompactor",
@@ -294,7 +300,7 @@ class AgentComposition:
     def output_processor(self) -> AgentOutputProcessor:
         return self._output_processor
 
-    def create_model_task_runner(
+    async def create_model_task_runner(
         self,
         *,
         api_key: str,
@@ -304,15 +310,27 @@ class AgentComposition:
     ) -> AgentModelTaskRunner:
         """Compose a private model-task runner for an existing Run."""
 
+        run = await self._db.fetch_one(
+            "SELECT runtime_limits_json, deadline_at_ms FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if run is None:
+            raise ValueError("model task requires an existing Run")
+        limits = runtime_limits_from_mapping(json.loads(run["runtime_limits_json"]))
         return AgentModelTaskRunner(
             AgentModelInvocationManager(
                 ProviderModelGateway(api_key),
                 output_observer=self._output_processor,
+                invocation_timeout_ms=limits.provider_invocation_timeout_ms,
+                runtime_limits=limits,
+                budget_repository=self._repository,
             ),
             ModelInvocationContext(
                 run_id=run_id,
                 turn_id=turn_id,
                 requested_reasoning_mode=reasoning_mode,
+                deadline_at_ms=run["deadline_at_ms"],
+                deadline_code="run_deadline_exceeded",
             ),
         )
 
@@ -395,6 +413,15 @@ class AgentComposition:
         if context_provider is None and context_provider_factory is None:
             raise RuntimeError(
                 f"{profile_id} ContextProvider is not configured"
+            )
+        if context_provider is not None:
+            context_provider = with_shared_agent_context(context_provider)
+        if context_provider_factory is not None:
+            domain_context_provider_factory = context_provider_factory
+            context_provider_factory = lambda model_tasks: (
+                with_shared_agent_context(
+                    domain_context_provider_factory(model_tasks)
+                )
             )
         resolved_compactor = conversation_compactor
         conversation_compactor_factory = None
