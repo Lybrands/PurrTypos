@@ -26,6 +26,8 @@ _hiddenimports = [
     "certifi",
     "aiosqlite",
     "yaml",
+    "qdrant_client",
+    "qdrant_client.local.qdrant_local",
     "httpx",
     "httpx2",
     "openai",

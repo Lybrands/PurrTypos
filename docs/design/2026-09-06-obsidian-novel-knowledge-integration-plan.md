@@ -1,6 +1,6 @@
 # Obsidian 小说创作资料接入方案
 
-日期：2026-09-06。状态：方案，尚未实施。当前授权范围为完善方案文档；不进行代码改动、插件安装、真实 Vault 绑定或数据迁移。第 2 节接点来自本方案初稿时的工作区源码核对，实施前需要重新核对；尚未执行 Provider 实验。
+日期：2026-09-06；实施更新：2026-09-07。状态：A–D 首版代码与确定性验证已完成，真实 Provider 对照及 Electron/Obsidian 桌面验收待完成。用户已明确授权代码实现和测试，替代此前仅文档阶段的限制。范围限定 PurrTypos 小说业务、Vault 只读；不修改 PurrA，不涉及剧本，E 阶段留待后续。开发使用临时 Vault 与测试作品，真实 Provider 对照与 Electron/Obsidian 桌面验收尚未完成。
 
 ## 1. 目标与范围
 
@@ -344,7 +344,7 @@ A–D 是首个可用版本，E 是第二次交付。所有权转移只有完整
 
 实现后的相关测试入口优先覆盖 `test_writing_retrieval.py`、`test_writing_context.py`、`test_unified_memory_context.py`、`test_memory_operations.py` 及新增资料测试；完成适用的 typecheck、前端单元、组件约束、后端回归和 Web 构建。后端整套使用 `.venv/bin/python -m pytest backend/tests -q`。Python/依赖变化后重启后端，再建立可比较的新 Run；离线通过不等于 Provider 或 Electron 全链路通过。
 
-本次只维护方案文档，检查文档格式、交叉引用和方案一致性，不运行应用测试/服务，也不将计划中的退出条件标记为已完成。
+实施阶段执行应用测试与临时数据验证；确定性、模拟 Provider、真实 Provider 与 Electron 验收分别记录，未执行的退出条件保持待验。
 
 ## 12. 官方资料与技术前提
 
@@ -356,3 +356,42 @@ A–D 是首个可用版本，E 是第二次交付。所有权转移只有完整
 - 官方 URI 支持跨应用打开笔记以及标题/块定位；本方案仅用打开能力，并单独验证操作系统派发和实际应用定位。[官方 URI 说明](https://obsidian.md/help/Extending%2BObsidian/Obsidian%2BURI)
 
 本方案未选择或安装 Obsidian 社区插件，未替作者建立真实资料目录；实施时还需用户选定试点作品及 Vault 位置。
+
+
+## 13. 实施记录（2026-09-07）
+
+开始时工作区干净。直接在当前工作区实现，未创建独立工作树；未改动 PurrA 仓库或真实 Vault。
+
+已核对并修正的实施选择：
+
+- 当前小说章节在 `outline_chapters`，通过 `outlines.type=writing` 与作品关联；章节顺序按目录树展开。资料范围保存稳定章节 ID，并记录章节顺序与正文修订摘要。
+- 首版不开放所有权转移。外部 `purr_id` 保留 Obsidian 所有权；`purr_entity: character:<id>` 或 `setting:<id>` 声明与原实体重叠，同名未映射也进入参考状态。原卡片和派生记忆不被覆盖。
+- 原记忆和设定缺少历史/知情投影：正文/人物模式下暂不注入这些来源，旧工具也受到持久 Run 的范围限制；作者显式选择设定讨论模式时可读取当前状态。未实现完整历史回放。
+- 首版采用 5 秒清单轮询、查询前完整扫描、发送前来源 hash 复验，保证文件事件丢失不影响正确性；尚未使用原生文件事件来优化大型目录扫描成本。单目录上限 2,000 篇、单篇 1 MiB，总扫描 64 MiB。
+- Obsidian 跳转使用宿主生成的 `open?path=`，特殊字符完整编码；标题/块首版明确回退到原文件并显示定位信息，避免 Vault 同名引起误跳。URI 派发不等于应用实际定位通过。
+- 语义功能复用已有 Embedding 配置，但需单独明确授权；使用独立 Qdrant 目录及 collection。首版由作者点击分批索引，每批最多 40 个片段，不自动在后台发起收费请求。配置身份变化需重新授权，失败降级全文，旧向量不能绕过 SQLite 当前修订校验。
+- 工具与自动上下文共用一个资料服务；自动上下文占现有检索预算最多 40%，工具读取有单次 3,000 估算 Token 上限。完整片段放不下时暂缓，不裁成残缺事实。
+- `stream.opened.contextEvidence` 是实际调用输入凭据来源；管理页召回不计入模型使用。来源预览保存当次修订，数据库恢复后绑定需重新授权，SQLite 备份不包括 Vault 文件。
+
+阶段状态与证据：
+
+| 项目 | 结果 | 证据与边界 |
+| --- | --- | --- |
+| A：试点资料 | 已完成隔离样本与规范案例 | `scripts/create-novel-knowledge-fixture.py` 仅生成新临时目录；未选用或迁移真实作品。真实 Provider 基线待采集 |
+| B：资料连接 | 代码及确定性测试通过 | `backend/tests/test_novel_knowledge.py` 覆盖只读、路径/作品隔离、状态、范围、修订、重启和恢复授权 |
+| C：Agent 与来源 | 代码及模拟 Provider 集成通过 | 实际应用组合/聊天接口/持久 Run 的模型请求和 `stream.opened.contextEvidence` 已断言；真实 Provider 与桌面外部跳转待验 |
+| D：语义检索 | 代码与本地 Qdrant 测试通过 | 确定性 Embedding 网关验证增量、配置变化、缓存丢失、失败降级；真实服务与效果对照待验 |
+| E：资料写入 | 未实施 | 保持本轮只读边界 |
+
+最终验证（2026-09-07）：
+
+- 后端全量：`.venv/bin/python -m pytest backend/tests -q -o addopts='' --tb=short`，**2,187 passed**，139.67 秒。新增资料测试 25 项包含参数化案例；本轮相关定向回归 **88 passed**。`-o addopts=''` 仅清除额外 pytest 参数，不排除用例。
+- 前端：`npm run typecheck`、`npm run check:purr-components` 通过；`npm run test:unit` **460 passed**，含 3 项新增 Electron IPC 测试。
+- 构建：`npm run build:web` 通过，生成 `dist-web`；检查打包资源的核心新增/修改源码与当前源码一致，含 `qdrant-client 1.19.0`、`PyYAML 6.0.3`、已发布 `purra 0.5.0`。未构建或验收 Electron 安装包。
+- 工作区：`git diff --check` 通过；PurrA 仓库无改动。首次全量暴露的上下文空值序列化、旧工具集合断言已修正后重新跑完整套。
+- 临时 HTTP 服务已启动验证并关闭；`18331` 和 `5175` 无监听。浏览器对临时 API 返回 `net::ERR_BLOCKED_BY_CLIENT`，该尝试不计为 UI 验收；未绕过浏览器访问限制。
+- 未调用真实生成/Embedding Provider，未执行 Electron 对话框与 Obsidian 实际跳转验收，没有准确性提升结论。
+
+实施过程还修正了自动上下文与工具重复读取同一片段时的凭据 ID 冲突；范围撤销在没有资料凭据时也会拦截旧 Run 的下一次模型调用；全文召回先按准入后的片段 ID 过滤，再限制候选数量，避免大量草稿挤占有效结果。
+
+详细试用步骤、资料模板和未验证边界见 [验证与试用记录](../validation/2026-09-07-obsidian-novel-knowledge.md)。真实 Provider、Electron 桌面和效果实验退出条件仍保持待验，不能把本表确定性通过视为这些条件通过。

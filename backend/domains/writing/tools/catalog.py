@@ -130,7 +130,7 @@ def build_writing_tool_catalog(
     return InMemoryToolCatalog(tuple(
         _decorate_registration(name, registrations[name])
         for name in skills
-    ), _enabled_writing_tools)
+    ), enabled_writing_tools)
 
 
 def _decorate_registration(
@@ -272,13 +272,23 @@ async def _validate_writing_scope(
     return None
 
 
-def _enabled_writing_tools(request: AgentRunRequest) -> frozenset[str]:
+def enabled_writing_tools(request: AgentRunRequest) -> frozenset[str]:
     if request.domain_context.namespace != WRITING_DOMAIN_NAMESPACE:
         return frozenset()
     context = WritingDomainContext.from_core_context(request.domain_context)
     if not context.book_id:
         return frozenset()
     names = set(WRITING_TOOL_POLICIES)
+    if not context.knowledge_scope:
+        names.difference_update({"searchNovelKnowledge", "readNovelKnowledge"})
+    elif context.knowledge_scope.get("purpose") != "discussion":
+        # These current-state sources do not have a chapter/POV projection.
+        names.difference_update({
+            "getBookCharacters", "listBookCharacters", "getSettingEntities", "listSettingEntities",
+            "getStoryBackground", "searchMemories", "searchSparkIdeas", "getGlobalOutline",
+            "queryOutline", "listOutlines", "getStoryHealthDashboard", "updateCharacter",
+            "updateSettingEntity", "editStoryBackground", "updateOutline", "editGlobalOutline",
+        })
     if not context.writing_method_recommendation_requested:
         names.discard("searchWritingMethods")
     if context.creation_mode != "continuation" or not context.continuation_binding:

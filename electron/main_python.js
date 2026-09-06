@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage, clipboard } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
@@ -10,6 +10,8 @@ const {
 const { createAppProtocolHandler } = require('./app_protocol')
 const { registerDatabaseIpcHandlers } = require('./database_ipc')
 const { registerNovelSourceFileIpc } = require('./source_file_ipc')
+const { registerNovelKnowledgeIpc } = require('./novel_knowledge_ipc')
+const knowledgeHostSecret = require('node:crypto').randomBytes(32).toString('hex')
 const { configureAppIcon } = require('./app_icon')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
@@ -22,7 +24,7 @@ if (!isDev) {
 
 let mainWindow = null
 let appIcon = null
-const backendProcess = createBackendProcessManager({ app })
+const backendProcess = createBackendProcessManager({ app, processEnv: { ...process.env, PURRTYPOS_KNOWLEDGE_HOST_SECRET: knowledgeHostSecret } })
 
 // ─── Python backend lifecycle ────────────────────────────────────
 
@@ -104,6 +106,8 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopPythonBackend()
 })
+
+registerNovelKnowledgeIpc({ ipcMain, dialog, shell, clipboard, getWindow: () => mainWindow, backendUrl: BACKEND_URL, secret: knowledgeHostSecret })
 
 // ─── IPC: native file operations ─────────────────────────────────
 

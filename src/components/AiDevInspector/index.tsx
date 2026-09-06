@@ -1,4 +1,5 @@
 import React from "react";
+import { PurrButton } from "@/purr-components";
 import type { AiTaskPlan } from "../../agent-runtime";
 import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
 import ToolDiagnosticsCard from "./ToolDiagnosticsCard";
@@ -731,6 +732,11 @@ export function ModelInputDiagnosticsCard({
               {call.revision != null ? <span>revision {call.revision}</span> : null}
               <span>{call.messages.length} 条消息 · {call.messages.reduce((sum, message) => sum + characterCount(formatJson(message)), 0).toLocaleString()} 字符（诊断序列化）</span>
             </summary>
+            {call.novelKnowledge?.length ? <details><summary>创作资料输入凭据 · {call.novelKnowledge.length} 个片段</summary>{call.novelKnowledge.map((receipt) => <div key={receipt.evidenceId}>
+              <strong>{receipt.metadata.title}</strong> · 修订 {receipt.metadata.revision.slice(0, 12)} · {receipt.metadata.reasons.join(' / ')}
+              <DiagnosticText label="适用章节与知情范围" text={formatJson(receipt.metadata.scope)} />
+              <PurrButton onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))}>查看资料来源</PurrButton>
+            </div>)}</details> : null}
             {call.sdkRequest ? (
               <DiagnosticText label="SDK 参数核验（已脱敏）" text={formatJson(call.sdkRequest)} />
             ) : null}

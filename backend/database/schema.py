@@ -543,6 +543,9 @@ async def init_schema(db: DatabaseConnection) -> None:
 
     await init_writing_method_schema(db)
 
+    from database.novel_knowledge_schema import init_novel_knowledge_schema
+    await init_novel_knowledge_schema(db)
+
     # ── screenplay projects / versioned documents ────────────────
     # 剧本项目与书架作品是“引用”关系而不是所有权关系。source_book_id
     # 可以在来源书籍删除后置空，剧本项目及其文档仍然保留。

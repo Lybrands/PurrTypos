@@ -168,6 +168,8 @@ async def test_catalog_replans_only_after_explicit_evidence_reads(
 ):
     from infrastructure.writing.retrieval import WritingMemoryRetriever, WritingMethodRetriever
 
+    from infrastructure.writing.knowledge_retrieval import NovelKnowledgeRetriever
+
     async def _successful(_ctx, _args, _send_chunk):
         return ToolResult('{"evidence":"new fact"}')
 
@@ -177,6 +179,8 @@ async def test_catalog_replans_only_after_explicit_evidence_reads(
     retriever = {
         "searchMemories": WritingMemoryRetriever,
         "searchWritingMethods": WritingMethodRetriever,
+        "searchNovelKnowledge": NovelKnowledgeRetriever,
+        "readNovelKnowledge": NovelKnowledgeRetriever,
     }.get(tool_name)
     if retriever is not None:
         monkeypatch.setattr(retriever, "retrieve", _retrieved)
@@ -327,7 +331,7 @@ def test_all_bound_handlers_keep_the_writing_operation_call_signature():
     )
 
     assert set(bound) == set(WRITING_TOOL_POLICIES) - {
-        "searchMemories", "searchWritingMethods",
+        "searchMemories", "searchWritingMethods", "searchNovelKnowledge", "readNovelKnowledge",
     }
     for name, handler in bound.items():
         assert isinstance(handler, partial)

@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron')
 // AI streaming, and all other application services are called through the
 // renderer's standard HTTP/SSE service layer.
 contextBridge.exposeInMainWorld('purrDesktop', {
+  selectNovelKnowledge: (bookId) => ipcRenderer.invoke('novel-knowledge-select', bookId),
+  openNovelKnowledge: (args) => ipcRenderer.invoke('novel-knowledge-open', args),
   openFilePath: (filePath) => ipcRenderer.invoke('open-file-path', filePath),
   writeExportFiles: (data) => ipcRenderer.invoke('write-export-files', data),
   writeSingleTextFile: (data) => ipcRenderer.invoke('write-single-text-file', data),

@@ -14,6 +14,7 @@ WRITING_DOMAIN_NAMESPACE = "purrtypos.writing"
 
 @dataclass(frozen=True, slots=True)
 class WritingDomainContext:
+    knowledge_scope: Mapping[str, Any] | None = None
     book_id: str | None = None
     chapter_id: str | None = None
     current_chapter_title: str | None = None
@@ -68,6 +69,7 @@ class WritingDomainContext:
         return DomainContext(
             namespace=WRITING_DOMAIN_NAMESPACE,
             payload={
+                "knowledge_scope": dict(self.knowledge_scope or {}),
                 "book_id": self.book_id,
                 "chapter_id": self.chapter_id,
                 "current_chapter_title": self.current_chapter_title,
@@ -96,6 +98,7 @@ class WritingDomainContext:
             raise ValueError(f"unsupported writing domain namespace: {context.namespace}")
         payload = thaw_json_mapping(context.payload)
         return cls(
+            knowledge_scope=_mapping(payload.get("knowledge_scope")) or None,
             book_id=_optional_identifier(payload.get("book_id")),
             chapter_id=_optional_identifier(payload.get("chapter_id")),
             current_chapter_title=_optional_identifier(
