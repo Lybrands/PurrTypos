@@ -3,7 +3,11 @@ import type {
   ToolCallSegment,
 } from "../../../agent-runtime/contracts";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
-import { toolCallDisplayRow } from "../toolCallLabels.ts";
+import { publicAgentProgressNarration } from "../../../agent-runtime/outputPresentation.ts";
+import {
+  resolveLocalizedToolDisplayName,
+  toolCallDisplayRow,
+} from "../toolCallLabels.ts";
 export { groupConsecutiveWorkSteps } from "../ExecutionLog/grouping.ts";
 export type { ExecutionLogTimelineItem } from "../ExecutionLog/grouping.ts";
 
@@ -35,6 +39,7 @@ export type TimelineCanonicalOperationPart = {
   type: "operation";
   operation: CanonicalOperation;
   label: string;
+  isRetry: boolean;
 };
 
 export type AssistantTimelinePart =
@@ -67,12 +72,6 @@ export interface BuildAssistantTimelineOptions {
   loading?: boolean;
   /** 子 Run 可显示已收到的普通文本；根回答始终保持终态原子提交。 */
   allowStreamingText?: boolean;
-}
-
-export function getAssistantProcessingLabel(
-  _message: AgentConversationMessage,
-): string {
-  return "";
 }
 
 export function getOperationGroupProgress(
@@ -138,6 +137,32 @@ export interface ExecutionPanelPresentation {
   title: string;
 }
 
+export function getActiveOperationLabel(
+  parts: TimelineOperationPart[],
+): string | undefined {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (part.type === "operation" && part.operation.status === "running") {
+      return part.isRetry ? `重试 ${part.label}` : part.label;
+    }
+    if (part.type === "tools" && part.isLive) {
+      const completed = Math.max(0, part.segment.completedToolCount ?? 0);
+      const activeLabel = part.segment.labels.find(
+        (_label, labelIndex) =>
+          labelIndex >= completed && !part.segment.cachedFlags?.[labelIndex],
+      );
+      if (activeLabel) return activeLabel;
+    }
+    if (
+      part.type === "contextCompaction"
+      && part.state.status === "running"
+    ) {
+      return "压缩上下文";
+    }
+  }
+  return undefined;
+}
+
 function isTimelineOperationPart(
   part: AssistantTimelinePart,
 ): part is TimelineOperationPart {
@@ -149,9 +174,15 @@ function isTimelineOperationPart(
 
 export function getExecutionPanelPresentation(
   parts: AssistantTimelinePart[],
-  input: { isStreaming: boolean; durationMs?: number },
+  input: {
+    isStreaming: boolean;
+    durationMs?: number;
+    status?: string | null;
+    hasError?: boolean;
+  },
 ): ExecutionPanelPresentation {
-  const progress = getOperationGroupProgress(parts.filter(isTimelineOperationPart));
+  const operationParts = parts.filter(isTimelineOperationPart);
+  const progress = getOperationGroupProgress(operationParts);
   const active = input.isStreaming;
   const stepCount = progress.total;
   const visible = active
@@ -160,14 +191,53 @@ export function getExecutionPanelPresentation(
   return {
     visible,
     active,
-    autoOpen: visible,
+    autoOpen: active,
     stepCount,
     title: active
       ? "正在进行"
-      : stepCount > 0
-        ? `执行了 ${stepCount} 个步骤`
-        : "用时",
+      : input.hasError || input.status === "failed" || input.status === "blocked"
+        ? "执行失败"
+        : input.status === "canceled"
+          ? "已取消"
+          : input.status === "paused"
+            ? "已暂停"
+            : "已完成",
   };
+}
+
+export function executionPanelHasTerminalError(
+  message: Pick<
+    AgentConversationMessage,
+    "isError" | "error" | "canonicalOutput" | "taskPlan"
+  >,
+): boolean {
+  const runStatus = message.canonicalOutput?.runStatus;
+  const planStatus = message.taskPlan?.status;
+  return Boolean(
+    message.isError
+    || message.error?.trim()
+    || runStatus === "failed"
+    || runStatus === "blocked"
+    || planStatus === "failed"
+    || planStatus === "blocked"
+  );
+}
+
+export function getCanonicalOperationStatusText(
+  operation: CanonicalOperation,
+  label: string,
+  isRetry: boolean,
+): string {
+  if (isRetry) {
+    if (operation.status === "running") return `正在重试 ${label}`;
+    if (operation.status === "failed") return `重试失败 ${label}`;
+    if (operation.status === "canceled") return `已取消重试 ${label}`;
+    return `重试成功 ${label}`;
+  }
+  if (operation.status === "running") return `正在执行 ${label}`;
+  if (operation.status === "failed") return `执行失败 ${label}`;
+  if (operation.status === "canceled") return `已取消 ${label}`;
+  return `已完成 ${label}`;
 }
 
 export function getExecutionPanelLogKey(
@@ -247,24 +317,53 @@ export function buildAssistantTimeline(
       });
     }
     canonicalOutput.commentaryBlocks
-      .filter((block) => !block.aborted && block.text.trim())
+      .filter((block) => !block.aborted)
       .forEach((block) => {
+        const narration = block.text.trim();
+        if (!narration) return;
         canonicalParts.push({
           sequence: block.firstSequence,
           part: {
             type: "commentary",
-            md: block.text.trim(),
+            md: narration,
             startedAt: Date.parse(block.startedAt),
             regionKey: `${messageIndex}-canonical-commentary-${block.outputStreamId}`,
           },
         });
     });
+    canonicalOutput.planningProgress.forEach((progress) => {
+      const narration = publicAgentProgressNarration(progress.text);
+      if (!narration) return;
+      canonicalParts.push({
+        sequence: progress.sequence,
+        part: {
+          type: "commentary",
+          md: narration,
+          startedAt: Date.parse(progress.occurredAt),
+          regionKey: `${messageIndex}-planning-progress-${progress.eventId}`,
+        },
+      });
+    });
+    canonicalOutput.agentProgress.forEach((progress) => {
+      const narration = publicAgentProgressNarration(progress.text);
+      if (!narration) return;
+      canonicalParts.push({
+        sequence: progress.sequence,
+        part: {
+          type: "commentary",
+          md: narration,
+          startedAt: Date.parse(progress.occurredAt),
+          regionKey: `${messageIndex}-agent-progress-stream-${progress.outputStreamId}`,
+        },
+      });
+    });
     canonicalOutput.operationOrder.forEach((operationId) => {
       const operation = canonicalOutput.operations[operationId];
-      // Model lifecycle stays canonical for timing, cancellation and diagnostics,
-      // but it is not a user-facing execution step.
+      // Planning and model lifecycle remain canonical state. Their public
+      // narration is rendered as commentary, not as an executable work row.
       if (
         !operation
+        || operation.kind === "planning"
         || operation.kind === "model"
         || operation.kind === "validation"
         || (operation.kind === "context_compaction" && message.contextCompaction)
@@ -276,6 +375,7 @@ export function buildAssistantTimeline(
           type: "operation",
           operation,
           label: canonicalOperationLabel(operation),
+          isRetry: typeof operation.display.labelParams.retryOfToolCallId === "string",
         },
       });
     });
@@ -297,7 +397,7 @@ export function buildAssistantTimeline(
     region: string,
   ) => {
     if (typeof blockIndex !== "number" || emittedBlocks.has(blockIndex)) return;
-    const md = blocks[blockIndex]?.trim();
+    const md = publicAgentProgressNarration(blocks[blockIndex]);
     if (!md) return;
     emittedBlocks.add(blockIndex);
     parts.push({
@@ -353,12 +453,15 @@ export function buildAssistantTimeline(
   }
 
   if (isStreaming && message.commentary?.trim()) {
-    parts.push({
-      type: "commentary",
-      md: message.commentary.trim(),
-      startedAt: message.commentaryStartedAt,
-      regionKey: `${messageIndex}-stream-${blocks.length}`,
-    });
+    const narration = publicAgentProgressNarration(message.commentary);
+    if (narration) {
+      parts.push({
+        type: "commentary",
+        md: narration,
+        startedAt: message.commentaryStartedAt,
+        regionKey: `${messageIndex}-stream-${blocks.length}`,
+      });
+    }
   }
 
   return parts;
@@ -370,7 +473,15 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
     ? params.toolName
     : operation.toolName;
   if (operation.kind === "tool" && toolName) {
-    return toolCallDisplayRow(toolName, {}, [], []).label;
+    const displayNames = localizedDisplayNames(params.displayNames);
+    const displayName = resolveLocalizedToolDisplayName(displayNames);
+    if (displayName) return displayName;
+    return toolCallDisplayRow(
+      toolName,
+      {},
+      [],
+      [],
+    ).label;
   }
   const labels: Record<string, string> = {
     validation: "校验输出",
@@ -379,4 +490,16 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
     tool: "执行工具",
   };
   return labels[operation.kind] || "执行操作";
+}
+
+function localizedDisplayNames(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === "string",
+  );
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }

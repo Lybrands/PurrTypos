@@ -1,4 +1,5 @@
 from __future__ import annotations
+from application.model_runtime import context_window_tokens
 
 import asyncio
 import json
@@ -10,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-from purra.context_orchestration import ContextCompressionCoordinator
 from purra.context_strategies import ContextStrategy
 from purra.contracts import (
     AgentMessage,
@@ -20,17 +20,24 @@ from purra.contracts import (
     ApprovalStatus,
     DomainContext,
     ModelRequest,
+    ReasoningMode,
     ResponseConstraints,
+    RunBinding,
     RuntimeLimits,
     RunStatus,
     ToolCall,
-    ToolExecutionMode,
 )
 from purra.events import AgentEvent, CoreEventType
-from purra.api import AgentModelTaskRunner
-from purra.api import AgentCoreRunOptions
-from purra.api import DelegationPolicy
+from purra.api import (
+    AgentCoreRunOptions,
+    AgentModelTaskRunner,
+    PlanningMode,
+)
 from purra.model_invocation import ModelInvocationContext
+from purra.model_protocol import (
+    FeatureSupport,
+    generic_capability_snapshot,
+)
 from purra.tools import InMemoryApprovalGateway
 from purra.tools import InMemoryToolCatalog
 from purra.recovery import RecoveryPolicy
@@ -45,11 +52,12 @@ from application.agent_profile_registry import (
     StaticAgentProfile,
 )
 from application.agent_run_service import AgentRunService
+from application.model_runtime import with_adapter_public_progress
+from application.shared_agent_context import SharedAgentContextProvider
 from application.conversation_compaction import ConversationCompactionService
 from application.memory_reranking import ModelBackedMemoryReranker
 from application.writing_agent_profile import build_writing_agent_profile
 from application.request_mapping import (
-    context_window_tokens,
     to_writing_agent_request,
     writing_run_options,
 )
@@ -57,7 +65,7 @@ from application.sse_mapping import core_update_to_sse_chunk
 from database.connection import DatabaseConnection
 from dependencies import set_db
 from domains.writing.context import WritingContextProvider
-from domains.writing.context_source import RepositoryWritingContextSource
+from application.writing_context_source import RepositoryWritingContextSource
 from domains.writing.contracts import WritingDomainContext
 from routers.ai import (
     _stream_composed_agent,
@@ -67,8 +75,10 @@ from routers.ai import (
 from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
 from tests.support.canonical_wire import (
     assert_raw_canonical_wire,
-    project_wire_events_for_legacy_assertions,
+    provider_text,
+    runtime_events,
 )
+from tests.support.planning_stream import route_planning_stream
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -91,7 +101,7 @@ class _FakeAgentProfile:
             execution_state_factory=None,
             tool_catalog=InMemoryToolCatalog(()),
             context_provider=None,
-            runtime_limits=RuntimeLimits(),
+            runtime_limits=RuntimeLimits(max_run_generation_tokens=None),
             recovery_policy=RecoveryPolicy(),
         )
 
@@ -121,7 +131,15 @@ class _FakeAgentProfile:
 def _fake_request() -> AgentRunRequest:
     return AgentRunRequest(
         messages=(AgentMessage(role="user", content="test"),),
-        model=ModelRequest(provider="openai", model="test-model"),
+        model=ModelRequest(
+            provider="openai",
+            model="test-model",
+            capability_snapshot=replace(
+                generic_capability_snapshot(),
+                profile_id="openai:test-model",
+                max_generation_tokens=4_096,
+            ),
+        ),
         domain_context=DomainContext(namespace="test.fake"),
     )
 
@@ -136,8 +154,8 @@ def _writing_composition(
 def _fixture_model_options() -> dict[str, object]:
     return {
         "model": "model",
-        "model_profile": "deepseek:deepseek-v4-flash",
-        "max_tokens": 2_048,
+        "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+        "max_generation_tokens": 2_048,
     }
 
 
@@ -211,7 +229,10 @@ async def test_composition_consumes_explicit_profile_capabilities(
     assert policies == (profile.judge_policy,)
     assert core._preset is not None
     assert core._preset.id == "fake"
-    assert core._context_provider_factory is profile.context_factory
+    assert core._context_provider_factory is not profile.context_factory
+    shared_provider = core._context_provider_factory(object())
+    assert isinstance(shared_provider, SharedAgentContextProvider)
+    assert shared_provider.provider is profile.context_provider
     assert core._execution_profile.task_admission_evaluator is profile.admission
     assert core._execution_profile.long_task_dispatcher is profile.dispatcher
     assert core._task_admission_evaluator is profile.admission
@@ -247,6 +268,92 @@ async def test_composition_create_core_requires_an_explicit_profile(
 
 
 @pytest.mark.asyncio
+async def test_explicit_planned_run_without_planner_fails_closed_before_provider(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    provider_calls = 0
+
+    async def provider_must_not_run(*_args, **_kwargs):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise AssertionError("planning_unavailable must fail before Provider")
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        provider_must_not_run,
+    )
+    context_calls = 0
+
+    class ContextProvider:
+        async def build_context(self, request, budget, signal=None):
+            nonlocal context_calls
+            del request, budget, signal
+            context_calls += 1
+            raise AssertionError("planning_unavailable must fail before context")
+
+    profile = _FakeAgentProfile({})
+    profile.context_factory = lambda _model_tasks: ContextProvider()
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(
+            lambda **_dependencies: profile,
+        ),
+    )
+    core = composition.create_core("key", agent_profile="fake")
+    try:
+        request = replace(
+            _fake_request(),
+            planning_mode=PlanningMode.PLANNED,
+        )
+
+        result = await (await core.submit(
+            request,
+            options=AgentCoreRunOptions(
+                result_capacity_target_tokens=256,
+            ),
+        )).wait()
+
+        assert result.status is RunStatus.FAILED
+        assert result.error == "planning_unavailable"
+        assert provider_calls == 0
+        assert context_calls == 0
+        assert core._planning_enabled is False
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_composition_closes_the_lifespan_memory_resource_after_cores(
+    temp_db: DatabaseConnection,
+):
+    closed = []
+
+    class MemoryResource:
+        async def close(self):
+            closed.append("memory")
+
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(
+            lambda **dependencies: _FakeAgentProfile(dependencies),
+        ),
+        memory_resource=MemoryResource(),
+    )
+    core = composition.create_core("key", agent_profile="fake")
+    original_close = core.close
+
+    async def close_core():
+        closed.append("core")
+        await original_close()
+
+    core.close = close_core
+    await composition.shutdown()
+
+    assert closed == ["core", "memory"]
+
+
+@pytest.mark.asyncio
 async def test_static_profile_defaults_have_no_side_effects(
     temp_db: DatabaseConnection,
 ):
@@ -270,6 +377,41 @@ async def test_static_profile_defaults_have_no_side_effects(
     assert profile.create_long_task_dispatcher() is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    (
+        ({}, FeatureSupport.SUPPORTED),
+        ({"responseAudience": "internal"}, FeatureSupport.UNKNOWN),
+        (
+            {"responseAudience": "internal", "progressAudience": "public"},
+            FeatureSupport.SUPPORTED,
+        ),
+    ),
+)
+async def test_composition_enables_real_provider_progress_only_for_public_scopes(
+    temp_db: DatabaseConnection,
+    metadata,
+    expected,
+):
+    profile = StaticAgentProfile(
+        id="fake",
+        domain_namespace="test.fake",
+        adapter=_FakeAgentProfile({}).adapter,
+    )
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **_kwargs: profile,),
+    )
+    request = replace(_fake_request(), tools_enabled=True, metadata=metadata)
+    try:
+        prepared = await composition.prepare_request(request)
+    finally:
+        await composition.shutdown()
+
+    assert prepared.model.capability_snapshot.protocol.public_progress is expected
+
+
 def test_profile_registry_stores_the_profile_as_the_registration():
     profile = StaticAgentProfile(
         id="fake",
@@ -280,6 +422,31 @@ def test_profile_registry_stores_the_profile_as_the_registration():
 
     assert registry.require("fake") is profile
     assert registry.for_request(_fake_request()) is profile
+
+
+@pytest.mark.asyncio
+async def test_product_profiles_all_enforce_public_tool_operation_presentation(
+    temp_db: DatabaseConnection,
+):
+    composition = create_agent_composition(temp_db)
+    try:
+        assert composition.agent_profile_ids == (
+            "writing",
+            "novel_analysis",
+            "screenplay",
+        )
+        for profile_id in composition.agent_profile_ids:
+            registrations = tuple(
+                composition.profile(profile_id).adapter.tool_catalog.registrations()
+            )
+            assert registrations
+            assert all(
+                item.schema.display_names.get("zh-CN")
+                and item.operation_display_params is not None
+                for item in registrations
+            )
+    finally:
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio
@@ -302,6 +469,7 @@ async def test_writing_profile_owns_product_capabilities(
         model_tasks = AgentModelTaskRunner(
             core._model_invocations,
             ModelInvocationContext(run_id="writing-profile-test"),
+            _fake_request().model,
         )
         provider = profile.context_provider_factory()(model_tasks)
         tool_names = {
@@ -320,22 +488,18 @@ async def test_writing_profile_owns_product_capabilities(
         assert core._context_strategy is ContextStrategy.STAGED
         assert tool_names == declared_skill_names
         assert not hasattr(core._preset, "delegated_agents")
-        assert "delegateToAgents" in {
+        assert "delegateToAgents" not in {
             item.schema.name for item in core._tool_catalog.registrations()
         }
-        assert isinstance(
-            profile.adapter.context_provider,
-            WritingContextProvider,
-        )
+        assert isinstance(profile.adapter.context_provider, WritingContextProvider)
         assert isinstance(
             profile.adapter.context_provider._source,
             RepositoryWritingContextSource,
         )
         assert isinstance(provider, WritingContextProvider)
         assert isinstance(provider._source, RepositoryWritingContextSource)
-        reranker = provider._source._memory._semantic._reranker
+        reranker = provider._source._memory_reranker
         assert isinstance(reranker, ModelBackedMemoryReranker)
-        assert provider._source._memory._story._reranker is reranker
         assert profile.task_admission() is None
         assert profile.create_long_task_dispatcher() is None
     finally:
@@ -343,15 +507,38 @@ async def test_writing_profile_owns_product_capabilities(
 
 
 @pytest.mark.asyncio
-async def test_product_composition_registers_writing_and_screenplay_profiles(
+async def test_product_composition_registers_product_profiles(
     temp_db: DatabaseConnection,
 ):
     composition = create_agent_composition(temp_db)
     try:
-        assert composition.agent_profile_ids == ("writing", "screenplay")
-        core = composition.create_core("key", agent_profile="screenplay")
-        assert core._planner._result_validator is not None
-        assert core._planner._limits.max_repair_attempts == 3
+        assert composition.agent_profile_ids == (
+            "writing",
+            "novel_analysis",
+            "screenplay",
+        )
+        for profile_id in composition.agent_profile_ids:
+            core = composition.create_core("key", agent_profile=profile_id)
+            provider = core._context_provider
+            if core._context_provider_factory is not None:
+                provider = core._context_provider_factory(AgentModelTaskRunner(
+                    core._model_invocations,
+                    ModelInvocationContext(run_id=f"{profile_id}-policy-test"),
+                    _fake_request().model,
+                ))
+            assert isinstance(provider, SharedAgentContextProvider)
+            assert (
+                core._preset.component_bindings["contextProvider"].revision
+                == "2"
+            )
+            if profile_id == "screenplay":
+                assert core._planner._result_validator is not None
+                assert core._planner._limits.max_repair_attempts == 2
+        novel_core = composition.create_core("key", agent_profile="novel_analysis")
+        assert type(novel_core._planner).__name__ == "AgentPlanner"
+        assert novel_core._planner._result_validator is not None
+        assert novel_core._planner._limits.max_steps is None
+        assert novel_core._planner._limits.max_tool_steps == 0
     finally:
         await composition.shutdown()
 
@@ -464,8 +651,8 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
         apiKey="key",
         apiProvider="openai",
         options={
-            "model": "deepseek-v4-pro",
-            "model_profile": "deepseek:deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
             "thinking": {"type": "enabled"},
         },
         enableAgentTools=True,
@@ -478,24 +665,25 @@ def test_request_mapping_hides_writing_fields_inside_domain_context():
     request = to_writing_agent_request(
         body,
         {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "baseURL": "https://api.deepseek.com",
         },
     )
     domain = WritingDomainContext.from_core_context(request.domain_context)
-    options = writing_run_options(request, {"max_tokens": 2048})
+    options = writing_run_options(request, {"max_generation_tokens": 2048})
 
     assert request.context_window == 64_000
     assert request.metadata["locale"] == "zh-Hans-CN"
     assert request.model.options["baseURL"] == "https://api.deepseek.com"
-    assert request.model.profile_id == "deepseek:deepseek-v4-pro"
+    assert request.model.profile_id == "deepseek:deepseek-v4-flash"
     assert "model_profile" not in request.model.options
     assert domain.book_id == "book-1"
     assert domain.chapter_id == "chapter-1"
     assert domain.selected_memory_ids == (1,)
-    assert "max_tokens" not in request.model.options
-    assert options.output_limit is not None
-    assert options.output_limit.max_tokens == 393_216
+    assert "max_generation_tokens" not in request.model.options
+    assert request.model.max_generation_tokens is None
+    assert request.model.capability_snapshot.max_generation_tokens == 393_216
+    assert options.result_capacity_target_tokens is None
     assert options.context_claims[0].name == "writing_retrieval"
 
 
@@ -506,8 +694,8 @@ def test_writing_chat_stream_id_becomes_an_opaque_run_correlation_binding():
         apiKey="key",
         apiProvider="openai",
         options={
-            "model": "deepseek-v4-pro",
-            "model_profile": "deepseek:deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
         },
         sessionId=7,
         chatAgentMode="agent",
@@ -516,11 +704,11 @@ def test_writing_chat_stream_id_becomes_an_opaque_run_correlation_binding():
     request = to_writing_agent_request(
         body,
         {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-v4-flash",
             "baseURL": "https://api.deepseek.com",
         },
     )
-    options = writing_run_options(request, {"max_tokens": 2048})
+    options = writing_run_options(request, {"max_generation_tokens": 2048})
 
     assert options.turn_id == "chat-session-7-request-1"
     assert options.binding is not None
@@ -545,15 +733,23 @@ async def test_composition_binds_profile_identity_into_existing_run_binding(
             chatAgentMode="agent",
         )
         request = to_writing_agent_request(body, {"model": "model"})
-        options = writing_run_options(request, {"max_tokens": 2_048})
+        options = writing_run_options(
+            request,
+            {"max_generation_tokens": 2_048},
+        )
 
         bound = composition.bind_run_profile(request, options)
 
         assert bound.binding is not None
-        assert dict(bound.binding.attributes) == {
+        attributes = dict(bound.binding.attributes)
+        identity = attributes.pop("modelTaskIdentity")
+        assert attributes == {
             "agentProfile": "writing",
             "domainNamespace": "purrtypos.writing",
         }
+        assert identity["schemaVersion"] == 1
+        assert len(identity["modelRequestDigest"]) == 64
+        assert identity["requestedReasoningMode"] == options.reasoning_mode.value
     finally:
         await composition.shutdown()
 
@@ -703,7 +899,10 @@ def test_writing_run_options_carries_host_response_constraints(
     )
     request = to_writing_agent_request(body, {"model": "model"})
 
-    options = writing_run_options(request, {"max_tokens": 2_048})
+    options = writing_run_options(
+        request,
+        {"max_generation_tokens": 2_048},
+    )
 
     assert isinstance(options.response_constraints, ResponseConstraints)
     assert (
@@ -752,7 +951,10 @@ def test_unavailable_host_material_does_not_force_refusal_into_items(
     )
     request = to_writing_agent_request(body, {"model": "model"})
 
-    options = writing_run_options(request, {"max_tokens": 2_048})
+    options = writing_run_options(
+        request,
+        {"max_generation_tokens": 2_048},
+    )
 
     assert options.response_constraints.exact_top_level_item_count is None
     assert options.response_validators == ()
@@ -785,18 +987,290 @@ async def test_composition_injects_model_judge_only_for_atomic_continuity(
     core = composition.create_core("key", agent_profile="writing")
     p5_options = writing_run_options(
         p5_request,
-        {"max_tokens": 2_048},
+        {"max_generation_tokens": 2_048},
         response_judge_policies=p5_judges,
     )
     p3_options = writing_run_options(
         p3_request,
-        {"max_tokens": 2_048},
+        {"max_generation_tokens": 2_048},
         response_judge_policies=p3_judges,
     )
 
     assert len(p5_options.response_judge_policies) == 1
     assert p3_options.response_judge_policies == ()
     assert not hasattr(core, "_response_judges")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invocation_timeout_ms", [None, 300_000])
+async def test_private_model_task_inherits_persisted_run_limits(
+    temp_db, monkeypatch, invocation_timeout_ms,
+):
+    import time
+    import application.agent_composition as composition_module
+    import purra.model_invocation.manager as invocation_manager
+    from infrastructure.persistence.run_store import create_run
+    from purra.contracts import ModelStream, ModelStreamChunk, ReasoningMode
+
+    class Gateway:
+        def describe_invocation(self, messages, invocation):
+            return {}
+
+        async def stream(self, messages, invocation, signal=None):
+            async def chunks():
+                yield ModelStreamChunk(content_delta="ok", finish_reason="stop")
+            return ModelStream(
+                chunks=chunks(), model="fixture-model",
+                applied_generation_limit=invocation.max_generation_tokens,
+            )
+
+        async def complete(self, *args, **kwargs):
+            raise AssertionError("streaming expected")
+
+    monkeypatch.setattr(composition_module, "ProviderModelGateway", lambda *a, **kw: Gateway())
+    monkeypatch.setattr(invocation_manager, "time", SimpleNamespace(
+        time=lambda: time.time() - 360,
+        monotonic=time.monotonic,
+    ))
+    model_request = ModelRequest(
+        provider="openai",
+        model="fixture-model",
+        capability_snapshot=replace(
+            generic_capability_snapshot(),
+            profile_id="openai:fixture-model",
+            max_generation_tokens=256,
+        ),
+    )
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **dependencies: _FakeAgentProfile(dependencies),),
+    )
+    bound = composition.bind_run_profile(
+        replace(_fake_request(), model=model_request),
+        AgentCoreRunOptions(
+            reasoning_mode=ReasoningMode.DISABLED,
+            binding=RunBinding("test.private", "root", "checkpoint"),
+        ),
+    )
+    run_id = await create_run(
+        temp_db, session_id=None, prompt="checkpoint", mode="agent",
+        binding=bound.binding,
+        runtime_limits=RuntimeLimits(
+            max_run_generation_tokens=None, max_model_invocation_attempts=1,
+            root_run_timeout_ms=None,
+            provider_invocation_timeout_ms=invocation_timeout_ms,
+        ),
+    )
+    service = AgentRunService(composition)
+
+    async def invoke():
+        return await service.run_model_text(
+            run_id=run_id, turn_id="private-task", api_key="fixture-key",
+            messages=(AgentMessage(role="user", content="checkpoint"),),
+            model_request=model_request,
+            reasoning_mode=ReasoningMode.DISABLED, signal=None,
+        )
+
+    try:
+        if invocation_timeout_ms is not None:
+            with pytest.raises(Exception) as failure:
+                await invoke()
+            assert failure.value.code == "model_invocation_deadline_exceeded"
+        else:
+            result = await invoke()
+            assert result.content == "ok"
+            operations = await temp_db.fetch_all(
+                "SELECT event_type FROM ai_agent_run_events WHERE run_id = ? "
+                "AND event_type IN ('operation.started', 'operation.finished') ORDER BY id",
+                [run_id],
+            )
+            assert [row["event_type"] for row in operations] == [
+                "operation.started", "operation.finished",
+            ]
+            with pytest.raises(Exception) as failure:
+                await invoke()
+            assert failure.value.code == "runtime_budget_exceeded"
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [
+    "user_ceiling_removed", "user_ceiling_lowered", "user_ceiling_raised",
+    "provider", "model", "thinking", "reasoning_effort", "reasoning_mode",
+    "capability", "endpoint", "temperature", "missing_identity",
+])
+async def test_private_model_task_rejects_persisted_root_identity_drift(
+    temp_db, monkeypatch, change,
+):
+    import application.agent_composition as composition_module
+    from infrastructure.persistence.run_store import create_run
+    from purra.errors import ContractViolationError
+
+    gateway_constructions = []
+    monkeypatch.setattr(
+        composition_module, "ProviderModelGateway",
+        lambda *args, **kwargs: gateway_constructions.append((args, kwargs)),
+    )
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **dependencies: _FakeAgentProfile(dependencies),),
+    )
+    root = replace(
+        _fake_request().model,
+        max_generation_tokens=512,
+        options={
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+            "temperature": 0.2,
+            "baseURL": "https://provider.example/v1",
+        },
+    )
+    bound = composition.bind_run_profile(
+        replace(_fake_request(), model=root),
+        AgentCoreRunOptions(
+            reasoning_mode=ReasoningMode.ENABLED,
+            binding=RunBinding("test.private", "root", "checkpoint"),
+        ),
+    )
+    run_id = await create_run(
+        temp_db, session_id=None, prompt="checkpoint", mode="agent",
+        binding=None if change == "missing_identity" else bound.binding,
+        requested_user_max_generation_tokens=512,
+        selected_context_window_tokens=2_048,
+    )
+    request = root
+    mode = ReasoningMode.ENABLED
+    if change.startswith("user_ceiling_"):
+        request = replace(root, max_generation_tokens={
+            "user_ceiling_removed": None,
+            "user_ceiling_lowered": 256,
+            "user_ceiling_raised": 1_024,
+        }[change])
+    elif change in {"provider", "model"}:
+        request = replace(root, **{change: "different"})
+    elif change == "reasoning_mode":
+        mode = ReasoningMode.DISABLED
+    elif change == "capability":
+        request = replace(root, capability_snapshot=replace(
+            root.capability_snapshot, max_generation_tokens=8_192,
+        ))
+    elif change in {"thinking", "reasoning_effort", "endpoint", "temperature"}:
+        key = "baseURL" if change == "endpoint" else change
+        request = replace(root, options={
+            **dict(root.options),
+            key: {
+                "thinking": {"type": "disabled"},
+                "reasoning_effort": "low",
+                "endpoint": "https://different.example/v1",
+                "temperature": 0.7,
+            }[change],
+        })
+
+    try:
+        with pytest.raises(ContractViolationError) as failure:
+            await AgentRunService(composition).run_model_text(
+                run_id=run_id, turn_id="private-task", api_key="fixture-key",
+                messages=(AgentMessage(role="user", content="checkpoint"),),
+                model_request=request, reasoning_mode=mode, signal=None,
+            )
+        assert failure.value.code == (
+            "model_request_identity_missing"
+            if change == "missing_identity"
+            else "model_request_identity_conflict"
+        )
+        assert gateway_constructions == []
+        row = await temp_db.fetch_one(
+            "SELECT model_attempt_count FROM ai_agent_runs WHERE id = ?", [run_id],
+        )
+        assert row["model_attempt_count"] == 0
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_private_model_task_preserves_root_identity_across_composition_restart(
+    temp_db, monkeypatch,
+):
+    import application.agent_composition as composition_module
+    from infrastructure.persistence.run_store import create_run
+    from purra.contracts import ModelStream, ModelStreamChunk
+
+    invocations = []
+
+    class Gateway:
+        async def stream(self, messages, invocation, signal=None):
+            invocations.append(invocation)
+
+            async def chunks():
+                yield ModelStreamChunk(content_delta='{"ok":true}', finish_reason="stop")
+
+            return ModelStream(
+                chunks=chunks(), model=invocation.request.model,
+                applied_generation_limit=invocation.max_generation_tokens,
+            )
+
+        async def complete(self, *args, **kwargs):
+            raise AssertionError("streaming expected")
+
+    monkeypatch.setattr(composition_module, "ProviderModelGateway", lambda *_, **_kwargs: Gateway())
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **dependencies: _FakeAgentProfile(dependencies),),
+    )
+    model = replace(_fake_request().model, options={
+        "baseURL": "https://provider.example/v1/",
+        "authorization": "Bearer old-credential",
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+    })
+    root = with_adapter_public_progress(model)
+    bound = composition.bind_run_profile(
+        replace(_fake_request(), model=root, context_window=2_048),
+        AgentCoreRunOptions(
+            reasoning_mode=ReasoningMode.ENABLED,
+            binding=RunBinding("test.private", "root", "checkpoint"),
+        ),
+    )
+    run_id = await create_run(
+        temp_db, session_id=None, prompt="checkpoint", mode="agent",
+        binding=bound.binding, selected_context_window_tokens=2_048,
+    )
+    await composition.shutdown()
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **dependencies: _FakeAgentProfile(dependencies),),
+    )
+    task_model = replace(model, options={
+        **dict(model.options),
+        "baseURL": "https://provider.example/v1",
+        "authorization": "Bearer rotated-credential",
+        "response_format": {"type": "json_object"},
+    })
+    try:
+        result = await AgentRunService(composition).run_model_text(
+            run_id=run_id, turn_id="private-task", api_key="fixture-key",
+            messages=(AgentMessage(role="user", content="checkpoint"),),
+            model_request=task_model, reasoning_mode=ReasoningMode.ENABLED,
+            signal=None,
+        )
+        assert result.content == '{"ok":true}'
+        assert len(invocations) == 1
+        assert invocations[0].request == task_model
+        assert invocations[0].reasoning_mode is ReasoningMode.ENABLED
+        assert invocations[0].max_generation_tokens < 2_048
+        assert invocations[0].output_budget.requested_user_max_generation_tokens is None
+        assert invocations[0].output_budget.profile_max_generation_tokens == 4_096
+        row = await temp_db.fetch_one(
+            "SELECT binding_attributes_json FROM ai_agent_runs WHERE id = ?", [run_id],
+        )
+        assert "old-credential" not in row["binding_attributes_json"]
+        assert "provider.example" not in row["binding_attributes_json"]
+        assert set(json.loads(row["binding_attributes_json"])["modelTaskIdentity"]) == {
+            "schemaVersion", "modelRequestDigest", "requestedReasoningMode",
+        }
+    finally:
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio
@@ -811,6 +1285,7 @@ async def test_composition_wires_compaction_into_core_not_run_service(
     compactor = core._conversation_compactor_factory(AgentModelTaskRunner(
         core._model_invocations,
         ModelInvocationContext(run_id="composition-test-run"),
+        _fake_request().model,
     ))
     assert not isinstance(
         core._conversation_compactor.hook,
@@ -846,7 +1321,7 @@ async def test_composed_core_consumes_configured_approval_timeout(
 
 
 @pytest.mark.asyncio
-async def test_composition_uses_model_defined_read_only_delegation(
+async def test_composition_does_not_expose_legacy_same_run_delegation(
     temp_db: DatabaseConnection,
 ):
     composition = _writing_composition(temp_db)
@@ -870,49 +1345,18 @@ async def test_composition_uses_model_defined_read_only_delegation(
 
     assert core._preset is not None
     assert not hasattr(core._preset, "delegated_agents")
-    executor = core._dynamic_delegated_executor
-    assert executor is not None
-    registrations, enabled = executor._read_capabilities(request)
-    by_name = {item.schema.name: item for item in registrations}
-    assert "getChapterContent" in enabled
-    assert "editChapterContent" not in enabled
-    assert "editChapterContent" not in by_name
-    assert "delegateToAgents" not in by_name
-    assert all(
-        by_name[name].policy.mode is ToolExecutionMode.READ
-        for name in enabled
-    )
-    delegation_schema = next(
-        item.schema
-        for item in core._tool_catalog.registrations()
-        if item.schema.name == "delegateToAgents"
-    )
-    item_properties = delegation_schema.parameters["properties"][
-        "delegations"
-    ]["items"]["properties"]
-    assert "agentName" in item_properties
-    assert "instruction" in item_properties
-    assert "enum" not in item_properties["agentName"]
+    assert "delegateToAgents" not in {
+        item.schema.name for item in core._tool_catalog.registrations()
+    }
+    assert request.tools_enabled is True
 
 
 @pytest.mark.asyncio
-async def test_composition_owns_the_delegation_policy(
+async def test_composition_rejects_the_removed_legacy_delegation_policy(
     temp_db: DatabaseConnection,
 ):
-    policy = DelegationPolicy(max_agents_per_call=1, max_parallel=1)
-    composition = _writing_composition(temp_db, delegation_policy=policy)
-    try:
-        core = composition.create_core("key", agent_profile="writing")
-        schema = next(
-            item.schema
-            for item in core._tool_catalog.registrations()
-            if item.schema.name == "delegateToAgents"
-        ).parameters
-
-        assert composition.delegation_policy is policy
-        assert schema["properties"]["delegations"]["maxItems"] == 1
-    finally:
-        await composition.shutdown()
+    with pytest.raises(TypeError, match="delegation_policy"):
+        _writing_composition(temp_db, delegation_policy=object())
 
 
 def test_request_mapping_rejects_caller_owned_tool_contract():
@@ -981,28 +1425,29 @@ def test_request_mapping_does_not_silently_drop_invalid_caller_tool_shapes(
         )
 
 
-def test_caller_output_limit_is_preserved_for_invocation_limit_resolution():
+def test_caller_generation_limit_is_preserved_for_invocation_resolution():
     body = ChatStreamRequest(
         messages=[{"role": "user", "content": "hello"}],
         apiKey="key",
-        apiProvider="anthropic",
+        apiProvider="openai",
         options=_fixture_model_options(),
         enableAgentTools=True,
         bookId="book-1",
     )
     provider_options = {
         "model": "deepseek-v4-flash",
-        "model_profile": "deepseek:deepseek-v4-flash",
-        "max_tokens": 1_000,
+        "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+        "max_generation_tokens": 1_000,
         "thinking": {"type": "enabled"},
     }
     request = to_writing_agent_request(body, provider_options)
 
     options = writing_run_options(request, provider_options)
 
-    assert request.model.options["max_tokens"] == 1_000
-    assert options.output_limit is not None
-    assert options.output_limit.max_tokens == 1_000
+    assert "max_generation_tokens" not in request.model.options
+    assert request.model.max_generation_tokens == 1_000
+    assert request.model.capability_snapshot.max_generation_tokens == 393_216
+    assert options.result_capacity_target_tokens is None
 
 
 def test_sse_mapping_rejects_legacy_agent_events():
@@ -1052,8 +1497,9 @@ async def test_custom_tools_fail_closed_without_calling_the_model(
             tools=custom_tools,
             enableAgentTools=True,
             bookId="book-1",
-            chatAgentMode="agent",
-            contextWindow="200k",
+                chatAgentMode="agent",
+                planningMode="planned",
+                contextWindow="200k",
         ),
     )
     events = await _collect(response)
@@ -1065,7 +1511,6 @@ async def test_custom_tools_fail_closed_without_calling_the_model(
             "请求已停止，未调用模型或执行工具。"
         ),
     }]
-    assert not any("agentRunStarted" in event for event in events)
 
 
 @pytest.mark.asyncio
@@ -1144,14 +1589,20 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
         messages=[{"role": "user", "content": "执行一个足够长的写作任务"}],
         apiKey="key",
         apiProvider="openai",
-        options=_fixture_model_options(),
+        options={
+            "model": "glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 2_048,
+            "thinking": {"type": "enabled"},
+        },
         enableAgentTools=True,
         bookId="book-1",
         chatAgentMode="agent",
     )
     provider_options = {
-        "model": "model",
+        "model": "glm-5.3-flash",
         "baseURL": "https://example.test/v1",
+        "thinking": {"type": "enabled"},
     }
 
     first = [chunk async for chunk in _stream_composed_agent(
@@ -1170,8 +1621,8 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
     capability_key = composition.provider_capabilities.key(
         api_provider="openai",
         base_url="https://example.test/v1",
-        model="model",
-        thinking_enabled=False,
+        model="glm-5.3-flash",
+        thinking_enabled=True,
     )
     assert composition.provider_capabilities.required_tool_choice_is_unsupported(
         capability_key
@@ -1200,6 +1651,230 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
 
 
 @pytest.mark.asyncio
+async def test_writing_auto_direct_answer_uses_real_live_final_stream(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime_calls = 0
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-1", "Auto 直接回答测试书"],
+    )
+
+    async def _planner_must_not_run(*_args, **_kwargs):
+        raise AssertionError("Auto direct answer must not start Planner")
+
+    async def _runtime(_key, _messages, options, _provider, signal=None):
+        nonlocal runtime_calls
+        runtime_calls += 1
+        assert signal is not None
+        tool_names = {
+            item["function"]["name"]
+            for item in options.get("tools", [])
+        }
+        async def _stream():
+            if runtime_calls == 1:
+                assert "request_plan" in tool_names
+                yield {
+                    "choices": [{
+                        "delta": {"content": "内部候选，不应公开。"},
+                        "finish_reason": "stop",
+                    }],
+                }
+                return
+            assert not tool_names
+            yield {"choices": [{"delta": {"content": "直接"}}]}
+            await asyncio.sleep(0.05)
+            yield {
+                "choices": [{
+                    "delta": {"content": "回答。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {
+            "applied_generation_limit": options.get("max_tokens"),
+            "stream": _stream(),
+            "model": "model",
+        }
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planner_must_not_run,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        _runtime,
+    )
+    set_agent_composition(_writing_composition(temp_db))
+
+    response = await chat_stream(ChatStreamRequest(
+        messages=[{"role": "user", "content": "直接回答这个问题"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-1",
+        chatAgentMode="agent",
+        contextWindow="200k",
+    ))
+    events = await _collect(response)
+
+    assert_raw_canonical_wire(events)
+    assert runtime_calls == 2
+    assert events[-1]["runResult"]["status"] == "done"
+    final_events = [
+        event
+        for event in events
+        if event.get("source") == "provider"
+        and event.get("kind") in {
+            "provider.content_delta", "provider.delta_batch",
+        }
+        and event.get("channel") == "final"
+        and event.get("visibility") == "public"
+    ]
+    assert len(final_events) == 2
+    assert provider_text(events) == "直接回答。"
+    assert "内部候选" not in provider_text(events)
+    assert not any(
+        event.get("kind") == "planning.progress"
+        for event in events
+    )
+    assert not any(
+        event.get("kind") == "agent.progress"
+        for event in events
+    )
+    assert not any(
+        event.get("kind") == "operation.started"
+        and event.get("payload", {}).get("kind") == "planning"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_writing_auto_request_plan_uses_shared_core_and_public_progress(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    planner_calls = 0
+    runtime_calls = 0
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES (?, ?)",
+        ["book-1", "Auto 规划测试书"],
+    )
+
+    async def _planner(_key, _messages, options, _provider, signal=None):
+        nonlocal planner_calls
+        planner_calls += 1
+        assert signal is not None
+        return {
+            "applied_generation_limit": options.get("max_tokens"),
+            "message": {
+                "role": "assistant",
+                "content": json.dumps({
+                    "needsTodos": False,
+                    "title": "回答请求",
+                    "goal": "根据请求形成最终答复",
+                    "todos": [],
+                }, ensure_ascii=False),
+            },
+            "model": "planner-model",
+            "finish_reason": "stop",
+        }
+
+    async def _runtime(_key, _messages, options, _provider, signal=None):
+        nonlocal runtime_calls
+        runtime_calls += 1
+        assert signal is not None
+
+        async def _stream():
+            if runtime_calls == 1:
+                names = [
+                    item["function"]["name"]
+                    for item in options.get("tools", [])
+                ]
+                assert "request_plan" in names
+                yield {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call-request-plan",
+                                "type": "function",
+                                "function": {
+                                    "name": "request_plan",
+                                    "arguments": "{}",
+                                },
+                            }],
+                        },
+                        "finish_reason": "tool_calls",
+                    }],
+                }
+                return
+            assert not options.get("tools")
+            yield {
+                "choices": [{
+                    "delta": {"content": "规划完成后回答。"},
+                    "finish_reason": "stop",
+                }],
+            }
+
+        return {
+            "applied_generation_limit": options.get("max_tokens"),
+            "stream": _stream(),
+            "model": "model",
+        }
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planner,
+    )
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        route_planning_stream(
+            _planner,
+            _runtime,
+            progress="先核对请求范围，再安排执行步骤。",
+        ),
+    )
+    set_agent_composition(_writing_composition(temp_db))
+
+    response = await chat_stream(ChatStreamRequest(
+        messages=[{"role": "user", "content": "先规划再回答"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-1",
+        chatAgentMode="agent",
+        contextWindow="200k",
+    ))
+    events = await _collect(response)
+    assert_raw_canonical_wire(events)
+    progress_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("kind") == "planning.progress"
+    ]
+    assert planner_calls == 1
+    assert {
+        "status": events[-1]["runResult"]["status"],
+        "errorCode": events[-1]["runResult"]["errorCode"],
+    } == {"status": "done", "errorCode": None}
+    assert runtime_calls == 2
+    assert progress_indexes
+    assert progress_indexes[0] < len(events) - 1
+    assert events[progress_indexes[0]]["payload"]["text"] == (
+        "先核对请求范围，再安排执行步骤。"
+    )
+    assert "request_plan" not in "\n".join(
+        json.dumps(event, ensure_ascii=False)
+        for event in events
+        if event.get("visibility") == "public"
+    )
+
+
+@pytest.mark.asyncio
 async def test_composed_route_uses_complete_purra(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
@@ -1208,6 +1883,7 @@ async def test_composed_route_uses_complete_purra(
 
     async def _create_plan(*_args, **_kwargs):
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1242,7 +1918,7 @@ async def test_composed_route_uses_complete_purra(
                 }],
             }
 
-        return {"stream": _stream(), "model": "model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1250,7 +1926,7 @@ async def test_composed_route_uses_complete_purra(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _create_chat_stream,
+        route_planning_stream(_create_plan, _create_chat_stream),
     )
     set_agent_composition(_writing_composition(temp_db))
 
@@ -1264,30 +1940,34 @@ async def test_composed_route_uses_complete_purra(
             enableAgentTools=True,
             bookId="book-1",
             chatAgentMode="agent",
+            planningMode="planned",
             contextWindow="200k",
         ),
     )
     events = await _collect(response)
 
     assert_raw_canonical_wire(events)
-    projected = project_wire_events_for_legacy_assertions(events)
-    assert any("agentRunStarted" in event for event in projected)
-    assert any("contextBudget" in event for event in projected)
+    assert [
+        event["payload"]["status"] for event in events
+        if event.get("kind") == "run.lifecycle"
+    ] == ["running", "done"]
+    assert runtime_events(events, "context.budgeted")
     assert round_number == 1
-    assert "".join(event.get("delta", "") for event in projected) == "完成"
-    assert any("agentRunCompleted" in event for event in projected)
+    assert provider_text(events) == "完成"
     assert events[-1]["done"] is True
     assert events[-1]["model"] == "model"
     assert events[-1]["runResult"]["status"] == "done"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("public_frame", [False, True])
 async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
+    public_frame,
 ):
     chapter_text = "弄堂里没有雨声，只有晾衣竹竿在风里轻撞墙面。"
-    style_fact = "克制、寂静，以细微物声衬托空间感"
+    background_fact = "弄堂狭窄安静，晾衣竹竿会在风中轻撞墙面"
     await temp_db.execute(
         "INSERT INTO books (id, title) VALUES (?, ?)",
         ["book-replan", "重规划测试书"],
@@ -1307,8 +1987,8 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         ["chapter-replan", _lexical(chapter_text)],
     )
     await temp_db.execute(
-        "INSERT INTO book_style (book_id, tone) VALUES (?, ?)",
-        ["book-replan", style_fact],
+        "INSERT INTO story_background (book_id, content) VALUES (?, ?)",
+        ["book-replan", background_fact],
     )
     planner_payloads: list[dict[str, object]] = []
 
@@ -1320,14 +2000,22 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
-                "goal": "根据书籍风格证据提出氛围改写",
+                "goal": "根据故事背景证据提出氛围改写",
                 "todos": [
                     {
-                        "id": "inspect-book-style",
-                        "title": "检查书籍风格",
+                        "id": "inspect-story-background",
+                        "title": "检查故事背景",
                         "type": "read",
                         "executor": "tool",
-                        "expectedTools": ["getBookStyle"],
+                        "expectedTools": ["getStoryBackground"],
+                        "riskLevel": "read",
+                    },
+                    {
+                        "id": "assess-alley-sound-continuity",
+                        "title": "评估弄堂声响连续性",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
                         "riskLevel": "read",
                     },
                     {
@@ -1343,19 +2031,19 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         else:
             execution = payload["executionState"]
             assert execution["completedSteps"][0]["id"] == (
-                "inspect-book-style"
+                "inspect-story-background"
             )
-            assert style_fact in json.dumps(
+            assert background_fact in json.dumps(
                 execution["recentToolObservations"],
                 ensure_ascii=False,
             )
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
-                "goal": "利用克制寂静的风格证据调整氛围策略",
+                "goal": "利用弄堂背景证据调整氛围策略",
                 "todos": [{
-                    "id": "shape-restrained-alley-atmosphere",
-                    "title": "按克制风格重塑弄堂氛围",
+                    "id": "shape-alley-atmosphere",
+                    "title": "按背景证据重塑弄堂氛围",
                     "type": "review",
                     "executor": "model",
                     "expectedTools": [],
@@ -1363,6 +2051,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }],
             }
         return {
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -1383,7 +2072,22 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 assert [
                     item["function"]["name"]
                     for item in options.get("tools", [])
-                ] == ["getBookStyle"]
+                ] == ["getStoryBackground"]
+                yield {
+                    "choices": [{
+                        "delta": {"content": "【公开说明】正在" if public_frame else "【进展】正在"},
+                        "finish_reason": None,
+                    }],
+                }
+                if public_frame:
+                    early = await temp_db.fetch_all("SELECT payload_json FROM ai_agent_run_events WHERE visibility='public' AND channel='commentary' AND kind='provider.content_delta'")
+                    assert any(json.loads(item['payload_json']).get('delta') == '正在' for item in early)
+                yield {
+                    "choices": [{
+                        "delta": {"content": "核对故事背景【说明结束】" if public_frame else "核对故事背景"},
+                        "finish_reason": None,
+                    }],
+                }
                 yield {
                     "choices": [{
                         "delta": {
@@ -1392,7 +2096,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                                 "id": "call-read-replan",
                                 "type": "function",
                                 "function": {
-                                    "name": "getBookStyle",
+                                    "name": "getStoryBackground",
                                     "arguments": "{}",
                                 },
                             }],
@@ -1402,7 +2106,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }
                 return
             assert not options.get("tools")
-            assert style_fact in json.dumps(messages, ensure_ascii=False)
+            assert background_fact in json.dumps(messages, ensure_ascii=False)
             yield {
                 "choices": [{
                     "delta": {"content": "改写应以寂静和轻微碰撞声为核心。"},
@@ -1410,7 +2114,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
                 }],
             }
 
-        return {"stream": _stream(), "model": "model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1418,7 +2122,7 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
     set_agent_composition(_writing_composition(temp_db))
 
@@ -1432,22 +2136,36 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         chapterId="chapter-replan",
         currentChapterTitle="第一章：弄堂",
         chatAgentMode="agent",
+        planningMode="planned",
         contextWindow="200k",
     ))
     events = await _collect(response)
-    projected = project_wire_events_for_legacy_assertions(events)
+    assert_raw_canonical_wire(events)
     plans = [
-        event["agentRunTodosUpdated"]
-        for event in projected
-        if "agentRunTodosUpdated" in event
+        event["payload"]["data"]
+        for event in runtime_events(events, "run.todos_updated")
     ]
 
     assert len(planner_payloads) == 2
     assert len(plans) >= 2
+    progress_events = [
+        event for event in events
+        if ((event.get("kind") == "provider.content_delta" and event.get("channel") == "commentary")
+            if public_frame else event.get("kind") == "agent.progress")
+    ]
+    assert [event["payload"]["delta" if public_frame else "text"] for event in progress_events] == [
+        "正在", "核对故事背景" if public_frame else "正在核对故事背景",
+    ]
+    first_tool_operation = next(
+        index for index, event in enumerate(events)
+        if event.get("kind") == "operation.started"
+        and event.get("payload", {}).get("kind") == "tool"
+    )
+    assert all(events.index(event) < first_tool_operation for event in progress_events)
     root_run_ids = {
-        event["agentRunStarted"]["runId"]
-        for event in projected
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     }
     assert len(root_run_ids) == 1
     latest = plans[-1]
@@ -1455,10 +2173,10 @@ async def test_writing_read_evidence_replans_only_unfinished_semantic_steps(
         (step["id"], step["title"], step["status"])
         for step in latest["steps"]
     ] == [
-        ("inspect-book-style", "检查书籍风格", "done"),
+        ("inspect-story-background", "检查故事背景", "done"),
         (
-            "shape-restrained-alley-atmosphere",
-            "按克制风格重塑弄堂氛围",
+            "shape-alley-atmosphere",
+            "按背景证据重塑弄堂氛围",
             "running",
         ),
     ]
@@ -1483,23 +2201,57 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
     monkeypatch: pytest.MonkeyPatch,
 ):
     round_number = 0
+    planner_call_count = 0
 
     async def _create_plan(*_args, **_kwargs):
+        nonlocal planner_call_count
+        planner_call_count += 1
+        todos = (
+            [
+                {
+                    "id": "inspect-characters",
+                    "title": "核对人物列表",
+                    "type": "read",
+                    "executor": "tool",
+                    "expectedTools": ["listBookCharacters"],
+                    "riskLevel": "read",
+                },
+                {
+                    "id": "confirm-delete-target",
+                    "title": "确认删除目标",
+                    "type": "review",
+                    "executor": "model",
+                    "expectedTools": [],
+                    "riskLevel": "read",
+                },
+                {
+                    "id": "delete-character",
+                    "title": "删除人物",
+                    "type": "write",
+                    "executor": "tool",
+                    "expectedTools": ["deleteCharacter"],
+                    "riskLevel": "destructive",
+                },
+            ]
+            if planner_call_count == 1
+            else [{
+                "id": "delete-character",
+                "title": "删除人物",
+                "type": "write",
+                "executor": "tool",
+                "expectedTools": ["deleteCharacter"],
+                "riskLevel": "destructive",
+            }]
+        )
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
                     "needsTodos": True,
                     "title": "安全删除人物",
                     "goal": "经用户确认后删除人物",
-                    "todos": [{
-                        "id": "delete-character",
-                        "title": "删除人物",
-                        "type": "write",
-                        "executor": "tool",
-                        "expectedTools": ["deleteCharacter"],
-                        "riskLevel": "destructive",
-                    }],
+                    "todos": todos,
                 }, ensure_ascii=False),
             },
             "model": "planner-model",
@@ -1568,7 +2320,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
                     }],
                 }
 
-        return {"stream": _stream(), "model": "model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1576,7 +2328,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _create_chat_stream,
+        route_planning_stream(_create_plan, _create_chat_stream),
     )
     set_agent_composition(_writing_composition(temp_db))
     body = ChatStreamRequest(
@@ -1587,6 +2339,7 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
         enableAgentTools=True,
         bookId="book-1",
         chatAgentMode="agent",
+        planningMode="planned",
         contextWindow="200k",
     )
 
@@ -1619,11 +2372,10 @@ async def test_composed_approval_is_resolved_through_existing_http_contract(
 
     assert round_number == 4
     assert_raw_canonical_wire(chunks)
-    projected = project_wire_events_for_legacy_assertions(chunks)
-    assert any("toolApprovalRequired" in chunk for chunk in projected)
-    assert any("toolApprovalResolved" in chunk for chunk in projected)
-    assert not any(chunk.get("toolResults") for chunk in projected)
-    assert "".join(chunk.get("delta", "") for chunk in projected) == "已保留人物"
+    assert runtime_events(chunks, "approval.requested")
+    assert runtime_events(chunks, "approval.resolved")
+    assert not runtime_events(chunks, "tool.results")
+    assert provider_text(chunks) == "已保留人物"
     assert chunks[-1]["done"] is True
     assert chunks[-1]["model"] == "model"
     assert chunks[-1]["runResult"]["status"] == "done"

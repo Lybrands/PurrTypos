@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Callable, Mapping, Sequence
 
 import httpx
+import httpx2
+from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
+from purra_anthropic import AnthropicMessagesGateway
+from purra_openai import OpenAIChatCompletionsGateway
 
 from purra.contracts import (
     AgentMessage,
@@ -18,23 +24,40 @@ from purra.contracts import (
     ToolCallDelta,
     ToolChoiceMode,
 )
-from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.errors import (
+    AgentCoreError,
+    ContractViolationError,
+    ModelGatewayError,
+    UnsupportedModelFeatureError,
+)
 from purra.json_values import thaw_json_mapping, thaw_json_value
 from purra.model_call_parameters import build_model_call_parameters
 from purra.model_protocol import ReasoningControl, ReasoningReplayPolicy
+from purra.output import MAX_AGENT_PROGRESS_CHARS
 from purra.ports import CancellationSignal
+from purra.cancellation import raise_if_stopped
 from infrastructure.models import provider_router
-from purra.stream_ownership import OwnedAsyncIterator
+from infrastructure.models.profiles.descriptors import DESCRIPTOR_KEY, TRACE_KEY
+from infrastructure.models.request_boundary import CheckedClient, describe_attempt, managed_send
+from infrastructure.models.capabilities import (
+    build_anthropic_thinking_param,
+    reasoning_mode_from_options,
+)
+from purra.stream_ownership import OwnedAsyncIterator, close_async_resource
+from config import DEV_DIAGNOSTICS_ENABLED
+from constants import AGENT_PUBLIC_PROGRESS_PREFIX
 
 
 class ProviderModelGateway:
-    """Expose OpenAI/Anthropic providers through the PurrA port."""
+    """Route native services through PurrA and compatible services through business adapters."""
 
     def __init__(
         self,
         api_key: str,
         *,
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
+        public_progress_from_content: bool = False,
+        request_observer=None,
     ):
         self._api_key = str(api_key or "").strip()
         if not self._api_key:
@@ -42,18 +65,40 @@ class ProviderModelGateway:
         self._on_required_tool_choice_unsupported = (
             on_required_tool_choice_unsupported
         )
+        self._public_progress_from_content = bool(public_progress_from_content)
+        self._request_observer = request_observer
 
     def describe_invocation(
         self,
         messages: Sequence[AgentMessage],
         invocation: ModelInvocation,
     ) -> dict[str, Any]:
-        return build_model_call_parameters(
+        native = _uses_native_adapter(invocation)
+        options = _provider_options(invocation)
+        options.pop("_capability_snapshot", None)
+        if native:
+            options = thaw_json_mapping(_native_invocation(invocation, options).request.options)
+        parameters = build_model_call_parameters(
             messages,
             invocation,
-            provider_options=_provider_options(invocation),
+            provider_options=options,
         )
+        parameters["sdkAttemptId"] = describe_attempt(self, invocation)
+        parameters["modelResolution"] = thaw_json_mapping(invocation.request.options.get(TRACE_KEY) or {})
+        if DEV_DIAGNOSTICS_ENABLED:
+            parameters["inputMessages"] = [
+                _diagnostic_provider_message(
+                    message,
+                    reasoning_replay=(
+                        invocation.request.protocol_capabilities.reasoning_replay
+                    ),
+                    preserve_role=native,
+                )
+                for message in messages
+            ]
+        return parameters
 
+    @managed_send
     async def stream(
         self,
         messages: Sequence[AgentMessage],
@@ -62,6 +107,34 @@ class ProviderModelGateway:
     ) -> ModelStream:
         request = invocation.request
         options = _provider_options(invocation)
+        if _uses_native_adapter(invocation):
+            raise_if_stopped(signal)
+            native_invocation = _native_invocation(invocation, options)
+            gateway, client = self._native_gateway(invocation)
+            try:
+                result = await gateway.stream(messages, native_invocation, signal)
+            except Exception as error:
+                await close_async_resource(client)
+                raise self._request_error(invocation, error) from None
+
+            async def chunks():
+                try:
+                    async for chunk in result.chunks:
+                        yield chunk
+                except Exception as error:
+                    raise self._request_error(invocation, error) from None
+
+            projected = _project_public_progress(
+                chunks(),
+                enabled=self._public_progress_from_content and bool(invocation.tools),
+            )
+            return replace(result, chunks=OwnedAsyncIterator(
+                projected, result.chunks, client,
+                terminal_predicate=lambda chunk: (
+                    isinstance(chunk, ModelStreamChunk)
+                    and chunk.finish_reason is not None
+                ),
+            ))
         try:
             result = await provider_router.create_chat_stream(
                 self._api_key,
@@ -80,11 +153,20 @@ class ProviderModelGateway:
             )
         except Exception as error:
             raise self._request_error(invocation, error) from error
+        if signal is not None and signal.is_set():
+            await close_async_resource(result.get("stream"))
+            raise_if_stopped(signal)
+        normalized = _normalize_openai_stream(result["stream"])
         return ModelStream(
-            chunks=_normalize_openai_stream(result["stream"]),
+            chunks=_project_public_progress(
+                normalized,
+                enabled=self._public_progress_from_content and bool(invocation.tools),
+            ),
             model=str(result.get("model") or request.model),
+            applied_generation_limit=result.get("applied_generation_limit"),
         )
 
+    @managed_send
     async def complete(
         self,
         messages: Sequence[AgentMessage],
@@ -93,6 +175,16 @@ class ProviderModelGateway:
     ) -> ModelCompletion:
         request = invocation.request
         options = _provider_options(invocation)
+        if _uses_native_adapter(invocation):
+            raise_if_stopped(signal)
+            native_invocation = _native_invocation(invocation, options)
+            gateway, client = self._native_gateway(invocation)
+            try:
+                return await gateway.complete(messages, native_invocation, signal)
+            except Exception as error:
+                raise self._request_error(invocation, error) from None
+            finally:
+                await close_async_resource(client)
         try:
             result = await provider_router.create_chat_no_stream(
                 self._api_key,
@@ -117,13 +209,21 @@ class ProviderModelGateway:
             model=str(result.get("model") or request.model),
             finish_reason=_normalize_finish_reason(result.get("finish_reason")),
             usage=_normalize_model_usage(result.get("usage")),
+            applied_generation_limit=result.get("applied_generation_limit"),
         )
+
+    def _native_gateway(self, invocation: ModelInvocation):
+        if invocation.request.provider == "anthropic":
+            client = AsyncAnthropic(api_key=self._api_key, base_url="https://api.anthropic.com")
+            return AnthropicMessagesGateway(CheckedClient(client, protocol="anthropic")), client
+        client = AsyncOpenAI(api_key=self._api_key, base_url="https://api.openai.com/v1")
+        return OpenAIChatCompletionsGateway(CheckedClient(client, protocol="openai")), client
 
     def _request_error(
         self,
         invocation: ModelInvocation,
         error: Exception,
-    ) -> ModelGatewayError:
+    ) -> AgentCoreError:
         if (
             invocation.tool_choice is ToolChoiceMode.REQUIRED
             and _is_required_tool_choice_compatibility_error(error)
@@ -133,12 +233,61 @@ class ProviderModelGateway:
             return UnsupportedModelFeatureError(
                 "required tool choice is unsupported"
             )
-        code = _provider_error_code(error)
+        error_code = getattr(error, "code", "")
+        if isinstance(error, AgentCoreError) and error_code != "upstream_stream_interrupted" and not error_code.startswith((
+            "openai_http_", "openai_transport_",
+            "anthropic_http_", "anthropic_transport_",
+        )):
+            return error
+        code = error_code if error_code == "upstream_stream_interrupted" else _provider_error_code(error)
         return ModelGatewayError(
             "model provider request failed",
             code=code,
             retryable=code == "upstream_stream_interrupted",
         )
+
+
+def _uses_native_adapter(invocation: ModelInvocation) -> bool:
+    base_url = str(invocation.request.options.get("baseURL") or "").strip().lower().rstrip("/")
+    if invocation.request.provider == "openai":
+        return base_url in {"https://api.openai.com", "https://api.openai.com/v1"}
+    if invocation.request.provider == "anthropic":
+        return base_url in {"", "https://api.anthropic.com", "https://api.anthropic.com/v1"}
+    return False
+
+
+def _native_invocation(invocation: ModelInvocation, options: dict) -> ModelInvocation:
+    options = dict(options)
+    for key in (
+        "model",
+        "model_profile",
+        "baseURL",
+        "context_window",
+        "tools",
+        "tool_choice",
+        "max_tokens",
+        "_capability_snapshot",
+        DESCRIPTOR_KEY,
+        TRACE_KEY,
+    ):
+        options.pop(key, None)
+    mode = invocation.reasoning_mode
+    if invocation.request.provider == "openai":
+        options.pop("thinking", None)
+        if invocation.request.protocol_capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
+            mode = ReasoningMode.DEFAULT
+    elif mode is ReasoningMode.ENABLED:
+        thinking, _ = build_anthropic_thinking_param(
+            True,
+            invocation.max_generation_tokens,
+            options.get("thinking"),
+        )
+        options["thinking"] = thinking
+    return replace(
+        invocation,
+        request=replace(invocation.request, options=options),
+        reasoning_mode=mode,
+    )
 
 
 def _provider_options(
@@ -151,39 +300,30 @@ def _provider_options(
             "selected reasoning mode is incompatible with model capabilities"
         )
     options = thaw_json_mapping(request.options)
+    configured_mode = reasoning_mode_from_options(options)
+    if not capabilities.reasoning_mode_is_supported(configured_mode):
+        raise UnsupportedModelFeatureError(
+            "configured reasoning mode is incompatible with model capabilities"
+        )
+    if configured_mode is not invocation.reasoning_mode:
+        raise ContractViolationError(
+            "provider options conflict with the Run reasoning mode",
+            code="model_configuration_conflict",
+        )
     options["model"] = request.model
+    options["_capability_snapshot"] = request.capability_snapshot.to_mapping()
     options.pop("model_profile", None)
     if request.profile_id is not None:
         options["model_profile"] = request.profile_id
     options.pop("tools", None)
     options.pop("tool_choice", None)
-    if invocation.max_output_tokens is not None:
-        options["max_tokens"] = invocation.max_output_tokens
-    if (
-        invocation.reasoning_mode is ReasoningMode.DISABLED
-        and capabilities.reasoning_control is ReasoningControl.SELECTABLE
-    ):
-        caller_thinking = options.get("thinking")
-        caller_had_thinking_enabled = bool(
-            options.get("thinking_enabled") is True
-            or (
-                isinstance(caller_thinking, dict)
-                and caller_thinking.get("type") == "enabled"
-            )
-        )
-        # Provider adapters consume the normalized ``thinking`` shape.  The
-        # former ad-hoc flag was ignored and could leave Anthropic extended
-        # thinking enabled for the narrow 1,200-token planner request.
-        options["thinking_enabled"] = False
-        options["thinking"] = {"type": "disabled"}
-        # A caller-selected thinking temperature may be invalid after Core
-        # disables reasoning for a derived invocation. Omitting sampling lets
-        # each provider apply the correct non-thinking default.
-        if caller_had_thinking_enabled:
-            options.pop("temperature", None)
-    elif capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
+    if invocation.max_generation_tokens is not None:
+        options["max_tokens"] = invocation.max_generation_tokens
+    if capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
         options.pop("thinking_enabled", None)
         options.pop("thinking", None)
+    else:
+        options.pop("thinking_enabled", None)
     if invocation.tools and invocation.tool_choice is not ToolChoiceMode.NONE:
         options["tools"] = [
             {
@@ -197,14 +337,7 @@ def _provider_options(
             for schema in invocation.tools
         ]
         if invocation.tool_choice is ToolChoiceMode.REQUIRED:
-            options["tool_choice"] = (
-                {
-                    "type": "function",
-                    "function": {"name": invocation.tools[0].name},
-                }
-                if len(invocation.tools) == 1
-                else "required"
-            )
+            options["tool_choice"] = "required"
     return options
 
 
@@ -256,6 +389,48 @@ def _provider_message(
         ]
     if message.tool_call_id is not None:
         value["tool_call_id"] = message.tool_call_id
+    return value
+
+
+def _diagnostic_provider_message(
+    message: AgentMessage,
+    *,
+    reasoning_replay: ReasoningReplayPolicy,
+    preserve_role: bool = False,
+) -> dict[str, Any]:
+    value = _provider_message(message, reasoning_replay=reasoning_replay)
+    if preserve_role:
+        value["role"] = message.role.value
+    value.pop("reasoning_content", None)
+    return _redact_diagnostic_fields(value)
+
+
+def _redact_diagnostic_fields(value: Any, *, field_name: str = "") -> Any:
+    normalized = "".join(
+        character for character in field_name.lower()
+        if character.isalnum()
+    )
+    if normalized in {
+        "apikey",
+        "authorization",
+        "proxyauthorization",
+        "password",
+        "secret",
+        "accesstoken",
+        "refreshtoken",
+        "token",
+    }:
+        return "<redacted>"
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_diagnostic_fields(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return [_redact_diagnostic_fields(item) for item in value]
     return value
 
 
@@ -334,6 +509,57 @@ def _normalize_openai_stream(raw_stream):
     )
 
 
+def _project_public_progress(chunks, *, enabled: bool):
+    if not enabled:
+        return chunks
+
+    async def _project():
+        prefix = ""
+        prefix_matched = False
+        title = ""
+        settled = False
+        async for chunk in chunks:
+            progress = chunk.progress_delta
+            if progress:
+                settled = True
+            elif not settled and chunk.content_delta:
+                content = chunk.content_delta
+                if not prefix_matched:
+                    candidate = prefix + content
+                    if AGENT_PUBLIC_PROGRESS_PREFIX.startswith(candidate):
+                        prefix = candidate
+                        content = ""
+                    elif candidate.startswith(AGENT_PUBLIC_PROGRESS_PREFIX):
+                        prefix_matched = True
+                        content = candidate[len(AGENT_PUBLIC_PROGRESS_PREFIX):]
+                    else:
+                        settled = True
+                        content = ""
+                if prefix_matched and content:
+                    candidate = (title + content).replace("\r\n", "\n").replace("\r", "\n")
+                    first_line, separator, _remainder = candidate.partition("\n")
+                    normalized = first_line.strip()
+                    if normalized and len(normalized) <= MAX_AGENT_PROGRESS_CHARS:
+                        title = first_line
+                        progress = normalized
+                    else:
+                        settled = True
+                    if separator:
+                        settled = True
+            if chunk.tool_call_deltas:
+                settled = True
+            yield replace(chunk, progress_delta=progress)
+
+    return OwnedAsyncIterator(
+        _project(),
+        chunks,
+        terminal_predicate=lambda chunk: (
+            isinstance(chunk, ModelStreamChunk)
+            and chunk.finish_reason is not None
+        ),
+    )
+
+
 def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     """Normalize OpenAI- and Anthropic-shaped provider usage."""
 
@@ -352,7 +578,7 @@ def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     else:
         return None
 
-    output_tokens = (
+    generation_tokens = (
         _usage_int(raw, "completion_tokens")
         if _usage_int(raw, "completion_tokens") is not None
         else (_usage_int(raw, "output_tokens") or 0)
@@ -360,6 +586,7 @@ def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     total_tokens = _usage_int(raw, "total_tokens")
     prompt_details = raw.get("prompt_tokens_details")
     completion_details = raw.get("completion_tokens_details")
+    output_details = raw.get("output_tokens_details")
     cached_input_tokens = (
         _usage_int(prompt_details, "cached_tokens")
         if isinstance(prompt_details, Mapping)
@@ -367,17 +594,19 @@ def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     )
     if cached_input_tokens is None:
         cached_input_tokens = _usage_int(raw, "cache_read_input_tokens") or 0
-    reasoning_output_tokens = (
+    reasoning_tokens = (
         _usage_int(completion_details, "reasoning_tokens")
         if isinstance(completion_details, Mapping)
         else None
-    ) or 0
+    )
+    if reasoning_tokens is None and isinstance(output_details, Mapping):
+        reasoning_tokens = _usage_int(output_details, "thinking_tokens")
     return ModelTokenUsage(
         input_tokens=input_tokens,
-        output_tokens=output_tokens,
+        generation_tokens=generation_tokens,
         total_tokens=total_tokens,
         cached_input_tokens=cached_input_tokens,
-        reasoning_output_tokens=reasoning_output_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
 
@@ -404,41 +633,44 @@ def _normalize_finish_reason(value) -> ModelFinishReason | None:
         "max_output_tokens",
         "max_completion_tokens",
         "token_limit",
+        "model_context_window_exceeded",
     }:
         return ModelFinishReason.LENGTH
     if normalized in {"tool_calls", "function_call"}:
         return ModelFinishReason.TOOL_CALLS
-    if normalized in {"content_filter", "safety", "blocked"}:
+    if normalized in {"content_filter", "safety", "blocked", "refusal"}:
         return ModelFinishReason.FILTERED
     return ModelFinishReason.OTHER
 
 
 def _is_required_tool_choice_compatibility_error(error: Exception) -> bool:
-    status = getattr(error, "status_code", None)
-    response = getattr(error, "response", None)
-    if status is None and response is not None:
-        status = getattr(response, "status_code", None)
-    if status not in {400, 422}:
-        return False
-    text = str(error or "").lower()
-    return any(marker in text for marker in (
-        "tool_choice",
-        "tool choice",
-        "forced tool",
-        "thinking mode",
-        "extended thinking",
-    ))
+    for current in _error_chain(error):
+        status = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+        if status in {400, 422} and any(marker in str(current).lower() for marker in (
+            "tool_choice", "tool choice", "forced tool", "thinking mode", "extended thinking",
+        )):
+            return True
+    return False
 
 
-def _provider_error_code(error: Exception) -> str:
+def _error_chain(error: Exception):
     current: BaseException | None = error
     seen: set[int] = set()
-    statuses: list[int] = []
-    messages: list[str] = []
     for _ in range(8):
         if current is None or id(current) in seen:
             break
         seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _provider_error_code(error: Exception) -> str:
+    statuses: list[int] = []
+    messages: list[str] = []
+    for current in _error_chain(error):
         messages.append(str(current or "").lower())
         status = getattr(current, "status_code", None)
         response = getattr(current, "response", None)
@@ -446,13 +678,8 @@ def _provider_error_code(error: Exception) -> str:
             status = getattr(response, "status_code", None)
         if isinstance(status, int):
             statuses.append(status)
-        if isinstance(current, (
-            httpx.ReadError,
-            httpx.RemoteProtocolError,
-            httpx.TimeoutException,
-        )):
+        if isinstance(current, (httpx.TransportError, httpx2.TransportError)):
             return "upstream_stream_interrupted"
-        current = current.__cause__ or current.__context__
     combined = " ".join(messages)
     if (
         402 in statuses

@@ -11,8 +11,9 @@ import {
 } from 'react-router-dom'
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiModelConfig, type EntityId } from './types'
-import { applyModelRuntimeConfigPatch, migrateKnownModelConfigs } from './modelCatalog'
+import { Book, type AiModelConfig, type EntityId, type MemoryEmbeddingConfig } from './types'
+import { applyModelRuntimeConfigPatch } from './modelCatalog'
+import { installModelDescriptors } from './models/registry'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -20,11 +21,13 @@ const BookshelfPage = lazy(() => import('./BookshelfPage'))
 const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const ScreenplayAgentPage = lazy(() => import('./ScreenplayAgentPage'))
+const WritingMethodsPage = lazy(() => import('./WritingMethodsPage'))
+const NovelSourcesPage = lazy(() => import('./NovelSourcesPage'))
 const AiDevInspector = import.meta.env.DEV
   ? lazy(() => import('./components/AiDevInspector'))
   : null
 
-type Page = 'home' | 'screenplay' | 'bookshelf' | 'workspace'
+type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'novelSources' | 'workspace'
 type BooksStatus = 'idle' | 'loading' | 'loaded'
 type SettingsLocationState = { returnTo?: string }
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
@@ -66,6 +69,10 @@ export default function App() {
       ? 'screenplay'
       : contentPath === '/bookshelf'
         ? 'bookshelf'
+        : contentPath === '/writing-methods'
+          ? 'writingMethods'
+        : contentPath === '/novel-sources' || contentPath.startsWith('/novel-sources/')
+          ? 'novelSources'
         : 'home'
   const [books, setBooks] = React.useState<Book[]>([])
   const [booksStatus, setBooksStatus] = React.useState<BooksStatus>('idle')
@@ -77,6 +84,8 @@ export default function App() {
     getStoredLastOpenedBookId,
   )
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
+  const [memoryModelId, setMemoryModelId] = React.useState('')
+  const [memoryEmbeddingConfig, setMemoryEmbeddingConfig] = React.useState<MemoryEmbeddingConfig | null>(null)
   const configuredModelConfigs = React.useMemo(
     () => modelConfigs.filter((config) => config.apiKey?.trim()),
     [modelConfigs],
@@ -86,14 +95,18 @@ export default function App() {
   React.useEffect(() => {
     services.settings.getSettings().then((res) => {
       if (!res.success || !res.data) return
+      if (res.data.model_descriptors) installModelDescriptors(res.data.model_descriptors)
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
-        const migration = migrateKnownModelConfigs(res.data.ai_model_configs)
-        setModelConfigs(migration.configs)
-        if (migration.changed) {
-          void services.settings.setSettings({ ai_model_configs: migration.configs })
-        }
+        setModelConfigs(res.data.ai_model_configs)
       }
+      setMemoryModelId(typeof res.data.memory_model_id === 'string' ? res.data.memory_model_id : '')
+      const embedding = res.data.memory_embedding_config
+      setMemoryEmbeddingConfig(
+        embedding && typeof embedding === 'object'
+          ? embedding as MemoryEmbeddingConfig
+          : null,
+      )
     })
   }, [])
 
@@ -102,9 +115,21 @@ export default function App() {
     services.settings.setSettings({ ai_model_configs: configs })
   }, [])
 
+  const saveMemoryConfiguration = React.useCallback((
+    modelId: string,
+    embedding: MemoryEmbeddingConfig | null,
+  ) => {
+    setMemoryModelId(modelId)
+    setMemoryEmbeddingConfig(embedding)
+    void services.settings.setSettings({
+      memory_model_id: modelId,
+      memory_embedding_config: embedding,
+    })
+  }, [])
+
   const updateModelConfig = React.useCallback((
     id: string,
-    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort' | 'modelPreferences'>>,
   ) => {
     setModelConfigs((prev) => {
       const next = prev.map((item) =>
@@ -141,7 +166,7 @@ export default function App() {
   }, [])
 
   React.useEffect(() => {
-    if (page === 'bookshelf' || page === 'screenplay' || page === 'workspace') loadBooks()
+    if (page === 'bookshelf' || page === 'screenplay' || page === 'workspace' || page === 'novelSources') loadBooks()
   }, [page, loadBooks])
 
   const handleEnterBookshelf = React.useCallback(() => {
@@ -150,6 +175,14 @@ export default function App() {
 
   const handleEnterScreenplayAgent = React.useCallback(() => {
     navigate('/screenplay')
+  }, [navigate])
+
+  const handleEnterWritingMethods = React.useCallback(() => {
+    navigate('/writing-methods')
+  }, [navigate])
+
+  const handleEnterNovelSources = React.useCallback(() => {
+    navigate('/novel-sources')
   }, [navigate])
 
   const handleOpenSettings = React.useCallback(() => {
@@ -267,7 +300,22 @@ export default function App() {
                 onCreateBook={handleCreateBook}
                 onDeleteBook={handleDeleteBook}
                 onRenameBook={handleRenameBook}
+                onContinuationCreated={loadBooks}
+                onOpenNovelSources={handleEnterNovelSources}
+                onOpenWritingMethods={handleEnterWritingMethods}
                 onBack={handleBackToHome}
+              />
+            )} />
+            <Route path="/writing-methods" element={(
+              <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} />
+            )} />
+            <Route path="/novel-sources/:workId?" element={(
+              <NovelSourcesPage
+                books={books}
+                modelConfigs={configuredModelConfigs}
+                onUpdateModelConfig={updateModelConfig}
+                onBack={handleEnterBookshelf}
+                onHome={handleBackToHome}
               />
             )} />
             <Route path="/books/:bookId" element={activeBook ? (
@@ -275,6 +323,7 @@ export default function App() {
                 bookId={activeBook.id}
                 bookTitle={activeBook.title}
                 enableVolume={!!activeBook.enable_volume}
+                creationMode={activeBook.creation_mode ?? 'original'}
                 onBack={handleBackToBookshelf}
                 onGoHome={handleBackToHome}
                 onOpenSettings={handleOpenSettings}
@@ -289,16 +338,15 @@ export default function App() {
           </Routes>
         </Suspense>
       </main>
-      <footer className="app-footer">
-        © 2026 Liu Yubin (PurrTypos). Powered by AI.
-      </footer>
-
       {showSettings && (
         <div className="app-settings-overlay">
           <Suspense fallback={<PurrSpin size="large" />}>
             <SettingsPage
               modelConfigs={modelConfigs}
               onSaveModelConfigs={saveModelConfigs}
+              memoryModelId={memoryModelId}
+              memoryEmbeddingConfig={memoryEmbeddingConfig}
+              onSaveMemoryConfiguration={saveMemoryConfiguration}
               onClose={handleCloseSettings}
               syncOutlineChapter={syncOutlineChapter}
               onSyncOutlineChapterChange={handleSyncOutlineChapterChange}

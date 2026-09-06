@@ -46,7 +46,6 @@ class _FakeClient:
 @pytest.mark.parametrize(
     ("model", "profile_id", "thinking_type"),
     [
-        ("deepseek-v4-pro", "deepseek:deepseek-v4-pro", "enabled"),
         ("deepseek-v4-flash", "deepseek:deepseek-v4-flash", "disabled"),
     ],
 )
@@ -97,4 +96,36 @@ async def test_deepseek_v4_uses_openai_compatible_thinking_and_tools(
 
     await result["stream"].aclose()
     assert client.streams[0].close_calls == 1
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_deepseek_v4_forwards_low_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import openai_chat
+
+    client = _FakeClient()
+    monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: client)
+
+    result = await openai_chat.chat_stream(
+        "secret",
+        [{"role": "user", "content": "继续写作"}],
+        {
+            "model": "deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+            "baseURL": "https://api.deepseek.com",
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "low",
+            "max_tokens": 16_384,
+        },
+    )
+
+    assert result["model"] == "deepseek-v4-flash"
+    assert client.create_calls[0]["reasoning_effort"] == "low"
+    assert client.create_calls[0]["extra_body"] == {
+        "thinking": {"type": "enabled"},
+    }
+
+    await result["stream"].aclose()
     assert client.close_calls == 1

@@ -11,9 +11,13 @@ import pytest_asyncio
 
 from database.connection import DatabaseConnection
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from purra.api import (
+    PLANNING_STREAM_SCHEMA,
+    PlanningScope,
+    PlanningStreamParser,
+)
 from purra.contracts import (
     ModelFinishReason,
-    RunBinding,
     RunCreateParams,
     RunStatus,
 )
@@ -24,6 +28,7 @@ from purra.errors import (
 )
 from purra.events import AgentEvent, CoreEventType
 from purra.output import (
+    AGENT_PROGRESS_SCHEMA,
     AgentOutputEventDraft,
     AgentOutputIntent,
     OutputChannel,
@@ -32,7 +37,9 @@ from purra.output import (
     OutputSource,
     OutputStreamSpec,
     OutputVisibility,
+    PROVIDER_DELTA_BATCH_SCHEMA,
     RunLifecycleOutputDraft,
+    provider_delta_batch_digest,
 )
 from purra.ports import RunCommit
 from purra.testing import assert_host_adapters_conform
@@ -291,6 +298,11 @@ async def test_repository_implements_the_output_port_and_creates_schema(
         "invocation_id",
         "intent",
         "commit_mode",
+        "output_protocol",
+        "planning_run_id",
+        "planning_operation_id",
+        "planning_revision",
+        "planning_attempt",
         "status",
         "finish_reason",
     }.issubset(stream_columns)
@@ -307,6 +319,10 @@ async def test_repository_implements_the_output_port_and_creates_schema(
         "occurred_at",
         "emitted_at",
         "source_event_key",
+        "root_run_id",
+        "agent_id",
+        "parent_run_id",
+        "root_sequence",
     }.issubset(event_columns)
 
 
@@ -319,6 +335,460 @@ async def test_sqlite_host_adapters_pass_the_shared_conformance_suite(output_db)
         publisher=InProcessAgentOutputPublisher(),
         session_id=7,
     )
+
+
+@pytest.mark.asyncio
+async def test_planning_stream_identity_and_provider_progress_are_replayable(
+    output_db,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    operation_id = "planning-operation-1"
+    invocation_id = "planning-invocation-1"
+    stream_id = "planning-stream-1"
+    occurred_at = datetime.now(timezone.utc)
+
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key=f"operation:{operation_id}:started",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.OPERATION_STARTED,
+        channel=OutputChannel.OPERATION,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "operationId": operation_id,
+            "parentOperationId": None,
+            "kind": "planning",
+            "startedAt": occurred_at.isoformat(),
+            "display": {"labelKey": "agent.operation.planning"},
+        },
+        occurred_at=occurred_at,
+    ))
+    spec = OutputStreamSpec(
+        output_stream_id=stream_id,
+        run_id=run_id,
+        turn_id="turn-1",
+        invocation_id=invocation_id,
+        intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+        commit_mode=OutputCommitMode.PRIVATE,
+        output_protocol=PLANNING_STREAM_SCHEMA,
+        planning_scope=PlanningScope(
+            run_id=run_id,
+            operation_id=operation_id,
+            revision=2,
+        ),
+        planning_attempt=1,
+    )
+    await repository.open_stream(spec)
+    wire = (
+        '{"v":1,"type":"progress","text":"正在核对续写范围。"}\n'
+        '{"v":1,"type":"progress","text":"正在整理执行步骤。"}\n'
+        '{"v":1,"type":"plan","plan":{"needsTodos":false}}\n'
+    )
+    progress = PlanningStreamParser().feed(wire)
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key="provider:planning-invocation-1:chunk:1:part:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_CONTENT_DELTA,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={"delta": wire},
+        occurred_at=occurred_at,
+    ))
+    projected = await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key="planning:planning-invocation-1:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PLANNING_PROGRESS,
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "schemaVersion": PLANNING_STREAM_SCHEMA,
+            "operationId": operation_id,
+            "revision": 2,
+            "attempt": 1,
+            **progress[0].to_mapping(),
+        },
+        occurred_at=occurred_at,
+    ))
+    with pytest.raises(
+        ContractViolationError,
+        match="does not match Provider source",
+    ):
+        await repository.append_event(AgentOutputEventDraft(
+            run_id=run_id,
+            turn_id="turn-1",
+            output_stream_id=stream_id,
+            invocation_id=invocation_id,
+            source_event_key="planning:planning-invocation-1:2",
+            source=OutputSource.PROVIDER,
+            kind=OutputEventKind.PLANNING_PROGRESS,
+            channel=OutputChannel.COMMENTARY,
+            visibility=OutputVisibility.PUBLIC,
+            payload={
+                "schemaVersion": PLANNING_STREAM_SCHEMA,
+                "operationId": operation_id,
+                "revision": 2,
+                "attempt": 1,
+                **progress[1].to_mapping(),
+                "text": "已经完成执行。",
+            },
+            occurred_at=occurred_at,
+        ))
+
+    assert projected.payload["text"] == "正在核对续写范围。"
+    assert await db.fetch_one(
+        "SELECT output_protocol, planning_run_id, planning_operation_id, "
+        "planning_revision, planning_attempt FROM ai_agent_output_streams "
+        "WHERE id = ?",
+        [stream_id],
+    ) == {
+        "output_protocol": PLANNING_STREAM_SCHEMA,
+        "planning_run_id": run_id,
+        "planning_operation_id": operation_id,
+        "planning_revision": 2,
+        "planning_attempt": 1,
+    }
+    replay = await repository.list_session_events(
+        session_id=7,
+        after_cursor=0,
+    )
+    replayed_progress = [
+        event for _, event in replay
+        if event.kind is OutputEventKind.PLANNING_PROGRESS
+    ]
+    assert replayed_progress == [projected]
+    assert all(
+        event.payload.get("delta") != wire
+        for _, event in replay
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_progress_requires_exact_persisted_provider_source(
+    output_db,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    invocation_id = "answer-invocation-1"
+    stream_id = "answer-stream-1"
+    occurred_at = datetime.now(timezone.utc)
+    await repository.open_stream(OutputStreamSpec(
+        output_stream_id=stream_id,
+        run_id=run_id,
+        turn_id="turn-1",
+        invocation_id=invocation_id,
+        intent=AgentOutputIntent.FINAL_PUBLIC,
+        commit_mode=OutputCommitMode.LIVE,
+    ))
+    entries = [{
+        "sourceChunkIndex": 1,
+        "sourcePartIndex": 3,
+        "kind": OutputEventKind.PROVIDER_PROGRESS_DELTA.value,
+        "payload": {"delta": "正在核对人物动机"},
+    }]
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key=(
+            "provider-batch:answer-invocation-1:diagnostic:private:1:1"
+        ),
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_DELTA_BATCH,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={
+            "schemaVersion": PROVIDER_DELTA_BATCH_SCHEMA,
+            "sourceChunkStart": 1,
+            "sourceChunkEnd": 1,
+            "entries": entries,
+            "payloadDigest": provider_delta_batch_digest(entries),
+        },
+        occurred_at=occurred_at,
+    ))
+    progress = await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id=stream_id,
+        invocation_id=invocation_id,
+        source_event_key="agent-progress:answer-invocation-1:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.AGENT_PROGRESS,
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "schemaVersion": AGENT_PROGRESS_SCHEMA,
+            "text": "正在核对人物动机",
+            "sourceChunkIndex": 1,
+        },
+        occurred_at=occurred_at,
+    ))
+
+    with pytest.raises(
+        ContractViolationError,
+        match="does not match Provider source",
+    ):
+        await repository.append_event(AgentOutputEventDraft(
+            run_id=run_id,
+            turn_id="turn-1",
+            output_stream_id=stream_id,
+            invocation_id=invocation_id,
+            source_event_key="agent-progress:answer-invocation-1:2",
+            source=OutputSource.PROVIDER,
+            kind=OutputEventKind.AGENT_PROGRESS,
+            channel=OutputChannel.COMMENTARY,
+            visibility=OutputVisibility.PUBLIC,
+            payload={
+                "schemaVersion": AGENT_PROGRESS_SCHEMA,
+                "text": "伪造的阶段",
+                "sourceChunkIndex": 2,
+            },
+            occurred_at=occurred_at,
+        ))
+
+    replay = await repository.list_session_events(session_id=7, after_cursor=0)
+    assert [
+        event for _, event in replay
+        if event.kind is OutputEventKind.AGENT_PROGRESS
+    ] == [progress]
+    assert all(
+        event.kind is not OutputEventKind.PROVIDER_DELTA_BATCH
+        for _, event in replay
+    )
+
+
+@pytest.mark.asyncio
+async def test_schema_backfills_historical_canonical_root_journal(tmp_path: Path):
+    original = DatabaseConnection(tmp_path)
+    await original.init()
+    runs = SqliteRunRepository(original)
+    root_id = await runs.create(RunCreateParams(
+        session_id=None,
+        prompt="historical root",
+        mode="agent",
+        requested_run_id="historical-root",
+        agent_id="historical-agent",
+    ))
+    timestamp = datetime.now(timezone.utc).isoformat()
+    await original.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, sequence, source, kind, "
+        "channel, visibility, occurred_at, emitted_at, source_event_key) "
+        "VALUES (?, 'runtime.event', '{}', 'historical-event', 1, 'runtime', "
+        "'runtime.event', 'diagnostic', 'private', ?, ?, 'historical:source')",
+        [root_id, timestamp, timestamp],
+    )
+    await original.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    try:
+        repository = _repository(migrated)
+        journal = await repository.list_root_events(
+            root_id,
+            after_root_sequence=0,
+        )
+        assert len(journal) == 1
+        assert journal[0].root_run_id == root_id
+        assert journal[0].agent_id == "historical-agent"
+        assert journal[0].parent_run_id is None
+        assert journal[0].root_sequence == 1
+        assert journal[0].source_event_key == "historical:source"
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_root_journal_migration_receipt_skips_completed_recheck(
+    tmp_path: Path,
+    monkeypatch,
+):
+    original = DatabaseConnection(tmp_path)
+    await original.init()
+    runs = SqliteRunRepository(original)
+    run_id = await runs.create(RunCreateParams(
+        session_id=None,
+        prompt="receipted journal",
+        mode="agent",
+        requested_run_id="receipted-journal",
+    ))
+    repository = _repository(original, run_repository=runs)
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id=None,
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key="receipt:event",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={},
+        occurred_at=datetime.now(timezone.utc),
+    ))
+    await original.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    assert await migrated.fetch_one(
+        "SELECT id FROM app_schema_migrations "
+        "WHERE id = 'agent-root-journal-v1'"
+    ) == {"id": "agent-root-journal-v1"}
+    await migrated.close()
+
+    import database.schema as schema
+
+    async def _unexpected_recheck(_db):
+        raise AssertionError("completed migration must not run again")
+
+    monkeypatch.setattr(schema, "_migrate_agent_root_journal", _unexpected_recheck)
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_appends_missing_root_sequences_after_existing_journal(
+    tmp_path: Path,
+):
+    original = DatabaseConnection(tmp_path)
+    await original.init()
+    runs = SqliteRunRepository(original)
+    root_id = await runs.create(RunCreateParams(
+        session_id=None,
+        prompt="partially migrated root",
+        mode="agent",
+        requested_run_id="partially-migrated-root",
+    ))
+    repository = _repository(original, run_repository=runs)
+    timestamp = datetime.now(timezone.utc)
+    first = await repository.append_event(AgentOutputEventDraft(
+        run_id=root_id,
+        turn_id=None,
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key="partial:first",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={},
+        occurred_at=timestamp,
+    ))
+    await original.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, payload_json, event_id, sequence, source, kind, "
+        "channel, visibility, occurred_at, emitted_at, source_event_key) "
+        "VALUES (?, 'runtime.event', '{}', 'partial-missing', 2, 'runtime', "
+        "'runtime.event', 'diagnostic', 'private', ?, ?, 'partial:missing')",
+        [root_id, timestamp.isoformat(), timestamp.isoformat()],
+    )
+    second = await repository.append_event(AgentOutputEventDraft(
+        run_id=root_id,
+        turn_id=None,
+        output_stream_id=None,
+        invocation_id=None,
+        source_event_key="partial:second",
+        source=OutputSource.RUNTIME,
+        kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={},
+        occurred_at=timestamp,
+    ))
+    assert (first.root_sequence, second.root_sequence) == (1, 2)
+    await original.close()
+
+    migrated = DatabaseConnection(tmp_path)
+    await migrated.init()
+    try:
+        rows = await migrated.fetch_all(
+            "SELECT event_id, root_sequence FROM ai_agent_run_events "
+            "WHERE run_id = ? ORDER BY root_sequence",
+            [root_id],
+        )
+        assert rows == [
+            {"event_id": first.event_id, "root_sequence": 1},
+            {"event_id": second.event_id, "root_sequence": 2},
+            {"event_id": "partial-missing", "root_sequence": 3},
+        ]
+    finally:
+        await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_child_events_share_one_atomic_root_journal(output_db):
+    db, _run_id, runs = output_db
+    root_id = await runs.create(RunCreateParams(
+        session_id=7,
+        prompt="journal root",
+        mode="agent",
+        requested_run_id="journal-root",
+        agent_id="journal-root-agent",
+    ))
+    child_ids = tuple([
+        await runs.create(RunCreateParams(
+            session_id=7,
+            prompt=f"journal child {index}",
+            mode="agent",
+            requested_run_id=f"journal-child-{index}",
+            root_run_id=root_id,
+            agent_id=f"journal-child-agent-{index}",
+            parent_run_id=root_id,
+        ))
+        for index in (1, 2)
+    ])
+    repository = _repository(db)
+    events = await asyncio.gather(*(
+        repository.append_event(AgentOutputEventDraft(
+            run_id=child_id,
+            turn_id=None,
+            output_stream_id=None,
+            invocation_id=None,
+            source_event_key=f"journal:{child_id}",
+            source=OutputSource.RUNTIME,
+            kind=OutputEventKind.RUNTIME,
+            channel=OutputChannel.DIAGNOSTIC,
+            visibility=OutputVisibility.PRIVATE,
+            payload={"childId": child_id},
+            occurred_at=datetime.now(timezone.utc),
+        ))
+        for child_id in child_ids
+    ))
+
+    assert {event.sequence for event in events} == {1}
+    journal = await repository.list_root_events(
+        root_id,
+        after_root_sequence=0,
+    )
+    assert [event.root_sequence for event in journal] == [1, 2]
+    assert {event.run_id for event in journal} == set(child_ids)
+    assert {event.parent_run_id for event in journal} == {root_id}
+    assert {
+        event.agent_id for event in journal
+    } == {"journal-child-agent-1", "journal-child-agent-2"}
+    assert await repository.list_root_events(
+        root_id,
+        after_root_sequence=1,
+    ) == (journal[1],)
+    with pytest.raises(ContractViolationError) as conflict:
+        await repository.list_root_events(
+            child_ids[0],
+            after_root_sequence=0,
+        )
+    assert conflict.value.code == "run_scope_conflict"
 
 
 @pytest.mark.asyncio
@@ -435,6 +905,141 @@ async def test_committed_private_tool_stream_publishes_replayable_commentary(
             after_cursor=0,
         )
     ) == published
+    with pytest.raises(
+        ContractViolationError,
+        match="rejects Provider tool calls",
+    ):
+        await repository.publish_stream_content_as_final("output-tool-1")
+
+
+@pytest.mark.asyncio
+async def test_live_agent_progress_replaces_delayed_commentary_promotion(
+    output_db,
+):
+    db, run_id, runs = output_db
+    repository = _repository(db, run_repository=runs)
+    await repository.open_stream(_private_tool_stream(run_id))
+    occurred_at = datetime.now(timezone.utc)
+    entries = [
+        {
+            "sourceChunkIndex": 1,
+            "sourcePartIndex": 0,
+            "kind": OutputEventKind.PROVIDER_CONTENT_DELTA.value,
+            "payload": {"delta": "正在核对资料"},
+        },
+        {
+            "sourceChunkIndex": 1,
+            "sourcePartIndex": 3,
+            "kind": OutputEventKind.PROVIDER_PROGRESS_DELTA.value,
+            "payload": {"delta": "正在核对资料"},
+        },
+    ]
+    await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id="output-tool-1",
+        invocation_id="invocation-tool-1",
+        source_event_key=(
+            "provider-batch:invocation-tool-1:diagnostic:private:1:1"
+        ),
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.PROVIDER_DELTA_BATCH,
+        channel=OutputChannel.DIAGNOSTIC,
+        visibility=OutputVisibility.PRIVATE,
+        payload={
+            "schemaVersion": PROVIDER_DELTA_BATCH_SCHEMA,
+            "sourceChunkStart": 1,
+            "sourceChunkEnd": 1,
+            "entries": entries,
+            "payloadDigest": provider_delta_batch_digest(entries),
+        },
+        occurred_at=occurred_at,
+    ))
+    progress = await repository.append_event(AgentOutputEventDraft(
+        run_id=run_id,
+        turn_id="turn-1",
+        output_stream_id="output-tool-1",
+        invocation_id="invocation-tool-1",
+        source_event_key="agent-progress:invocation-tool-1:1",
+        source=OutputSource.PROVIDER,
+        kind=OutputEventKind.AGENT_PROGRESS,
+        channel=OutputChannel.COMMENTARY,
+        visibility=OutputVisibility.PUBLIC,
+        payload={
+            "schemaVersion": AGENT_PROGRESS_SCHEMA,
+            "text": "正在核对资料",
+            "sourceChunkIndex": 1,
+        },
+        occurred_at=occurred_at,
+    ))
+    await repository.append_event(_private_tool_call(run_id))
+    await repository.commit_stream(
+        "output-tool-1",
+        ModelFinishReason.TOOL_CALLS,
+    )
+
+    assert await repository.publish_stream_content_as_commentary(
+        "output-tool-1"
+    ) == ()
+    replay = await repository.list_session_events(
+        session_id=7,
+        after_cursor=0,
+    )
+    assert [event for _cursor, event in replay] == [progress]
+
+
+@pytest.mark.asyncio
+async def test_committed_private_answer_publishes_exact_replayable_final(
+    output_db,
+):
+    db, run_id, _runs = output_db
+    repository = _repository(db)
+    await repository.open_stream(_private_tool_stream(run_id))
+    await repository.append_event(_private_tool_content(
+        run_id,
+        source_event_key="provider:answer:1",
+        text="直接",
+    ))
+    await repository.append_event(_private_tool_content(
+        run_id,
+        source_event_key="provider:answer:2",
+        text="回答。",
+    ))
+    private_commit = await repository.commit_stream(
+        "output-tool-1",
+        ModelFinishReason.STOP,
+    )
+
+    published = await repository.publish_stream_content_as_final(
+        "output-tool-1"
+    )
+    repeated = await repository.publish_stream_content_as_final(
+        "output-tool-1"
+    )
+    run = await db.fetch_one(
+        "SELECT conversation_id, final_response FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    )
+    conversation = await db.fetch_one(
+        "SELECT response FROM ai_conversations WHERE id = ?",
+        [run["conversation_id"]],
+    )
+
+    assert repeated == published
+    assert len(published) == 2
+    final, committed = published
+    assert final.sequence > private_commit.sequence
+    assert final.source is OutputSource.PROVIDER
+    assert final.kind is OutputEventKind.PROVIDER_CONTENT_DELTA
+    assert final.channel is OutputChannel.FINAL
+    assert final.visibility is OutputVisibility.PUBLIC
+    assert final.payload == {"delta": "直接回答。"}
+    assert committed.sequence > final.sequence
+    assert committed.kind is OutputEventKind.STREAM_COMMITTED
+    assert committed.channel is OutputChannel.FINAL
+    assert committed.visibility is OutputVisibility.PUBLIC
+    assert run["final_response"] == "直接回答。"
+    assert conversation == {"response": "直接回答。"}
 
 
 @pytest.mark.asyncio

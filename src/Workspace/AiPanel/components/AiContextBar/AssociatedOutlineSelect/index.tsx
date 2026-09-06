@@ -1,4 +1,3 @@
-import React from 'react'
 import { PurrButton, PurrMultiSelect, PurrTooltip } from '@/purr-components'
 import { BoltIcon } from '@/purr-components'
 import type { EntityId } from '../../../../../types'

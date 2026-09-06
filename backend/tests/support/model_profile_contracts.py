@@ -16,7 +16,7 @@ from purra.contracts import (
     ToolChoiceMode,
     ToolSchema,
 )
-from purra.model_protocol import resolve_invocation_output_limit
+from purra.model_protocol import resolve_invocation_output_budget
 
 
 async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
@@ -45,12 +45,12 @@ async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
             },
         ),),
         tool_choice=ToolChoiceMode.AUTO,
-        output_limit=(
-            resolve_invocation_output_limit(
+        output_budget=(
+            resolve_invocation_output_budget(
                 snapshot,
-                explicit_user_override=None,
+                max_generation_tokens=None,
             )
-            if snapshot.max_output_tokens is not None
+            if snapshot.max_generation_tokens is not None
             else None
         ),
         reasoning_mode=ReasoningMode.DEFAULT,
@@ -59,8 +59,8 @@ async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
     assert options["model"] == model
     assert options["model_profile"] == profile.profile_id
     assert options["tools"][0]["function"]["name"] == "publish_part"
-    if snapshot.max_output_tokens is not None:
-        assert options["max_tokens"] == snapshot.max_output_tokens
+    if snapshot.max_generation_tokens is not None:
+        assert options["max_tokens"] == snapshot.max_generation_tokens
     else:
         assert "max_tokens" not in options
 
@@ -125,8 +125,8 @@ async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
     assert chunks[-1].finish_reason is ModelFinishReason.TOOL_CALLS
     assert chunks[-1].usage is not None
     assert chunks[-1].usage.input_tokens == 21
-    assert chunks[-1].usage.output_tokens == 8
-    assert chunks[-1].usage.reasoning_output_tokens == 3
+    assert chunks[-1].usage.generation_tokens == 8
+    assert chunks[-1].usage.reasoning_tokens == 3
 
     canceled = False
 

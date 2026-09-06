@@ -25,12 +25,12 @@ from purra.contracts import (
 from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.model_protocol import (
     generic_capability_snapshot,
-    InvocationOutputLimit,
-    InvocationOutputLimitSource,
+    InvocationOutputBudget,
+    GenerationBudgetSource,
     ModelProtocolCapabilities,
     ReasoningControl,
     ReasoningReplayPolicy,
-    resolve_invocation_output_limit,
+    resolve_invocation_output_budget,
 )
 from purra.ports import ModelGateway
 from purra.runtime import AgentRuntime
@@ -44,16 +44,21 @@ def _snapshot(*, profile_id="generic", protocol=None):
     return replace(
         generic_capability_snapshot(),
         profile_id=profile_id,
-        max_output_tokens=393_216,
+        max_generation_tokens=393_216,
         protocol=protocol or ModelProtocolCapabilities(),
     )
 
 
-def _limit(max_tokens: int) -> InvocationOutputLimit:
-    return InvocationOutputLimit(
-        max_tokens=max_tokens,
-        source=InvocationOutputLimitSource.USER_OVERRIDE,
-        profile_max_tokens=393_216,
+def _limit(
+    max_tokens: int,
+    *,
+    profile_max_tokens: int = 393_216,
+) -> InvocationOutputBudget:
+    return InvocationOutputBudget(
+        max_generation_tokens=max_tokens,
+        generation_source=GenerationBudgetSource.USER,
+        profile_max_generation_tokens=profile_max_tokens,
+        requested_user_max_generation_tokens=max_tokens,
     )
 
 
@@ -64,8 +69,11 @@ def _limit(max_tokens: int) -> InvocationOutputLimit:
         ("stop_sequence", ModelFinishReason.STOP),
         ("max_tokens", ModelFinishReason.LENGTH),
         ("max_output_tokens", ModelFinishReason.LENGTH),
+        ("model_context_window_exceeded", ModelFinishReason.LENGTH),
         ("content_filter", ModelFinishReason.FILTERED),
         ("blocked", ModelFinishReason.FILTERED),
+        ("refusal", ModelFinishReason.FILTERED),
+        ("pause_turn", ModelFinishReason.OTHER),
         ("provider_specific_unknown", ModelFinishReason.OTHER),
     ],
 )
@@ -76,6 +84,40 @@ def test_provider_finish_reasons_are_normalized_fail_closed(
     assert provider_model_gateway._normalize_finish_reason(
         native_reason
     ) is normalized
+
+
+def test_anthropic_usage_without_thinking_detail_remains_unknown():
+    usage = provider_model_gateway._normalize_model_usage({
+        "input_tokens": 10,
+        "output_tokens": 7,
+    })
+
+    assert usage == ModelTokenUsage(
+        input_tokens=10,
+        generation_tokens=7,
+        reasoning_tokens=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"completion_tokens_details": {"reasoning_tokens": 5}},
+        {"output_tokens_details": {"thinking_tokens": 5}},
+    ],
+)
+def test_anthropic_usage_extracts_reported_thinking_tokens(details):
+    usage = provider_model_gateway._normalize_model_usage({
+        "input_tokens": 10,
+        "output_tokens": 7,
+        **details,
+    })
+
+    assert usage == ModelTokenUsage(
+        input_tokens=10,
+        generation_tokens=7,
+        reasoning_tokens=5,
+    )
 
 
 def test_disabled_reasoning_keeps_an_existing_non_thinking_temperature():
@@ -111,20 +153,28 @@ def test_provider_receives_the_exact_profile_or_user_output_limit(
     reasoning_mode,
 ):
     snapshot = resolve_model_profile(
-        "deepseek:deepseek-v4-pro",
-        "deepseek-v4-pro",
+        "deepseek:deepseek-v4-flash",
+        "deepseek-v4-flash",
         "https://api.deepseek.com",
     ).capability_snapshot(context_window_tokens=1_000_000)
     invocation = ModelInvocation(
         request=ModelRequest(
             provider="openai",
-            model="deepseek-v4-pro",
+            model="deepseek-v4-flash",
             capability_snapshot=snapshot,
-            options={"baseURL": "https://api.deepseek.com"},
+            max_generation_tokens=explicit_limit,
+            options={
+                "baseURL": "https://api.deepseek.com",
+                **(
+                    {"thinking": {"type": "disabled"}}
+                    if reasoning_mode is ReasoningMode.DISABLED
+                    else {}
+                ),
+            },
         ),
-        output_limit=resolve_invocation_output_limit(
+        output_budget=resolve_invocation_output_budget(
             snapshot,
-            explicit_user_override=explicit_limit,
+            max_generation_tokens=explicit_limit,
         ),
         reasoning_mode=reasoning_mode,
     )
@@ -163,9 +213,10 @@ def test_always_enabled_reasoning_profile_rejects_disabled_invocation():
                 "kimi-k3",
                 "https://api.moonshot.cn/v1",
             ).capability_snapshot(context_window_tokens=1_000_000),
+            max_generation_tokens=1_200,
             options={"baseURL": "https://api.moonshot.cn/v1"},
         ),
-        output_limit=_limit(1_200),
+        output_budget=_limit(1_200, profile_max_tokens=1_048_576),
         reasoning_mode=ReasoningMode.DISABLED,
     )
 
@@ -204,6 +255,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
             provider="openai",
             model="model",
             capability_snapshot=_snapshot(profile_id="profile"),
+            max_generation_tokens=2_048,
             options={
                 "baseURL": (
                     "https://name:password@example.invalid/v1"
@@ -215,6 +267,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
                     "access_token": "private-access-token",
                     "label": "writing",
                 },
+                "thinking": {"type": "disabled"},
                 "tools": [{"function": {"name": "caller-owned"}}],
             },
         ),
@@ -224,7 +277,7 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
             parameters={"type": "object"},
         ),),
         tool_choice=ToolChoiceMode.AUTO,
-        output_limit=_limit(2_048),
+        output_budget=_limit(2_048),
         reasoning_mode=ReasoningMode.DISABLED,
     )
 
@@ -233,6 +286,8 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
         invocation,
     )
 
+    assert parameters.pop("sdkAttemptId").startswith("sdk-")
+    assert parameters.pop("modelResolution") == {}
     assert parameters == {
         "provider": "openai",
         "model": "model",
@@ -250,26 +305,35 @@ def test_model_call_parameters_are_provider_normalized_and_redacted():
             "model": "model",
             "model_profile": "profile",
             "max_tokens": 2_048,
-            "thinking_enabled": False,
             "thinking": {"type": "disabled"},
         },
-        "maxOutputTokens": 2_048,
+        "maxGenerationTokens": 2_048,
         "reasoningMode": "disabled",
         "toolChoice": "auto",
         "toolNames": ["readThing"],
         "messageCount": 1,
         "messageRoles": ["user"],
-            "profileId": "profile",
-            "modelOutputCapabilities": {
-                "maxOutputTokens": 393_216,
-                "thinkingTokenAccounting": "unknown",
-            },
-            "outputLimit": {
-                "maxTokens": 2_048,
-                "source": "user_override",
-                "profileMaxTokens": 393_216,
-            },
-        }
+        "profileId": "profile",
+        "modelOutputCapabilities": {
+            "maxGenerationTokens": 393_216,
+            "thinkingTokenAccounting": "unknown",
+            "reasoningUsageDetail": "optional",
+            "reasoningLimitKind": "none",
+            "visibleOutputReservation": "unknown",
+            "lengthReasonDetail": "conflated",
+            "continuationKind": "none",
+            "continuationSafeFor": [],
+        },
+        "outputBudget": {
+            "maxGenerationTokens": 2_048,
+            "generationSource": "user",
+            "profileMaxGenerationTokens": 393_216,
+            "requestedUserMaxGenerationTokens": 2_048,
+            "resultCapacityTargetTokens": None,
+            "resultCapacitySource": None,
+            "nonResultHeadroomTokens": None,
+        },
+    }
     assert "private message" not in json.dumps(parameters)
     assert "private-provider-key" not in json.dumps(parameters)
     assert "caller-owned" not in json.dumps(parameters)
@@ -286,6 +350,49 @@ def test_provider_message_downgrades_developer_role_to_system():
         "role": "system",
         "content": "host context",
     }
+
+
+def test_development_model_diagnostics_capture_final_provider_messages(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        provider_model_gateway,
+        "DEV_DIAGNOSTICS_ENABLED",
+        True,
+    )
+    gateway = ProviderModelGateway("private-provider-key")
+    invocation = ModelInvocation(
+        request=ModelRequest(
+            provider="openai",
+            model="model",
+            options={"thinking": {"type": "disabled"}},
+        ),
+        reasoning_mode=ReasoningMode.DISABLED,
+    )
+
+    parameters = gateway.describe_invocation(
+        [
+            AgentMessage(
+                role="developer",
+                content="内置写作方法",
+                attributes={
+                    "context_name": "writing_method",
+                    "apiKey": "private-message-key",
+                },
+            ),
+            AgentMessage(role="user", content="用户原始输入"),
+        ],
+        invocation,
+    )
+
+    assert parameters["inputMessages"] == [
+        {
+            "apiKey": "<redacted>",
+            "role": "system",
+            "content": "内置写作方法",
+        },
+        {"role": "user", "content": "用户原始输入"},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -348,7 +455,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
             "provider": provider,
             "signal": signal,
         })
-        return {"stream": _chunks(), "model": "resolved-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _chunks(), "model": "resolved-model"}
 
     async def _complete(key, messages, options, provider, signal):
         assert key == "secret"
@@ -357,6 +464,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
         assert provider == "anthropic"
         assert signal is None
         return {
+            "applied_generation_limit": options.get("max_tokens"),
             "message": {"role": "assistant", "content": "complete"},
             "model": "resolved-model",
             "finish_reason": "stop",
@@ -372,15 +480,16 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
         provider="anthropic",
         model="requested-model",
         capability_snapshot=resolve_model_profile(
-            "deepseek:deepseek-v4-pro",
-            "deepseek-v4-pro",
+            "deepseek:deepseek-v4-flash",
+            "deepseek-v4-flash",
             "https://api.deepseek.com",
         ).capability_snapshot(context_window_tokens=1_000_000),
+        max_generation_tokens=2_048,
         options={
             "baseURL": "https://example.invalid",
             "tool_choice": "required",
             "max_tokens": 999_999,
-            "thinking_enabled": True,
+            "thinking": {"type": "disabled"},
             "temperature": 1.0,
             "metadata": {"tags": ["writing"]},
         },
@@ -412,7 +521,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
                 },
             ),),
             tool_choice=ToolChoiceMode.REQUIRED,
-            output_limit=_limit(2_048),
+            output_budget=_limit(2_048),
             reasoning_mode=ReasoningMode.DISABLED,
         )
     chunks, completion = await assert_model_gateway_conforms(
@@ -433,10 +542,10 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert chunks[0].tool_call_deltas[0].arguments_fragment == "{}"
     assert chunks[0].usage == ModelTokenUsage(
         input_tokens=120,
-        output_tokens=8,
+        generation_tokens=8,
         total_tokens=128,
         cached_input_tokens=20,
-        reasoning_output_tokens=3,
+        reasoning_tokens=3,
     )
     assert captured["key"] == "secret"
     assert captured["provider"] == "anthropic"
@@ -447,15 +556,11 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     }]
     assert captured["options"]["model"] == "requested-model"
     assert captured["options"]["tools"][0]["function"]["name"] == "readThing"
-    assert captured["options"]["tool_choice"] == {
-        "type": "function",
-        "function": {"name": "readThing"},
-    }
+    assert captured["options"]["tool_choice"] == "required"
     assert captured["options"]["max_tokens"] == 2_048
-    assert captured["options"]["thinking_enabled"] is False
     assert captured["options"]["thinking"] == {"type": "disabled"}
-    assert captured["options"]["model_profile"] == "deepseek:deepseek-v4-pro"
-    assert "temperature" not in captured["options"]
+    assert captured["options"]["model_profile"] == "deepseek:deepseek-v4-flash"
+    assert captured["options"]["temperature"] == 1.0
     assert type(captured["options"]) is dict
     assert type(captured["options"]["metadata"]) is dict
     assert type(captured["options"]["metadata"]["tags"]) is list
@@ -465,7 +570,7 @@ async def test_provider_model_gateway_preserves_provider_messages_tools_and_mode
     assert json.loads(json.dumps(captured["options"])) == captured["options"]
 
 
-def test_provider_options_pin_one_required_tool_and_keep_multi_tool_required():
+def test_provider_options_keep_required_tool_choice_provider_neutral():
     request = ModelRequest(provider="openai", model="requested-model")
     first = ToolSchema(
         name="readFirst",
@@ -489,10 +594,7 @@ def test_provider_options_pin_one_required_tool_and_keep_multi_tool_required():
         tool_choice=ToolChoiceMode.REQUIRED,
     ))
 
-    assert single["tool_choice"] == {
-        "type": "function",
-        "function": {"name": "readFirst"},
-    }
+    assert single["tool_choice"] == "required"
     assert multiple["tool_choice"] == "required"
 
 
@@ -502,6 +604,7 @@ async def test_provider_model_gateway_normalizes_non_stream_completion(monkeypat
         assert "tools" not in options
         assert "tool_choice" not in options
         return {
+            "applied_generation_limit": options.get("max_tokens"),
             "message": {"role": "assistant", "content": "planned", "reasoning_content": "brief"},
             "model": "resolved-model",
             "usage": {
@@ -529,7 +632,7 @@ async def test_provider_model_gateway_normalizes_non_stream_completion(monkeypat
     assert completion.message.reasoning == "brief"
     assert completion.usage == ModelTokenUsage(
         input_tokens=95,
-        output_tokens=10,
+        generation_tokens=10,
         cached_input_tokens=5,
     )
 
@@ -544,7 +647,7 @@ async def test_provider_model_gateway_maps_typed_tool_continuation_messages(monk
         async def _chunks():
             yield {"choices": [{"message": {"content": "fallback"}, "finish_reason": "stop"}]}
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -628,7 +731,7 @@ async def test_provider_model_gateway_standardizes_upstream_stream_interruptions
             raise httpx.ReadError("connection contained secret details")
             yield  # pragma: no cover
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_generation_limit": _args[2].get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -672,6 +775,36 @@ async def test_provider_model_gateway_standardizes_completion_failures(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_provider_model_gateway_treats_wrapped_connection_errors_as_retryable(
+    monkeypatch,
+):
+    async def _complete(*_args, **_kwargs):
+        try:
+            raise httpx.ConnectError("private DNS or socket detail")
+        except httpx.ConnectError as cause:
+            raise RuntimeError("SDK connection wrapper") from cause
+
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _complete,
+    )
+
+    with pytest.raises(ModelGatewayError) as captured:
+        await ProviderModelGateway("secret").complete(
+            [AgentMessage(role="user", content="hello")],
+            ModelInvocation(
+                request=ModelRequest(provider="openai", model="model"),
+                tool_choice=ToolChoiceMode.NONE,
+            ),
+        )
+
+    assert captured.value.code == "upstream_stream_interrupted"
+    assert captured.value.retryable is True
+    assert "private" not in str(captured.value)
+    assert "SDK" not in str(captured.value)
+
+
+@pytest.mark.asyncio
 async def test_provider_model_gateway_recognizes_wrapped_stream_interruptions(
     monkeypatch,
 ):
@@ -683,7 +816,7 @@ async def test_provider_model_gateway_recognizes_wrapped_stream_interruptions(
                 raise RuntimeError("SDK wrapper detail") from cause
             yield  # pragma: no cover
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_generation_limit": _args[2].get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -710,7 +843,7 @@ async def test_provider_model_gateway_turns_cumulative_message_fallback_into_del
             yield {"choices": [{"delta": {"content": "a"}, "finish_reason": None}]}
             yield {"choices": [{"message": {"content": "ab"}, "finish_reason": "stop"}]}
 
-        return {"stream": _chunks(), "model": "model"}
+        return {"applied_generation_limit": _args[2].get("max_tokens"), "stream": _chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     stream = await ProviderModelGateway("secret").stream(
@@ -808,9 +941,13 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
     signal = asyncio.Event()
 
     async def _stream(_key, _messages, _options, _provider, received_signal):
-        assert received_signal is signal
+        # PurrA 0.3 clips the caller signal with its invocation deadline and
+        # passes that reason-aware child signal to the Provider boundary.
+        assert received_signal is not signal
+        assert not received_signal.is_set()
         signal.set()
-        return {"stream": raw_stream, "model": "resolved-model"}
+        assert received_signal.is_set()
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": raw_stream, "model": "resolved-model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", _stream)
     runtime = AgentRuntime(model_gateway=ProviderModelGateway("secret"))
@@ -819,10 +956,15 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
         async for update in runtime.run(
             AgentRunRequest(
                 messages=(AgentMessage(role="user", content="hello"),),
-                model=ModelRequest(provider="openai", model="requested-model"),
+                model=ModelRequest(
+                    provider="openai",
+                    model="requested-model",
+                    capability_snapshot=_snapshot(),
+                    max_generation_tokens=2_048,
+                ),
                 domain_context=DomainContext(namespace="test"),
             ),
-            output_limit=_limit(2_048),
+            output_budget=_limit(2_048),
             signal=signal,
         )
     ]
@@ -836,7 +978,7 @@ async def test_provider_gateway_runtime_same_tick_cancel_closes_unstarted_raw_st
 
 
 @pytest.mark.asyncio
-async def test_runtime_rejects_unknown_output_limit_before_provider_request(
+async def test_runtime_rejects_unknown_generation_limit_before_provider_request(
     monkeypatch,
 ):
     provider_called = False
@@ -865,5 +1007,72 @@ async def test_runtime_rejects_unknown_output_limit_before_provider_request(
     result = updates[-1]
     assert isinstance(result, AgentRuntimeResult)
     assert result.outcome is RuntimeOutcome.FAILED
-    assert result.error_code == "model_output_limit_unknown"
+    assert result.error_code == "model_generation_limit_unknown"
     assert provider_called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("applied,usage", [(None, 1), (4096, 1), (2048, 2049)])
+async def test_managed_provider_rejects_invalid_output_receipt_or_usage(
+    monkeypatch, streaming, applied, usage,
+):
+    from purra.errors import ContractViolationError
+    from purra.model_invocation import (
+        AgentModelCall, AgentModelInvocationManager, ModelInvocationContext,
+    )
+    from purra.output import AgentOutputIntent, OutputCommitMode
+
+    closed = False
+
+    class RawStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return {
+                "choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": usage},
+            }
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    async def provider(*args):
+        assert args[2]["max_tokens"] == 2048
+        result = {
+            "model": "model", "message": {"role": "assistant", "content": "answer"},
+            "finish_reason": "stop", "usage": {"prompt_tokens": 1, "completion_tokens": usage},
+            "stream": RawStream(),
+        }
+        if applied is not None:
+            result["applied_generation_limit"] = applied
+        return result
+
+    monkeypatch.setattr(provider_model_gateway.provider_router, "create_chat_stream", provider)
+    monkeypatch.setattr(provider_model_gateway.provider_router, "create_chat_no_stream", provider)
+    manager = AgentModelInvocationManager(ProviderModelGateway("test-key"))
+    call = AgentModelCall(
+        request=ModelRequest(
+            provider="openai",
+            model="model",
+            capability_snapshot=_snapshot(),
+            max_generation_tokens=2_048,
+        ),
+        output_budget=_limit(2048),
+        output_intent=AgentOutputIntent.STRUCTURED_PRIVATE,
+        commit_mode=OutputCommitMode.PRIVATE,
+    )
+    context = ModelInvocationContext(run_id="output-contract-test")
+    messages = (AgentMessage(role="user", content="hello"),)
+    with pytest.raises(ContractViolationError) as error:
+        if streaming:
+            result = await manager.stream(messages, call, context)
+            async for _ in result.chunks:
+                pass
+        else:
+            await manager.complete(messages, call, context)
+    assert error.value.code == "model_gateway_contract_violation"
+    if streaming:
+        assert closed

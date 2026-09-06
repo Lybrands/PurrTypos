@@ -1,5 +1,6 @@
 import React from 'react'
 import { PurrInput } from '@/purr-components'
+import type { AgentComposerCommand } from '../extensions'
 import './index.scss'
 
 export interface AgentComposerProps {
@@ -15,6 +16,12 @@ export interface AgentComposerProps {
   floatingContent?: React.ReactNode
   footer: React.ReactNode
   className?: string
+  commands?: AgentComposerCommand[]
+}
+
+export function composerCommandQuery(value: string): string | null {
+  const match = String(value ?? '').match(/^\s*\/([^\s]*)$/)
+  return match ? match[1].toLocaleLowerCase() : null
 }
 
 /**
@@ -36,7 +43,21 @@ export default function AgentComposer({
   floatingContent,
   footer,
   className,
+  commands = [],
 }: AgentComposerProps) {
+  const query = composerCommandQuery(value)
+  const visibleCommands = query == null ? [] : commands.filter((command) => {
+    const haystack = [command.label, command.description, ...(command.keywords ?? [])]
+      .filter(Boolean)
+      .join(' ')
+      .toLocaleLowerCase()
+    return !query || haystack.includes(query)
+  })
+  const selectCommand = (command: AgentComposerCommand) => {
+    if (disabled || command.disabled) return
+    onChange('')
+    command.onSelect()
+  }
   return (
     <div
       className={[
@@ -60,16 +81,45 @@ export default function AgentComposer({
         autoSize={autoSize}
         disabled={disabled}
         onKeyDown={(event) => {
+          if (event.key === 'Escape' && visibleCommands.length > 0) {
+            event.preventDefault()
+            onChange(value.replace(/^\s*\//, ''))
+            return
+          }
           if (
             event.key !== 'Enter'
             || event.shiftKey
             || event.nativeEvent.isComposing
+            || disabled
             || submitDisabled
           ) return
           event.preventDefault()
+          if (visibleCommands.length > 0) {
+            const first = visibleCommands.find((command) => !command.disabled)
+            if (first) selectCommand(first)
+            return
+          }
           onSubmit()
         }}
       />
+      {visibleCommands.length > 0 ? (
+        <div className="agent-composer__command-menu" role="listbox" aria-label="输入命令">
+          {visibleCommands.map((command) => (
+            <button
+              key={command.id}
+              type="button"
+              role="option"
+              aria-selected={Boolean(command.active)}
+              disabled={disabled || command.disabled}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => selectCommand(command)}
+            >
+              <strong>{command.label}</strong>
+              {command.description ? <span>{command.description}</span> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
       {supplementaryContent}
       <div className="agent-composer__footer">
         {footer}

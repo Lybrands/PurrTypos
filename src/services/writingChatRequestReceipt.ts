@@ -25,16 +25,6 @@ export async function reserveWritingChatRequest(dependencies: {
   }
 }
 
-export async function cancelAfterWritingRequestReservation(dependencies: {
-  requestId: string
-  reservation: Promise<WritingChatRequestReservation>
-  cancel(requestId: string): Promise<AiWritingChatRequestReceipt>
-}): Promise<AiWritingChatRequestReceipt | undefined> {
-  const reserved = await dependencies.reservation
-  if (reserved.kind !== 'accepted') return undefined
-  return dependencies.cancel(dependencies.requestId)
-}
-
 export async function replayWritingChatPostUntilObserved<T>(dependencies: {
   send(): Promise<T>
   accept?(value: T): boolean

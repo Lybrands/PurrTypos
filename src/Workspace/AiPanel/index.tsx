@@ -1,12 +1,18 @@
 import { services } from '@/services'
+import { loadCompleteAgentRunSnapshot, mergeAgentRunSnapshot } from '../../agent-runtime/runSnapshotHydration'
+import { shouldRefreshBookProposalProjection } from './bookProposalProjection'
+import { waitForAgentRetry } from '../../services/agentEventStream'
+import type { CanonicalOperation } from '../../agent-runtime/canonicalOutput'
 /// <reference path="../../vite-env.d.ts" />
 import React from 'react'
 import { usePurrToast, type PurrDropdownItem } from '@/purr-components'
 import type {
   AiModelConfig,
   AiSession,
+  BookWritingMethodBinding,
   Conversation,
   SettingDiffCardState,
+  WritingMethodOverrides,
 } from '../../types'
 import type { AgentConversationMessage } from '../../agent-runtime/contracts'
 import { getActiveTaskPlan } from '../../agent-runtime/taskPlan'
@@ -55,13 +61,17 @@ import {
 } from './bookAssistantAttachments'
 import { useBookConversationController } from './useBookConversationController'
 import { useBookConversationExtensions } from './BookConversationExtensions'
+import {
+  boundWritingMethodChoices,
+  cycleWritingMethodOverride,
+} from './writingMethodOverrides'
 import './index.scss'
 
 interface AiPanelProps {
   modelConfigs: AiModelConfig[]
   onUpdateModelConfig?: (
     id: string,
-    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>,
   ) => void
   onOpenModelSettings: () => void
   conversationSidebarOpen?: boolean
@@ -113,6 +123,12 @@ export default function AiPanel({
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false)
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false)
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false)
+  const [writingMethodBindings, setWritingMethodBindings] = React.useState<
+    BookWritingMethodBinding[]
+  >([])
+  const [writingMethodOverrides, setWritingMethodOverrides] = React.useState<
+    WritingMethodOverrides
+  >({ forceRevisionIds: [], excludeRevisionIds: [] })
   const pendingSettingSessionRef = React.useRef(false)
   const pendingSettingPromptRef = React.useRef<string>()
   const conversationLifecycleRef = React.useRef(
@@ -122,6 +138,41 @@ export default function AiPanel({
   const effectiveChapterId = chatScope === 'setting' ? null : chapterId
   const scopeAvailable = bookId != null
     && (chatScope === 'setting' || chapterId != null)
+  const writingMethodChoices = React.useMemo(
+    () => boundWritingMethodChoices(writingMethodBindings),
+    [writingMethodBindings],
+  )
+
+  React.useEffect(() => {
+    let current = true
+    const load = () => {
+      if (bookId == null) return
+      void services.writingMethods.listBookBindings({ bookId }).then((result) => {
+        if (!current || !result.success) return
+        const nextBindings = result.data ?? []
+        const allowed = new Set(
+          boundWritingMethodChoices(nextBindings).map((item) => item.revisionId),
+        )
+        setWritingMethodBindings(nextBindings)
+        setWritingMethodOverrides((overrides) => ({
+          forceRevisionIds: overrides.forceRevisionIds.filter((id) => allowed.has(id)),
+          excludeRevisionIds: overrides.excludeRevisionIds.filter((id) => allowed.has(id)),
+        }))
+      })
+    }
+    const onChanged = (event: Event) => {
+      const changedBookId = (event as CustomEvent<{ bookId?: unknown }>).detail?.bookId
+      if (String(changedBookId) === String(bookId)) load()
+    }
+    setWritingMethodBindings([])
+    setWritingMethodOverrides({ forceRevisionIds: [], excludeRevisionIds: [] })
+    load()
+    window.addEventListener('writing-method-bindings-changed', onChanged)
+    return () => {
+      current = false
+      window.removeEventListener('writing-method-bindings-changed', onChanged)
+    }
+  }, [bookId])
 
   const {
     selectedModel,
@@ -131,6 +182,8 @@ export default function AiPanel({
     selectedModelConfig,
   } = useAiModelPrefs(bookId, modelConfigs)
   const {
+    selectedLongTermMemoryIds,
+    setSelectedLongTermMemoryIds,
     selectedMemoryIds,
     setSelectedMemoryIds,
     selectedForeshadowingIds,
@@ -263,7 +316,6 @@ export default function AiPanel({
     setAssociatedChapterIds,
     associatedOutlineIds,
     setAssociatedOutlineIds,
-    availableOutlines,
     outlineSelectOptions,
     chapterSelectOptions,
     handleQuickAssociateChapter,
@@ -280,6 +332,7 @@ export default function AiPanel({
     onQuickAssociateChapter: handleQuickAssociateChapter,
     onQuickAssociateOutline: handleQuickAssociateOutline,
     selectedMemoryIds,
+    selectedLongTermMemoryIds,
     selectedForeshadowingIds,
     onOpenMemoryModal: () => setMemoryModalOpen(true),
     contextPopoverOpen,
@@ -293,6 +346,7 @@ export default function AiPanel({
     handleQuickAssociateOutline,
     outlineSelectOptions,
     selectedForeshadowingIds,
+    selectedLongTermMemoryIds,
     selectedMemoryIds,
     setAssociatedChapterIds,
     setAssociatedOutlineIds,
@@ -316,7 +370,8 @@ export default function AiPanel({
   const {
     handleSubmit: doSubmit,
     handleAbort,
-    queuedMessages,
+    queuedSubmissions,
+    updateQueuedSubmission,
     sessionActivities,
     stopping,
   } = useChatSubmit({
@@ -339,8 +394,10 @@ export default function AiPanel({
       : activeChapterTitle || undefined,
     selectedModel,
     agentEnabled: chatAgentMode !== 'ask',
+    selectedLongTermMemoryIds,
     selectedMemoryIds,
     selectedForeshadowingIds,
+    writingMethodOverrides,
     sessionScope: chatScope,
     onAssistantAttachment: addAssistantAttachment,
     associateAssistantIdentities: attachmentManager.associate,
@@ -354,9 +411,26 @@ export default function AiPanel({
   })
 
   const clearSelectedContext = React.useCallback(() => {
+    setSelectedLongTermMemoryIds([])
     setSelectedMemoryIds([])
     setSelectedForeshadowingIds([])
-  }, [setSelectedForeshadowingIds, setSelectedMemoryIds])
+    setWritingMethodOverrides({ forceRevisionIds: [], excludeRevisionIds: [] })
+  }, [
+    setSelectedForeshadowingIds,
+    setSelectedLongTermMemoryIds,
+    setSelectedMemoryIds,
+  ])
+
+  const cycleWritingMethod = React.useCallback((revisionId: string) => {
+    setWritingMethodOverrides((current) => (
+      cycleWritingMethodOverride(current, revisionId)
+    ))
+  }, [])
+
+  const requestWritingMethodRecommendation = React.useCallback(() => {
+    setChatAgentMode('agent')
+    setPrompt('[写作方法推荐] 请根据我接下来描述的写作目标，检索方法目录并给出建议和理由：')
+  }, [setChatAgentMode, setPrompt])
 
   const handleSubmit = React.useCallback((content?: string) => {
     const token = conversationLifecycleRef.current.currentToken()
@@ -412,6 +486,7 @@ export default function AiPanel({
     }
     const sessionId = activeSessionId
     const token = lifecycle.beginLoad(sessionId)
+    const recoveryController = new AbortController()
     setConversationIdentity(token.identity)
     const pendingSettingPrompt = chatScope === 'setting'
       ? pendingSettingPromptRef.current
@@ -467,7 +542,7 @@ export default function AiPanel({
       }
     }
     const hydrateRows = async (rows: Conversation[]) => {
-      while (lifecycle.isCurrent(token)) {
+      for (let attempt = 0; lifecycle.isCurrent(token); attempt++) {
         try {
           return await hydrateBookConversationReadModel(rows, {
             getRunSnapshot: (input) => services.ai.getAgentRunSnapshot(input),
@@ -475,8 +550,8 @@ export default function AiPanel({
             isCurrent: () => lifecycle.isCurrent(token),
           })
         } catch (error) {
-          if (!(error instanceof BookConversationHydrationError)) throw error
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
+          if (!(error instanceof BookConversationHydrationError) || attempt >= 8) throw error
+          await waitForAgentRetry(Math.min(10_000, 250 * 2 ** attempt), recoveryController.signal)
         }
       }
       return undefined
@@ -501,9 +576,7 @@ export default function AiPanel({
       setConversations(loaded.messages)
       setLoading(false)
     }
-    const waitForAuthority = () => new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 500)
-    })
+    const waitForAuthority = (delayMs = 500) => waitForAgentRetry(delayMs, recoveryController.signal)
     const hydrateLatest = (input: Parameters<typeof hydrateLatestBookRun>[0]) => (
       retryCurrentConversationRead({
         isCurrent: () => lifecycle.isCurrent(token),
@@ -625,16 +698,24 @@ export default function AiPanel({
           return
         }
 
-        let snapshot = latestSnapshot
-        let promptForRun = latest.prompt
+        const baseline = await loadCompleteAgentRunSnapshot(latestSnapshot.run.runId, {
+          initialSnapshot: latestSnapshot,
+          getRunSnapshot: request => services.ai.getAgentRunSnapshot(request),
+          isCurrent: () => lifecycle.isCurrent(token),
+        })
+        if (!baseline || !lifecycle.isCurrent(token)) return
+        let snapshot = baseline
+        const promptForRun = latest.prompt
         let recoveredTerminalOwner: RecoveredRunProjectionOwner<number> | undefined
-        while (lifecycle.isCurrent(token)) {
+        let recoveredOperations: Record<string, CanonicalOperation> = {}
+        const projectSnapshot = async () => {
           const running = await hydrateLatest({
             sessionId,
             prompt: promptForRun,
             snapshot,
           })
           if (!running || !lifecycle.isCurrent(token)) return
+          recoveredOperations = running.messages.at(-1)?.canonicalOutput?.operations ?? {}
           const combined = mergeHydratedBookRun(
             history,
             running,
@@ -669,25 +750,33 @@ export default function AiPanel({
           setLoading(true)
           finishInitialLoad()
 
-          if (snapshot.run.status !== 'running') {
-            const runtime = getChatSessionRuntime(sessionId)
-            if (runtime) {
-              recoveredTerminalOwner = captureRecoveredRunProjectionOwner(
-                runtime,
-                snapshot.run.runId,
-              )
-            }
-            break
-          }
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 500))
-          if (!lifecycle.isCurrent(token)) return
-          const polled = await services.ai.getAgentRunSnapshot({
-            runId: snapshot.run.runId,
-            limit: 500,
-          })
-          if (!polled.success || !polled.data) continue
-          snapshot = polled.data
         }
+        await projectSnapshot()
+        if (snapshot.run.status === 'running') {
+          await services.ai.consumeAgentRunEvents({
+            runId: snapshot.run.runId, sessionId, after: snapshot.nextCursor,
+            signal: recoveryController.signal,
+            onEvent: async page => {
+              if (!lifecycle.isCurrent(token)) return
+              snapshot = mergeAgentRunSnapshot(snapshot, page)
+              if (page.hasMore) return
+              await projectSnapshot()
+              if (page.run.status !== 'running' || page.events.some(event =>
+                event.chunk && shouldRefreshBookProposalProjection(event.chunk,
+                  recoveredOperations[String((event.chunk.payload as Record<string, unknown> | undefined)?.operationId || '')]))) {
+                const product = await services.ai.getAgentRunSnapshot({
+                  runId: page.run.runId, after: page.nextCursor, limit: 1,
+                })
+                if (!lifecycle.isCurrent(token)) return
+                if (product.success && product.data) snapshot.productEvents = product.data.productEvents
+                await projectSnapshot()
+              }
+            },
+          })
+        }
+        if (!lifecycle.isCurrent(token)) return
+        const runtime = getChatSessionRuntime(sessionId)
+        if (runtime) recoveredTerminalOwner = captureRecoveredRunProjectionOwner(runtime, snapshot.run.runId)
 
         // Canonical terminal materialization is server-owned. Refetch it; if
         // projection commit is a fraction behind, retain the replayed terminal
@@ -719,8 +808,13 @@ export default function AiPanel({
         finishInitialLoad()
         return
       }
-    })()
-    return () => lifecycle.invalidate()
+    })().catch(error => {
+      if (lifecycle.isCurrent(token)) {
+        finishInitialLoad()
+        appMessage.error(error instanceof Error ? error.message : '恢复对话失败，请重新进入会话')
+      }
+    })
+    return () => { recoveryController.abort(); lifecycle.invalidate() }
   }, [
     activeSessionId,
     attachmentManager,
@@ -771,7 +865,7 @@ export default function AiPanel({
     messages: conversations,
     prependedHistory,
     activities: sessionActivities,
-    queuedMessages,
+    queuedSubmissions,
     prompt: activePrompt,
     setPrompt,
     initializing: Boolean(
@@ -794,6 +888,7 @@ export default function AiPanel({
       closeSession,
       renameSession: (id, title) => handleRenameSession(Number(id), title),
       send: handleSubmit,
+      updateQueuedSubmission,
       abort: handleAbort,
       editMessage: handleEditMessage,
       resolveToolApproval: handleResolveToolApproval,
@@ -822,6 +917,10 @@ export default function AiPanel({
     attachments,
     running: loading,
     onAddFavorite: handleAddFavorite,
+    writingMethodChoices,
+    writingMethodOverrides,
+    onCycleWritingMethod: cycleWritingMethod,
+    onRequestWritingMethodRecommendation: requestWritingMethodRecommendation,
   })
 
   const ellipsisMenuItems: PurrDropdownItem[] = [{
@@ -852,8 +951,10 @@ export default function AiPanel({
         bookId={bookId ?? null}
         writingChapters={writingChapters}
         selectedIds={selectedMemoryIds}
+        selectedLongTermMemoryIds={selectedLongTermMemoryIds}
         selectedForeshadowingIds={selectedForeshadowingIds}
-        onSelectConfirm={(memoryIds, foreshadowingIds) => {
+        onSelectConfirm={(longTermMemoryIds, memoryIds, foreshadowingIds) => {
+          setSelectedLongTermMemoryIds(longTermMemoryIds)
           setSelectedMemoryIds(memoryIds)
           setSelectedForeshadowingIds(foreshadowingIds)
         }}

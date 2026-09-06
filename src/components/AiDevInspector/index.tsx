@@ -1,44 +1,46 @@
 import React from "react";
+import type { AiTaskPlan } from "../../agent-runtime";
+import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
+import ToolDiagnosticsCard from "./ToolDiagnosticsCard";
+import DiagnosticText, { characterCount } from "./DiagnosticText";
 import type {
-  AiAgentRunDiagnostics,
-  AiAgentRunStabilityTrendReport,
   AiErrorReport,
+  AiModelInputDiagnostic,
+  AiPlannerModelOutputDiagnostic,
 } from "../../types";
 import {
   clearAiDebugRuns,
-  aiDebugTurnKey,
+  aiDebugConversationLifecycle,
+  aiDebugCurrentRunId,
+  aiDebugTurnTokenUsage,
+  aiDebugTurnDiagnosticId,
+  aiDebugTurnRootRunId,
   getAiDebugSnapshot,
   groupAiDebugRunsByTurn,
   recordAiDebugErrorReportStatus,
-  selectAiDebugRun,
+  recordAiDebugRunUsageSnapshot,
+  isAiDebugRunActive,
   subscribeAiDebugStore,
+  getAiDebugInspectorVisible,
+  setAiDebugInspectorVisible,
+  subscribeAiDebugInspectorVisibility,
   type AiDebugRun,
+  type AiDebugTurnGroup,
   type AiDebugDelegationActivity,
   type AiDebugRunStatus,
   type AiDebugModelCall,
+  type AiDebugTokenUsage,
   type AiDebugTool,
 } from "./store";
-import {
-  failureFindingLabel,
-  failureRemediationLabel,
-  formatStabilityTrendRate,
-  recoveryCauseLabel,
-  recoveryDecisionLabel,
-  stabilityGateAlertText,
-  stabilityGateVerdictLabel,
-  stabilityTrendAlertText,
-  stabilityTrendScopeLabel,
-  stabilityTrendVerdictLabel,
-} from "./stabilityTrend";
 import { services } from "../../services";
 import "./index.scss";
 
-type InspectorTab = "overview" | "context" | "events" | "reports";
 type Position = { x: number; y: number };
 
 const POSITION_KEY = "purrtypos:ai-dev-inspector-position";
-const PANEL_WIDTH = 460;
-const PANEL_HEIGHT = 680;
+const PANEL_WIDTH = 520;
+const PANEL_HEIGHT = 760;
+const usageSnapshotRequests = new Set<string>();
 
 const STATUS_LABELS: Record<AiDebugRunStatus, string> = {
   starting: "正在发起",
@@ -48,11 +50,22 @@ const STATUS_LABELS: Record<AiDebugRunStatus, string> = {
   tool: "调用工具",
   awaiting_approval: "等待审批",
   responding: "生成回答",
-  dispatched: "任务已启动",
+  dispatched: "后台执行中",
   completed: "已完成",
   aborted: "已中止",
   failed: "失败",
 };
+
+function debugTaskPlan(value: unknown, runId: string): AiTaskPlan | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const plan = value as Record<string, unknown>;
+  if (!Array.isArray(plan.steps)) return null;
+  return {
+    ...(plan as unknown as AiTaskPlan),
+    runId,
+    title: String(plan.title || 'Core Planner 执行计划'),
+  };
+}
 
 function loadPosition(): Position {
   const fallback = {
@@ -106,32 +119,35 @@ function formatDuration(ms: number): string {
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1_000)}s`;
 }
 
-function compactPrompt(value: string, maxLength = 28): string {
-  const compact = value.replace(/\s+/g, " ").trim();
-  return compact.length > maxLength ? `${compact.slice(0, maxLength)}…` : compact;
-}
-
-function compactRunId(run: AiDebugRun): string {
-  const value = run.agentRunId || run.id;
-  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-5)}` : value;
-}
-
 function formatTokens(value: unknown): string {
   const tokens = Number(value);
-  if (!Number.isFinite(tokens) || tokens <= 0) return "—";
+  if (!Number.isFinite(tokens) || tokens < 0) return "—";
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}K`;
   return String(Math.round(tokens));
 }
 
-function isRunActive(run: AiDebugRun | undefined): boolean {
-  return Boolean(
-    run &&
-      run.status !== "dispatched" &&
-      run.status !== "completed" &&
-      run.status !== "aborted" &&
-      run.status !== "failed",
-  );
+export function tokenUsageText(usage: AiDebugTokenUsage): string {
+  if (usage.totalTokens === 0 && usage.unreportedAttempts > 0) return "Token 未上报";
+  const incomplete = !usage.complete || usage.unreportedAttempts > 0;
+  return `输入 ${formatTokens(usage.inputTokens)} / 输出 ${formatTokens(usage.generationTokens)}${incomplete ? "+" : ""} Token`;
+}
+
+function tokenUsageTitle(usage: AiDebugTokenUsage): string {
+  const parts = [
+    `输入 ${usage.inputTokens}`,
+    `生成 ${usage.generationTokens}`,
+    `推理 ${usage.reasoningTokens ?? '未上报'}`,
+    `合计 ${usage.totalTokens}`,
+  ];
+  if (!usage.complete) parts.push("当前仅显示已上报用量");
+  if (usage.unreportedAttempts > 0) {
+    parts.push(`${usage.unreportedAttempts} 次模型调用未返回用量`);
+  }
+  if (usage.unreportedReasoningAttempts > 0) {
+    parts.push(`${usage.unreportedReasoningAttempts} 次模型调用未单独上报推理用量`);
+  }
+  return parts.join(" · ");
 }
 
 function StatusPill({ status }: { status: AiDebugRunStatus }) {
@@ -150,12 +166,18 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
     <details className={`ai-dev-inspector__tool ai-dev-inspector__tool--${tool.status}`}>
       <summary>
         <span className="ai-dev-inspector__tool-index">{tool.index + 1}</span>
-        <strong>{tool.name}</strong>
+        <strong>{tool.displayName || tool.name}</strong>
         {tool.cached && <span className="ai-dev-inspector__tag">缓存</span>}
         <span className="ai-dev-inspector__tool-duration">{formatDuration(duration)}</span>
         <span>{tool.status === "running" ? "运行中" : tool.status === "failed" ? "失败" : "完成"}</span>
       </summary>
       <div className="ai-dev-inspector__tool-detail">
+        {tool.displayName && tool.displayName !== tool.name && (
+          <>
+            <span>工具函数</span>
+            <pre>{tool.name}</pre>
+          </>
+        )}
         {tool.errorCode && (
           <>
             <span>错误代码</span>
@@ -180,13 +202,16 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
             <pre>{formatJson(tool.diagnostics)}</pre>
           </>
         )}
-        <span>参数</span>
-        <pre>{formatJson(tool.argumentsValue)}</pre>
+        {tool.argumentsValue !== undefined && (
+          <DiagnosticText label="参数" text={formatJson(tool.argumentsValue)} />
+        )}
         {tool.result !== undefined && (
-          <>
-            <span>结果</span>
-            <pre>{formatJson(tool.result)}</pre>
-          </>
+          <DiagnosticText label="结果" text={formatJson(tool.result)} />
+        )}
+        {tool.argumentsValue === undefined && tool.result === undefined && (
+          <div className="ai-dev-inspector__notice">
+            参数和返回请展开下方「工具参数与返回」，从持久化日志读取。
+          </div>
         )}
       </div>
     </details>
@@ -340,14 +365,6 @@ const MODEL_PHASE_LABELS: Record<string, string> = {
   response_judge: "回答校验",
 };
 
-const MODEL_FINISH_REASON_LABELS: Record<string, string> = {
-  stop: "正常完成",
-  tool_calls: "进入工具调用",
-  length: "达到本次输出预算",
-  filtered: "供应商内容过滤",
-  other: "供应商其他原因",
-};
-
 function ModelCallRow({
   call,
   index,
@@ -358,6 +375,10 @@ function ModelCallRow({
   source: string;
 }) {
   const outputBudget = call.parameters?.outputBudget as Record<string, unknown> | undefined;
+  const maxGenerationTokens =
+    outputBudget?.maxGenerationTokens ?? call.parameters?.maxGenerationTokens;
+  const requestedUserMaxGenerationTokens = outputBudget?.requestedUserMaxGenerationTokens;
+  const resultCapacityTargetTokens = outputBudget?.resultCapacityTargetTokens;
   const modelCapabilities = call.parameters?.modelOutputCapabilities as Record<string, unknown> | undefined;
   const roundLabel =
     call.logicalRound != null
@@ -366,20 +387,26 @@ function ModelCallRow({
         ? `轮次 ${call.round}`
         : "";
   return (
-    <div className="ai-dev-inspector__model-call">
-      <div>
+    <details className="ai-dev-inspector__model-call">
+      <summary>
         <span>#{index + 1}</span>
         <strong>{MODEL_PHASE_LABELS[call.phase] || call.phase}</strong>
         {call.count > 1 ? <em>×{call.count}</em> : null}
         <small>{source}</small>
         {roundLabel ? <small>{roundLabel}</small> : null}
-      </div>
+      </summary>
       <div className="ai-dev-inspector__tool-chips">
-        {outputBudget ? (
-          <span>本次预算 {formatTokens(outputBudget.effectiveTokens)}</span>
+        {maxGenerationTokens ? (
+          <span>本次生成上限 {formatTokens(maxGenerationTokens)}</span>
         ) : null}
-        {modelCapabilities?.maxOutputTokens ? (
-          <span>模型上限 {formatTokens(modelCapabilities.maxOutputTokens)}</span>
+        {requestedUserMaxGenerationTokens ? (
+          <span>用户上限 {formatTokens(requestedUserMaxGenerationTokens)}</span>
+        ) : null}
+        {resultCapacityTargetTokens ? (
+          <span>结果容量目标 {formatTokens(resultCapacityTargetTokens)}</span>
+        ) : null}
+        {modelCapabilities?.maxGenerationTokens ? (
+          <span>模型能力上限 {formatTokens(modelCapabilities.maxGenerationTokens)}</span>
         ) : null}
         {call.toolNames.length > 0
           ? call.toolNames.map((name) => <code key={name}>{name}</code>)
@@ -387,11 +414,11 @@ function ModelCallRow({
       </div>
       {call.parameters ? (
         <details className="ai-dev-inspector__model-parameters">
-          <summary>传给模型的参数（已脱敏）</summary>
+          <summary>调用前请求配置（已脱敏） <small>{characterCount(formatJson(call.parameters)).toLocaleString()} 字符</small></summary>
           <pre>{formatJson(call.parameters)}</pre>
         </details>
       ) : null}
-    </div>
+    </details>
   );
 }
 
@@ -488,382 +515,250 @@ function ErrorReportCard({ run }: { run: AiDebugRun }) {
   );
 }
 
-function StabilityCard({ run }: { run: AiDebugRun }) {
-  const [report, setReport] = React.useState<AiAgentRunDiagnostics | null>(null);
-  const [trend, setTrend] = React.useState<AiAgentRunStabilityTrendReport | null>(null);
+function PlannerModelOutputCard({
+  runId,
+  hasPlan,
+  status,
+}: {
+  runId?: string;
+  hasPlan: boolean;
+  status: AiDebugRunStatus;
+}) {
+  const [outputs, setOutputs] = React.useState<AiPlannerModelOutputDiagnostic[]>([]);
+  const [opened, setOpened] = React.useState(false);
+  const [loaded, setLoaded] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
-  const [maintaining, setMaintaining] = React.useState(false);
-  const [maintenanceFeedback, setMaintenanceFeedback] = React.useState("");
   const [error, setError] = React.useState("");
+  const requestVersion = React.useRef(0);
 
   const load = React.useCallback(async () => {
-    if (!run.agentRunId || isRunActive(run)) return;
+    if (!runId) return;
+    const version = ++requestVersion.current;
     setLoading(true);
     setError("");
     try {
-      const [diagnosticsResponse, trendResponse] = await Promise.all([
-        services.ai.getAgentRunDiagnostics({runId: run.agentRunId}),
-        services.ai.getAgentRunStabilityTrend({
-          runId: run.agentRunId,
-          scope: "auto",
-          limit: 20,
-        }),
-      ]);
-      const errors: string[] = [];
-      if (diagnosticsResponse.success) {
-        setReport(diagnosticsResponse.data);
+      const response = await services.ai.getAgentRunPlannerDiagnostics({
+        runId,
+      });
+      if (version !== requestVersion.current) return;
+      if (response.success) {
+        setOutputs(response.data.outputs);
       } else {
-        errors.push(diagnosticsResponse.error || "读取本次稳定性指标失败");
+        setError(response.error || "读取 Planner 原始输出失败");
       }
-      if (trendResponse.success) {
-        setTrend(trendResponse.data);
-      } else {
-        errors.push(trendResponse.error || "读取近期稳定性趋势失败");
-      }
-      setError(errors.join("；"));
     } catch {
-      setError("读取稳定性指标失败");
+      if (version !== requestVersion.current) return;
+      setError("读取 Planner 原始输出失败");
     } finally {
+      if (version !== requestVersion.current) return;
+      setLoaded(true);
       setLoading(false);
     }
-  }, [run.agentRunId, run.status]);
+  }, [runId]);
 
   React.useEffect(() => {
-    setReport(null);
-    setTrend(null);
+    requestVersion.current += 1;
+    setOutputs([]);
+    setOpened(false);
+    setLoaded(false);
     setError("");
-    setMaintenanceFeedback("");
-    if (!run.agentRunId || isRunActive(run)) return;
+    setLoading(false);
+    return () => {
+      requestVersion.current += 1;
+    };
+  }, [runId]);
+
+  React.useEffect(() => {
+    if (!runId || !opened) return;
     void load();
-  }, [load, run.agentRunId, run.status]);
+  }, [load, hasPlan, status, opened]);
 
-  const maintainArtifacts = React.useCallback(async () => {
-    setMaintaining(true);
-    setMaintenanceFeedback("");
-    try {
-      const response = await services.ai.maintainAgentArtifacts();
-      if (!response.success) {
-        setMaintenanceFeedback(response.error || "Artifact 安全维护失败");
-        return;
-      }
-      const released = response.data.report.releasedClaims;
-      setMaintenanceFeedback(
-        released > 0
-          ? `已回收 ${released} 个失效写入租约，未删除 Artifact 内容`
-          : "未发现需要回收的失效写入租约",
-      );
-      await load();
-    } catch {
-      setMaintenanceFeedback("Artifact 安全维护失败");
-    } finally {
-      setMaintaining(false);
-    }
-  }, [load]);
-
-  if (!run.agentRunId || isRunActive(run)) return null;
-  const stability = report?.stability;
-  const artifacts = report?.artifacts;
-  const artifactMaintenance = report?.artifactMaintenance;
-  const failureClassification = report?.failureClassification;
-  const recovery = report?.recovery;
-  const metrics = stability?.metrics;
-  const verdictLabel = stability
-    ? stability.verdict === "pass"
-      ? "稳定"
-      : stability.verdict === "warn"
-        ? "有降级"
-        : "存在失败"
-    : loading
-      ? "读取中"
-      : "暂无";
-  const successRate = metrics?.toolSuccessRate;
-  const trendStatus = trend?.verdict === "insufficient_data"
-    ? "captured"
-    : trend?.verdict || "captured";
+  if (!runId || (loaded && !loading && !error && outputs.length === 0 && !hasPlan)) {
+    return null;
+  }
 
   return (
-    <div className="ai-dev-inspector__report-card">
-      <div className="ai-dev-inspector__report-heading">
-        <span>持久化稳定性指标</span>
-        <strong data-status={stability?.verdict || "captured"}>{verdictLabel}</strong>
-      </div>
-      {error ? <div className="ai-dev-inspector__error">{error}</div> : null}
-      <div className="ai-dev-inspector__metrics">
-        <div>
-          <span>工具成功率</span>
-          <strong>
-            {successRate == null ? "—" : `${Math.round(successRate * 100)}%`}
-          </strong>
-        </div>
-        <div>
-          <span>协议失败</span>
-          <strong>{metrics?.toolProtocolFailures ?? "—"}</strong>
-        </div>
-        <div>
-          <span>未收口工具</span>
-          <strong>{metrics?.incompleteToolCalls ?? "—"}</strong>
-        </div>
-        <div>
-          <span>模型中断/重试</span>
-          <strong>
-            {metrics
-              ? `${metrics.interruptedModelAttempts}/${metrics.retryAttempts}`
-              : "—"}
-          </strong>
-        </div>
-        <div>
-          <span>上下文溢出</span>
-          <strong>{metrics?.contextOverflows ?? "—"}</strong>
-        </div>
-        <div>
-          <span>压缩降级/失败</span>
-          <strong>
-            {metrics
-              ? `${metrics.compactionFallbacks}/${metrics.compactionFailures}`
-              : "—"}
-          </strong>
-        </div>
-        <div>
-          <span>Artifact 批次</span>
-          <strong>
-            {artifacts
-              ? `${artifacts.batchCount} · 未完成 ${artifacts.openArtifacts}`
-              : "—"}
-          </strong>
-        </div>
-        <div>
-          <span>Writer Claim</span>
-          <strong>
-            {artifactMaintenance
-              ? `${artifactMaintenance.activeClaims} 有效 / ${artifactMaintenance.reclaimableClaims} 待回收`
-              : "—"}
-          </strong>
-        </div>
-        <div>
-          <span>Artifact 一致性</span>
-          <strong>
-            {artifactMaintenance
-              ? artifactMaintenance.consistencyIssues > 0
-                ? `${artifactMaintenance.consistencyIssues} 项异常`
-                : "正常"
-              : "—"}
-          </strong>
-        </div>
-      </div>
-      {artifactMaintenance?.requiresAttention ? (
-        <div className="ai-dev-inspector__root-cause">
-          <div className="ai-dev-inspector__report-heading">
-            <div>
-              <span>Artifact 生命周期需要处理</span>
-              <code>{artifactMaintenance.scopeRunId || "global"}</code>
-            </div>
-            <strong data-status="warn">需要关注</strong>
-          </div>
-          <strong>
-            可回收租约 {artifactMaintenance.reclaimableClaims} 个，结构异常 {artifactMaintenance.consistencyIssues} 项
-          </strong>
-          <p>
-            安全维护只回收过期、失联或状态失效的 writer claim；结构异常会保留原始记录用于诊断。
-          </p>
-        </div>
-      ) : null}
-      {failureClassification?.primaryFinding ? (
-        <div className="ai-dev-inspector__root-cause">
-          <div className="ai-dev-inspector__report-heading">
-            <div>
-              <span>持久化根因分类</span>
-              <code title={failureClassification.primaryFinding.code}>
-                {failureClassification.primaryFinding.code}
-              </code>
-            </div>
-            <strong data-status={failureClassification.primaryFinding.severity}>
-              {failureClassification.primaryFinding.confidence === "high"
-                ? "高置信度"
-                : failureClassification.primaryFinding.confidence === "medium"
-                  ? "中置信度"
-                  : "证据不足"}
-            </strong>
-          </div>
-          <strong>{failureFindingLabel(failureClassification.primaryFinding)}</strong>
-          <p>{failureRemediationLabel(failureClassification.primaryFinding)}</p>
-          {failureClassification.findings.length > 1 ? (
-            <details>
-              <summary>其他关联信号 · {failureClassification.findings.length - 1}</summary>
-              <ul>
-                {failureClassification.findings.slice(1).map((finding) => (
-                  <li key={finding.code}>{failureFindingLabel(finding)}</li>
-                ))}
-              </ul>
+    <details className="ai-dev-inspector__planner-raw" open={opened}
+      onToggle={(event) => setOpened(event.currentTarget.open)}>
+      <summary>
+        <span>
+          <strong>Planner 原始模型返回</strong>
+          <small>精确持久化内容，不含 reasoning</small>
+        </span>
+        <em data-status={error ? "fail" : outputs.length ? "pass" : "captured"}>
+          {loading ? "读取中" : error ? "读取失败" : outputs.length ? `${outputs.length} 次调用` : loaded ? "暂无记录" : "展开读取"}
+        </em>
+      </summary>
+      {opened && <div className="ai-dev-inspector__planner-raw-body">
+        {error ? <div className="ai-dev-inspector__error">{error}</div> : null}
+        {outputs.map((output) => (
+          <details className="ai-dev-inspector__planner-attempt" key={output.invocationId}>
+            <summary className="ai-dev-inspector__inline-meta">
+              <span>{output.model || "未知模型"}</span>
+              <span>revision {output.revision} / attempt {output.attempt}</span>
+              <span>{output.status}{output.finishReason ? ` · ${output.finishReason}` : ""}</span>
+              <span>{characterCount(output.rawContent || '').toLocaleString()} 字符{output.rawContentTruncated ? ' · 已截断' : ''}</span>
+              {typeof output.timing.firstActivityMs === 'number' ? (
+                <span>首个模型活动 {formatDuration(output.timing.firstActivityMs)}</span>
+              ) : null}
+              {typeof output.timing.firstPublicProgressMs === 'number' ? (
+                <span>首段公开进展 {formatDuration(output.timing.firstPublicProgressMs)}</span>
+              ) : null}
+            </summary>
+            {output.contentDeltaConflict ? (
+              <div className="ai-dev-inspector__error">
+                同一 Provider source span 出现冲突，只保留首次持久化值。
+              </div>
+            ) : null}
+            <pre className="ai-dev-inspector__raw-json">
+              {output.rawContent || "模型尚未返回 content delta…"}
+            </pre>
+            {output.rawContentTruncated ? (
+              <div className="ai-dev-inspector__error">原始输出超过诊断上限，当前内容已截断。</div>
+            ) : null}
+            <details className="ai-dev-inspector__text-block">
+              <summary>调用标识与时序</summary>
+              <pre>{formatJson({
+                invocationId: output.invocationId,
+                outputStreamId: output.outputStreamId,
+                contentDeltaCount: output.contentDeltaCount,
+                progressRecords: output.progressRecords,
+                timing: output.timing,
+              })}</pre>
             </details>
-          ) : null}
-        </div>
-      ) : null}
-      {recovery && recovery.summary.decisionCount > 0 ? (
-        <div className="ai-dev-inspector__recovery">
-          <div className="ai-dev-inspector__report-heading">
-            <div>
-              <span>受控恢复决策</span>
-              <code>{recovery.summary.decisionCount} 次判定</code>
-            </div>
-            <strong data-status={
-              recovery.summary.safetyProtectedCount > 0
-                ? "warn"
-                : recovery.summary.deniedCount > 0
-                  ? "warn"
-                  : "pass"
-            }>
-              {recovery.summary.safetyProtectedCount > 0
-                ? `安全阻止 ${recovery.summary.safetyProtectedCount} 次`
-                : recovery.summary.deniedCount > 0
-                  ? `限制 ${recovery.summary.deniedCount} 次`
-                  : `已执行 ${recovery.summary.allowedCount} 次`}
-            </strong>
-          </div>
-          <div className="ai-dev-inspector__recovery-list">
-            {[...recovery.decisions].reverse().slice(0, 4).map((decision, index) => (
-              <div
-                key={`${decision.round}-${decision.cause}-${decision.action}-${index}`}
-                data-status={decision.allowed ? "pass" : "warn"}
-              >
-                <div>
-                  <strong>{recoveryCauseLabel(decision.cause)}</strong>
-                  <code title={decision.cause}>第 {decision.round} 轮</code>
-                </div>
-                <p>{recoveryDecisionLabel(decision)}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {trend ? (
-        <div className="ai-dev-inspector__trend">
-          <div className="ai-dev-inspector__report-heading">
-            <div>
-              <span>
-                近期趋势 · {stabilityTrendScopeLabel(trend.scope.type)}
-              </span>
-              <code>
-                最近 {trend.sampleSize}/{trend.windowLimit} 次运行
-              </code>
-            </div>
-            <strong data-status={trendStatus}>
-              {stabilityTrendVerdictLabel(trend.verdict)}
-            </strong>
-          </div>
-          <div className="ai-dev-inspector__metrics">
-            <div>
-              <span>运行失败率</span>
-              <strong>{formatStabilityTrendRate(trend.metrics.runFailureRate)}</strong>
-            </div>
-            <div>
-              <span>稳定性失败率</span>
-              <strong>{formatStabilityTrendRate(trend.metrics.stabilityFailureRate)}</strong>
-            </div>
-            <div>
-              <span>协议异常率</span>
-              <strong>{formatStabilityTrendRate(trend.metrics.toolProtocolRunRate)}</strong>
-            </div>
-            <div>
-              <span>工具未收口率</span>
-              <strong>{formatStabilityTrendRate(trend.metrics.incompleteToolRunRate)}</strong>
-            </div>
-            <div>
-              <span>上下文溢出率</span>
-              <strong>{formatStabilityTrendRate(trend.metrics.contextOverflowRunRate)}</strong>
-            </div>
-            <div>
-              <span>连续异常</span>
-              <strong>{trend.metrics.currentFailureStreak} 次</strong>
-            </div>
-            <div>
-              <span>主要工具错误</span>
-              <strong title={trend.metrics.topToolErrorCodes[0]?.code || ""}>
-                {trend.metrics.topToolErrorCodes[0]
-                  ? `${trend.metrics.topToolErrorCodes[0].code} × ${trend.metrics.topToolErrorCodes[0].count}`
-                  : "—"}
-              </strong>
-            </div>
-          </div>
-          <div className="ai-dev-inspector__trend-gate">
-            <div className="ai-dev-inspector__report-heading">
-              <div>
-                <span>滚动基线门禁</span>
-                <code>
-                  近期 {trend.regressionGate.candidateSampleSize} 次 / 上一窗口 {trend.regressionGate.baselineSampleSize} 次
-                </code>
-              </div>
-              <strong data-status={
-                trend.regressionGate.verdict === "insufficient_data"
-                  ? "captured"
-                  : trend.regressionGate.verdict
-              }>
-                {stabilityGateVerdictLabel(trend.regressionGate.verdict)}
-              </strong>
-            </div>
-            {trend.regressionGate.alerts.length > 0 ? (
-              <div className="ai-dev-inspector__trend-alerts">
-                {trend.regressionGate.alerts.slice(0, 4).map((alert) => (
-                  <div key={alert.code} data-status={alert.severity}>
-                    {stabilityGateAlertText(alert)}
-                  </div>
-                ))}
+          </details>
+        ))}
+        <button type="button" onClick={() => void load()} disabled={loading}>
+          {loading ? "读取中…" : "重新读取"}
+        </button>
+      </div>}
+    </details>
+  );
+}
+
+export function ModelInputDiagnosticsCard({
+  runId,
+  status,
+}: {
+  runId?: string;
+  status: AiDebugRunStatus;
+}) {
+  const [calls, setCalls] = React.useState<AiModelInputDiagnostic[]>([]);
+  const [loaded, setLoaded] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [opened, setOpened] = React.useState(false);
+  const requestVersion = React.useRef(0);
+  const previousStatus = React.useRef(status);
+
+  const load = React.useCallback(async () => {
+    if (!runId) return;
+    const version = ++requestVersion.current;
+    setLoading(true);
+    setError("");
+    try {
+      const response = await services.ai.getAgentRunModelInputDiagnostics({ runId });
+      if (version !== requestVersion.current) return;
+      if (response.success) {
+        setCalls(response.data.calls);
+      } else {
+        setError(response.error || "读取模型实际输入失败");
+      }
+    } catch {
+      if (version !== requestVersion.current) return;
+      setError("读取模型实际输入失败");
+    } finally {
+      if (version !== requestVersion.current) return;
+      setLoaded(true);
+      setLoading(false);
+    }
+  }, [runId]);
+
+  React.useEffect(() => {
+    requestVersion.current += 1;
+    setCalls([]);
+    setLoaded(false);
+    setLoading(false);
+    setError("");
+    setOpened(false);
+  }, [runId]);
+
+  React.useEffect(() => {
+    const changed = previousStatus.current !== status;
+    previousStatus.current = status;
+    if (
+      changed
+      && opened
+      && loaded
+      && ["completed", "failed", "aborted"].includes(status)
+    ) void load();
+  }, [load, loaded, opened, status]);
+
+  if (!runId) return null;
+  const capturedCalls = calls.filter((call) => call.captured).length;
+
+  return (
+    <details
+      className="ai-dev-inspector__planner-raw ai-dev-inspector__model-input"
+      open={opened}
+      onToggle={(event) => {
+        const nextOpen = event.currentTarget.open;
+        setOpened(nextOpen);
+        if (nextOpen && !loaded && !loading) void load();
+      }}
+    >
+      <summary>
+        <span>
+          <strong>Provider 实际输入</strong>
+          <small>开发环境最终消息；保留系统上下文，密钥已脱敏，不展示 reasoning</small>
+        </span>
+        <em data-status={error ? "fail" : capturedCalls ? "pass" : "captured"}>
+          {loading ? "读取中" : error ? "读取失败" : loaded ? `${capturedCalls}/${calls.length} 次已记录` : "展开读取"}
+        </em>
+      </summary>
+      <div className="ai-dev-inspector__planner-raw-body">
+        {error ? <div className="ai-dev-inspector__error">{error}</div> : null}
+        {loaded && !error && calls.length === 0 ? (
+          <div className="ai-dev-inspector__notice">当前 Run 尚无模型调用记录。</div>
+        ) : null}
+        {calls.map((call, index) => (
+          <details className="ai-dev-inspector__planner-attempt" key={call.eventRowId}>
+            <summary className="ai-dev-inspector__inline-meta">
+              <span>#{index + 1} · {call.phase}</span>
+              <span>{call.provider || "未知 Provider"} / {call.model || "未知模型"}</span>
+              {call.round != null ? <span>round {call.round}</span> : null}
+              {call.attempt != null ? <span>attempt {call.attempt}</span> : null}
+              {call.revision != null ? <span>revision {call.revision}</span> : null}
+              <span>{call.messages.length} 条消息 · {call.messages.reduce((sum, message) => sum + characterCount(formatJson(message)), 0).toLocaleString()} 字符（诊断序列化）</span>
+            </summary>
+            {call.sdkRequest ? (
+              <DiagnosticText label="SDK 参数核验（已脱敏）" text={formatJson(call.sdkRequest)} />
+            ) : null}
+            {call.captured ? (
+              <div className="ai-dev-inspector__messages">
+                {call.messages.map((message, messageIndex) => {
+                  const role = String(message.role || "unknown");
+                  return (
+                    <DiagnosticText
+                      key={`${call.eventRowId}:${messageIndex}`}
+                      label={`#${messageIndex + 1} · ${role}`}
+                      text={formatJson(message)}
+                    />
+                  );
+                })}
               </div>
             ) : (
-              <div className="ai-dev-inspector__trend-note">
-                {trend.regressionGate.verdict === "insufficient_data"
-                  ? `两个窗口各需要至少 ${trend.regressionGate.minimumWindowSize} 次运行。`
-                  : "近期窗口没有超过上一窗口的允许退化范围。"}
+              <div className="ai-dev-inspector__notice">
+                该调用未捕获输入消息，无法还原；未补造历史内容。
               </div>
             )}
-          </div>
-          {trend.verdict === "insufficient_data" ? (
-            <div className="ai-dev-inspector__trend-note">
-              至少需要 {trend.minimumSampleSize} 次运行后才启用阈值告警。
-            </div>
-          ) : trend.alerts.length > 0 ? (
-            <div className="ai-dev-inspector__trend-alerts">
-              {trend.alerts.map((alert) => (
-                <div key={alert.code} data-status={alert.severity}>
-                  {stabilityTrendAlertText(alert)}
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="ai-dev-inspector__trend-note">
-              近期指标均未达到预警阈值。
-            </div>
-          )}
-        </div>
-      ) : null}
-      {report ? (
-        <details className="ai-dev-inspector__text-block">
-          <summary>完整稳定性报告</summary>
-          <pre>{formatJson({
-            stability: report.stability,
-            performance: report.performance,
-            artifacts: report.artifacts,
-            artifactMaintenance: report.artifactMaintenance,
-            failureClassification: report.failureClassification,
-            recovery: report.recovery,
-            trend,
-          })}</pre>
-        </details>
-      ) : null}
-      <div className="ai-dev-inspector__report-actions">
+          </details>
+        ))}
         <button type="button" onClick={() => void load()} disabled={loading}>
-          {loading ? "读取中…" : "刷新指标"}
+          {loading ? "读取中…" : "重新读取"}
         </button>
-        <button
-          type="button"
-          onClick={() => void maintainArtifacts()}
-          disabled={maintaining || loading}
-          title="只回收失效 writer claim，不删除 Artifact 内容"
-        >
-          {maintaining ? "维护中…" : "安全维护 Artifact"}
-        </button>
-        {maintenanceFeedback ? <span>{maintenanceFeedback}</span> : null}
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -936,25 +831,125 @@ function DelegationActivityList({
   );
 }
 
-function Overview({ run, now }: { run: AiDebugRun; now: number }) {
+function RunTechnicalDetails({
+  run,
+  modelCallRows,
+  modelToolNames,
+}: {
+  run: AiDebugRun;
+  modelCallRows: Array<{ key: string; call: AiDebugModelCall; source: string }>;
+  modelToolNames: string[];
+}) {
+  const [opened, setOpened] = React.useState(false);
+  return (
+    <details className="ai-dev-inspector__technical" open={opened}
+      onToggle={(event) => setOpened(event.currentTarget.open)}>
+      <summary>
+        <span>技术明细</span>
+        <small>{run.eventCount} 个事件</small>
+      </summary>
+      {opened && <div className="ai-dev-inspector__technical-body">
+        <div className="ai-dev-inspector__identifiers">
+          <div><span>Agent Run ID</span><code title={run.agentRunId}>{run.agentRunId || "—"}</code></div>
+          <div><span>Stream ID</span><code title={run.id}>{run.id}</code></div>
+          <div><span>Turn ID</span><code title={run.turnId}>{run.turnId || "—"}</code></div>
+          <div><span>Session ID</span><code>{run.sessionId != null ? `#${run.sessionId}` : "—"}</code></div>
+          <div><span>记录 ID</span><code>{run.conversationId != null ? `#${run.conversationId}` : "尚未保存"}</code></div>
+        </div>
+
+        {modelToolNames.length > 0 ? (
+          <div className="ai-dev-inspector__tool-chips ai-dev-inspector__tool-chips--catalog">
+            {modelToolNames.map((name) => <code key={name}>{name}</code>)}
+          </div>
+        ) : null}
+
+        {modelCallRows.length > 0 ? (
+          <details className="ai-dev-inspector__model-calls">
+            <summary>模型操作记录 <small>{modelCallRows.reduce((sum, item) => sum + item.call.count, 0)} 次已记录</small></summary>
+            <div>
+              {modelCallRows.map((item, index) => (
+                <ModelCallRow
+                  key={item.key}
+                  call={item.call}
+                  index={index}
+                  source={item.source}
+                />
+              ))}
+            </div>
+          </details>
+        ) : null}
+
+        <details className="ai-dev-inspector__text-block">
+          <summary>请求参数 <small>{characterCount(formatJson(run.request.meta)).toLocaleString()} 字符</small></summary>
+          <pre>{formatJson(run.request.meta)}</pre>
+        </details>
+
+        {run.request.messages.length > 0 ? (
+          <details className="ai-dev-inspector__text-block">
+            <summary>入口请求消息 <small>{run.request.messages.length} 条 · 后端处理前</small></summary>
+            <div className="ai-dev-inspector__messages">
+              {run.request.messages.map((message, index) => (
+                <details
+                  className={`ai-dev-inspector__message ai-dev-inspector__message--${message.role}`}
+                  key={`${message.role}-${index}`}
+                >
+                  <summary><span>{message.role}</span><small>#{index + 1} · {characterCount(formatJson(message.content)).toLocaleString()} 字符</small></summary>
+                  <pre>{formatJson(message.content)}</pre>
+                </details>
+              ))}
+            </div>
+          </details>
+        ) : null}
+
+        {run.contextBudget !== undefined ? (
+          <details className="ai-dev-inspector__text-block">
+            <summary>上下文与预算</summary>
+            <pre>{formatJson(run.contextBudget)}</pre>
+          </details>
+        ) : null}
+
+        <details className="ai-dev-inspector__text-block">
+          <summary>事件日志 <small>{run.events.length}/{run.eventCount}</small></summary>
+          <div className="ai-dev-inspector__events">
+            {run.events.map((event) => (
+              <details className={`ai-dev-inspector__event ai-dev-inspector__event--${event.type}`} key={event.id}>
+                <summary><time>{formatTime(event.at)}</time><span>{event.label}</span></summary>
+                {event.payload !== undefined ? <pre>{formatJson(event.payload)}</pre> : null}
+              </details>
+            ))}
+            {run.eventCount > run.events.length ? (
+              <div className="ai-dev-inspector__notice">内存中只保留最近 {run.events.length} 条事件。</div>
+            ) : null}
+          </div>
+        </details>
+      </div>}
+    </details>
+  );
+}
+
+const RunTimelineItem = React.memo(function RunTimelineItem({
+  run,
+  index,
+  total,
+  rootRunId,
+  now,
+}: {
+  run: AiDebugRun;
+  index: number;
+  total: number;
+  rootRunId?: string;
+  isCurrent: boolean;
+  now: number;
+}) {
+  const [open, setOpen] = React.useState(false);
+  React.useEffect(() => setOpen(false), [run.id]);
+  const isRoot = Boolean(rootRunId && run.agentRunId === rootRunId);
   const elapsed = (run.finishedAt ?? now) - run.startedAt;
-  const rootModelCallCount = run.modelCalls.reduce(
-    (sum, call) => sum + call.count,
-    0,
-  );
-  const delegationModelCallCount = run.delegationActivities.reduce(
-    (sum, activity) => sum + activity.modelCalls.reduce(
-      (activitySum, call) => activitySum + call.count,
-      0,
-    ),
-    0,
-  );
-  const modelCallCount = rootModelCallCount + delegationModelCallCount;
   const modelCallRows = [
     ...run.modelCalls.map((call) => ({
-      key: `root:${call.id}`,
+      key: `run:${call.id}`,
       call,
-      source: '主流程',
+      source: "当前 Agent",
     })),
     ...run.delegationActivities.flatMap((activity) => activity.modelCalls.map((call) => ({
       key: `${activity.id}:${call.id}`,
@@ -962,317 +957,262 @@ function Overview({ run, now }: { run: AiDebugRun; now: number }) {
       source: activity.agentTitle || activity.agentName,
     }))),
   ];
-  const modelToolNames = [...new Set(
-    [
-      ...run.modelCalls,
-      ...run.delegationActivities.flatMap((activity) => activity.modelCalls),
-    ].flatMap((call) => call.toolNames),
-  )];
-  const contextBudget = run.contextBudget as Record<string, unknown> | undefined;
-  const resolvedOutputBudget = contextBudget?.outputBudget as Record<string, unknown> | undefined;
-  const inputTokens = contextBudget
-    ?.actualInputTokens ??
-    contextBudget?.estimatedInputTokens;
-  const outputTokens = contextBudget?.actualOutputTokens;
-  const finishReason = String(contextBudget?.finishReason ?? "");
+  const modelCallCount = Math.max(
+    modelCallRows.reduce((sum, item) => sum + item.call.count, 0),
+    run.tokenUsage?.modelAttempts ?? 0,
+  );
+  const modelToolNames = [...new Set(modelCallRows.flatMap((item) => item.call.toolNames))];
+  const usage = run.tokenUsage;
+
   return (
-    <div className="ai-dev-inspector__section">
-      <div className="ai-dev-inspector__metrics">
-        <div><span>状态</span><strong>{STATUS_LABELS[run.status]}</strong></div>
-        <div><span>任务类型</span><strong title={run.taskType}>{run.taskType}</strong></div>
-        <div><span>耗时</span><strong>{formatDuration(elapsed)}</strong></div>
-        <div><span>模型</span><strong title={run.model}>{run.model || "待返回"}</strong></div>
-        <div><span>Token</span><strong>{String(inputTokens ?? "—")} / {String(outputTokens ?? "—")}</strong></div>
-        <div>
-          <span>本次输出预算</span>
-          <strong>{formatTokens(resolvedOutputBudget?.effectiveTokens ?? contextBudget?.outputReserveTokens)}</strong>
-        </div>
-        <div>
-          <span>模型输出上限</span>
-          <strong>{formatTokens(resolvedOutputBudget?.modelMaxOutputTokens)}</strong>
-        </div>
-        <div>
-          <span>结束原因</span>
-          <strong>{MODEL_FINISH_REASON_LABELS[finishReason] ?? (finishReason || "—")}</strong>
-        </div>
-        <div>
-          <span>模型调用</span>
-          <strong title={`主流程 ${rootModelCallCount} 次 · 委派 ${delegationModelCallCount} 次`}>
-            {modelCallCount} 次
-          </strong>
-        </div>
-        <div><span>传入工具</span><strong>{modelToolNames.length} 个</strong></div>
+    <section className="ai-dev-inspector__timeline-item" data-status={run.status}>
+      <div className="ai-dev-inspector__timeline-rail" aria-hidden="true">
+        <span>{index + 1}</span>
+        {index < total - 1 ? <i /> : null}
       </div>
-
-      <div className="ai-dev-inspector__section-title">
-        <span>本轮标识</span>
-        <small>保存后回填记录 ID</small>
-      </div>
-      <div className="ai-dev-inspector__identifiers">
-        <div>
-          <span>对话记录 ID</span>
-          <code>{run.conversationId != null ? `#${run.conversationId}` : "保存后生成"}</code>
-        </div>
-        <div>
-          <span>会话 ID</span>
-          <code>{run.sessionId != null ? `#${run.sessionId}` : "—"}</code>
-        </div>
-        <div>
-          <span>Agent Run ID</span>
-          <code title={run.agentRunId}>{run.agentRunId || "—"}</code>
-        </div>
-        <div>
-          <span>Stream ID</span>
-          <code title={run.id}>{run.id}</code>
-        </div>
-      </div>
-
-      <DelegationActivityList items={run.delegationActivities} now={now} />
-
-      {run.error && <div className="ai-dev-inspector__error">{run.error}</div>}
-      <FailureDiagnosisCard
-        report={run.errorReport}
-        tools={run.tools}
-        fallback={run.error}
-      />
-      <ErrorReportCard run={run} />
-      <StabilityCard run={run} />
-
-      <div className="ai-dev-inspector__section-title">
-        <span>传入模型的工具函数</span>
-        <small>
-          {modelToolNames.length} 个 · 根 {rootModelCallCount} 次 / 子 {delegationModelCallCount} 次
-        </small>
-      </div>
-      {modelToolNames.length > 0 ? (
-        <div className="ai-dev-inspector__tool-chips ai-dev-inspector__tool-chips--catalog">
-          {modelToolNames.map((name) => <code key={name}>{name}</code>)}
-        </div>
-      ) : (
-        <div className="ai-dev-inspector__empty">
-          {modelCallCount > 0 ? "本轮模型调用未传入工具函数" : "等待模型调用…"}
-        </div>
-      )}
-      {modelCallRows.length > 0 ? (
-        <details className="ai-dev-inspector__model-calls">
-          <summary>
-            模型调用明细
-            <small>{modelCallCount} 次</small>
-          </summary>
+      <details
+        className="ai-dev-inspector__run-card"
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
+        <summary>
           <div>
-            {modelCallRows.map((item, index) => (
-              <ModelCallRow
-                key={item.key}
-                call={item.call}
-                index={index}
-                source={item.source}
-              />
-            ))}
+            <span>{isRoot ? "主 AGENT" : `执行段 ${index + 1}`}</span>
+            <strong>{isRoot ? "主流程" : run.source || run.taskType}</strong>
+            <small title={usage ? tokenUsageTitle(usage) : undefined}>
+              {isRoot ? `${run.source} · ` : ""}{formatTime(run.startedAt)}
+              {usage ? ` · ${tokenUsageText(usage)}` : ""}
+            </small>
           </div>
-        </details>
+          <span className="ai-dev-inspector__run-card-status">
+            <StatusPill status={run.status} />
+            <i aria-hidden="true">⌄</i>
+          </span>
+        </summary>
+
+        {open && <div className="ai-dev-inspector__run-card-body">
+
+          <div className="ai-dev-inspector__run-facts">
+            <span><b>{formatDuration(elapsed)}</b>耗时</span>
+            <span><b>{run.model || "—"}</b>模型</span>
+            <span><b>{modelCallCount}</b>模型调用</span>
+            <span><b>{run.tools.length}</b>工具调用</span>
+            {usage ? <>
+              <span title={tokenUsageTitle(usage)}>
+                <b>{tokenUsageText(usage)}</b>本段消耗
+              </span>
+              <span><b>{formatTokens(usage.inputTokens)} / {formatTokens(usage.generationTokens)}</b>输入 / 生成</span>
+              {usage.reasoningTokens != null && usage.reasoningTokens > 0 ? (
+                <span><b>{formatTokens(usage.reasoningTokens)}</b>其中推理 Token</span>
+              ) : usage.reasoningTokens == null ? (
+                <span><b>未上报</b>推理 Token 明细</span>
+              ) : null}
+              {usage.unreportedAttempts > 0 ? (
+                <span><b>{usage.unreportedAttempts}</b>用量未上报的调用</span>
+              ) : null}
+            </> : null}
+          </div>
+
+          {run.error ? <div className="ai-dev-inspector__error">{run.error}</div> : null}
+          <FailureDiagnosisCard report={run.errorReport} tools={run.tools} fallback={run.error} />
+          <ErrorReportCard run={run} />
+
+          {!run.agentRunId && run.tools.length > 0 ? (
+            <div className="ai-dev-inspector__run-section">
+              <div className="ai-dev-inspector__section-title">
+                <span>工具执行</span><small>{run.tools.length} 个</small>
+              </div>
+              <div className="ai-dev-inspector__tool-list">
+                {run.tools.map((tool) => <ToolCard key={`${tool.batchIndex}-${tool.id}`} tool={tool} />)}
+              </div>
+            </div>
+          ) : null}
+
+          {run.agentRunId ? <ToolDiagnosticsCard
+            key={run.agentRunId}
+            runId={run.agentRunId}
+            revision={`${run.status}:${run.tools.map((tool) => `${tool.id}:${tool.status}`).join('|')}`}
+          /> : null}
+
+          <DelegationActivityList items={run.delegationActivities} now={now} />
+
+          {run.commentary ? (
+            <details className="ai-dev-inspector__text-block">
+              <summary>公开过程输出 <small>{run.commentary.length} 字符</small></summary>
+              <pre>{run.commentary}</pre>
+            </details>
+          ) : null}
+          {run.output ? (
+            <details className="ai-dev-inspector__text-block">
+              <summary>最终输出 <small>{run.output.length} 字符</small></summary>
+              <pre>{run.output}</pre>
+            </details>
+          ) : null}
+
+          <ModelInputDiagnosticsCard
+            runId={run.agentRunId}
+            status={run.status}
+          />
+
+          <RunTechnicalDetails
+            run={run}
+            modelCallRows={modelCallRows}
+            modelToolNames={modelToolNames}
+          />
+        </div>}
+      </details>
+    </section>
+  );
+});
+
+function ConversationTimeline({
+  turn,
+  now,
+}: {
+  turn: AiDebugTurnGroup;
+  now: number;
+}) {
+  const lifecycle = aiDebugConversationLifecycle(turn);
+  const rootRunId = aiDebugTurnRootRunId(turn);
+  const rootRun = rootRunId
+    ? turn.runs.find((run) => run.agentRunId === rootRunId)
+    : undefined;
+  const taskPlan = debugTaskPlan(rootRun?.agentPlan, rootRunId || rootRun?.id || turn.key);
+  const runs = [...turn.runs].sort((left, right) => (
+    left.startedAt - right.startedAt || left.id.localeCompare(right.id)
+  ));
+  const currentRunId = aiDebugCurrentRunId(runs);
+  const turnUsage = aiDebugTurnTokenUsage(runs);
+  const usageRunIds = runs.flatMap((run) => (
+    !isAiDebugRunActive(run)
+    && run.tokenUsage?.complete !== true
+    && run.agentRunId
+      ? [run.agentRunId]
+      : []
+  ));
+  const usageRefreshKey = usageRunIds.join("|");
+  React.useEffect(() => {
+    for (const runId of usageRunIds) {
+      if (usageSnapshotRequests.has(runId)) continue;
+      usageSnapshotRequests.add(runId);
+      void services.ai.getAgentRunSnapshot({ runId, limit: 1 })
+        .then((result) => {
+          if (result.success && result.data) {
+            recordAiDebugRunUsageSnapshot(result.data);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => usageSnapshotRequests.delete(runId));
+    }
+  }, [usageRefreshKey]);
+  const finishedAt = runs.every((run) => !isAiDebugRunActive(run))
+    ? Math.max(...runs.map((run) => run.finishedAt ?? run.updatedAt))
+    : now;
+  const modelCallCount = runs.reduce((sum, run) => (
+    sum
+    + Math.max(run.modelCalls.reduce((count, call) => count + call.count, 0), run.tokenUsage?.modelAttempts ?? 0)
+    + run.delegationActivities.reduce((count, activity) => (
+      count + activity.modelCalls.reduce((calls, call) => calls + call.count, 0)
+    ), 0)
+  ), 0);
+  const toolCallCount = runs.reduce((sum, run) => sum + run.tools.length, 0);
+
+  return (
+    <div className="ai-dev-inspector__conversation">
+      <section className="ai-dev-inspector__turn-summary">
+        <header>
+          <div>
+            <span>当前任务</span>
+            <strong>{turn.source}</strong>
+          </div>
+          <StatusPill status={lifecycle.status} />
+        </header>
+        {turn.prompt ? <p title={turn.prompt}>{turn.prompt}</p> : null}
+        <div className="ai-dev-inspector__turn-facts">
+          <span>{formatTime(turn.startedAt)} 开始</span>
+          <span>{formatDuration(finishedAt - turn.startedAt)}</span>
+          <span>{runs.length} 个执行段</span>
+          <span>{modelCallCount} 次模型调用</span>
+          <span>{toolCallCount} 次工具调用</span>
+          {turnUsage ? (
+            <span title={tokenUsageTitle(turnUsage)}>{tokenUsageText(turnUsage)}</span>
+          ) : null}
+        </div>
+      </section>
+
+      {taskPlan ? (
+        <section className="ai-dev-inspector__plan">
+          <div className="ai-dev-inspector__section-title">
+            <span>模型任务计划</span>
+            <small>{taskPlan.title} · {taskPlan.steps.length} 步</small>
+          </div>
+          <TaskPlanCard plan={taskPlan} planKey={`debug:${taskPlan.runId}`} />
+        </section>
       ) : null}
 
-      <div className="ai-dev-inspector__section-title">
-        <span>工具调用</span>
-        <small>{run.tools.length} 个</small>
+      <PlannerModelOutputCard
+        runId={rootRunId}
+        hasPlan={Boolean(taskPlan)}
+        status={rootRun?.status ?? lifecycle.status}
+      />
+
+      <div className="ai-dev-inspector__timeline-heading">
+        <strong>执行过程</strong>
+        <span>按发生顺序排列</span>
       </div>
-      {run.tools.length > 0 ? (
-        <div className="ai-dev-inspector__tool-list">
-          {run.tools.map((tool) => <ToolCard key={`${tool.batchIndex}-${tool.id}`} tool={tool} />)}
-        </div>
-      ) : (
-        <div className="ai-dev-inspector__empty">本轮尚未调用工具</div>
-      )}
-
-      {run.commentary && (
-        <details className="ai-dev-inspector__text-block">
-          <summary>公开执行说明 <small>{run.commentary.length} 字符</small></summary>
-          <pre>{run.commentary}</pre>
-        </details>
-      )}
-      <details className="ai-dev-inspector__text-block" open>
-        <summary>最终回答 <small>{run.output.length} 字符</small></summary>
-        <pre>{run.output || "等待最终回答…"}</pre>
-      </details>
-
-      {run.agentPlan !== undefined && (
-        <details className="ai-dev-inspector__text-block">
-          <summary>Core Planner 执行计划</summary>
-          <pre>{formatJson(run.agentPlan)}</pre>
-        </details>
-      )}
-      {run.contextBudget !== undefined && (
-        <details className="ai-dev-inspector__text-block">
-          <summary>上下文预算</summary>
-          <pre>{formatJson(run.contextBudget)}</pre>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function ContextView({ run }: { run: AiDebugRun }) {
-  return (
-    <div className="ai-dev-inspector__section">
-      <details className="ai-dev-inspector__text-block">
-        <summary>请求参数</summary>
-        <pre>{formatJson(run.request.meta)}</pre>
-      </details>
-      <div className="ai-dev-inspector__section-title">
-        <span>消息</span>
-      </div>
-      <div className="ai-dev-inspector__messages">
-        {run.request.messages.map((message, index) => (
-          <details
-            className={`ai-dev-inspector__message ai-dev-inspector__message--${message.role}`}
-            key={`${message.role}-${index}`}
-            open={index >= run.request.messages.length - 2}
-          >
-            <summary>
-              <span>{message.role}</span>
-              <small>#{index + 1}</small>
-            </summary>
-            <pre>{formatJson(message.content)}</pre>
-          </details>
+      <div className="ai-dev-inspector__timeline">
+        {runs.map((run, index) => (
+          <RunTimelineItem
+            key={run.id}
+            run={run}
+            index={index}
+            total={runs.length}
+            rootRunId={rootRunId}
+            isCurrent={run.id === currentRunId}
+            now={isAiDebugRunActive(run) ? now : run.finishedAt ?? run.updatedAt}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function EventsView({ run }: { run: AiDebugRun }) {
-  return (
-    <div className="ai-dev-inspector__events">
-      {run.events.map((event) => (
-        <details className={`ai-dev-inspector__event ai-dev-inspector__event--${event.type}`} key={event.id}>
-          <summary>
-            <time>{formatTime(event.at)}</time>
-            <span>{event.label}</span>
-          </summary>
-          {event.payload !== undefined && <pre>{formatJson(event.payload)}</pre>}
-        </details>
-      ))}
-      {run.eventCount > run.events.length && (
-        <div className="ai-dev-inspector__notice">
-          为控制内存，仅保留最近 {run.events.length} 条事件。
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ReportsView({
-  onOpenRun,
-  availableRunIds,
-}: {
-  onOpenRun: (streamId: string) => void;
-  availableRunIds: ReadonlySet<string>;
-}) {
-  const [reports, setReports] = React.useState<AiErrorReport[]>([]);
-  const [loading, setLoading] = React.useState(true);
-  const [error, setError] = React.useState("");
-
-  const loadReports = React.useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const result = await services.ai.listAiErrorReports({ limit: 50 });
-      if (!result.success) {
-        setError(result.error || "读取错误报告失败");
-        return;
-      }
-      setReports(result.data || []);
-    } catch {
-      setError("读取错误报告失败");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  React.useEffect(() => {
-    void loadReports();
-  }, [loadReports]);
-
-  return (
-    <div className="ai-dev-inspector__reports">
-      <div className="ai-dev-inspector__reports-toolbar">
-        <span>本地报告不会包含提示词或章节正文</span>
-        <button type="button" onClick={loadReports} disabled={loading}>
-          {loading ? "刷新中…" : "刷新"}
-        </button>
-      </div>
-      {error ? <div className="ai-dev-inspector__error">{error}</div> : null}
-      {!loading && reports.length === 0 ? (
-        <div className="ai-dev-inspector__empty">暂时没有错误报告</div>
-      ) : null}
-      {reports.map((report) => (
-        <article className="ai-dev-inspector__report-item" key={report.id}>
-          <header>
-            <code title={report.id}>{report.id}</code>
-            <span data-status={report.status}>
-              {report.status === "captured"
-                ? "已记录"
-                : report.status === "submitted"
-                  ? "待排查"
-                  : "已解决"}
-            </span>
-          </header>
-          <p>{report.errorMessage}</p>
-          <FailureDiagnosisCard report={report} compact />
-          <dl>
-            <div><dt>来源</dt><dd>{report.source}</dd></div>
-            <div>
-              <dt>任务类型</dt>
-              <dd>{String(report.diagnostics?.taskType || "—")}</dd>
-            </div>
-            <div><dt>时间</dt><dd>{new Date(report.createTime).toLocaleString("zh-CN")}</dd></div>
-            <div><dt>Agent Run</dt><dd>{report.agentRunId || "—"}</dd></div>
-          </dl>
-          {report.userNote ? <blockquote>{report.userNote}</blockquote> : null}
-          <button
-            type="button"
-            onClick={() => onOpenRun(report.streamId)}
-            disabled={!availableRunIds.has(report.streamId)}
-            title={
-              availableRunIds.has(report.streamId)
-                ? "在开发面板中定位本轮"
-                : "本轮已不在开发面板的内存记录中"
-            }
-          >
-            {availableRunIds.has(report.streamId) ? "定位本轮" : "仅保留持久记录"}
-          </button>
-        </article>
-      ))}
-    </div>
-  );
-}
 
 export default function AiDevInspector() {
+  const visible = React.useSyncExternalStore(
+    subscribeAiDebugInspectorVisibility,
+    getAiDebugInspectorVisible,
+    getAiDebugInspectorVisible,
+  );
+  return visible ? <VisibleAiDevInspector /> : (
+    <button type="button" className="ai-dev-inspector-launcher"
+      aria-label="打开 AI 诊断" onClick={() => setAiDebugInspectorVisible(true)}>
+      AI 诊断
+    </button>
+  );
+}
+
+function VisibleAiDevInspector() {
   const snapshot = React.useSyncExternalStore(
     subscribeAiDebugStore,
     getAiDebugSnapshot,
     getAiDebugSnapshot,
   );
-  const selectedRun =
-    snapshot.runs.find((run) => run.id === snapshot.selectedRunId) ?? snapshot.runs[0];
   const turns = React.useMemo(
     () => groupAiDebugRunsByTurn(snapshot.runs),
     [snapshot.runs],
   );
-  const selectedTurnKey = selectedRun ? aiDebugTurnKey(selectedRun) : turns[0]?.key;
-  const selectedTurn = turns.find((turn) => turn.key === selectedTurnKey) ?? turns[0];
-  const availableRunIds = React.useMemo(
-    () => new Set(snapshot.runs.map((run) => run.id)),
-    [snapshot.runs],
-  );
-  const [tab, setTab] = React.useState<InspectorTab>("overview");
+  const currentTurn = turns.find((turn) => (
+    turn.runs.some((run) => run.id === snapshot.selectedRunId)
+  )) ?? turns[0];
+  const lifecycle = currentTurn
+    ? aiDebugConversationLifecycle(currentTurn)
+    : undefined;
   const [collapsed, setCollapsed] = React.useState(false);
-  const [hidden, setHidden] = React.useState(true);
   const [position, setPosition] = React.useState<Position>(
     () => clampPosition(loadPosition(), false),
   );
   const [now, setNow] = React.useState(Date.now);
-  const lastOpenedRunRef = React.useRef<string | null>(null);
   const dragRef = React.useRef<{
     pointerId: number;
     startX: number;
@@ -1280,19 +1220,13 @@ export default function AiDevInspector() {
     origin: Position;
   } | null>(null);
 
+  const ticking = !collapsed && Boolean(currentTurn?.runs.some(isAiDebugRunActive));
   React.useEffect(() => {
-    if (!selectedRun || lastOpenedRunRef.current === selectedRun.id) return;
-    lastOpenedRunRef.current = selectedRun.id;
-    setHidden(false);
-    setCollapsed(false);
-    setTab("overview");
-  }, [selectedRun?.id]);
-
-  React.useEffect(() => {
-    if (!isRunActive(selectedRun)) return;
-    const interval = window.setInterval(() => setNow(Date.now()), 250);
+    if (!ticking) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
-  }, [selectedRun?.id, selectedRun?.status]);
+  }, [ticking]);
 
   React.useEffect(() => {
     const handleResize = () => setPosition((current) => clampPosition(current, collapsed));
@@ -1308,7 +1242,7 @@ export default function AiDevInspector() {
   }, []);
 
   const handlePointerDown = (event: React.PointerEvent<HTMLElement>) => {
-    if ((event.target as HTMLElement).closest("button, select")) return;
+    if ((event.target as HTMLElement).closest("button")) return;
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -1338,14 +1272,13 @@ export default function AiDevInspector() {
     });
   };
 
-  if (hidden) return null;
-  const status = selectedRun?.status ?? "starting";
+  const status = lifecycle?.status ?? "starting";
 
   return (
     <aside
       className={`ai-dev-inspector ${collapsed ? "ai-dev-inspector--collapsed" : ""}`}
       style={{ left: position.x, top: position.y }}
-      aria-label="AI 对话开发状态"
+      aria-label="当前 AI 任务诊断"
     >
       <header
         className="ai-dev-inspector__header"
@@ -1357,15 +1290,16 @@ export default function AiDevInspector() {
         <div className="ai-dev-inspector__title">
           <span className={`ai-dev-inspector__live-dot ai-dev-inspector__live-dot--${status}`} />
           <div>
-            <strong>{collapsed ? "AI 调试" : "AI 对话诊断"}</strong>
-            <small>
-              {collapsed && selectedRun
-                ? STATUS_LABELS[selectedRun.status]
-                : selectedRun?.source ?? "开发模式"}
-            </small>
+            <strong>{collapsed ? "AI 诊断" : "当前任务诊断"}</strong>
+            <small>{currentTurn?.source ?? "等待任务"} · {STATUS_LABELS[status]}</small>
           </div>
         </div>
         <div className="ai-dev-inspector__header-actions">
+          {!collapsed && currentTurn ? (
+            <button type="button" onClick={clearAiDebugRuns} aria-label="清空诊断记录" title="清空诊断记录">
+              清空
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
@@ -1374,114 +1308,36 @@ export default function AiDevInspector() {
           >
             {collapsed ? "▣" : "—"}
           </button>
-          {!collapsed && (
-            <button type="button" onClick={() => setHidden(true)} aria-label="关闭调试面板" title="下次 AI 对话时自动打开">
+          {!collapsed ? (
+            <button type="button" onClick={() => setAiDebugInspectorVisible(false)} aria-label="关闭调试面板" title="下次提交新任务时打开">
               ×
             </button>
-          )}
+          ) : null}
         </div>
       </header>
 
-      {!collapsed && (
+      {!collapsed ? (
         <>
-          <div className="ai-dev-inspector__runbar">
-            <div className="ai-dev-inspector__selectors">
-              <label>
-                <span>对话</span>
-                <select
-                  value={selectedTurn?.key ?? ""}
-                  onChange={(event) => {
-                    const turn = turns.find((item) => item.key === event.target.value);
-                    const run = turn?.runs.find(isRunActive) ?? turn?.runs[0];
-                    if (run) selectAiDebugRun(run.id);
-                  }}
-                  disabled={turns.length === 0}
-                  aria-label="选择 AI 对话轮次"
-                >
-                  {turns.length === 0 ? (
-                    <option value="">等待第一次 AI 对话…</option>
-                  ) : turns.map((turn) => (
-                    <option value={turn.key} key={turn.key}>
-                      {formatTime(turn.startedAt)} · {turn.conversationId != null ? `#${turn.conversationId} · ` : ""}{turn.source}{turn.prompt ? ` · ${compactPrompt(turn.prompt)}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>Run</span>
-                <select
-                  value={selectedRun?.id ?? ""}
-                  onChange={(event) => selectAiDebugRun(event.target.value)}
-                  disabled={!selectedTurn?.runs.length}
-                  aria-label="选择当前对话中的 AI Run"
-                >
-                  {!selectedTurn?.runs.length ? (
-                    <option value="">暂无 Run</option>
-                  ) : selectedTurn.runs.map((run, index) => (
-                    <option value={run.id} key={run.id}>
-                      Run {selectedTurn.runs.length - index} · {run.taskType} · {STATUS_LABELS[run.status]} · {compactRunId(run)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <div className="ai-dev-inspector__runbar-actions">
-              {selectedRun && <StatusPill status={selectedRun.status} />}
-              <button type="button" onClick={clearAiDebugRuns} disabled={snapshot.runs.length === 0}>
-                清空
-              </button>
-            </div>
-          </div>
-
-          <nav className="ai-dev-inspector__tabs" aria-label="调试信息分类">
-            {([
-              ["overview", "过程", undefined],
-              ["context", "上下文", undefined],
-              ["events", "事件", selectedRun?.eventCount],
-              ["reports", "错误", undefined],
-            ] as const).map(([key, label, count]) => (
-              <button
-                type="button"
-                className={tab === key ? "is-active" : ""}
-                onClick={() => setTab(key)}
-                key={key}
-              >
-                <span>{label}</span>
-                {count != null ? <small>{count}</small> : null}
-              </button>
-            ))}
-          </nav>
-
           <div className="ai-dev-inspector__body">
-            {tab === "reports" ? (
-              <ReportsView
-                availableRunIds={availableRunIds}
-                onOpenRun={(streamId) => {
-                  selectAiDebugRun(streamId);
-                  setTab("overview");
-                }}
-              />
-            ) : !selectedRun ? (
+            {currentTurn ? (
+              <ConversationTimeline turn={currentTurn} now={now} />
+            ) : (
               <div className="ai-dev-inspector__waiting">
                 <span className="ai-dev-inspector__waiting-icon">⌁</span>
-                <strong>等待 AI 对话</strong>
-                <p>任一 AI 流开始后，这里会自动显示本轮上下文、工具和实时事件。</p>
+                <strong>等待 AI 任务</strong>
+                <p>任务开始后，计划、各执行段、工具和错误会按发生顺序显示在这里。</p>
               </div>
-            ) : tab === "overview" ? (
-              <Overview run={selectedRun} now={now} />
-            ) : tab === "context" ? (
-              <ContextView run={selectedRun} />
-            ) : (
-              <EventsView run={selectedRun} />
             )}
           </div>
 
           <footer className="ai-dev-inspector__footer">
-            <span>开发模式</span>
-            <code>{selectedRun?.id ?? "idle"}</code>
+            <span>本轮 Root Run ID</span>
+            <code title={aiDebugTurnDiagnosticId(currentTurn)}>
+              {aiDebugTurnDiagnosticId(currentTurn)}
+            </code>
           </footer>
         </>
-      )}
+      ) : null}
     </aside>
   );
 }

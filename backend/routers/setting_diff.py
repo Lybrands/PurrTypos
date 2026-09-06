@@ -235,10 +235,11 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
             accepted_segments=body.accepted_segments,
             rejected_segments=body.rejected_segments,
         )
-    try:
         from services import memory_deposition_service
-        await memory_deposition_service.deposit_manual_character_memory(row)
-        await memory_deposition_service.deposit_character_diff_candidate(
+
+        manual_keys = await memory_deposition_service.record_manual_character(db, row)
+        diff_keys = await memory_deposition_service.record_character_diff_candidate(
+            db,
             book_id=str(row["book_id"]),
             character_id=cid,
             character_name=body.after.name or body.name,
@@ -247,9 +248,16 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
             source=body.source,
             accepted_segments=body.accepted_segments,
         )
-    except Exception:
-        pass
-    return {"success": True, "data": {"id": hist_id, "characterId": cid}}
+        delivery_keys = (*manual_keys, *diff_keys)
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {
+        "success": True,
+        "data": {
+            "id": hist_id,
+            "characterId": cid,
+            "memoryDelivery": [item.to_dict() for item in deliveries],
+        },
+    }
 
 
 @router.get("/setting-diff/character/{characterId}/history")
@@ -437,10 +445,11 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
             accepted_segments=body.accepted_segments,
             rejected_segments=body.rejected_segments,
         )
-    try:
         from services import memory_deposition_service
-        await memory_deposition_service.deposit_manual_entity_memory(row)
-        await memory_deposition_service.deposit_entity_diff_candidate(
+
+        manual_keys = await memory_deposition_service.record_manual_entity(db, row)
+        diff_keys = await memory_deposition_service.record_entity_diff_candidate(
+            db,
             book_id=str(row["book_id"]),
             entity_id=eid,
             entity_name=body.after.name or body.name,
@@ -449,9 +458,16 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
             source=body.source,
             accepted_segments=body.accepted_segments,
         )
-    except Exception:
-        pass
-    return {"success": True, "data": {"id": hist_id, "entityId": eid}}
+        delivery_keys = (*manual_keys, *diff_keys)
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {
+        "success": True,
+        "data": {
+            "id": hist_id,
+            "entityId": eid,
+            "memoryDelivery": [item.to_dict() for item in deliveries],
+        },
+    }
 
 
 @router.get("/setting-diff/entity/{entityId}/history")
@@ -602,22 +618,30 @@ async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest)
             accepted_segments=body.accepted_segments,
             rejected_segments=body.rejected_segments,
         )
-    try:
         from services import memory_deposition_service
-        await memory_deposition_service.deposit_manual_background_memory(
-            bookId,
+
+        manual_keys = await memory_deposition_service.record_manual_background(
+            db, bookId,
             body.content or body.after_content,
         )
-        await memory_deposition_service.deposit_background_diff_candidate(
+        diff_keys = await memory_deposition_service.record_background_diff_candidate(
+            db,
             book_id=bookId,
             after_content=body.after_content or body.content,
             source_id=hist_id,
             source=body.source,
             accepted_segments=body.accepted_segments,
         )
-    except Exception:
-        pass
-    return {"success": True, "data": {"id": hist_id, "bookId": bookId}}
+        delivery_keys = (*manual_keys, *diff_keys)
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {
+        "success": True,
+        "data": {
+            "id": hist_id,
+            "bookId": bookId,
+            "memoryDelivery": [item.to_dict() for item in deliveries],
+        },
+    }
 
 
 @router.get("/setting-diff/background/{bookId}/history")

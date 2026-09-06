@@ -1,11 +1,13 @@
+import { createAgentReplayPageCommit } from '../agent-runtime/chunkHandlers/commitScheduler'
+import { changeQueuedSubmission } from '../agent-runtime/queuedSubmission'
 import { services } from '@/services'
 import React from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import AppHeader from '../components/AppHeader'
 import { AgentConversationPanel } from '../components/AgentConversation'
 import {
-  hydrateAiDebugRunSnapshot,
-  recordScreenplayAiDebugChunk,
+  recordAgentConversationDebugChunk,
+  setAiDebugInspectorVisible,
   type AiDebugChunk,
 } from '../components/AiDevInspector/store'
 import Markdown from '../components/Markdown'
@@ -105,7 +107,6 @@ import {
 import { ScreenplayConversationClient } from './conversationClient'
 import {
   isScreenplayOperationCancellable,
-  modelRunIds,
   screenplayTurnArtifacts,
   screenplayTurnReconciliationKey,
   type ScreenplayConversationState,
@@ -167,7 +168,7 @@ interface ScreenplayAgentPageProps {
   modelConfigs: AiModelConfig[]
   onUpdateModelConfig?: (
     id: string,
-    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>,
   ) => void
   onOpenBookshelf: () => void
   onOpenSettings: () => void
@@ -225,11 +226,6 @@ const DOCUMENT_STAGE_GROUPS: Array<{
   { stage: 'review', kinds: ['review'] },
 ]
 
-function documentStageForKind(
-  kind: ScreenplayDocument['kind'],
-): ScreenplayDocumentStage | null {
-  return DOCUMENT_STAGE_GROUPS.find((group) => group.kinds.includes(kind))?.stage ?? null
-}
 const SERIES_FORMATS = new Set<ScreenplayFormat>(['连续剧', '竖屏短剧'])
 const BOOK_BRIEF_STEPS: PurrStepItem<BriefStepKey>[] = [
   { key: 'basics', title: '基础设置' },
@@ -668,12 +664,22 @@ export default function ScreenplayAgentPage({
     ScreenplayConversationState | null
   >(null)
   const [agentChunkVersion, setAgentChunkVersion] = React.useState(0)
-  const [agentQueuedSubmissions, setAgentQueuedSubmissions] = React.useState<
+  const [agentQueuedSubmissions, setAgentQueuedSubmissionsState] = React.useState<
     ScreenplayQueuedSubmission[]
   >([])
+  const agentQueueRef = React.useRef(agentQueuedSubmissions)
+  const setAgentQueuedSubmissions = React.useCallback((update: React.SetStateAction<ScreenplayQueuedSubmission[]>) => {
+    const next = typeof update === 'function' ? update(agentQueueRef.current) : update
+    agentQueueRef.current = next
+    setAgentQueuedSubmissionsState(next)
+  }, [])
   const [agentQueueDraining, setAgentQueueDraining] = React.useState(false)
   const [agentSessionId, setAgentSessionId] = React.useState<number | null>(null)
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
+  const [agentHistorySessions, setAgentHistorySessions] = React.useState<AiSession[]>([])
+  const [agentHistoryLoading, setAgentHistoryLoading] = React.useState(false)
+  const [agentHistoryError, setAgentHistoryError] = React.useState<string>()
+  const [deletingAgentHistorySessionIds, setDeletingAgentHistorySessionIds] = React.useState<number[]>([])
   const [agentSessionLoading, setAgentSessionLoading] = React.useState(false)
   const [agentChunkHydrating, setAgentChunkHydrating] = React.useState(false)
   const [agentLoadInitializing, setAgentLoadInitializing] = React.useState(false)
@@ -693,6 +699,7 @@ export default function ScreenplayAgentPage({
   const [comparisonDocument, setComparisonDocument] = React.useState<ScreenplayDocument | null>(null)
   const [updatingProjectStatus, setUpdatingProjectStatus] = React.useState(false)
   const activeAgentSessionRef = React.useRef<number | null>(null)
+  const agentHistoryRequestRef = React.useRef(0)
   const agentPromptRef = React.useRef('')
   const agentSessionLifecycleRef = React.useRef(
     createScreenplayConversationSessionLifecycle(),
@@ -706,12 +713,9 @@ export default function ScreenplayAgentPage({
     createScreenplayOperationCommandLatch(),
   )
   const agentChunkCursorRef = React.useRef(0)
-  const agentChunkRenderPendingRef = React.useRef(false)
   const agentChunkReplayCaughtUpRef = React.useRef(true)
   const conversationPollErrorRef = React.useRef('')
   const reconciledConversationTurnRef = React.useRef({ scope: '', key: '' })
-  const diagnosticRunMonitorsRef = React.useRef(new Map<string, () => void>())
-  const completedDiagnosticRunIdsRef = React.useRef(new Set<string>())
   const conversationClient = React.useMemo(
     () => new ScreenplayConversationClient(services.screenplay),
     [],
@@ -730,7 +734,11 @@ export default function ScreenplayAgentPage({
         role: entry.role,
         content: entry.content,
         clientTurnId: entry.turnId,
-        sentAt: entry.createdAt || undefined,
+        sentAt: (
+          entry.role === 'assistant'
+            ? entry.updatedAt || entry.createdAt
+            : entry.createdAt
+        ) || undefined,
         agentRunId: entry.runId || undefined,
         model: entry.model || undefined,
         isError: entry.status === 'failed',
@@ -796,11 +804,6 @@ export default function ScreenplayAgentPage({
     ) ?? null
   ), [activeConversationOperation, activeConversationTask, agentConversationState])
   const latestConversationTurn = agentConversationState?.turns.at(-1) ?? null
-  const latestConversationTask = latestConversationTurn
-    ? agentConversationState?.tasks.find(
-      (task) => task.turnId === latestConversationTurn.id,
-    )
-    : undefined
   const latestConversationOperation = latestConversationTurn
     ? agentConversationState?.operations.find(
       (operation) => operation.turnId === latestConversationTurn.id,
@@ -864,82 +867,6 @@ export default function ScreenplayAgentPage({
     agentConversationStateRef.current = agentConversationState
   }, [agentConversationState])
 
-  const monitorDiagnosticRun = React.useCallback((input: {
-    runId: string
-    turnId: string
-    prompt: string
-  }) => {
-    if (
-      !import.meta.env.DEV
-      || !input.runId
-      || diagnosticRunMonitorsRef.current.has(input.runId)
-      || completedDiagnosticRunIdsRef.current.has(input.runId)
-    ) return
-    let stopped = false
-    let terminal = false
-    const cancel = () => {
-      stopped = true
-    }
-    diagnosticRunMonitorsRef.current.set(input.runId, cancel)
-    void (async () => {
-      let after = 0
-      while (!stopped) {
-        const result = await services.ai.getAgentRunSnapshot({
-          runId: input.runId,
-          after,
-          limit: 500,
-        })
-        if (!result.success || !result.data) {
-          throw new Error(result.error || '读取剧本 Agent 诊断失败')
-        }
-        hydrateAiDebugRunSnapshot({
-          snapshot: result.data,
-          turnId: input.turnId,
-          prompt: input.prompt,
-          source: '剧本 Agent 对话',
-        })
-        if (result.data.nextCursor > after) {
-          after = result.data.nextCursor
-        } else if (result.data.hasMore) {
-          throw new Error('剧本 Agent 诊断事件游标没有前进')
-        }
-        if (result.data.hasMore) continue
-        terminal = ['done', 'failed', 'canceled', 'blocked'].includes(
-          result.data.run.status,
-        )
-        if (terminal) break
-        await new Promise((resolve) => window.setTimeout(resolve, 200))
-      }
-    })().catch(() => undefined).finally(() => {
-      if (diagnosticRunMonitorsRef.current.get(input.runId) === cancel) {
-        diagnosticRunMonitorsRef.current.delete(input.runId)
-      }
-      if (terminal) completedDiagnosticRunIdsRef.current.add(input.runId)
-    })
-  }, [])
-
-  React.useEffect(() => {
-    if (!import.meta.env.DEV) return
-    for (const turn of agentConversationState?.turns ?? []) {
-      const task = agentConversationState?.tasks.find((item) => item.turnId === turn.id)
-      const runIds = new Set([
-        turn.rootRunId,
-        ...modelRunIds(task),
-      ].filter((runId): runId is string => Boolean(runId?.trim())))
-      for (const runId of runIds) {
-        monitorDiagnosticRun({
-          runId,
-          turnId: turn.id,
-          prompt: turn.userContent,
-        })
-      }
-    }
-  }, [agentConversationState, monitorDiagnosticRun])
-
-  React.useEffect(() => () => {
-    diagnosticRunMonitorsRef.current.forEach((cancel) => cancel())
-    diagnosticRunMonitorsRef.current.clear()
-  }, [agentSessionId])
 
   React.useEffect(() => {
     if (modelConfigs.length === 0) return
@@ -1703,7 +1630,6 @@ export default function ScreenplayAgentPage({
     setAgentSessionLoading(true)
     setAgentChunkHydrating(true)
     agentChunkReplayCaughtUpRef.current = false
-    agentChunkRenderPendingRef.current = false
     activeAgentSessionRef.current = sessionId
     setAgentSessionId(sessionId)
     const restoredDraft = lifecycle.getDraft(loadToken)
@@ -1753,7 +1679,6 @@ export default function ScreenplayAgentPage({
     agentChunkReplayRef.current.reset()
     agentChunkCursorRef.current = 0
     agentChunkReplayCaughtUpRef.current = false
-    agentChunkRenderPendingRef.current = false
     setAgentChunkHydrating(true)
     setAgentChunkVersion((current) => current + 1)
     agentPromptRef.current = ''
@@ -1761,7 +1686,7 @@ export default function ScreenplayAgentPage({
     setProjectLoading(true)
     setStage('project')
     try {
-      const [documents, , sessionResult, workspace] = await Promise.all([
+      const [, , sessionResult, workspace] = await Promise.all([
         loadProjectDocuments(project.id),
         loadProjectSourceRefs(project.id),
         services.screenplay.getOrCreateScreenplaySession({
@@ -1813,6 +1738,14 @@ export default function ScreenplayAgentPage({
   ])
 
   const openedProjectId = openedProject?.id ?? null
+
+  React.useEffect(() => {
+    ++agentHistoryRequestRef.current
+    setAgentHistorySessions([])
+    setAgentHistoryLoading(false)
+    setAgentHistoryError(undefined)
+    setDeletingAgentHistorySessionIds([])
+  }, [openedProjectId])
 
   React.useEffect(() => {
     const routeKey = `${location.pathname}${location.search}`
@@ -1878,6 +1811,7 @@ export default function ScreenplayAgentPage({
     let stopWatching: (() => void) | null = null
     let polling = false
     let rerun = false
+    let refreshFailures = 0
     const reconciliationScope = `${openedProjectId}:${agentSessionId}`
     if (reconciledConversationTurnRef.current.scope !== reconciliationScope) {
       reconciledConversationTurnRef.current = {
@@ -1916,6 +1850,7 @@ export default function ScreenplayAgentPage({
           : await conversationClient.load(openedProjectId, agentSessionId)
         if (stopped || activeAgentSessionRef.current !== agentSessionId) return
         conversationPollErrorRef.current = ''
+        refreshFailures = 0
         if (next !== current) {
           agentConversationStateRef.current = next
           setAgentConversationState(next)
@@ -1924,9 +1859,13 @@ export default function ScreenplayAgentPage({
           stopWatching = conversationClient.watch(next, {
             chunkAfter: agentChunkCursorRef.current,
             onInvalidate: wake,
+            onError: error => { if (!stopped) message.error(error.message) },
             onChunks: (page) => {
               if (stopped || activeAgentSessionRef.current !== agentSessionId) return
-              let changed = false
+              const pageCommit = createAgentReplayPageCommit(
+                !agentChunkReplayCaughtUpRef.current,
+                () => setAgentChunkVersion(current => current + 1),
+              )
               for (const event of page.chunks) {
                 if (event.cursor <= agentChunkCursorRef.current) continue
                 const state = agentConversationStateRef.current
@@ -1954,6 +1893,8 @@ export default function ScreenplayAgentPage({
                 agentChunkReplayRef.current.dispatch({
                   turnId: event.turnId,
                   rootRunId: turn?.rootRunId || undefined,
+                  eventRunId: event.runId || undefined,
+                  runRole: event.runRole,
                   sessionId: agentSessionId,
                   userContent: event.userContent || turn?.userContent || '',
                   model: modelName || undefined,
@@ -1968,52 +1909,31 @@ export default function ScreenplayAgentPage({
                   appMessage: message,
                 })
                 if (import.meta.env.DEV && event.runId) {
-                  recordScreenplayAiDebugChunk({
+                  recordAgentConversationDebugChunk({
                     runId: event.runId,
+                    source: '剧本 Agent',
                     turnId: event.turnId,
+                    conversationRootRunId: turn?.rootRunId || undefined,
                     sessionId: agentSessionId,
                     prompt: event.userContent || turn?.userContent || '',
                     model: modelName || undefined,
                     chunk: event.chunk as AiDebugChunk,
                   })
-                  monitorDiagnosticRun({
-                    runId: event.runId,
-                    turnId: event.turnId,
-                    prompt: event.userContent || turn?.userContent || '',
-                  })
                 }
                 agentChunkCursorRef.current = event.cursor
-                const terminalReplay = operation
-                  ? ['paused', 'succeeded', 'failed', 'canceled'].includes(
-                    operation.status,
-                  )
-                  : turn && ['paused', 'completed', 'failed', 'canceled'].includes(
-                    task?.status || turn.status,
-                  )
-                changed = (
-                  screenplayChunkChangesConversation(chunk)
-                  && (!terminalReplay || Boolean(chunk.done || chunk.error))
-                ) || changed
+                if (screenplayChunkChangesConversation(chunk)) {
+                  pageCommit.change()
+                }
               }
+              pageCommit.finish()
               agentChunkCursorRef.current = Math.max(
                 agentChunkCursorRef.current,
                 page.nextCursor,
               )
-              if (!agentChunkReplayCaughtUpRef.current) {
-                agentChunkRenderPendingRef.current = (
-                  agentChunkRenderPendingRef.current || changed
-                )
-                if (!page.hasMore) {
-                  agentChunkReplayCaughtUpRef.current = true
-                  setAgentChunkHydrating(false)
-                  if (agentChunkRenderPendingRef.current) {
-                    setAgentChunkVersion((current) => current + 1)
-                  }
-                  agentChunkRenderPendingRef.current = false
-                }
-                return
+              if (!page.hasMore) {
+                agentChunkReplayCaughtUpRef.current = true
+                setAgentChunkHydrating(false)
               }
-              if (changed) setAgentChunkVersion((current) => current + 1)
             },
           })
         }
@@ -2049,6 +1969,9 @@ export default function ScreenplayAgentPage({
             conversationPollErrorRef.current = errorMessage
             message.error(errorMessage)
           }
+          if (++refreshFailures <= 5) {
+            fallbackTimer = setTimeout(wake, Math.min(10_000, 500 * 2 ** refreshFailures))
+          }
         }
       } finally {
         polling = false
@@ -2056,20 +1979,6 @@ export default function ScreenplayAgentPage({
           if (rerun) {
             rerun = false
             wake()
-          } else {
-            const state = agentConversationStateRef.current
-            const active = state?.turns.some(
-              (turn) => turn.status === 'queued' || turn.status === 'planning',
-            ) || state?.operations.some(
-              (operation) => ['queued', 'running'].includes(operation.status)
-                || Boolean(
-                  operation.cancelRequestedAt && operation.status === 'paused',
-                ),
-            )
-            fallbackTimer = setTimeout(
-              () => void poll(),
-              active ? 2000 : 10000,
-            )
           }
         }
       }
@@ -2089,7 +1998,6 @@ export default function ScreenplayAgentPage({
     loadProjectWorkspace,
     message,
     modelConfigs,
-    monitorDiagnosticRun,
     openedProjectId,
     selectedModelId,
   ])
@@ -2147,6 +2055,13 @@ export default function ScreenplayAgentPage({
         message.error(result.error || '关闭对话失败')
         return
       }
+      ++agentHistoryRequestRef.current
+      setAgentHistoryLoading(false)
+      setAgentHistorySessions((current) => (
+        current.some((item) => item.id === session.id)
+          ? current
+          : [...current, { ...session, closed: 1 }]
+      ))
       const remaining = agentSessions.filter((item) => item.id !== session.id)
       setAgentSessions(remaining)
       if (session.id !== agentSessionId) return
@@ -2197,6 +2112,120 @@ export default function ScreenplayAgentPage({
       message.error(result.error || '更新对话名称失败')
     }
   }, [message])
+
+  const loadAgentSessionHistory = React.useCallback(async () => {
+    if (!openedProject) return
+    const request = ++agentHistoryRequestRef.current
+    setAgentHistoryLoading(true)
+    setAgentHistoryError(undefined)
+    try {
+      const result = await services.screenplay.listScreenplaySessions({
+        projectId: openedProject.id,
+        includeClosed: true,
+      })
+      if (request !== agentHistoryRequestRef.current) return
+      if (!result.success) {
+        setAgentHistoryError(result.error || '历史对话加载失败')
+        return
+      }
+      setAgentHistorySessions(
+        (result.data || []).filter((session) => (
+          session.closed === true || session.closed === 1
+        )),
+      )
+    } catch {
+      if (request === agentHistoryRequestRef.current) {
+        setAgentHistoryError('历史对话加载失败，请稍后重试')
+      }
+    } finally {
+      if (request === agentHistoryRequestRef.current) {
+        setAgentHistoryLoading(false)
+      }
+    }
+  }, [openedProject])
+
+  const openAgentHistorySession = React.useCallback(async (sessionId: number) => {
+    if (
+      !openedProject
+      || agentSessionLoading
+      || agentChunkHydrating
+      || deletingAgentHistorySessionIds.includes(sessionId)
+    ) return
+    const session = agentHistorySessions.find((item) => item.id === sessionId)
+    if (!session) return
+    setAgentSessionLoading(true)
+    try {
+      const result = await services.sessions.setSessionReopened({ sessionId })
+      if (!result.success) {
+        message.error(result.error || '重新打开对话失败')
+        return
+      }
+      ++agentHistoryRequestRef.current
+      setAgentHistoryLoading(false)
+      const reopened = { ...session, closed: 0 }
+      setAgentHistorySessions((current) => (
+        current.filter((item) => item.id !== sessionId)
+      ))
+      setAgentSessions((current) => (
+        current.some((item) => item.id === sessionId)
+          ? current
+          : [...current, reopened]
+      ))
+      await loadAgentSession(sessionId, openedProject)
+    } finally {
+      setAgentSessionLoading(false)
+    }
+  }, [
+    agentChunkHydrating,
+    agentHistorySessions,
+    agentSessionLoading,
+    deletingAgentHistorySessionIds,
+    loadAgentSession,
+    message,
+    openedProject,
+  ])
+
+  const deleteAgentHistorySession = React.useCallback(async (sessionId: number) => {
+    const session = agentHistorySessions.find((item) => item.id === sessionId)
+    if (!session || deletingAgentHistorySessionIds.includes(sessionId)) return
+    const decision = await confirm({
+      title: `永久删除「${session.title || '未命名对话'}」？`,
+      content: '该对话的消息与剧本 Agent 对话过程记录将被永久删除，无法恢复。',
+      confirmText: '永久删除',
+      confirmVariant: 'danger',
+      cancelText: '取消',
+    })
+    if (decision !== 'confirm') return
+    ++agentHistoryRequestRef.current
+    setAgentHistoryLoading(false)
+    setDeletingAgentHistorySessionIds((current) => [...current, sessionId])
+    setAgentHistoryError(undefined)
+    try {
+      const result = await services.sessions.deleteSession({ sessionId })
+      if (!result.success) {
+        setAgentHistoryError(result.error || '删除历史对话失败')
+        return
+      }
+      ++agentHistoryRequestRef.current
+      setAgentHistoryLoading(false)
+      setAgentHistorySessions((current) => (
+        current.filter((item) => item.id !== sessionId)
+      ))
+      setAgentSessions((current) => current.filter((item) => item.id !== sessionId))
+      message.success('历史对话已永久删除')
+    } catch {
+      setAgentHistoryError('删除历史对话失败，请稍后重试')
+    } finally {
+      setDeletingAgentHistorySessionIds((current) => (
+        current.filter((id) => id !== sessionId)
+      ))
+    }
+  }, [
+    agentHistorySessions,
+    confirm,
+    deletingAgentHistorySessionIds,
+    message,
+  ])
 
   const stopAgent = React.useCallback(async (): Promise<boolean> => {
     const targetOperation = cancellableConversationOperation
@@ -2349,7 +2378,8 @@ export default function ScreenplayAgentPage({
       return
     }
     const runtime = runtimeOverride || runtimeForModel(model!)
-    if (agentRunning || agentSubmitting) {
+    if (agentRunning || agentSubmitting || agentQueueRef.current.some(item => item.projectId === openedProject.id
+      && item.sessionId === agentSessionId && item.editing)) {
       if (typeof editMessageIndex === 'number') {
         message.info('当前对话仍在执行，完成后再编辑历史消息')
         return
@@ -2388,6 +2418,7 @@ export default function ScreenplayAgentPage({
         ...(stageCommand ? { stageCommand } : {}),
       })
       if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
+      if (import.meta.env.DEV) setAiDebugInspectorVisible(true)
       const next = await conversationClient.load(openedProject.id, agentSessionId)
       if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
       agentConversationStateRef.current = next
@@ -2437,7 +2468,9 @@ export default function ScreenplayAgentPage({
       || !openedProject
       || agentSessionId == null
     ) return
-    const queued = agentQueuedSubmissions.find((submission) => (
+    if (agentQueueRef.current.some(item => item.projectId === openedProject.id
+      && item.sessionId === agentSessionId && item.editing)) return
+    const queued = agentQueueRef.current.find((submission) => (
       submission.projectId === openedProject.id
       && submission.sessionId === agentSessionId
     ))
@@ -2997,7 +3030,22 @@ export default function ScreenplayAgentPage({
     renameSession: (sessionId, title) => {
       if (typeof sessionId === 'number') return renameAgentSession(sessionId, title)
     },
+    loadSessionHistory: loadAgentSessionHistory,
+    openHistorySession: (sessionId) => {
+      if (typeof sessionId === 'number') return openAgentHistorySession(sessionId)
+    },
+    deleteSession: (sessionId) => {
+      if (typeof sessionId === 'number') return deleteAgentHistorySession(sessionId)
+    },
     send: (content) => runAgent(content),
+    updateQueuedSubmission: (id, patch) => {
+      if (!openedProject || agentSessionId == null) return false
+      const next = changeQueuedSubmission(agentQueueRef.current, id, patch,
+        item => item.projectId === openedProject.id && item.sessionId === agentSessionId)
+      if (next === agentQueueRef.current) return false
+      setAgentQueuedSubmissions(next)
+      return true
+    },
     abort: () => void stopAgent(),
     resume: resumeAgent,
     editMessage: (index, content) => runAgent(content, index),
@@ -3011,17 +3059,27 @@ export default function ScreenplayAgentPage({
     agentSessions,
     closeAgentSession,
     createAgentSession,
+    deleteAgentHistorySession,
+    loadAgentSessionHistory,
+    openAgentHistorySession,
     renameAgentSession,
     resumeAgent,
     runAgent,
     stopAgent,
     switchAgentSession,
+    openedProject,
+    agentSessionId,
+    setAgentQueuedSubmissions,
   ])
   const screenplayConversationBindings = React.useMemo<
     ScreenplayConversationBindings | null
   >(() => openedProject ? ({
     project: openedProject,
     sessions: agentSessions,
+    historySessions: agentHistorySessions,
+    historyLoading: agentHistoryLoading,
+    historyError: agentHistoryError,
+    deletingHistorySessionIds: deletingAgentHistorySessionIds,
     activeSessionId: agentSessionId,
     conversationIdentity: agentConversationIdentity,
     messages: agentMessages,
@@ -3031,8 +3089,7 @@ export default function ScreenplayAgentPage({
     setPrompt: updateAgentPrompt,
     initializing: projectLoading
       || agentSessionLoading
-      || agentChunkHydrating
-      || agentLoadInitializing,
+      || ((agentChunkHydrating || agentLoadInitializing) && agentMessages.length === 0),
     running: agentRunning || agentSubmitting,
     stopping: Boolean(
       cancelPendingConversationOperation
@@ -3057,6 +3114,9 @@ export default function ScreenplayAgentPage({
     agentCancelHeld,
     agentChunkHydrating,
     agentConversationIdentity,
+    agentHistoryError,
+    agentHistoryLoading,
+    agentHistorySessions,
     agentLoadInitializing,
     agentMessages,
     agentPrompt,
@@ -3068,6 +3128,7 @@ export default function ScreenplayAgentPage({
     agentSessions,
     agentSubmitting,
     cancelPendingConversationOperation,
+    deletingAgentHistorySessionIds,
     modelConfigs,
     onOpenSettings,
     onUpdateModelConfig,
@@ -3254,7 +3315,7 @@ export default function ScreenplayAgentPage({
       <AppHeader
         title={(
           <span className="screenplay-agent-header-title">
-            <span className="app-title">剧本 Agent</span>
+            <span className="app-title">剧本创作 Agent</span>
             {stage !== 'source' && (
               <span className="screenplay-agent-stage">{stageLabel}</span>
             )}
@@ -4291,10 +4352,7 @@ export default function ScreenplayAgentPage({
 
               <section className={`screenplay-agent-studio ${openedProject.status === 'archived' ? 'is-readonly' : ''}`}>
                 <header className="screenplay-agent-studio__header">
-                  <div>
-                    <span className="screenplay-source-eyebrow">SCREENPLAY AGENT</span>
-                    <h2>与 Agent 继续创作</h2>
-                  </div>
+                  <span>续写、修订与整理当前剧本</span>
                 </header>
 
                 <div className="screenplay-agent-studio__body">

@@ -17,6 +17,12 @@ export interface Book {
   cover_color?: string | null;
   enable_volume?: number;
   create_time?: string;
+  creation_mode?: 'original' | 'continuation';
+  continuation_source_title?: string | null;
+  continuation_fork_section_title?: string | null;
+  continuation_fork_ordinal?: number | null;
+  continuation_source_revision_id?: string | null;
+  continuation_canon_snapshot_id?: string | null;
 }
 
 export type ScreenplaySourceKind = 'book' | 'original';
@@ -177,27 +183,6 @@ export interface ScreenplayDocumentEpisode {
   storage_mode: 'revision_part';
   create_time?: string;
   update_time?: string;
-}
-
-export interface ScreenplayDocumentProposal {
-  kind: ScreenplayDocumentKind;
-  title: string;
-  contentJson: Record<string, unknown>;
-  contentText: string;
-  derivedFromIds: EntityId[];
-  /** Run whose formal proposal event produced this exact payload. */
-  sourceRunId?: string;
-}
-
-export interface ScreenplayRevisionRef {
-  schemaVersion: 1;
-  projectId: EntityId;
-  taskId: string;
-  revisionId: string;
-  role: ScreenplayV2DeliverableRole;
-  revisionNo: number;
-  /** Live transport provenance; persisted conversations resolve by Revision id. */
-  sourceRunId?: string;
 }
 
 export interface ScreenplaySourceRef {
@@ -487,7 +472,7 @@ export interface ScreenplayOperationProjection {
 export interface ScreenplayOperationUsage {
   invocationCount: number;
   inputTokens: number;
-  outputTokens: number;
+  generationTokens: number;
   reasoningTokens: number | null;
 }
 
@@ -522,6 +507,7 @@ export interface ScreenplayAgentChunkEvent {
   turnId: string;
   taskId: string | null;
   runId: string | null;
+  runRole: 'root' | 'unit' | 'final_response' | 'related';
   userContent: string;
   model: string | null;
   turnCreatedAt?: string | null;
@@ -532,6 +518,17 @@ export interface ScreenplayAgentChunkEvent {
 export interface ScreenplayAgentChunkPage {
   kind: 'agent_chunks';
   chunks: ScreenplayAgentChunkEvent[];
+  nextCursor: number;
+  hasMore: boolean;
+  projectionVersion?: string;
+}
+
+export interface NovelAnalysisStreamPage {
+  kind: 'analysis_events';
+  chunks: Array<{ cursor: number; runId: string; chunk: Record<string, unknown>; createdAt: string }>;
+  runs?: NovelAnalysisRun[];
+  publishedId?: string | null;
+  projectionVersion: string;
   nextCursor: number;
   hasMore: boolean;
 }
@@ -547,8 +544,12 @@ export interface ScreenplayConversationRuntimeInput {
     model: string;
     model_profile?: string;
     temperature?: number;
-    max_tokens?: number;
-    thinking?: { type: 'disabled' | 'enabled' };
+    profile_max_generation_tokens?: number;
+    max_generation_tokens?: number;
+    thinking?: { type: 'disabled' | 'enabled'; budget_tokens?: number };
+    supports_thinking?: boolean;
+    thinking_only?: boolean;
+    reasoning_effort?: AiReasoningEffort;
     context_window?: AiContextWindow;
   };
   contextWindow?: AiContextWindow;
@@ -651,19 +652,359 @@ export interface Article {
   update_time?: string;
 }
 
-export interface BookStyle {
-  book_id: EntityId;
-  pov: string;
-  tone: string;
-  pace: string;
-  banned_rules: string;
-  /** JSON 字符串：number[] 或 string[]，参考章节 id */
-  reference_chapter_ids: string;
-  free_notes: string;
-  update_time?: string;
+export type WritingMethodType = 'primary' | 'technique';
+
+export interface WritingMethodOverrides {
+  forceRevisionIds: string[];
+  excludeRevisionIds: string[];
 }
 
-export type SaveBookStylePayload = Omit<BookStyle, 'book_id' | 'update_time'> & { bookId: EntityId };
+export interface NovelSourcePickedFile {
+  fileName: string;
+  extension: '.txt' | '.md' | '.markdown';
+  byteCount: number;
+  content: string;
+  importKind: 'file' | 'folder' | 'archive';
+  documentCount: number;
+  skippedFileCount: number;
+}
+
+export interface NovelSourceSection {
+  id: string;
+  revision_id: string;
+  ordinal: number;
+  title: string;
+  content_digest: string;
+  locator: Record<string, unknown>;
+  text_content?: string;
+  total_character_count?: number;
+  text_start_character?: number;
+  text_end_character?: number;
+  has_more_text?: boolean;
+}
+
+export interface NovelSourceSearchResult {
+  id: string;
+  ordinal: number;
+  title: string;
+  excerpt: string;
+  start_character: number;
+}
+
+export interface NovelSourceRevision {
+  id: string;
+  work_id: string;
+  version_no: number;
+  content_digest: string;
+  parser_version: number;
+  byte_count: number;
+  character_count: number;
+  source_metadata: Record<string, unknown>;
+  sections?: NovelSourceSection[];
+  create_time: string;
+}
+
+export interface NovelSourceWork {
+  id: string;
+  title: string;
+  source_type: 'external_text' | 'frozen_book';
+  origin_book_id: EntityId | null;
+  status: 'active' | 'archived';
+  metadata: Record<string, unknown>;
+  revision_count?: number;
+  analysis_count?: number;
+  latest_revision_id?: string | null;
+  revisions?: NovelSourceRevision[];
+  create_time: string;
+  update_time: string;
+}
+
+export interface NovelSourceImportPreview {
+  fileName: string;
+  extension: '.txt' | '.md' | '.markdown';
+  importKind: 'file' | 'folder' | 'archive';
+  documentCount: number;
+  skippedFileCount: number;
+  byteCount: number;
+  characterCount: number;
+  contentDigest: string;
+  suggestedTitle: string;
+  parserVersion: number;
+  sectionCount: number;
+  requiresSingleSectionConfirmation: boolean;
+  estimatedAdditionalStorageBytes: number;
+  rightsNotice: string;
+  modelDataBoundaryNotice: string;
+  sections: Array<{
+    ordinal: number;
+    title: string;
+    characterCount: number;
+    preview: string;
+    startCharacter: number;
+    endCharacter: number;
+  }>;
+}
+
+export interface NovelAnalysisEvidence {
+  sectionId: string;
+  excerpt: string;
+  segmentStartCharacter?: number;
+  segmentEndCharacter?: number;
+  sectionOrdinal?: number;
+  sectionTitle?: string;
+  locator?: { start: number; end: number };
+  excerptDigest?: string;
+}
+
+export interface NovelAnalysisFact {
+  id?: string;
+  factKind: string;
+  subjectKey: string;
+  predicate: string;
+  value: unknown;
+  lifecycleStatus: string;
+  evidence: NovelAnalysisEvidence[];
+}
+
+export interface NovelAnalysisCraftCard {
+  id?: string;
+  cardKind: string;
+  title: string;
+  bodyMarkdown: string;
+  evidence: NovelAnalysisEvidence[];
+}
+
+export interface NovelAnalysisStoryOverview {
+  summaryMarkdown: string;
+  evidence: NovelAnalysisEvidence[];
+  contentDigest?: string;
+}
+
+export interface DistilledWritingSkill {
+  name: string;
+  purpose: string;
+  markdown: string;
+}
+export interface WritingSkillTrials {
+  trials: Array<{ brief: string; baseline: string; application: string; stepApplications: Array<{ step: number; observation: string }> }>;
+}
+export interface WritingSkillDistillation {
+  revisionNotes: string[];
+  initialTrials: WritingSkillTrials;
+  transferTrials: WritingSkillTrials;
+  assessment: { checks: Array<{ dimension: string; passed: boolean; reason: string }> };
+}
+
+export interface NovelAnalysisArtifact {
+  writingSkill?: DistilledWritingSkill;
+  distillation?: WritingSkillDistillation;
+  skillReviewStatus?: "pending_review" | "needs_revision";
+  artifactId: string;
+  artifactKind: string;
+  sourceRevisionId: string;
+  sectionIds: string[];
+  facts: NovelAnalysisFact[];
+  craftCards: NovelAnalysisCraftCard[];
+  storyOverview?: NovelAnalysisStoryOverview | null;
+  coverage: Record<string, unknown>;
+  conflicts: unknown[];
+  reviewStatus: 'pending' | 'reviewed';
+}
+
+export interface NovelAnalysisRun {
+  runId: string;
+  runStatus: string;
+  commandId: string;
+  interactionKind?: 'analysis' | 'follow_up';
+  analysisArtifactRef?: string | null;
+  prompt?: string;
+  finalResponse?: string;
+  taskId: string | null;
+  taskStatus: string | null;
+  taskRevision: number | null;
+  totalUnits: number;
+  completedUnits: number;
+  failedUnits: number;
+  providerOutputEvents?: number;
+  relatedRuns?: Array<{ runId: string; status: string }>;
+  analysisPlan?: {
+    title: string;
+    goal?: string;
+    taskSpec?: {
+      goal?: string;
+      operation?: string;
+      instruction?: string;
+      deliverable?: string;
+      constraints?: string[];
+    };
+    steps: Array<{
+      id: string;
+      title: string;
+      type: 'analyze' | 'review';
+      executor: 'model' | 'tool';
+      dependsOn: string[];
+      description?: string;
+    }>;
+  } | null;
+  units?: Array<{
+    unitId: string;
+    title: string;
+    kind: string;
+    plannerStepId?: string;
+    status: string;
+    attempt: number;
+    maxAttempts: number;
+    errorCode?: string | null;
+    updateTime?: string | null;
+  }>;
+  error?: string | null;
+  artifactRef?: string | null;
+  createTime?: string | null;
+  updateTime?: string | null;
+}
+
+export interface PublishedNovelAnalysis {
+  writingSkill?: DistilledWritingSkill;
+  distillation?: WritingSkillDistillation;
+  skillReviewStatus?: "pending_review" | "needs_revision";
+  id: string;
+  sourceRevisionId: string;
+  versionNo: number;
+  coverageEndOrdinal: number;
+  schemaVersion: number;
+  contentDigest: string;
+  facts: NovelAnalysisFact[];
+  craftCards: NovelAnalysisCraftCard[];
+  storyOverview?: NovelAnalysisStoryOverview | null;
+  summary: Record<string, unknown>;
+  createTime: string;
+}
+
+export interface ContinuationCanonPreview {
+  sourceRevisionId: string;
+  sourceAnalysisId: string;
+  forkSectionId: string;
+  forkOrdinal: number;
+  sourceWorkId: string;
+  sourceTitle: string;
+  sourceVersionNo: number;
+  forkSectionTitle: string;
+  snapshotDigest: string;
+  records: Array<{
+    sourceFactId: string;
+    factKind: string;
+    subjectKey: string;
+    predicate: string;
+    value: unknown;
+    contentDigest: string;
+  }>;
+}
+
+export interface ContinuationWorkspace {
+  book: Book;
+  binding: {
+    id: string;
+    sourceWorkId: string;
+    sourceRevisionId: string;
+    sourceAnalysisId: string;
+    sourceTitle: string;
+    forkSectionId: string;
+    forkSectionTitle: string;
+    forkOrdinal: number;
+    canonSnapshotId: string;
+    canonSnapshotDigest: string;
+    bindingDigest: string;
+  };
+  canonRecords: ContinuationCanonPreview['records'];
+}
+
+export interface WritingMethodRevision {
+  id: string;
+  method_id: string;
+  version_no: number;
+  name: string;
+  description: string;
+  method_type: WritingMethodType;
+  tags: string[];
+  markdown_body: string;
+  metadata: Record<string, unknown>;
+  content_digest: string;
+  published_at: string;
+}
+
+export interface WritingMethod {
+  id: string;
+  name: string;
+  description: string;
+  method_type: WritingMethodType;
+  tags: string[];
+  source_type: string;
+  source_ref: Record<string, unknown>;
+  is_builtin: number;
+  status: 'active' | 'archived' | 'disabled';
+  draft_markdown: string;
+  draft_metadata: Record<string, unknown>;
+  draft_revision: number;
+  current_published_revision_id: string | null;
+  revisions?: WritingMethodRevision[];
+  create_time: string;
+  update_time: string;
+}
+
+export interface WritingSchemeRevisionMember {
+  ordinal: number;
+  method_revision_id: string;
+  method_id: string;
+  name: string;
+  method_type: WritingMethodType;
+  version_no: number;
+  content_digest: string;
+}
+
+export interface WritingSchemeRevision {
+  id: string;
+  scheme_id: string;
+  version_no: number;
+  name: string;
+  description: string;
+  members_digest: string;
+  members: WritingSchemeRevisionMember[];
+  published_at: string;
+}
+
+export interface WritingScheme {
+  id: string;
+  name: string;
+  description: string;
+  draft_member_revision_ids: string[];
+  draft_revision: number;
+  source_type: string;
+  source_ref: Record<string, unknown>;
+  is_builtin: number;
+  status: 'active' | 'archived' | 'disabled';
+  current_published_revision_id: string | null;
+  revisions?: WritingSchemeRevision[];
+  create_time: string;
+  update_time: string;
+}
+
+export interface WritingMethodCandidateBatch {
+  analysisId: string;
+  scheme: WritingScheme;
+  methods: WritingMethod[];
+  bindingChanged: false;
+}
+
+export interface BookWritingMethodBinding {
+  id: string;
+  book_id: EntityId;
+  binding_type: 'method' | 'scheme';
+  method_revision_id: string | null;
+  scheme_revision_id: string | null;
+  priority: number;
+  source: string;
+  revision: WritingMethodRevision | WritingSchemeRevision;
+}
 
 export interface ChapterDiffHistory {
   id: number;
@@ -674,17 +1015,6 @@ export interface ChapterDiffHistory {
   accepted_segments: number;
   rejected_segments: number;
   create_time?: string;
-}
-
-export interface StoryMemoryAnalysisReceipt {
-  book_id: string;
-  chapter_id: string;
-  source_revision: string;
-  status: 'skipped' | 'running' | 'completed' | 'reused' | 'failed';
-  candidate_count: number;
-  delta_id?: string | null;
-  reason: string;
-  model: string;
 }
 
 export interface StoryMemoryEvolutionFieldChange {
@@ -713,15 +1043,6 @@ export interface StoryMemoryEvolutionDecision {
   resolved_delta_id?: string | null;
   resolution_actor?: string | null;
   resolved_at?: string | null;
-}
-
-export interface StoryMemoryEvolutionReview {
-  delta_id: string;
-  book_id: string;
-  chapter_id: string;
-  status: 'open' | 'resolved' | 'stale';
-  decisions: StoryMemoryEvolutionDecision[];
-  summary: Record<StoryMemoryEvolutionDecision['classification'], number>;
 }
 
 export interface StoryMemoryEvolutionResolutionReceipt {
@@ -943,6 +1264,7 @@ export interface AiSession {
   scope?: 'chapter' | 'setting' | 'screenplay';
   title: string;
   create_time?: string;
+  closed?: number | boolean;
 }
 
 export interface AiFavorite {
@@ -996,19 +1318,13 @@ export interface AiContextCompactionState {
 }
 
 export interface AiOutputBudgetState {
-  policyKey: string;
-  workUnits: number;
-  targetTokens: number;
-  requestedTokens: number;
-  effectiveTokens: number;
-  reasoningReserveTokens: number;
-  thinkingEnabled: boolean;
-  taskHardCapTokens: number;
-  modelMaxOutputTokens?: number | null;
-  contextMaxOutputTokens: number;
-  limitingFactor: 'task_estimate' | 'task_hard_cap' | 'model_capability' | 'context_available';
-  executionMode: 'single' | 'chunked';
-  lengthStrategy: 'fail' | 'continue' | 'retry_larger';
+  maxGenerationTokens: number;
+  generationSource: 'user' | 'model_profile' | 'context_capacity';
+  profileMaxGenerationTokens: number;
+  requestedUserMaxGenerationTokens?: number | null;
+  resultCapacityTargetTokens?: number | null;
+  resultCapacitySource?: 'user' | 'workflow_policy' | null;
+  nonResultHeadroomTokens?: number | null;
 }
 
 export interface AiContextBudgetState {
@@ -1028,14 +1344,14 @@ export interface AiContextBudgetState {
   memoryTokens?: number;
   associatedTokens?: number;
   actualInputTokens?: number;
-  actualOutputTokens?: number;
+  actualGenerationTokens?: number;
   actualTotalTokens?: number;
   cachedInputTokens?: number;
-  reasoningOutputTokens?: number;
+  reasoningTokens?: number | null;
   actualUsageRound?: number;
   inputTokenEstimateAtUsage?: number;
   usageSource?: "provider";
-  requestedOutputTokens?: number;
+  requestedGenerationTokens?: number;
   finishReason?: string;
   outputBudget?: AiOutputBudgetState;
 }
@@ -1087,7 +1403,7 @@ export interface AiAgentRunProductEvent {
 }
 
 export interface AiAgentRunSnapshot {
-  version: 1;
+  version: 2;
   run: {
     runId: string;
     sessionId?: number | null;
@@ -1102,6 +1418,19 @@ export interface AiAgentRunSnapshot {
       leaseExpiresAtMs?: number | null;
       heartbeatAtMs?: number | null;
       cancellationRequested: boolean;
+    };
+    activity?: {
+      modelAttemptCount: number;
+      usage?: {
+        inputTokens: number;
+        generationTokens: number;
+        reasoningTokens?: number | null;
+        unreportedReasoningAttempts?: number;
+        totalTokens: number;
+        unreportedAttempts: number;
+      };
+      providerOutputEvents: number;
+      providerOutputBytes: number;
     };
     provenance: {
       modelProvider?: string | null;
@@ -1217,33 +1546,76 @@ export type MemoryKind =
   | 'style'
   | 'summary';
 
-export type MemoryStatus = 'pending' | 'active' | 'archived' | 'superseded';
-export type MemoryScopeType = 'book' | 'chapter' | 'character' | 'outline' | 'session';
+export type MemoryScopeType = 'book' | 'chapter' | 'character' | 'outline';
 
-export interface MemoryItem {
-  id: number;
-  book_id: EntityId;
-  kind: MemoryKind;
-  scope_type: MemoryScopeType;
-  scope_id?: string | null;
-  content: string;
-  summary: string;
-  keywords: string;
-  importance: number;
-  confidence: number;
-  status: MemoryStatus;
-  pinned: number;
-  fingerprint: string;
-  source_type: string;
-  source_id?: string | null;
-  create_time?: string;
-  update_time?: string;
-  last_used_at?: string | null;
-  deduped?: boolean;
+export interface ComponentMemoryRecord {
+  id: string;
+  version: number;
+  state: 'active' | 'pending' | 'disabled';
+  text: string;
+  source: { id: string; revision: string };
+  inferred: boolean;
+  expiresAt: string | null;
+  metadata: {
+    kind: MemoryKind;
+    scopeType: MemoryScopeType;
+    scopeId: string | null;
+    summary: string;
+    keywords: string;
+    importance: number;
+    confidence: number;
+    pinned: boolean;
+  };
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  resolutionKey: string | null;
 }
 
 export type UnifiedMemorySource = 'semantic' | 'story_state' | 'story_candidate';
 export type UnifiedMemoryStatus = 'active' | 'pending' | 'conflict' | 'stale' | 'archived' | 'rejected';
+
+export interface ComponentMemoryRef {
+  id: string;
+  version: number;
+}
+
+export interface ComponentMemoryResolution {
+  kind: 'independent' | 'duplicate' | 'supersede' | 'conflict';
+  items: ComponentMemoryRef[];
+  keep: string | null;
+  reviewKey: string | null;
+}
+
+export interface ComponentMemoryOperation {
+  key: string;
+  state: string;
+  ids: string[];
+  review: null | {
+    key: string;
+    candidate: ComponentMemoryRef;
+    epoch: number;
+    matches: Array<{
+      item: ComponentMemoryRef;
+      kind: 'duplicate' | 'supersede' | 'conflict' | 'related';
+    }>;
+    proposal: ComponentMemoryResolution | null;
+  };
+  resolution: ComponentMemoryResolution | null;
+}
+
+export interface ComponentMemoryLinkPage {
+  items: Array<{
+    key: string;
+    from: ComponentMemoryRef;
+    to: ComponentMemoryRef;
+    relation: 'supersedes' | 'contradicts' | 'supports' | 'relates_to';
+    note: string;
+    valid: boolean;
+  }>;
+  next: string | null;
+  epoch: number;
+}
 
 export interface UnifiedMemoryItem {
   id: string;
@@ -1271,7 +1643,7 @@ export interface UnifiedMemoryItem {
   recommendation?: StoryMemoryEvolutionDecision['recommendation'] | null;
   risk?: StoryMemoryEvolutionDecision['risk'] | null;
   resolution?: StoryMemoryEvolutionDecision['resolution'] | null;
-  actions: Array<'activate' | 'edit' | 'pin' | 'archive' | 'accept' | 'reject' | 'view_history'>;
+  actions: Array<'activate' | 'edit' | 'pin' | 'archive' | 'review' | 'delete' | 'view_history' | 'view_links' | 'accept' | 'reject'>;
   create_time?: string | null;
   update_time?: string | null;
 }
@@ -1282,33 +1654,13 @@ export interface UnifiedMemoryPage {
   suppressedDuplicates: number;
 }
 
-export interface MemoryContextDiagnostics {
-  forced: number;
-  recalled: number;
-  included: number;
-  deferred: number;
-  suppressed: number;
-  conflicts: number;
-  relationExpanded: number;
-  characterCount: number;
-}
-
 export interface MemoryContextBlock {
   text: string;
-  includedIds: number[];
-  deferredIds: number[];
-  suppressedIds: number[];
+  includedIds: string[];
+  deferredIds: string[];
+  missingIds: string[];
   tokenEstimate: number;
-  diagnostics: MemoryContextDiagnostics;
-}
-
-export interface XmindTopic {
-  title?: string;
-  children?: { attached?: XmindTopic[] };
-}
-
-export interface XmindSheet {
-  rootTopic?: XmindTopic;
+  diagnostics: Record<string, unknown>;
 }
 
 export interface ApiResult<T = unknown> {
@@ -1341,233 +1693,95 @@ export interface AiErrorReport {
   updateTime: string;
 }
 
-export interface AiAgentRunStabilityReport {
-  verdict: "pass" | "warn" | "fail";
-  metrics: {
-    toolCalls: number;
-    completedToolCalls: number;
-    failedToolCalls: number;
-    incompleteToolCalls: number;
-    toolSuccessRate?: number | null;
-    toolProtocolFailures: number;
-    toolErrorCodes: Record<string, number>;
-    modelAttempts: number;
-    interruptedModelAttempts: number;
-    retryAttempts: number;
-    contextOverflows: number;
-    maxDroppedMessages: number;
-    compactionPasses: number;
-    compactedTurns: number;
-    compactionFallbacks: number;
-    compactionFailures: number;
-    compactionOutcomes: Record<string, number>;
-  };
-  checks: Array<{
-    name: string;
-    status: "pass" | "warn" | "fail";
-    detail: unknown;
-  }>;
-}
-
-export interface AiAgentRunArtifactMetrics {
-  artifactCount: number;
-  openArtifacts: number;
-  finalizedArtifacts: number;
-  abortedArtifacts: number;
-  batchCount: number;
-  committedItemCount: number;
-  expectedItemCount: number;
-  completionRate?: number | null;
-  artifacts: Array<{
-    artifactId: string;
-    namespace: string;
-    kind: string;
-    status: string;
-    ownerRef: {
-      kind: string;
-      id: string;
-    };
-    revision: number;
-    committedItemCount: number;
-    expectedItemCount?: number | null;
-    batchCount: number;
-    batchItemCount: number;
-  }>;
-}
-
-export interface AiArtifactMaintenanceSnapshot {
-  checkedAtMs: number;
-  scopeRunId?: string | null;
-  artifactCount: number;
-  openArtifacts: number;
-  finalizedArtifacts: number;
-  abortedArtifacts: number;
-  unknownArtifacts: number;
-  claimCount: number;
-  activeClaims: number;
-  expiredClaims: number;
-  unavailableRunClaims: number;
-  invalidTargetClaims: number;
-  reclaimableClaims: number;
-  consistencyIssues: number;
-  requiresAttention: boolean;
-}
-
-export interface AiArtifactMaintenanceReport {
-  expiredClaimsReleased: number;
-  unavailableRunClaimsReleased: number;
-  invalidTargetClaimsReleased: number;
-  releasedClaims: number;
-  purgedArtifacts: number;
-  consistencyIssues: number;
-  changed: boolean;
-}
-
-export interface AiArtifactMaintenanceResult {
-  report: AiArtifactMaintenanceReport;
-  snapshot: AiArtifactMaintenanceSnapshot;
-}
-
-export interface AiAgentRunStabilityTrendAlert {
-  code: string;
-  severity: "warn" | "fail";
-  value: number | null;
-  threshold: number;
-}
-
-export interface AiAgentRunFailureFinding {
-  code: string;
-  category: string;
-  severity: "warn" | "fail";
-  confidence: "high" | "medium" | "low";
-  evidence: Record<string, unknown>;
-  remediation: string;
-}
-
-export interface AiAgentRunFailureClassification {
-  verdict: "pass" | "warn" | "fail";
-  primaryFinding?: AiAgentRunFailureFinding | null;
-  findings: AiAgentRunFailureFinding[];
-  summary: {
-    findingCount: number;
-    categoryCounts: Record<string, number>;
-  };
-}
-
-export interface AiAgentRunRecoveryDecision {
-  round: number;
-  cause: string;
-  action: "retry_model" | "fallback_provider_mode" | "replan" | string;
-  allowed: boolean;
-  reasonCode: string;
+export interface AiPlannerModelOutputDiagnostic {
+  runId: string;
+  invocationId: string;
+  outputStreamId: string;
+  operationId: string;
+  revision: number;
   attempt: number;
-  maxAttempts: number;
-  remainingModelRounds: number;
-  effectState: "not_started" | "committed" | "unknown" | string;
-  mayRepeatSideEffect: boolean;
+  model?: string | null;
+  status: "open" | "committed" | "aborted";
+  finishReason?: string | null;
+  errorCode?: string | null;
+  rawContent: string;
+  rawContentCharacters: number;
+  rawContentTruncated: boolean;
+  contentDeltaCount: number;
+  contentDeltaConflict: boolean;
+  progressRecords: Array<{
+    eventId?: string | null;
+    sequence?: number | null;
+    recordIndex: number;
+    revision: number;
+    attempt: number;
+    text: string;
+    sourceStart: number;
+    sourceEnd: number;
+    occurredAt?: string | null;
+  }>;
+  timing: Record<string, unknown>;
 }
 
-export interface AiAgentRunRecoveryReport {
-  summary: {
-    decisionCount: number;
-    allowedCount: number;
-    deniedCount: number;
-    safetyProtectedCount: number;
-    causes: Record<string, number>;
-    allowedActions: Record<string, number>;
-    deniedReasons: Record<string, number>;
-  };
-  decisions: AiAgentRunRecoveryDecision[];
+export interface AiAgentRunPlannerDiagnostics {
+  runId: string;
+  outputs: AiPlannerModelOutputDiagnostic[];
 }
 
-export interface AiAgentRunStabilityRegressionGate {
-  verdict: "pass" | "warn" | "fail" | "insufficient_data";
-  candidateSampleSize: number;
-  baselineSampleSize: number;
-  minimumWindowSize: number;
-  metricDeltas: Record<string, number | null>;
-  newToolErrorCodes: string[];
-  newCriticalSignals: string[];
-  checks: Array<{
-    name: string;
-    status: "pass" | "warn" | "fail" | "insufficient_data" | "not_applicable";
-    detail: Record<string, unknown>;
-  }>;
-  alerts: Array<{
-    code: string;
-    severity: "warn" | "fail";
-    detail: Record<string, unknown>;
-  }>;
+export interface AiModelInputDiagnostic {
+  sdkRequest?: Record<string, unknown> | null;
+  eventRowId: number;
+  phase: string;
+  count: number;
+  round?: number | null;
+  logicalRound?: number | null;
+  attempt?: number | null;
+  revision?: number | null;
+  provider?: string | null;
+  model?: string | null;
+  captured: boolean;
+  messages: Array<Record<string, unknown>>;
+  recordedAt?: string | null;
 }
 
-export interface AiAgentRunStabilityTrendReport {
-  verdict: "pass" | "warn" | "fail" | "insufficient_data";
-  sampleSize: number;
-  minimumSampleSize: number;
-  windowLimit: number;
-  comparisonWindowSize: number;
-  scope: {
-    type: "session" | "book" | "screenplay_project" | "global";
-    id?: EntityId | null;
-  };
-  metrics: {
-    failedRuns: number;
-    runFailureRate: number | null;
-    stabilityFailedRuns: number;
-    stabilityFailureRate: number | null;
-    toolRuns: number;
-    toolProtocolFailureRuns: number;
-    toolProtocolRunRate: number | null;
-    incompleteToolRuns: number;
-    incompleteToolRunRate: number | null;
-    contextOverflowRuns: number;
-    contextOverflowRunRate: number | null;
-    compactionFailureRuns: number;
-    compactionFailureRunRate: number | null;
-    modelRuns: number;
-    retryRuns: number;
-    retryRunRate: number | null;
-    currentFailureStreak: number;
-    toolErrorCodes: Record<string, number>;
-    topToolErrorCodes: Array<{ code: string; count: number }>;
-  };
-  checks: Array<{
-    name: string;
-    status: "pass" | "warn" | "fail" | "insufficient_data" | "not_applicable";
-    value: number | null;
-    numerator: number;
-    denominator: number | null;
-    warnAt: number;
-    failAt: number;
-  }>;
-  alerts: AiAgentRunStabilityTrendAlert[];
-  regressionGate: AiAgentRunStabilityRegressionGate;
-  recentRuns: Array<{
-    runId: string;
-    runStatus: string;
-    stabilityVerdict: "pass" | "warn" | "fail" | string;
-    createTime?: string | null;
-  }>;
+export interface AiAgentRunModelInputDiagnostics {
+  runId: string;
+  calls: AiModelInputDiagnostic[];
 }
 
-export interface AiAgentRunDiagnostics {
-  runId?: string;
-  runStatus?: string;
-  verdict: "pass" | "warn" | "fail";
-  performance: Record<string, unknown>;
-  stability: AiAgentRunStabilityReport;
-  recovery: AiAgentRunRecoveryReport;
-  failureClassification: AiAgentRunFailureClassification;
-  artifacts: AiAgentRunArtifactMetrics;
-  artifactMaintenance: AiArtifactMaintenanceSnapshot;
-  [key: string]: unknown;
+export interface AiDiagnosticPreview {
+  text: string;
+  characters: number;
+  truncated: boolean;
+}
+
+export interface AiToolCallDiagnostic {
+  runId: string;
+  toolCallId: string;
+  eventRowId: number;
+  name?: string;
+  displayName?: string;
+  operationId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  status?: 'completed' | 'failed';
+  outcome?: string;
+  cached?: boolean;
+  approvalStatus?: string;
+  arguments?: AiDiagnosticPreview;
+  result?: AiDiagnosticPreview;
+  error?: AiDiagnosticPreview;
+}
+
+export interface AiAgentRunToolDiagnostics {
+  runId: string;
+  calls: AiToolCallDiagnostic[];
+  nextCursor: number;
+  hasMore: boolean;
 }
 
 export interface ElectronAPI {
-  openXmindFile: () => Promise<string | null>;
-  parseXmind: (filePath: string) => Promise<ApiResult<XmindSheet[]>>;
   openFilePath: (filePath: string) => Promise<ApiResult<void>>;
-  readFileBuffer: (filePath: string) => Promise<ApiResult<Uint8Array>>;
   writeExportFiles: (data: { entries: Array<{ path: string; content: string }>; exportAsZip: boolean }) => Promise<ApiResult<void>>;
   /** 整本导出为单个 TXT：保存对话框 + 写盘 */
   writeSingleTextFile: (data: { defaultName: string; content: string }) => Promise<ApiResult<{ path: string }>>;
@@ -1588,6 +1802,7 @@ export interface ElectronAPI {
   importDatabase: () => Promise<ApiResult<{
     beforeStats: { books: number; outlineChapters: number; articles: number };
     afterStats: { books: number; outlineChapters: number; articles: number };
+    restartRequired?: boolean;
   }>>;
   getDatabaseInfo: () => Promise<ApiResult<{ dbPath: string; books: number; outlineChapters: number; articles: number }>>;
   openDatabaseDirectory: () => Promise<ApiResult<void>>;
@@ -1638,6 +1853,7 @@ export interface ElectronAPI {
     sessionId: number;
     chunkAfter?: number;
     onEvent: (event: ScreenplayConversationStreamEvent) => void;
+    onError?: (error: Error) => void;
   }) => () => void;
   cancelScreenplayConversationTurn: (data: {
     commandId: string;
@@ -1844,17 +2060,11 @@ export interface ElectronAPI {
   getVolumeOutlines: (
     bookId?: EntityId | null,
   ) => Promise<ApiResult<VolumeOutline[]>>;
-  getOutlineByWritingChapter: (
-    writingChapterId: EntityId,
-  ) => Promise<ApiResult<Outline | null>>;
   /** 本章自身绑定的 outline（outlines.writing_chapter_id == id），
    *  与 OutlinePanel 显示的章/卷大纲一致。 */
   getOutlineForChapter: (
     writingChapterId: EntityId,
   ) => Promise<ApiResult<Outline | null>>;
-  getOutlines: (
-    typeFilter?: "global" | "chapter",
-  ) => Promise<ApiResult<Outline[]>>;
   getWritingOutline: (bookId?: EntityId | null) => Promise<ApiResult<Outline>>;
   getGlobalOutline: (
     bookId?: EntityId | null,
@@ -1886,11 +2096,6 @@ export interface ElectronAPI {
   restoreOutlineHistory: (data: {
     historyId: number;
   }) => Promise<ApiResult<Outline>>;
-  // 章节
-  saveChapters: (data: {
-    outlineId: EntityId;
-    chapters: unknown[];
-  }) => Promise<ApiResult<void>>;
   getChapters: (data: { outlineId: EntityId }) => Promise<ApiResult<Chapter[]>>;
   addChapter: (data: {
     outlineId: EntityId;
@@ -1904,10 +2109,6 @@ export interface ElectronAPI {
     id: EntityId;
     title: string;
   }) => Promise<ApiResult<void>>;
-  updateChapterProgress: (data: {
-    id: EntityId;
-    progress: string;
-  }) => Promise<ApiResult<void>>;
   // 文档
   saveArticle: (data: {
     chapterId: EntityId;
@@ -1917,25 +2118,10 @@ export interface ElectronAPI {
   getArticle: (data: {
     chapterId: EntityId;
   }) => Promise<ApiResult<Article | null>>;
-  analyzeChapterStoryMemory: (data: {
-    bookId: EntityId;
-    chapterId: EntityId;
-    modelId?: string;
-  }) => Promise<ApiResult<StoryMemoryAnalysisReceipt>>;
-  reviewStoryMemoryDelta: (data: {
-    deltaId: string;
-  }) => Promise<ApiResult<StoryMemoryEvolutionReview>>;
-  getStoryMemoryEvolutionReview: (data: {
-    deltaId: string;
-  }) => Promise<ApiResult<StoryMemoryEvolutionReview>>;
   getStoryMemoryVersions: (data: {
     bookId: EntityId;
     memoryKey: string;
   }) => Promise<ApiResult<StoryMemoryVersionView[]>>;
-  listStoryMemoryEvolutionReviews: (data: {
-    bookId: EntityId;
-    statuses?: Array<'open' | 'resolved' | 'stale'>;
-  }) => Promise<ApiResult<StoryMemoryEvolutionReview[]>>;
   resolveStoryMemoryEvolutionReview: (data: {
     deltaId: string;
     resolutions: Record<string, 'accepted' | 'rejected'>;
@@ -1943,13 +2129,64 @@ export interface ElectronAPI {
   getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string } | null>>;
   saveStoryBackground: (data: { bookId: EntityId; content: string }) => Promise<ApiResult<void>>;
   openAndReadTextFile: () => Promise<ApiResult<string>>;
+  pickNovelSourceTextFile: (options?: { mode?: 'file' | 'folder' }) => Promise<ApiResult<NovelSourcePickedFile>>;
   pickStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
   openStoryBackgroundAttachment: (data: { storedPath: string }) => Promise<string>;
-  // Book style
-  getBookStyle: (data: { bookId: EntityId }) => Promise<ApiResult<BookStyle | null>>;
-  saveBookStyle: (data: SaveBookStylePayload) => Promise<ApiResult<void>>;
+  listWritingMethods: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingMethod[]>>;
+  getWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
+  createWritingMethod: (data: { name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
+  updateWritingMethodDraft: (data: { methodId: string; expectedDraftRevision: number; name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
+  publishWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethodRevision>>;
+  publishWritingMethodBatch: (data: { methodIds: string[]; schemeIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevisions: WritingSchemeRevision[] }>>;
+  copyWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
+  deleteWritingMethod: (data: { methodId: string }) => Promise<ApiResult<void>>;
+  listWritingSchemes: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingScheme[]>>;
+  getWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
+  createWritingScheme: (data: { name: string; description?: string; memberRevisionIds?: string[] }) => Promise<ApiResult<WritingScheme>>;
+  updateWritingSchemeDraft: (data: { schemeId: string; expectedDraftRevision: number; name: string; description?: string; memberRevisionIds: string[] }) => Promise<ApiResult<WritingScheme>>;
+  publishWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingSchemeRevision>>;
+  copyWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
+  deleteWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<void>>;
+  listBookWritingMethodBindings: (data: { bookId: EntityId }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
+  bindBookWritingMethod: (data: { bookId: EntityId; bindingType: 'method' | 'scheme'; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
+  reorderBookWritingMethodBindings: (data: { bookId: EntityId; bindingIds: string[] }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
+  upgradeBookWritingMethodBinding: (data: { bookId: EntityId; bindingId: string; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
+  unbindBookWritingMethod: (data: { bookId: EntityId; bindingId: string }) => Promise<ApiResult<void>>;
+  createWritingMethodCandidates: (data: { analysisId: string }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
+  publishWritingMethodCandidateBatch: (data: { schemeId: string; methodIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevision: WritingSchemeRevision; bindingChanged: false }>>;
+  previewNovelSourceImport: (data: NovelSourcePickedFile) => Promise<ApiResult<NovelSourceImportPreview>>;
+  confirmNovelSourceImport: (data: NovelSourcePickedFile & {
+    title: string;
+    workId?: string;
+    expectedContentDigest: string;
+    confirmSingleSection: boolean;
+    rightsConfirmed: boolean;
+    modelDataBoundaryConfirmed: boolean;
+    sections?: Array<{ title: string; startCharacter: number; endCharacter: number }>;
+  }) => Promise<ApiResult<NovelSourceRevision>>;
+  freezeBookAsNovelSource: (data: { bookId: EntityId }) => Promise<ApiResult<NovelSourceRevision>>;
+  listNovelSources: (data?: { includeArchived?: boolean }) => Promise<ApiResult<NovelSourceWork[]>>;
+  getNovelSource: (data: { workId: string }) => Promise<ApiResult<NovelSourceWork>>;
+  deleteNovelSource: (data: { workId: string }) => Promise<ApiResult<void>>;
+  getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
+  getNovelSourceSection: (data: { revisionId: string; sectionId: string; startCharacter?: number; characterLimit?: number }) => Promise<ApiResult<NovelSourceSection>>;
+  searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<NovelSourceSearchResult[]>>;
+  startNovelAnalysis: (data: { commandId: string; revisionId: string; prompt?: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
+  followUpNovelAnalysis: (data: { commandId: string; revisionId: string; artifactId: string; prompt: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
+  listNovelAnalysisRuns: (data: { revisionId: string }) => Promise<ApiResult<NovelAnalysisRun[]>>;
+  pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisRun>>;
+  resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; taskId: string; commandId: string }>>;
+  cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisRun>>;
+  getNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
+  listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
+  getPublishedNovelAnalysis: (data: { analysisId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
+  previewContinuationCanon: (data: { sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string }) => Promise<ApiResult<ContinuationCanonPreview>>;
+  createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; enableVolume?: boolean; writingMethodBindings?: Array<{ bindingType: 'method' | 'scheme'; revisionId: string }> }) => Promise<ApiResult<ContinuationWorkspace>>;
+  getContinuation: (data: { bookId: string }) => Promise<ApiResult<ContinuationWorkspace>>;
   // Chapter diff history
   commitChapterDiff: (data: {
     chapterId: EntityId;
@@ -1961,7 +2198,6 @@ export interface ElectronAPI {
     rejectedSegments?: number;
   }) => Promise<ApiResult<{ id: number } | null>>;
   listChapterDiff: (data: { chapterId: EntityId; limit?: number }) => Promise<ApiResult<ChapterDiffHistory[]>>;
-  getChapterDiff: (data: { diffId: number }) => Promise<ApiResult<ChapterDiffHistory | null>>;
   rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
   // Setting diff history (character / story background)
   commitCharacterSettingDiff: (data: {
@@ -2094,54 +2330,54 @@ export interface ElectronAPI {
     data: { title?: string; content?: string; sort?: number };
   }) => Promise<ApiResult<AiPromptTemplate>>;
   deletePromptTemplate: (data: { id: number }) => Promise<ApiResult<void>>;
-  reorderPromptTemplates: (data: { ids: number[] }) => Promise<ApiResult<void>>;
   // 本书设定（五层）
   addSparkIdea: (data: { bookId: EntityId; layer: SparkIdeaLayer; content: string; chapterId?: EntityId | null; characterId?: number | null }) => Promise<ApiResult<AiSparkIdea>>;
-  updateSparkIdea: (data: { id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
-  deleteSparkIdea: (data: { id: number | string }) => Promise<ApiResult<void>>;
+  updateSparkIdea: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiSparkIdea, 'content' | 'layer' | 'chapter_id' | 'character_id'>> }) => Promise<ApiResult<AiSparkIdea>>;
+  deleteSparkIdea: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getSparkIdeasByBook: (data: { bookId: EntityId; layer?: SparkIdeaLayer }) => Promise<ApiResult<AiSparkIdea[]>>;
-  getSparkIdeasByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiSparkIdea[]>>;
-  getSparkIdeasForPrompt: (data: {
-    bookId: EntityId;
-    query?: string;
-    options?: { layers?: SparkIdeaLayer[]; chapterId?: EntityId; limitPerLayer?: number; limit?: number };
-  }) => Promise<ApiResult<AiSparkIdea[]>>;
   // 伏笔记忆
   addForeshadowing: (data: { bookId: EntityId; chapterId: EntityId; content: string; type?: string; expectedChapterId?: EntityId | null }) => Promise<ApiResult<AiForeshadowing>>;
-  updateForeshadowing: (data: { id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
-  deleteForeshadowing: (data: { id: number | string }) => Promise<ApiResult<void>>;
+  updateForeshadowing: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
+  deleteForeshadowing: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
-  getForeshadowingByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<AiForeshadowing[]>>;
-  getForeshadowingForPrompt: (data: { bookId: EntityId; query?: string; options?: { limit?: number; status?: '未回收' | '已回收' } }) => Promise<ApiResult<AiForeshadowing[]>>;
   // 长期记忆
   createMemory: (data: {
     bookId: EntityId;
     kind: MemoryKind;
-    content: string;
+    text: string;
+    operationKey: string;
     scopeType?: MemoryScopeType;
     scopeId?: string | null;
     summary?: string;
     keywords?: string;
     importance?: number;
     confidence?: number;
-    status?: MemoryStatus;
+    state?: 'active' | 'pending';
     pinned?: boolean;
-    sourceType?: string;
-    sourceId?: string | null;
-  }) => Promise<ApiResult<MemoryItem>>;
-  updateMemory: (data: { id: number | string; data: Partial<MemoryItem> }) => Promise<ApiResult<MemoryItem>>;
-  archiveMemory: (data: { id: number | string }) => Promise<ApiResult<MemoryItem>>;
-  searchMemories: (data: {
+  }) => Promise<ApiResult<ComponentMemoryRecord>>;
+  updateMemory: (data: {
+    id: string;
     bookId: EntityId;
-    query?: string;
-    options?: {
-      statuses?: MemoryStatus[];
-      kinds?: MemoryKind[];
-      scopeType?: MemoryScopeType;
-      scopeId?: string;
-      limit?: number;
-    };
-  }) => Promise<ApiResult<MemoryItem[]>>;
+    version: number;
+    operationKey: string;
+    text?: string;
+    kind?: MemoryKind;
+    scopeType?: MemoryScopeType;
+    scopeId?: string | null;
+    summary?: string;
+    keywords?: string;
+    importance?: number;
+    confidence?: number;
+    pinned?: boolean;
+  }) => Promise<ApiResult<ComponentMemoryRecord>>;
+  setMemoryState: (data: {
+    id: string;
+    bookId: EntityId;
+    version: number;
+    operationKey: string;
+    state: 'active' | 'pending' | 'disabled';
+    reason: string;
+  }) => Promise<ApiResult<ComponentMemoryRecord>>;
   listUnifiedMemories: (data: {
     bookId: EntityId;
     query?: string;
@@ -2150,16 +2386,47 @@ export interface ElectronAPI {
     sources?: UnifiedMemorySource[];
     limit?: number;
   }) => Promise<ApiResult<UnifiedMemoryPage>>;
-  getMemoriesByIds: (data: { ids: (number | string)[] }) => Promise<ApiResult<MemoryItem[]>>;
   linkMemories: (data: {
     bookId: EntityId;
-    fromMemoryId: number;
-    toMemoryId: number;
+    operationKey: string;
+    fromMemory: { id: string; version: number };
+    toMemory: { id: string; version: number };
     relation: 'supersedes' | 'contradicts' | 'supports' | 'relates_to';
     note?: string;
   }) => Promise<ApiResult<unknown>>;
+  reviewMemory: (data: {
+    id: string;
+    bookId: EntityId;
+    version: number;
+    operationKey: string;
+  }) => Promise<ApiResult<ComponentMemoryOperation>>;
+  resolveMemories: (data: {
+    bookId: EntityId;
+    operationKey: string;
+    kind: ComponentMemoryResolution['kind'];
+    items: ComponentMemoryRef[];
+    keep?: string | null;
+    reviewKey?: string | null;
+  }) => Promise<ApiResult<ComponentMemoryOperation>>;
+  deleteMemory: (data: {
+    id: string;
+    bookId: EntityId;
+    version: number;
+    operationKey: string;
+  }) => Promise<ApiResult<ComponentMemoryOperation>>;
+  getMemoryHistory: (data: {
+    id: string;
+    bookId: EntityId;
+  }) => Promise<ApiResult<Array<Record<string, unknown>>>>;
+  getMemoryLinks: (data: {
+    id: string;
+    bookId: EntityId;
+    limit?: number;
+    after?: string;
+  }) => Promise<ApiResult<ComponentMemoryLinkPage>>;
   buildMemoryContext: (data: {
     bookId: EntityId;
+    operationKey: string;
     userPrompt?: string;
     mode?: string;
     selectedLongTermMemoryIds?: (number | string)[];
@@ -2175,28 +2442,35 @@ export interface ElectronAPI {
     prompt: string;
     apiProvider?: AiApiProvider;
     model?: string;
+    options?: import('./agent-runtime/streamOptions').StreamRequestOptions;
   }) => Promise<ApiResult<string>>;
-  listModels: (data: {
-    apiKey: string;
-    baseURL?: string;
-    apiProvider?: AiApiProvider;
-  }) => Promise<ApiResult<string[]>>;
   getAgentRunSnapshot: (data: {
     runId: string;
     after?: number;
     limit?: number;
   }) => Promise<ApiResult<AiAgentRunSnapshot>>;
-  getAgentRunDiagnostics: (data: {
+  consumeAgentRunEvents: (data: {
     runId: string;
-  }) => Promise<ApiResult<AiAgentRunDiagnostics>>;
-  maintainAgentArtifacts: () => Promise<
-    ApiResult<AiArtifactMaintenanceResult>
-  >;
-  getAgentRunStabilityTrend: (data: {
+    sessionId: number;
+    after?: number;
+    signal: AbortSignal;
+    onEvent: (snapshot: AiAgentRunSnapshot) => void | Promise<void>;
+  }) => Promise<void>;
+  consumeNovelAnalysisEvents: (data: {
+    revisionId: string;
+    signal: AbortSignal;
+    onEvent: (page: NovelAnalysisStreamPage) => void | Promise<void>;
+  }) => Promise<void>;
+  getAgentRunPlannerDiagnostics: (data: {
     runId: string;
-    scope?: "auto" | "session" | "book" | "screenplay_project" | "global";
-    limit?: number;
-  }) => Promise<ApiResult<AiAgentRunStabilityTrendReport>>;
+  }) => Promise<ApiResult<AiAgentRunPlannerDiagnostics>>;
+  getAgentRunModelInputDiagnostics: (data: {
+    runId: string;
+  }) => Promise<ApiResult<AiAgentRunModelInputDiagnostics>>;
+  getAgentRunToolDiagnostics: (data: {
+    runId: string;
+    after?: number;
+  }) => Promise<ApiResult<AiAgentRunToolDiagnostics>>;
   getLatestSessionAgentRun: (data: {
     sessionId: number;
   }) => Promise<ApiResult<{
@@ -2204,26 +2478,6 @@ export interface ElectronAPI {
     prompt: string;
     snapshot: AiAgentRunSnapshot | null;
   } | null>>;
-  captureAiErrorReport: (data: {
-    streamId: string;
-    agentRunId?: string;
-    sessionId?: number;
-    conversationId?: number;
-    bookId?: EntityId | null;
-    chapterId?: EntityId | null;
-    source?: string;
-    errorCode?: string;
-    errorMessage: string;
-    model?: string;
-    diagnostics?: Record<string, unknown>;
-  }) => Promise<ApiResult<AiErrorReport>>;
-  listAiErrorReports: (data?: {
-    status?: AiErrorReportStatus;
-    limit?: number;
-  }) => Promise<ApiResult<AiErrorReport[]>>;
-  getAiErrorReport: (data: {
-    reportId: string;
-  }) => Promise<ApiResult<AiErrorReport>>;
   submitAiErrorReport: (data: {
     reportId: string;
     userNote?: string;
@@ -2256,8 +2510,12 @@ export interface ElectronAPI {
       /** 内置模型 profile id；高级自定义为空并走通用协议适配。 */
       model_profile?: string;
       temperature?: number;
-      max_tokens?: number;
-      thinking?: { type: "disabled" | "enabled" };
+      profile_max_generation_tokens?: number;
+      max_generation_tokens?: number;
+      thinking?: { type: "disabled" | "enabled"; budget_tokens?: number };
+      supports_thinking?: boolean;
+      thinking_only?: boolean;
+      reasoning_effort?: AiReasoningEffort;
       context_window?: AiContextWindow;
     };
     /** 是否允许三层 Writing Agent 暴露当前书籍范围内的工具。 */
@@ -2269,9 +2527,12 @@ export interface ElectronAPI {
     associatedChapterIds?: EntityId[];
     associatedOutlineIds?: EntityId[];
     /** AiContextBar 勾选的设定/伏笔 id，后端前置 fetch 后注入 system */
+    selectedLongTermMemoryIds?: string[];
     selectedMemoryIds?: (number | string)[];
     selectedForeshadowingIds?: (number | string)[];
+    writingMethodOverrides?: WritingMethodOverrides;
     chatAgentMode?: ChatAgentMode;
+    planningMode?: 'reactive' | 'planned';
     contextWindow?: AiContextWindow;
     /** Immutable durable history frontier for request reservation/claim. */
     expectedConversationIds?: number[];
@@ -2281,6 +2542,8 @@ export interface ElectronAPI {
   onAiChunk: (
     callback: (chunk: {
       streamId?: string;
+      /** Local connection failure, not a Run failure or Assistant reply. */
+      transportError?: string;
       /** Raw canonical PurrA output event. Transport adds only streamId. */
       eventId?: string;
       outputStreamId?: string | null;
@@ -2380,16 +2643,20 @@ export interface ElectronAPI {
     }) => void,
     streamId?: string,
   ) => () => void;
-  debugLog: (payload: unknown) => void;
   // 设置
   getSettings: () => Promise<ApiResult<GeneralSettings>>;
   setSettings: (data: Partial<GeneralSettings>) => Promise<ApiResult<void>>;
 }
 
 export interface GeneralSettings {
+  model_descriptors?: Array<Record<string, unknown>>;
   sync_outline_chapter: boolean;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
+  /** PurrA memory extraction/review model. Empty means model-assisted memory is unavailable. */
+  memory_model_id?: string;
+  /** Explicit OpenAI-compatible Embedding endpoint used by the PurrA memory component. */
+  memory_embedding_config?: MemoryEmbeddingConfig | null;
   /** 开启后，AI 接受的改动会尝试用模型提炼待确认的长期记忆候选。 */
   memory_intelligence_enabled?: boolean;
   /** 可选：指定用于记忆提炼的模型配置 id；为空时使用第一个可用模型配置。 */
@@ -2406,13 +2673,33 @@ export interface GeneralSettings {
   story_memory_auto_apply_kinds?: Array<StoryMemoryEvolutionDecision['kind']>;
 }
 
+export interface MemoryEmbeddingConfig {
+  apiProvider: 'openai';
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  dimensions: number;
+}
+
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';
+export type AiReasoningEffort = 'low' | 'high' | 'max';
 
 export type AiBuiltinProviderId = 'zai' | 'deepseek' | 'moonshot' | 'minimax' | 'mimo';
 export type AiApiProvider = 'openai' | 'anthropic' | 'zai';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
+export type ModelSettingChoice<T> = { state: 'inherit' | 'provider_default' } | { state: 'explicit'; value: T };
+
 export interface AiModelConfig {
+  modelSettingsVersion?: 1;
+  modelPreferences?: {
+    reasoning_mode?: ModelSettingChoice<'enabled' | 'disabled'>;
+    reasoning_effort?: ModelSettingChoice<AiReasoningEffort>;
+    temperature?: ModelSettingChoice<number>;
+  };
+  modelPreferenceSources?: Record<string, string>;
+  descriptorDigest?: string;
+  profileBinding?: 'compatible';
   id: string;
   /** 来自内置目录时记录预设 id；旧配置与高级自定义配置不需要该字段。 */
   presetId?: string;
@@ -2432,10 +2719,16 @@ export interface AiModelConfig {
   thinkingOnly: boolean;
   /** 当前模型是否以 thinking 模式请求，可在模型选择器中切换。 */
   thinkingEnabled?: boolean;
+  /** 用户明确选择的思考强度；未设置时保持服务商默认。 */
+  reasoningEffort?: AiReasoningEffort;
   /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
   contextWindow?: AiContextWindow;
-  /** @deprecated Agent 输出预算现由后端按任务解析；仅保留以读取旧配置。 */
-  outputTokenBudget?: number;
+  /** 自定义模型由服务商确认的能力上限；内置模型由版本化 profile 提供。 */
+  profileMaxGenerationTokens?: number;
+  /** 用户明确设置的单次总生成上限；包含服务商计入同一配额的思考 token。 */
+  maxGenerationTokens?: number;
+  /** Anthropic 手动 extended-thinking 的显式预算；不会由应用推断。 */
+  thinkingBudgetTokens?: number;
   /**
    * 为 true 时在设置中展示并采用下方 temperature，请求会携带 temperature。
    * 为 false 时不传 temperature，由大模型接口使用其默认采样行为。

@@ -1,16 +1,16 @@
-"""Application use case for the Writing long-term-memory context endpoint."""
+"""Authorized non-Run memory context for inline writing operations."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from domains.writing.memory_context import (
-    MemoryContextBlock,
-    MemoryContextRequest,
-    WritingMemoryContextBuilder,
+from purra.context_budget import estimate_json_tokens
+
+from application.memory_operations import MemoryApplicationService
+from application.component_memory_context import (
+    assemble_selected_business_sources,
 )
-from infrastructure.persistence.writing import SqliteMemoryRecallRepository
 from schemas.memories import BuildMemoryContextRequest
 
 if TYPE_CHECKING:
@@ -19,30 +19,28 @@ if TYPE_CHECKING:
 
 DEFAULT_MEMORY_BUDGET = 6_000
 _CONTEXT_WINDOWS = {
-    "32k": 32_000,
-    "64k": 64_000,
-    "128k": 128_000,
-    "200k": 200_000,
-    "256k": 256_000,
-    "300k": 300_000,
-    "1m": 1_000_000,
+    "32k": 32_000, "64k": 64_000, "128k": 128_000, "200k": 200_000,
+    "256k": 256_000, "300k": 300_000, "1m": 1_000_000,
 }
 
 
 @dataclass(frozen=True, slots=True)
 class WritingMemoryContextResult:
-    """Application result with an explicit stable HTTP representation."""
-
-    block: MemoryContextBlock
+    text: str
+    included_ids: tuple[str, ...]
+    deferred_ids: tuple[str, ...]
+    missing_ids: tuple[str, ...]
+    token_estimate: int
+    receipt_count: int
 
     def to_response_data(self) -> dict[str, Any]:
         return {
-            "text": self.block.text,
-            "includedIds": list(self.block.included_ids),
-            "deferredIds": list(self.block.deferred_ids),
-            "suppressedIds": list(self.block.suppressed_ids),
-            "tokenEstimate": self.block.token_estimate,
-            "diagnostics": dict(self.block.diagnostics),
+            "text": self.text,
+            "includedIds": list(self.included_ids),
+            "deferredIds": list(self.deferred_ids),
+            "missingIds": list(self.missing_ids),
+            "tokenEstimate": self.token_estimate,
+            "diagnostics": {"receiptCount": self.receipt_count},
         }
 
 
@@ -51,49 +49,65 @@ async def build_writing_memory_context(
     *,
     db: "DatabaseConnection",
 ) -> WritingMemoryContextResult:
-    """Map the transport request and execute the Writing memory use case."""
+    from application.agent_composition import get_agent_composition
 
-    request = _to_domain_request(body)
-    builder = WritingMemoryContextBuilder(SqliteMemoryRecallRepository(db))
-    return WritingMemoryContextResult(await builder.build(request))
+    budget = _memory_budget(body)
+    component = MemoryApplicationService(
+        db, get_agent_composition().memory_resource
+    )
+    from infrastructure.persistence.writing import SqliteWritingSourceRepository
 
-
-def _to_domain_request(body: BuildMemoryContextRequest) -> MemoryContextRequest:
-    return MemoryContextRequest(
+    sources = SqliteWritingSourceRepository(db)
+    semantic = await component.build_context(
         book_id=body.bookId,
-        user_prompt=body.userPrompt,
-        token_budget=_memory_budget(body),
+        operation_key=body.operationKey,
+        query=body.userPrompt,
+        selected_ids=tuple(
+            str(value) for value in (body.selectedLongTermMemoryIds or ())
+        ),
+        token_budget=budget,
         recall_limit=_memory_recall_limit(body),
-        selected_memory_item_ids=tuple(body.selectedLongTermMemoryIds or ()),
-        selected_spark_idea_ids=tuple(body.selectedMemoryIds or ()),
-        selected_foreshadowing_ids=tuple(body.selectedForeshadowingIds or ()),
+    )
+    text, included, deferred = await assemble_selected_business_sources(
+        sources,
+        book_id=body.bookId,
+        selected_spark_ids=body.selectedMemoryIds or (),
+        selected_foreshadowing_ids=body.selectedForeshadowingIds or (),
+        sections=(
+            ("【语义长期记忆】\n" + semantic.block.content,)
+            if semantic.block is not None else ()
+        ),
+        included=semantic.included,
+        deferred=semantic.deferred,
+        token_budget=budget,
+    )
+    return WritingMemoryContextResult(
+        text=text,
+        included_ids=tuple(included),
+        deferred_ids=tuple(deferred),
+        missing_ids=semantic.missing,
+        token_estimate=estimate_json_tokens(text),
+        receipt_count=len(semantic.receipts),
     )
 
 
 def _context_window(value: Any) -> int:
-    key = str(value or "").strip().lower()
-    return _CONTEXT_WINDOWS.get(key, _CONTEXT_WINDOWS["200k"])
+    return _CONTEXT_WINDOWS.get(
+        str(value or "").strip().lower(), _CONTEXT_WINDOWS["200k"]
+    )
 
 
 def _memory_budget(body: BuildMemoryContextRequest) -> int:
     if body.memoryBudget is not None:
         return int(body.memoryBudget)
-    window = _context_window(body.contextWindow)
-    return min(40_000, max(DEFAULT_MEMORY_BUDGET, window // 25))
+    return min(40_000, max(DEFAULT_MEMORY_BUDGET, _context_window(body.contextWindow) // 25))
 
 
 def _memory_recall_limit(body: BuildMemoryContextRequest) -> int:
     if body.memoryRecallLimit:
         return int(body.memoryRecallLimit)
     window = _context_window(body.contextWindow)
-    if window >= 1_000_000:
-        return 64
-    if window >= 300_000:
-        return 32
-    return 16
+    return 64 if window >= 1_000_000 else 32 if window >= 300_000 else 16
 
 
-__all__ = [
-    "WritingMemoryContextResult",
-    "build_writing_memory_context",
-]
+__all__ = ["WritingMemoryContextResult", "build_writing_memory_context"]

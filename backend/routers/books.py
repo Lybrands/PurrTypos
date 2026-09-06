@@ -55,7 +55,17 @@ async def get_book_word_count(bookId: str):
 async def get_books():
     db = get_db()
     rows = await db.fetch_all(
-        "SELECT * FROM books ORDER BY create_time ASC"
+        "SELECT b.*, COALESCE(sw.title, CASE WHEN cb.id IS NOT NULL "
+        "THEN '已删除来源' END) AS continuation_source_title, "
+        "COALESCE(ss.title, CASE WHEN cb.id IS NOT NULL "
+        "THEN '原分叉章节已删除' END) AS continuation_fork_section_title, "
+        "cb.fork_ordinal AS continuation_fork_ordinal, "
+        "cb.source_revision_id AS continuation_source_revision_id, "
+        "cb.canon_snapshot_id AS continuation_canon_snapshot_id "
+        "FROM books AS b LEFT JOIN continuation_bindings AS cb "
+        "ON cb.target_book_id = b.id LEFT JOIN novel_source_works AS sw "
+        "ON sw.id = cb.source_work_id LEFT JOIN novel_source_sections AS ss "
+        "ON ss.id = cb.fork_section_id ORDER BY b.create_time ASC"
     )
     return {"success": True, "data": rows}
 
@@ -84,7 +94,23 @@ async def create_book(body: CreateBookRequest):
 async def delete_book(bookId: str):
     db = get_db()
     attachment_paths: list[str] = []
+    from application.memory_delivery import (
+        MemoryDeliveryService,
+        record_book_deletion,
+    )
+    from application.memory_operations import MemoryApplicationService
+    from application.agent_composition import get_agent_composition
+
     async with db.transaction(cancellation_linearizable=True):
+        book = await db.fetch_one("SELECT id FROM books WHERE id = ?", [bookId])
+        if book is None:
+            return {"success": False, "error": "书籍不存在"}
+        memory_operation_key = await record_book_deletion(db, book_id=bookId)
+        continuation = await db.fetch_one(
+            "SELECT canon_snapshot_id FROM continuation_bindings "
+            "WHERE target_book_id = ?",
+            [bookId],
+        )
         outlines = await db.fetch_all(
             "SELECT id FROM outlines WHERE book_id = ?", [bookId]
         )
@@ -153,8 +179,6 @@ async def delete_book(bookId: str):
 
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
-        await db.execute("DELETE FROM memory_links WHERE book_id = ?", [bookId])
-        await db.execute("DELETE FROM memory_items WHERE book_id = ?", [bookId])
         await db.execute(
             "DELETE FROM story_memory_versions WHERE book_id = ?",
             [bookId],
@@ -195,7 +219,23 @@ async def delete_book(bookId: str):
         await db.execute("DELETE FROM characters WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM story_background WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM story_background_attachments WHERE book_id = ?", [bookId])
-        await db.execute("DELETE FROM book_style WHERE book_id = ?", [bookId])
+        await db.execute(
+            "DELETE FROM book_writing_method_bindings WHERE book_id = ?", [bookId]
+        )
+        if continuation is not None:
+            snapshot_id = str(continuation["canon_snapshot_id"])
+            await db.execute(
+                "DELETE FROM continuation_bindings WHERE target_book_id = ?",
+                [bookId],
+            )
+            await db.execute(
+                "DELETE FROM continuation_canon_records WHERE snapshot_id = ?",
+                [snapshot_id],
+            )
+            await db.execute(
+                "DELETE FROM continuation_canon_snapshots WHERE id = ?",
+                [snapshot_id],
+            )
         await db.execute(
             "DELETE FROM setting_entity_history WHERE entity_id IN "
             "(SELECT id FROM setting_entities WHERE book_id = ?)",
@@ -212,9 +252,18 @@ async def delete_book(bookId: str):
         )
         await db.execute("DELETE FROM books WHERE id = ?", [bookId])
 
+    composition = get_agent_composition()
+    memory_delivery = await MemoryDeliveryService(
+        db,
+        MemoryApplicationService(db, composition.memory_resource),
+    ).deliver_book_deletion(memory_operation_key)
     for stored_path in attachment_paths:
         safe_unlink_stored_file(stored_path, DATA_DIR)
-    return {"success": True, "data": {"attachmentPaths": attachment_paths}}
+    return {
+        "success": True,
+        "data": {"attachmentPaths": attachment_paths},
+        "memoryDelivery": memory_delivery.to_dict(),
+    }
 
 
 @router.put("/books/{bookId}/rename")

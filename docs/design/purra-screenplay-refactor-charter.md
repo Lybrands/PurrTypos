@@ -2,6 +2,8 @@
 
 > 状态：Phase 0–5 已完成。本文定义 2026-08 重构的层级所有权、目标契约、实施顺序和验收门槛。旧的 Agent 完成记录只作为历史材料，发生冲突时以本文为准。
 
+公共对话输入、流式消费与恢复语义补充遵循[三类 Agent 共享对话规范](shared-agent-conversation-contract.md)，领域工作流与交付物仍由本章程规定。
+
 ## 1. 重构目标
 
 本次重构同时解决两个问题：
@@ -23,6 +25,10 @@
 8. 用户消息、Assistant Turn、Run、Operation 和 Revision 的关联都服务端持久化；前端缓存不得成为事实源。
 9. SSE 只是带游标的订阅协议。订阅断开不等于取消，刷新必须能从快照和事件重建相同界面。
 10. 所有命令具有幂等键；同一正式任务最多产生一个 Operation 和一个 Candidate Revision。
+11. 自动装配给 Provider 的上下文只包含执行规则、紧凑清单、稳定标识和当前任务边界；原作正文、交付物正文、候选产物正文和完整分析输入不得作为缓存材料隐式注入。
+12. 模型需要正文时必须显式调用当前 Run 可用的读取工具；工具缓存只能缩短这次调用的执行时间，缓存命中仍产生真实工具结果、Operation 事件和来源收据。
+13. 候选写入、依赖消费和来源证据只认当前 Run 的成功工具事件及其结果，不认历史 Provider 输入收据、缓存存在性或上下文窗口尚有余量。
+14. 上下文窗口与 token budget 只是容量上限，不是材料相关性或注入权限。`readScreenplayDeliverable` 每次只返回 `structured` 或 `text` 一种内容表示，禁止同一正文的双表示复制。
 
 ## 3. 层级所有权
 
@@ -221,12 +227,16 @@ Phase 0–5 删除了旧 Writing Chat 双轨，但第一版 native Conversation 
 - 咨询对话使用简洁的剧作顾问规则，正式 Operation 才注入 Artifact/阶段提交协议；
 - 同一 Session 同时最多一个 queued/running Turn，不再依赖渲染进程的临时发送队列；
 - 失败或取消 Turn 不进入后续模型历史；恢复会清除旧半截回答和旧 Run/Revision 引用，并递增 Turn attempt；
-- Conversation event 只做 Snapshot 失效通知，永不复制 `screenplay.document_proposal` 全文；
-- 页面以 SSE cursor 通知触发 Snapshot 刷新，低频轮询只作为订阅断线的恢复路径。
+- Conversation event 传输持久化的公开 canonical chunks 与业务 `projectionVersion`，永不复制 `screenplay.document_proposal` 全文；
+- 公开文本/过程直接增量重放；只有业务版本变化才合并刷新 Snapshot。共同 SSE 读取器从已消费 cursor 有界重连，健康连接旁不再常驻 HTTP 轮询。详见 [生命周期改造记录](2026-08-31-agent-conversation-transport-lifecycle-refactor-plan.md#9-本轮实现与验收记录)。
 
 此前 native Conversation 表缺少 attempt，且无法安全表达新恢复语义。测试阶段启动时只定向删除这一个不兼容的旧 Conversation/Events 数据集；Project、Operation、Revision、Head、Artifact 与来源数据保持不变。
 
 ## 8. 每阶段验收门槛
+
+公共对话链路的传输、恢复与规划可见性须遵守
+[统一生命周期规范](2026-08-31-agent-conversation-transport-lifecycle-refactor-plan.md#42-规划阶段也必须有真实执行状态)。
+初始规划与动态调整必须由共享装配接入 canonical Operation，不能只在页面补“正在规划”的文本；私有规划结果不作为公开回复。
 
 每个阶段都必须满足：
 

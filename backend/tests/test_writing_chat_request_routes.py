@@ -22,6 +22,7 @@ from tests.support.asgi_sse import (
     request_json,
     start_asgi_request,
 )
+from tests.support.planning_stream import route_planning_stream
 
 
 pytestmark = pytest.mark.asyncio
@@ -60,7 +61,7 @@ def request_body(request_id: str = "chat-route-1") -> dict:
         "sessionId": 7,
         "options": {
             "model": "deepseek-v4-flash",
-            "model_profile": "deepseek:deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
         },
         "enableAgentTools": True,
         "bookId": "book-1",
@@ -272,7 +273,7 @@ async def test_request_id_replay_cannot_change_api_key_credential(receipt_app):
     assert "different-secret" not in stored["request_digest"]
 
 
-async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
+async def test_replan_repairs_completed_step_rewrites_in_one_root(
     receipt_app,
     monkeypatch,
 ):
@@ -326,10 +327,17 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                         "expectedTools": [],
                         "riskLevel": "read",
                     },
+                    {
+                        "id": "review-atmosphere-consistency",
+                        "title": "核对改写与章节环境的一致性",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    },
                 ],
             }
-        else:
-            assert planner_round == 2
+        elif planner_round == 2:
             execution = payload["executionState"]
             assert execution["completedSteps"][0]["id"] == (
                 "inspect-current-chapter"
@@ -338,9 +346,6 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                 execution["recentToolObservations"],
                 ensure_ascii=False,
             )
-            # Approved contract deviation: Core rejects this completed-id
-            # rewrite by retaining immutable history, without surfacing a
-            # planner validation error to the Writing layer.
             content = {
                 "needsTodos": True,
                 "title": "深化弄堂氛围",
@@ -364,7 +369,26 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                     },
                 ],
             }
+        else:
+            assert planner_round == 3
+            assert "reuses completed step ids: inspect-current-chapter" in (
+                messages[-1]["content"]
+            )
+            content = {
+                "needsTodos": True,
+                "title": "深化弄堂氛围",
+                "goal": "根据新证据调整未完成策略",
+                "todos": [{
+                    "id": "shape-wind-sound-atmosphere",
+                    "title": "围绕风声调整弄堂氛围",
+                    "type": "review",
+                    "executor": "model",
+                    "expectedTools": [],
+                    "riskLevel": "read",
+                }],
+            }
         return {
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -411,7 +435,7 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
                 }],
             }
 
-        return {"stream": _stream(), "model": "route-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -419,11 +443,12 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
     body = request_body(request_id)
     body["messages"] = [{"role": "user", "content": "深化弄堂氛围"}]
     body["currentChapterTitle"] = "第一章：弄堂"
+    body["planningMode"] = "planned"
     body.pop("streamId")
     body.pop("requestReceiptVersion")
     frames = [
@@ -434,7 +459,7 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
             provider_options={
                 "model": "deepseek-v4-flash",
                 "baseURL": "https://provider.test/v1/",
-                "max_tokens": 2_048,
+                "max_generation_tokens": 2_048,
             },
             signal=asyncio.Event(),
         )
@@ -448,14 +473,13 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
     observed_runs = await db.fetch_all(
         "SELECT id, status, final_response FROM ai_agent_runs"
     )
-    assert planner_round == 2
+    assert planner_round == 3
     assert len(plans) >= 2
     assert [
         (
             step["id"],
             step["title"],
             step["type"],
-            step["executor"],
             step["status"],
         )
         for step in plans[-1]["steps"]
@@ -464,14 +488,12 @@ async def test_replan_silently_discards_completed_step_rewrites_in_one_root(
             "inspect-current-chapter",
             "检查当前章节",
             "read",
-            "tool",
             "done",
         ),
         (
             "shape-wind-sound-atmosphere",
             "围绕风声调整弄堂氛围",
             "review",
-            "model",
             "running",
         ),
     ]
@@ -516,6 +538,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
     async def _planner(_key, _messages, _options, _provider, signal=None):
         assert signal is not None
         return {
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -529,6 +552,20 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
                         "executor": "tool",
                         "expectedTools": ["editChapterContent"],
                         "riskLevel": "write",
+                    }, {
+                        "id": "summarize-edit-effects",
+                        "title": "说明候选稿中的氛围改动",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    }, {
+                        "id": "review-candidate-status",
+                        "title": "核对候选稿的审阅与应用状态",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
                     }],
                 }, ensure_ascii=False),
             },
@@ -598,7 +635,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
                     }],
                 }
 
-        return {"stream": _stream(), "model": "route-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -606,11 +643,12 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_planner, _runtime),
     )
     body = request_body("chat-candidate-first")
     body["messages"] = [{"role": "user", "content": "深化弄堂氛围"}]
     body["currentChapterTitle"] = "第一章：弄堂"
+    body["planningMode"] = "planned"
     body.pop("streamId")
     body.pop("requestReceiptVersion")
     chunks = [
@@ -621,7 +659,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
             provider_options={
                 "model": "deepseek-v4-flash",
                 "baseURL": "https://provider.test/v1/",
-                "max_tokens": 2_048,
+                "max_generation_tokens": 2_048,
             },
             signal=asyncio.Event(),
         )

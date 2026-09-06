@@ -30,31 +30,63 @@ _ROLES = {
         ],
     },
     "maxItems": 6,
-    "uniqueItems": True,
 }
 
 
 SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "readScreenplayTaskDependencies": _object({
+        "partKeys": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+            },
+            "minItems": 1,
+            "maxItems": 12,
+            "uniqueItems": True,
+            "description": "当前任务中已完成的 Part key，不得重复。省略 partKeys 可列出可读 Part。",
+        },
+        "cursor": _CURSOR,
+        "limit": _LIMIT,
+    }),
     "inspectScreenplayProject": _object({}),
     "readScreenplayDeliverable": _object({
         "role": _ROLES["items"],
+        "sectionKeys": {
+            "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 120},
+            "description": "只读取这些结构化顶层章节，键名来自文档目录；省略读取完整文档。不可与 text 表示同时使用。",
+        },
         "revisionId": {
             "type": "string",
             "minLength": 1,
             "maxLength": 120,
             "description": (
-                "同一项目、同一 role 的 revisionId；省略时读取当前已接受版本。"
+                "同一项目、同一 role 的 revisionId；省略时优先使用任务参考版本，否则读取已接受版本。"
             ),
         },
-        "episodeNumber": {"type": "integer", "minimum": 1},
+        "episodeNumber": {
+            "type": "integer", "minimum": 1,
+            "description": "按集读取；省略时读取文档，分集存储的交付物返回集数目录。",
+        },
+        "representation": {
+            "type": "string",
+            "enum": ["structured", "text", "section_index"],
+            "description": (
+                "只返回一种内容表示。structured 返回结构化内容，text 返回渲染文本，section_index 返回顶层章节目录及长度；"
+                "省略时优先返回非空结构化内容，否则返回文本。"
+            ),
+        },
     }, ("role",)),
     "searchScreenplayDeliverables": _object({
         "query": {"type": "string", "minLength": 1, "maxLength": 500},
         "roles": _ROLES,
         "limit": _LIMIT,
+        "includeHistory": {"type": "boolean", "description": "同时检索项目内其他已有版本。"},
     }, ("query",)),
     "getScreenplayEpisodeContext": _object({
-        "episodeNumber": {"type": "integer", "minimum": 1},
+        "episodeNumber": {"type": "integer", "minimum": 1, "description": "要读取的集数；省略时使用当前任务集数。"},
         "draftRevisionId": {
             "type": "string",
             "minLength": 1,
@@ -63,7 +95,16 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "screenplayDraft 的 revisionId，不接受其他交付物版本 ID。"
             ),
         },
-    }, ("episodeNumber",)),
+        "sceneListRevisionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "description": (
+                "同一项目的 sceneList revisionId；省略时优先使用任务参考版本。"
+            ),
+        },
+    }),
+    "getScreenplaySceneContext": _object({}),
     "inspectSourceStructure": _object({"cursor": _CURSOR, "limit": _LIMIT}),
     "readSourceChapters": _object({
         "chapterIds": {
@@ -73,13 +114,12 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "minLength": 1,
                 "maxLength": 120,
                 "description": (
-                    "只能使用 inspectSourceStructure.chapterId 或 "
-                    "readSourceOutline.chapterId，不能使用 outlineId。"
+                    "当前授权范围内的 chapterId，可来自任务绑定、"
+                    "inspectSourceStructure 或 readSourceOutline 的章节标识。"
                 ),
             },
             "minItems": 1,
             "maxItems": 12,
-            "uniqueItems": True,
         },
     }, ("chapterIds",)),
     "searchSourceText": _object({
@@ -101,7 +141,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "minItems": 1,
             "maxItems": 20,
-            "uniqueItems": True,
         },
     }, ("characterIds",)),
     "listSourceWorldEntities": _object({
@@ -112,7 +151,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 "enum": ["location", "faction", "item", "other"],
             },
             "maxItems": 4,
-            "uniqueItems": True,
         },
         "query": {"type": "string", "maxLength": 200},
         "cursor": _CURSOR,
@@ -128,7 +166,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
             "minItems": 1,
             "maxItems": 20,
-            "uniqueItems": True,
         },
     }, ("entityIds",)),
     "readSourceBackground": _object({}),
@@ -147,7 +184,6 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 ],
             },
             "maxItems": 5,
-            "uniqueItems": True,
         },
         "limit": _LIMIT,
     }, ("query",)),
@@ -163,12 +199,10 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                 ),
             },
             "maxItems": 12,
-            "uniqueItems": True,
         },
         "cursor": _CURSOR,
         "limit": _LIMIT,
     }),
-    "readSourceStyle": _object({}),
     "writeScreenplayCandidatePart": _object({
         "candidate": {"type": "object"},
     }, ("candidate",)),
@@ -177,10 +211,21 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 SCREENPLAY_TOOL_DESCRIPTIONS = {
+    "readScreenplayTaskDependencies": (
+        "按 Part key 读取当前任务中已完成的产物；省略 partKeys 可分页列出可读 Part。"
+        "每次最多读取 12 项。"
+    ),
     "inspectScreenplayProject": "查看当前剧本项目、阶段和已有交付物的紧凑清单。",
-    "readScreenplayDeliverable": "读取当前项目内一个已接受或指定版本的交付物。revisionId 必须属于所选 role。",
-    "searchScreenplayDeliverables": "只在当前项目各交付物的已接受版本中检索相关内容，避免旧版本污染上下文。",
+    "readScreenplayDeliverable": (
+        "按需读取当前项目内一个已接受或指定版本的交付物。revisionId 必须属于"
+        "所选 role；每次只返回 structured 或 text 一种内容表示。"
+    ),
+    "searchScreenplayDeliverables": "检索当前项目交付物。默认检索已接受版本，includeHistory=true 时包含其他已有版本；结果标明版本是否已接受。",
     "getScreenplayEpisodeContext": "读取指定集的场景计划、前集连续性与当前草稿。",
+    "getScreenplaySceneContext": (
+        "读取当前场景已绑定的场景计划、本集分集结构、精确前场依赖、原作分析目录与创作简报；"
+        "场景、集数、版本和 Part key 均由宿主锁定。"
+    ),
     "inspectSourceStructure": "分页查看当前许可改编范围内的原作卷章结构，并返回可读取正文的 chapterId。",
     "readSourceChapters": "按 chapterId 读取当前许可范围内的原文章节；chapterIds 不接受 outlineId。",
     "searchSourceText": "在当前许可改编范围内检索原文并返回短摘录。",
@@ -191,7 +236,6 @@ SCREENPLAY_TOOL_DESCRIPTIONS = {
     "readSourceBackground": "读取来源作品的故事背景。",
     "querySourceStoryFacts": "检索带章节证据的当前故事事实、事件和伏笔线索。",
     "readSourceOutline": "分页或按 outlineId 读取原作大纲；有对应正文时另行返回可供 readSourceChapters 使用的 chapterId。",
-    "readSourceStyle": "读取来源作品的写作风格约束。",
     "writeScreenplayCandidatePart": "写入本次 Run 唯一且有界的剧本候选部件。",
     "inspectScreenplayCandidate": "检查本次 Run 已写入候选部件的状态和摘要。",
 }

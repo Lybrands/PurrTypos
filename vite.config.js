@@ -20,10 +20,7 @@ export default defineConfig({
           if (!n.includes('node_modules')) return
           if (n.includes('@lexical') || n.includes('lexical/')) return 'lexical'
           if (n.includes('@tiptap')) return 'tiptap'
-          if (n.includes('simple-mind-map')) return 'mindmap'
           if (n.includes('react-markdown') || n.includes('remark-') || n.includes('rehype-') || n.includes('marked')) return 'markdown'
-          if (n.includes('openai')) return 'openai'
-          if (n.includes('sql.js')) return 'sql'
           if (n.includes('turndown')) return 'turndown'
           if (n.includes('adm-zip')) return 'misc'
           return 'react-vendor'
@@ -32,7 +29,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 5174,
     strictPort: true,
   },
 })

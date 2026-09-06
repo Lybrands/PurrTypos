@@ -112,7 +112,6 @@ export default function CommandPalette({
   if (!open) return null
 
   // 按分类分组显示
-  const grouped = React.Children.toArray([]) as React.ReactNode[]
   const groups = new Map<string, { start: number; items: CommandItem[] }>()
   filtered.forEach((cmd, i) => {
     const cat = cmd.category || '常用'

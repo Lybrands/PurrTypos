@@ -3,11 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const path = require('node:path')
-const {
-  registerDatabaseIpcHandlers,
-  removeDatabaseSidecars,
-  samePath,
-} = require('./database_ipc')
+const { registerDatabaseIpcHandlers } = require('./database_ipc')
 
 function register(overrides = {}) {
   const handlers = new Map()
@@ -34,43 +30,42 @@ function register(overrides = {}) {
   return { backendProcess, handlers }
 }
 
-test('removeDatabaseSidecars removes WAL and shared-memory files', () => {
-  const removed = []
-  removeDatabaseSidecars('book.db', {
-    rmSync: (filePath, options) => removed.push([filePath, options]),
-  })
-
-  assert.deepEqual(removed, [
-    ['book.db-wal', { force: true }],
-    ['book.db-shm', { force: true }],
-  ])
-})
-
-test('samePath compares normalized paths case-insensitively', () => {
-  assert.equal(samePath('C:\\DATA\\book.db', 'c:\\data\\book.db'), true)
-  assert.equal(samePath('C:\\data\\one.db', 'C:\\data\\two.db'), false)
-})
-
-test('import rejects the active database without stopping the backend', async () => {
+test('import sends the complete archive through the backend validator before restart', async () => {
   let stopCalls = 0
+  let startCalls = 0
+  const requests = []
   const fsImpl = {
     existsSync: () => true,
+    readFileSync: () => Buffer.from('full-backup'),
   }
   const { handlers } = register({
     dialog: {
       showOpenDialog: async () => ({
         canceled: false,
-        filePaths: [path.resolve('/data/purrtypos.db')],
+        filePaths: [path.resolve('/data/project.purrbackup')],
       }),
       showSaveDialog: async () => ({ canceled: true }),
     },
-    app: { getPath: () => path.resolve('/data') },
     fsImpl,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options })
+      return {
+        ok: true,
+        json: async () => ({
+          success: true,
+          data: {
+            beforeStats: { books: 1 },
+            afterStats: { books: 2 },
+            restartRequired: true,
+          },
+        }),
+      }
+    },
     backendProcess: {
       backendUrl: 'http://backend.test',
       fetchDatabaseInfo: async () => ({ success: true, data: {} }),
       isRunning: () => true,
-      start() {},
+      start: () => { startCalls += 1 },
       stop: async () => { stopCalls += 1 },
       async waitUntilReady() {},
     },
@@ -78,11 +73,12 @@ test('import rejects the active database without stopping the backend', async ()
 
   const result = await handlers.get('import-database')()
 
-  assert.deepEqual(result, {
-    success: false,
-    error: '不能导入当前正在使用的数据库文件',
-  })
-  assert.equal(stopCalls, 0)
+  assert.equal(result.success, true)
+  assert.equal(requests.length, 1)
+  assert.match(requests[0].url, /project\.purrbackup$/)
+  assert.equal(requests[0].options.body.toString(), 'full-backup')
+  assert.equal(stopCalls, 1)
+  assert.equal(startCalls, 1)
 })
 
 test('open database directory uses the backend-reported path', async () => {

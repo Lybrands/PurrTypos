@@ -5,6 +5,7 @@ import type {
   AiSubAgentActivity,
 } from "../../../agent-runtime/contracts";
 import Markdown from "../../Markdown";
+import { ExecutionLogStepGroup } from "../ExecutionLog";
 import ToolCallStatus from "../ToolCallStatus";
 import { buildAssistantTimeline } from "../AssistantOutput/timeline";
 import {
@@ -68,6 +69,24 @@ export default function DelegationStatus({
             rawTimeline,
             `delegation-${item.delegationId}`,
           );
+          const renderToolPart = (
+            part: Extract<(typeof rawTimeline)[number], { type: "tools" }>,
+            key: React.Key,
+          ) => (
+            <ToolCallStatus
+              key={key}
+              labels={part.segment.labels}
+              labelOutcomes={part.segment.labelOutcomes}
+              cachedFlags={part.segment.cachedFlags}
+              completedToolCount={part.isLive
+                ? part.segment.completedToolCount ?? 0
+                : part.segment.labels.length}
+              itemDurationsMs={part.segment.itemDurationsMs}
+              activeItemStartedAt={part.isLive
+                ? part.segment.activeItemStartedAt
+                : undefined}
+            />
+          );
           return (
             <div
               className={`work-log__subagent work-log__subagent--${item.status}`}
@@ -97,20 +116,58 @@ export default function DelegationStatus({
                 )}
                 {timeline.map((part, partIndex) => {
                   if (part.type === "tools") {
+                    return renderToolPart(
+                      part,
+                      `${item.delegationId}-tools-${part.segmentIndex}`,
+                    );
+                  }
+                  if (part.type === "stepGroup") {
+                    const toolParts = part.parts.filter(
+                      (candidate) => candidate.type === "tools",
+                    );
+                    const activeGroup = toolParts.some((candidate) => candidate.isLive);
+                    const completedDurationMs = toolParts.reduce(
+                      (total, candidate) => total + (
+                        candidate.segment.itemDurationsMs?.reduce<number>(
+                          (subtotal, duration) => subtotal + Math.max(0, duration ?? 0),
+                          0,
+                        ) ?? (candidate.isLive ? 0 : candidate.segment.durationMs ?? 0)
+                      ),
+                      0,
+                    );
                     return (
-                      <ToolCallStatus
-                        key={`${item.delegationId}-tools-${part.segmentIndex}`}
-                        labels={part.segment.labels}
-                        labelOutcomes={part.segment.labelOutcomes}
-                        cachedFlags={part.segment.cachedFlags}
-                        completedToolCount={part.isLive
-                          ? part.segment.completedToolCount ?? 0
-                          : part.segment.labels.length}
-                        itemDurationsMs={part.segment.itemDurationsMs}
-                        activeItemStartedAt={part.isLive
-                          ? part.segment.activeItemStartedAt
-                          : undefined}
-                      />
+                      <ExecutionLogStepGroup
+                        key={part.groupKey}
+                        groupKey={part.groupKey}
+                        stepCount={toolParts.reduce(
+                          (total, candidate) => total + candidate.segment.labels.filter(
+                            (_label, labelIndex) =>
+                              !candidate.segment.cachedFlags?.[labelIndex],
+                          ).length,
+                          0,
+                        )}
+                        completedDurationMs={completedDurationMs}
+                        activeStartedAt={toolParts
+                          .filter((candidate) => candidate.isLive)
+                          .map((candidate) =>
+                            candidate.segment.activeItemStartedAt
+                              ?? candidate.segment.startedAt
+                          )
+                          .find((startedAt) => startedAt != null)}
+                        active={activeGroup}
+                        hasError={toolParts.some((candidate) =>
+                          candidate.segment.labelOutcomes?.some(
+                            (outcome, labelIndex) =>
+                              outcome === "context_error"
+                              && !candidate.segment.cachedFlags?.[labelIndex],
+                          )
+                        )}
+                      >
+                        {toolParts.map((candidate) => renderToolPart(
+                          candidate,
+                          `${part.groupKey}-tools-${candidate.segmentIndex}`,
+                        ))}
+                      </ExecutionLogStepGroup>
                     );
                   }
                   if (part.type === "commentary" || part.type === "text") {

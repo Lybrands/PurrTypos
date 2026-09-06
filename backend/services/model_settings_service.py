@@ -6,6 +6,8 @@ import json
 from typing import Any, Sequence
 
 
+
+
 async def get_setting_value(db: Any, key: str) -> Any:
     row = await db.fetch_one("SELECT value FROM settings WHERE key = ?", [key])
     if not row:

@@ -1,13 +1,15 @@
 import React from 'react'
 import { ArrowLeftIcon, CheckIcon, CopyIcon, DeleteIcon, EditIcon, ExportIcon, ImportIcon, PlusIcon } from '@/purr-components'
-import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrModal, PurrRadio, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
-import type { AiModelConfig } from '../types'
+import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrInputNumber, PurrModal, PurrRadio, PurrSelect, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
+import type { AiModelConfig, MemoryEmbeddingConfig } from '../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
+  AI_REASONING_EFFORT_LABELS,
   getBuiltinProvider,
-  getModelMaxOutputTokens,
+  getModelProfileMaxGenerationTokens,
   getModelPreset,
   getModelContextWindowOptions,
+  getModelReasoningEffortOptions,
   normalizeApiProvider,
 } from '../modelCatalog'
 import { useAppFeedback } from '../hooks/useAppFeedback'
@@ -31,6 +33,12 @@ const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
 interface SettingsPageProps {
   modelConfigs: AiModelConfig[]
   onSaveModelConfigs: (configs: AiModelConfig[]) => void
+  memoryModelId: string
+  memoryEmbeddingConfig: MemoryEmbeddingConfig | null
+  onSaveMemoryConfiguration: (
+    modelId: string,
+    embedding: MemoryEmbeddingConfig | null,
+  ) => void
   onClose: () => void
   syncOutlineChapter: boolean
   onSyncOutlineChapterChange: (value: boolean) => void
@@ -39,6 +47,9 @@ interface SettingsPageProps {
 export default function SettingsPage({
   modelConfigs,
   onSaveModelConfigs,
+  memoryModelId,
+  memoryEmbeddingConfig,
+  onSaveMemoryConfiguration,
   onClose,
   syncOutlineChapter,
   onSyncOutlineChapterChange,
@@ -48,7 +59,17 @@ export default function SettingsPage({
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
-  const [form] = PurrForm.useForm<Omit<AiModelConfig, 'id'>>()
+  const [memoryModelDraft, setMemoryModelDraft] = React.useState(memoryModelId)
+  const [memoryEmbeddingDraft, setMemoryEmbeddingDraft] = React.useState<MemoryEmbeddingConfig>(
+    memoryEmbeddingConfig ?? {
+      apiProvider: 'openai',
+      model: '',
+      apiKey: '',
+      baseUrl: '',
+      dimensions: 1536,
+    },
+  )
+  const [form] = PurrForm.useForm<Omit<AiModelConfig, 'id' | 'reasoningEffort'> & { reasoningEffort?: AiModelConfig['reasoningEffort'] | 'inherit' }>()
   const apiProviderWatch = PurrForm.useWatch('apiProvider', form)
   const thinkingEnabledWatch = PurrForm.useWatch('thinkingEnabled', form)
   const customizeTemperatureWatch = PurrForm.useWatch('customizeTemperature', form)
@@ -57,13 +78,24 @@ export default function SettingsPage({
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
   const displayName = (c: AiModelConfig) => (c.nickname?.trim() || c.name) || '未命名'
   const displayModelOutputCapability = (c: AiModelConfig) => {
-    const maximum = getModelMaxOutputTokens(c)
+    const maximum = getModelProfileMaxGenerationTokens(c)
     return maximum ? `${Math.round(maximum / 1024)}K` : '未登记'
   }
 
   React.useEffect(() => {
     setModelConfigList(modelConfigs)
   }, [modelConfigs])
+
+  React.useEffect(() => {
+    setMemoryModelDraft(memoryModelId)
+    setMemoryEmbeddingDraft(memoryEmbeddingConfig ?? {
+      apiProvider: 'openai',
+      model: '',
+      apiKey: '',
+      baseUrl: '',
+      dimensions: 1536,
+    })
+  }, [memoryEmbeddingConfig, memoryModelId])
 
   /** 开启自定义 Temperature 且启用 Thinking 时，若尚未有思考温度则补默认值 */
   React.useEffect(() => {
@@ -103,10 +135,14 @@ export default function SettingsPage({
       apiProvider: config.apiProvider ?? 'openai',
       name: config.name,
       nickname: config.nickname ?? '',
-      supportsThinking: config.thinkingEnabled ?? config.thinkingOnly ?? false,
+      supportsThinking: config.supportsThinking,
       thinkingOnly: config.thinkingOnly,
-      thinkingEnabled: config.thinkingEnabled ?? config.thinkingOnly ?? false,
+      thinkingEnabled: config.thinkingEnabled,
+      reasoningEffort: config.modelPreferences?.reasoning_effort?.state === 'inherit' ? 'inherit' : config.reasoningEffort,
+      thinkingBudgetTokens: config.thinkingBudgetTokens,
       contextWindow: config.contextWindow ?? '128k',
+      profileMaxGenerationTokens: config.profileMaxGenerationTokens,
+      maxGenerationTokens: config.maxGenerationTokens,
       customizeTemperature: config.customizeTemperature ?? true,
       temperatureThinking: config.temperatureThinking ?? 0.6,
       temperatureNonThinking: config.temperatureNonThinking ?? 0.6,
@@ -124,15 +160,37 @@ export default function SettingsPage({
       const nickname = (values.nickname ?? '').trim()
       const apiKey = (values.apiKey ?? '').trim()
       const baseUrl = (editingPresetProvider?.baseUrl ?? values.baseUrl ?? '').trim()
-      const thinkingEnabled = editingPreset?.thinkingOnly ? true : !!values.thinkingEnabled
+      const thinkingEnabled = values.thinkingEnabled === undefined
+        ? editingConfig?.thinkingEnabled
+        : values.thinkingEnabled === true
+      const reasoningEffortOptions = editingPreset?.reasoningEffortOptions ?? []
+      const requestedReasoningEffort = values.reasoningEffort
+      if (requestedReasoningEffort && requestedReasoningEffort !== 'inherit' && !reasoningEffortOptions.includes(requestedReasoningEffort)) {
+        message.warning('该模型不支持所选思考强度，请重新选择')
+        return
+      }
+      const reasoningEffort = requestedReasoningEffort === 'inherit' ? undefined : requestedReasoningEffort
+      if (thinkingEnabled === false && reasoningEffort) {
+        message.warning('普通模式不能同时指定思考强度')
+        return
+      }
+      const thinkingBudgetTokens = values.thinkingBudgetTokens == null
+        ? undefined
+        : Number(values.thinkingBudgetTokens)
       const contextWindow = values.contextWindow ?? '128k'
+      const profileMaxGenerationTokens = values.profileMaxGenerationTokens == null
+        ? undefined
+        : Number(values.profileMaxGenerationTokens)
+      const maxGenerationTokens = values.maxGenerationTokens == null
+        ? undefined
+        : Number(values.maxGenerationTokens)
       const customizeTemperature = !!values.customizeTemperature
       let temperatureNonThinking = editingConfig?.temperatureNonThinking ?? 0.6
       let temperatureThinking = editingConfig?.temperatureThinking ?? 0.6
       if (customizeTemperature) {
         temperatureNonThinking =
           values.temperatureNonThinking != null ? Number(values.temperatureNonThinking) : 0.6
-        temperatureThinking = thinkingEnabled
+        temperatureThinking = thinkingEnabled === true
           ? (values.temperatureThinking != null ? Number(values.temperatureThinking) : 0.6)
           : (editingConfig?.temperatureThinking ?? 0.6)
       } else {
@@ -153,6 +211,48 @@ export default function SettingsPage({
         message.warning('请填写接口地址')
         return
       }
+      if (
+        !editingPreset
+        && (
+          !Number.isInteger(profileMaxGenerationTokens)
+          || profileMaxGenerationTokens! <= 0
+        )
+      ) {
+        message.warning('请填写服务商确认的模型能力上限')
+        return
+      }
+      if (
+        maxGenerationTokens != null
+        && (!Number.isInteger(maxGenerationTokens) || maxGenerationTokens <= 0)
+      ) {
+        message.warning('用户单次生成上限必须是正整数')
+        return
+      }
+      const registeredProfileLimit = editingPreset?.maxGenerationTokens
+        ?? profileMaxGenerationTokens
+      if (
+        registeredProfileLimit
+        && maxGenerationTokens
+        && maxGenerationTokens > registeredProfileLimit
+      ) {
+        message.warning('用户单次生成上限不能超过模型能力上限')
+        return
+      }
+      if (
+        prov === 'anthropic'
+        && thinkingEnabled === true
+        && (
+          !Number.isInteger(thinkingBudgetTokens)
+          || thinkingBudgetTokens! < 1_024
+          || (
+            registeredProfileLimit != null
+            && thinkingBudgetTokens! >= (maxGenerationTokens ?? registeredProfileLimit)
+          )
+        )
+      ) {
+        message.warning('Anthropic 思考预算必须至少为 1024，且小于单次总生成上限')
+        return
+      }
       if (editingConfig) {
         const next = modelConfigList.map((c) => {
           if (editingPreset && c.providerId === editingPreset.providerId && c.id !== editingConfig.id) {
@@ -165,10 +265,27 @@ export default function SettingsPage({
                 name,
                 nickname: nickname || undefined,
                 supportsThinking: editingPreset?.supportsThinking
-                  ?? (thinkingEnabled || editingConfig.supportsThinking),
+                  ?? editingConfig.supportsThinking,
                 thinkingOnly: editingPreset?.thinkingOnly ?? editingConfig.thinkingOnly,
                 thinkingEnabled,
+                reasoningEffort,
+                modelSettingsVersion: 1 as const,
+                modelPreferences: {
+                  reasoning_mode: thinkingEnabled === undefined
+                    ? editingConfig.modelPreferences?.reasoning_mode ?? { state: 'provider_default' as const }
+                    : { state: 'explicit' as const, value: thinkingEnabled ? 'enabled' as const : 'disabled' as const },
+                  reasoning_effort: requestedReasoningEffort === 'inherit' ? { state: 'inherit' as const }
+                    : reasoningEffort ? { state: 'explicit' as const, value: reasoningEffort } : { state: 'provider_default' as const },
+                  temperature: customizeTemperature && thinkingEnabled !== undefined
+                    ? { state: 'explicit' as const, value: thinkingEnabled ? temperatureThinking : temperatureNonThinking }
+                    : { state: 'provider_default' as const },
+                },
+                thinkingBudgetTokens,
                 contextWindow,
+                profileMaxGenerationTokens: editingPreset
+                  ? undefined
+                  : profileMaxGenerationTokens,
+                maxGenerationTokens,
                 customizeTemperature,
                 temperatureThinking,
                 temperatureNonThinking,
@@ -182,14 +299,19 @@ export default function SettingsPage({
         message.success('已更新')
       } else {
         const newConfig: AiModelConfig = {
+          modelSettingsVersion: 1,
+          modelPreferences: { reasoning_effort: { state: 'inherit' } },
           id: `model_${shortUuid()}`,
           apiProvider: prov,
           name,
           nickname: nickname || undefined,
-          supportsThinking: thinkingEnabled,
+          supportsThinking: thinkingEnabled === true,
           thinkingOnly: false,
           thinkingEnabled,
+          thinkingBudgetTokens,
           contextWindow,
+          profileMaxGenerationTokens,
+          maxGenerationTokens,
           customizeTemperature,
           temperatureThinking,
           temperatureNonThinking,
@@ -227,6 +349,38 @@ export default function SettingsPage({
     setModelConfigList(next)
     onSaveModelConfigs(next)
     message.success('已复制配置')
+  }
+
+  const handleSaveMemoryConfiguration = () => {
+    const embedding = {
+      ...memoryEmbeddingDraft,
+      model: memoryEmbeddingDraft.model.trim(),
+      apiKey: memoryEmbeddingDraft.apiKey.trim(),
+      baseUrl: memoryEmbeddingDraft.baseUrl.trim(),
+    }
+    if (!embedding.model || !embedding.apiKey || !embedding.baseUrl) {
+      message.warning('请完整填写 Embedding 模型、API Key 和接口地址')
+      return
+    }
+    if (!Number.isInteger(embedding.dimensions) || embedding.dimensions < 1 || embedding.dimensions > 65536) {
+      message.warning('Embedding 维度必须是 1～65536 的整数')
+      return
+    }
+    onSaveMemoryConfiguration(memoryModelDraft, embedding)
+    message.success('记忆模型配置已保存，重启后生效')
+  }
+
+  const handleClearMemoryConfiguration = () => {
+    setMemoryModelDraft('')
+    setMemoryEmbeddingDraft({
+      apiProvider: 'openai',
+      model: '',
+      apiKey: '',
+      baseUrl: '',
+      dimensions: 1536,
+    })
+    onSaveMemoryConfiguration('', null)
+    message.success('记忆模型配置已清除，重启后生效')
   }
 
   const {
@@ -315,8 +469,17 @@ export default function SettingsPage({
                             模型输出上限 {displayModelOutputCapability(c)}
                           </span>
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
-                            {(c.thinkingEnabled ?? c.thinkingOnly ?? false) ? 'Thinking' : 'Non-thinking'}
+                            {c.thinkingEnabled === undefined
+                              ? 'Thinking: Provider default'
+                              : c.thinkingEnabled ? 'Thinking' : 'Non-thinking'}
                           </span>
+                          {c.thinkingEnabled !== false && getModelReasoningEffortOptions(c).length > 0 ? (
+                            <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
+                              思考强度 {c.reasoningEffort
+                                ? AI_REASONING_EFFORT_LABELS[c.reasoningEffort]
+                                : 'Provider default'}
+                            </span>
+                          ) : null}
                           <span style={{ marginLeft: 8, color: 'var(--text-secondary, #666)', fontSize: 12 }}>
                             {builtinProvider?.name ?? (c.apiProvider === 'anthropic' ? 'Anthropic 兼容' : 'OpenAI 兼容')}
                           </span>
@@ -409,6 +572,18 @@ export default function SettingsPage({
                           ))}
                         </PurrRadio.Group>
                       </PurrForm.Item>
+                      <PurrForm.Item
+                        name="maxGenerationTokens"
+                        label="单次总生成上限（含思考）"
+                        extra="选填；未设置时使用系统登记的模型能力上限。它不是正文长度目标。"
+                        rules={[{
+                          type: 'number', min: 1,
+                          max: getModelPreset(editingConfig?.presetId)?.maxGenerationTokens,
+                          message: '必须是模型能力范围内的正整数',
+                        }]}
+                      >
+                        <PurrInputNumber min={1} className="settings-input-full" />
+                      </PurrForm.Item>
                       <PurrForm.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
                         <PurrInput.Password
                           placeholder={getBuiltinProvider(editingConfig?.providerId)?.keyPlaceholder ?? 'sk-xxxxxxxxxxxxxxxx'}
@@ -448,13 +623,61 @@ export default function SettingsPage({
                     </PurrRadio.Group>
                   </PurrForm.Item>
                   <PurrForm.Item
+                    name="profileMaxGenerationTokens"
+                    label="模型能力上限（含思考）"
+                    extra="必须填写服务商确认的真实能力上限；它描述模型能力，不会作为本次正文长度目标。"
+                    rules={[
+                      { required: true, message: '请填写模型能力上限' },
+                      { type: 'number', min: 1, message: '必须是正整数' },
+                    ]}
+                  >
+                    <PurrInputNumber min={1} className="settings-input-full" />
+                  </PurrForm.Item>
+                  <PurrForm.Item
+                    name="maxGenerationTokens"
+                    label="用户单次生成上限（含思考）"
+                    extra="选填；未设置时使用上方模型能力上限。该上限包含思考和正文生成，不是正文长度目标。"
+                    rules={[{ type: 'number', min: 1, message: '必须是正整数' }]}
+                  >
+                    <PurrInputNumber min={1} className="settings-input-full" />
+                  </PurrForm.Item>
+                  <PurrForm.Item
                     name="thinkingEnabled"
                     valuePropName="checked"
                     label="Thinking"
-                    extra={editingConfig?.thinkingOnly ? '该模型使用思考模式，服务端不支持关闭。' : undefined}
+                    extra={editingConfig?.thinkingOnly ? '该模型服务端不支持关闭；不兼容的配置会明确报错，不会被自动改写。' : undefined}
                   >
-                    <PurrSwitch size='small' disabled={editingConfig?.thinkingOnly} />
+                    <PurrSwitch size='small' />
                   </PurrForm.Item>
+                  {apiProviderWatch === 'anthropic' && thinkingEnabledWatch === true ? (
+                    <PurrForm.Item
+                      name="thinkingBudgetTokens"
+                      label="Anthropic 思考预算"
+                      extra="开启思考时必填；该预算计入单次总生成上限。"
+                      rules={[
+                        { required: true, message: '请填写 Anthropic 思考预算' },
+                        { type: 'number', min: 1_024, message: '至少为 1024' },
+                      ]}
+                    >
+                      <PurrInputNumber min={1_024} className="settings-input-full" />
+                    </PurrForm.Item>
+                  ) : null}
+                  {getModelReasoningEffortOptions(editingConfig).length > 0 ? (
+                    <PurrForm.Item
+                      name="reasoningEffort"
+                      label="思考强度"
+                      extra="选择本模型支持的思考强度；未选择时使用服务商默认值。"
+                    >
+                      <PurrSelect
+                        allowClear
+                        placeholder="服务商默认"
+                        options={[{ value: 'inherit', label: '继承任务默认' }, ...getModelReasoningEffortOptions(editingConfig).map((value) => ({
+                          value,
+                          label: AI_REASONING_EFFORT_LABELS[value],
+                        }))]}
+                      />
+                    </PurrForm.Item>
+                  ) : null}
                   <PurrForm.Item name="customizeTemperature" valuePropName="checked" label="自定义 Temperature">
                     <PurrSwitch size='small' />
                   </PurrForm.Item>
@@ -519,6 +742,68 @@ export default function SettingsPage({
                   )}
                 </PurrForm>
               </PurrModal>
+              <section className="settings-memory-models">
+                <h3>记忆组件模型</h3>
+                <p className="settings-field-desc">
+                  Embedding 只使用这里明确配置的 OpenAI 兼容接口，不会自动选择聊天模型或付费服务。修改向量维度需要单独重建存储；后端不会把不同维度写入同一集合。
+                </p>
+                <label className="settings-field">
+                  <span className="settings-field-label">提炼与评审模型</span>
+                  <PurrSelect
+                    value={memoryModelDraft || undefined}
+                    placeholder="未选择时不启用模型提炼与评审"
+                    allowClear
+                    options={modelConfigList
+                      .filter((config) => config.apiKey?.trim())
+                      .map((config) => ({ value: config.id, label: displayName(config) }))}
+                    onChange={(value) => setMemoryModelDraft(String(value || ''))}
+                  />
+                </label>
+                <div className="settings-memory-embedding-grid">
+                  <label className="settings-field">
+                    <span className="settings-field-label">Embedding 模型</span>
+                    <PurrInput
+                      value={memoryEmbeddingDraft.model}
+                      placeholder="如 text-embedding-3-small"
+                      onChange={(event) => setMemoryEmbeddingDraft((current) => ({ ...current, model: event.target.value }))}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    <span className="settings-field-label">向量维度</span>
+                    <PurrInputNumber
+                      value={memoryEmbeddingDraft.dimensions}
+                      min={1}
+                      max={65536}
+                      step={1}
+                      onChange={(value) => setMemoryEmbeddingDraft((current) => ({ ...current, dimensions: Number(value) }))}
+                    />
+                  </label>
+                  <label className="settings-field settings-memory-embedding-wide">
+                    <span className="settings-field-label">Embedding 接口地址</span>
+                    <PurrInput
+                      value={memoryEmbeddingDraft.baseUrl}
+                      placeholder="https://api.example.com/v1"
+                      onChange={(event) => setMemoryEmbeddingDraft((current) => ({ ...current, baseUrl: event.target.value }))}
+                    />
+                  </label>
+                  <label className="settings-field settings-memory-embedding-wide">
+                    <span className="settings-field-label">Embedding API Key</span>
+                    <PurrInput.Password
+                      value={memoryEmbeddingDraft.apiKey}
+                      placeholder="sk-xxxxxxxxxxxxxxxx"
+                      onChange={(event) => setMemoryEmbeddingDraft((current) => ({ ...current, apiKey: event.target.value }))}
+                    />
+                  </label>
+                </div>
+                <div className="settings-field-actions">
+                  <PurrButton type="primary" onClick={handleSaveMemoryConfiguration}>保存记忆模型配置</PurrButton>
+                  {memoryEmbeddingConfig ? (
+                    <PurrButton danger onClick={() => {
+                      if (window.confirm('确定清除记忆模型配置？重启后记忆组件将不可用。')) handleClearMemoryConfiguration()
+                    }}>清除配置</PurrButton>
+                  ) : null}
+                </div>
+              </section>
             </div>
           )}
           {activeTab === 'shortcuts' && (
@@ -554,7 +839,7 @@ export default function SettingsPage({
           {activeTab === 'data' && (
             <div className="settings-section">
               <h2 className="settings-section-title">备份与恢复</h2>
-              <p className="settings-section-desc">导出完整数据库备份到本地文件，或从备份文件恢复数据。导入将覆盖当前全部数据并刷新应用。</p>
+              <p className="settings-section-desc">导出包含作品数据库与本地记忆组件的完整备份，或成套恢复数据。API 密钥不会写入备份；恢复会覆盖当前数据并要求重启后端。</p>
               <div className="settings-field" style={{ maxWidth: 820, marginBottom: 16 }}>
                 <div className="settings-field-label">当前数据库</div>
                 <div
@@ -590,7 +875,7 @@ export default function SettingsPage({
                   onClick={handleExportDatabase}
                   loading={exportingDb}
                 >
-                  导出数据库
+                  导出完整备份
                 </PurrButton>
                 <PurrButton
                   type="default"
@@ -599,7 +884,7 @@ export default function SettingsPage({
                   loading={importingDb}
                   danger
                 >
-                  导入数据库
+                  恢复完整备份
                 </PurrButton>
               </div>
             </div>

@@ -90,11 +90,11 @@ def _snapshot(
     actionable=True,
 ):
     return ModelCapabilitySnapshot(
-        schema_version=1,
+        schema_version=2,
         profile_id="test:profile",
         provider_protocol="test_protocol",
         context_window_tokens=200_000,
-        max_output_tokens=100_000,
+        max_generation_tokens=100_000,
         thinking_token_accounting=ThinkingTokenAccounting.INCLUDED,
         protocol=ModelProtocolCapabilities(
             reasoning_control=reasoning_control,
@@ -130,6 +130,8 @@ def _requirements(
         (ReasoningControl.SELECTABLE, ReasoningMode.DEFAULT),
         (ReasoningControl.SELECTABLE, ReasoningMode.DISABLED),
         (ReasoningControl.ALWAYS_ENABLED, ReasoningMode.DEFAULT),
+        (ReasoningControl.ALWAYS_ENABLED, ReasoningMode.ENABLED),
+        (ReasoningControl.UNAVAILABLE, ReasoningMode.DEFAULT),
         (ReasoningControl.UNAVAILABLE, ReasoningMode.DISABLED),
     ],
 )
@@ -152,7 +154,7 @@ def test_capability_preflight_accepts_supported_reasoning_modes(
         ),
         (
             _snapshot(reasoning_control=ReasoningControl.UNAVAILABLE),
-            _requirements(reasoning_mode=ReasoningMode.DEFAULT),
+            _requirements(reasoning_mode=ReasoningMode.ENABLED),
         ),
         (
             _snapshot(tool_calling=FeatureSupport.UNKNOWN),

@@ -12,6 +12,7 @@ import {
   updateAgentConversationMessages,
 } from '../../../agent-runtime/runtimeStore'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
+import { changeQueuedSubmission, type QueuedSubmissionEdit } from '../../../agent-runtime/queuedSubmission'
 import type {
   ChatSessionActivity,
   QueuedChatSubmission,
@@ -123,6 +124,22 @@ export function getChatRuntimeQueue(): QueuedChatSubmission[] {
 export function replaceChatRuntimeQueue(queue: QueuedChatSubmission[]): void {
   queuedSubmissions = queue
   emitQueueChange()
+}
+
+export function updateChatQueuedSubmission(
+  sessionId: number, bookId: string | number, id: string, patch: QueuedSubmissionEdit | null,
+): boolean {
+  const next = changeQueuedSubmission(queuedSubmissions, id, patch,
+    item => item.sessionId === sessionId && item.bookId === bookId)
+  if (next === queuedSubmissions) return false
+  replaceChatRuntimeQueue(next)
+  const runtime = getChatSessionRuntime(sessionId)
+  const queuedCount = next.filter(item => item.sessionId === sessionId).length
+  if (runtime?.activity) setChatRuntimeActivity(sessionId, {
+    ...runtime.activity, queuedCount,
+    state: runtime.activity.state === 'queued' && !queuedCount ? 'canceled' : runtime.activity.state,
+  })
+  return true
 }
 
 export function clearChatRuntime(sessionId: number): void {

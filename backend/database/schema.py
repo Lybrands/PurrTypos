@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 from utils.id_utils import short_id8
 
 
+_AGENT_ROOT_JOURNAL_MIGRATION_ID = "agent-root-journal-v1"
+
+
 async def _try_exec(db: DatabaseConnection, sql: str) -> None:
     """Execute DDL that may fail (e.g. column already exists)."""
     try:
@@ -192,7 +195,7 @@ async def _migrate_legacy_long_tasks(db: DatabaseConnection) -> None:
             failed_units INTEGER NOT NULL DEFAULT 0,
             max_parallelism INTEGER NOT NULL DEFAULT 1,
             cancel_requested_at_ms INTEGER DEFAULT NULL,
-            usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+            usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}',
             metadata_json TEXT NOT NULL DEFAULT '{}',
             create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -248,118 +251,156 @@ async def _migrate_legacy_artifact_claims(db: DatabaseConnection) -> None:
         )
 
 
-async def _migrate_legacy_delegations(db: DatabaseConnection) -> None:
-    columns = await _table_columns(db, "ai_agent_delegations")
-    if not columns:
-        return
-    if "run_id" in columns:
-        if "agent_role" not in columns:
-            return
-        async with db.transaction():
-            await db.execute(
-                "UPDATE ai_agent_delegations SET agent_name = agent_role "
-                "WHERE TRIM(agent_name) = '' AND TRIM(agent_role) <> ''"
-            )
-            await db.execute(
-                "UPDATE ai_agent_delegations SET agent_title = agent_name "
-                "WHERE TRIM(agent_title) = ''"
-            )
-            await db.execute(
-                "UPDATE ai_agent_delegations SET agent_instruction = "
-                "'Execute the delegated objective.' "
-                "WHERE TRIM(agent_instruction) = ''"
-            )
-            await db.execute(
-                "ALTER TABLE ai_agent_delegations DROP COLUMN agent_role"
-            )
-        return
-    required = {"parent_run_id", "root_run_id", "child_run_id", "agent_role"}
-    if not required.issubset(columns):
-        missing = ", ".join(sorted(required - columns))
-        raise RuntimeError(
-            f"legacy Agent delegation schema is missing columns: {missing}"
-        )
-    unresolved = await db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_delegations "
-        "WHERE TRIM(parent_run_id) = '' OR TRIM(agent_role) = ''"
-    )
-    if int((unresolved or {}).get("count") or 0):
-        raise RuntimeError(
-            "legacy Agent delegations contain unresolved Run or Agent identities"
-        )
-
-    async with db.transaction():
-        await db.execute("DROP TABLE IF EXISTS ai_agent_delegations_migrating")
-        await db.execute("""CREATE TABLE ai_agent_delegations_migrating (
-            id TEXT PRIMARY KEY NOT NULL,
-            run_id TEXT NOT NULL,
-            batch_id TEXT NOT NULL,
-            agent_name TEXT NOT NULL,
-            agent_title TEXT NOT NULL,
-            agent_instruction TEXT NOT NULL,
-            objective TEXT NOT NULL,
-            input_json TEXT NOT NULL DEFAULT '{}',
-            context_mode TEXT NOT NULL DEFAULT 'isolated',
-            status TEXT NOT NULL DEFAULT 'queued',
-            required INTEGER NOT NULL DEFAULT 1,
-            priority INTEGER NOT NULL DEFAULT 0,
-            result_summary TEXT DEFAULT NULL,
-            error TEXT DEFAULT NULL,
-            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-        )""")
-        await db.execute("""INSERT INTO ai_agent_delegations_migrating (
-            id, run_id, batch_id, agent_name, agent_title, agent_instruction,
-            objective, input_json, context_mode, status, required, priority,
-            result_summary, error, create_time, update_time
-        )
-        SELECT
-            id,
-            parent_run_id,
-            'legacy-delegation:' || id,
-            agent_role,
-            agent_role,
-            'Execute the delegated objective.',
-            objective,
-            json_set(
-                CASE WHEN json_valid(input_json) THEN input_json ELSE '{}' END,
-                '$._legacyChildRunId', child_run_id,
-                '$._legacyRootRunId', root_run_id
-            ),
-            'isolated',
-            status,
-            required,
-            priority,
-            result_summary,
-            error,
-            create_time,
-            update_time
-        FROM ai_agent_delegations""")
-        await db.execute("DROP TABLE ai_agent_delegations")
-        await db.execute(
-            "ALTER TABLE ai_agent_delegations_migrating "
-            "RENAME TO ai_agent_delegations"
-        )
-
-
-async def _drop_agent_run_lineage_columns(db: DatabaseConnection) -> None:
+async def _migrate_agent_run_scope(db: DatabaseConnection) -> None:
     columns = {
         str(row["name"])
         for row in await db.fetch_all("PRAGMA table_info(ai_agent_runs)")
     }
     obsolete = (
-        "parent_run_id",
-        "root_run_id",
         "delegation_id",
         "agent_role",
         "run_depth",
     )
-    if not columns.intersection(obsolete):
-        return
     await db.execute("DROP INDEX IF EXISTS idx_ai_agent_runs_parent")
     for column in obsolete:
         if column in columns:
             await db.execute(f"ALTER TABLE ai_agent_runs DROP COLUMN {column}")
+
+    async with db.transaction():
+        await db.execute(
+            "UPDATE ai_agent_runs SET root_run_id = id "
+            "WHERE root_run_id IS NULL OR TRIM(root_run_id) = ''"
+        )
+        await db.execute(
+            "UPDATE ai_agent_runs SET agent_id = id "
+            "WHERE agent_id IS NULL OR TRIM(agent_id) = ''"
+        )
+        invalid_root = await db.fetch_one(
+            "SELECT child.id FROM ai_agent_runs AS child "
+            "LEFT JOIN ai_agent_runs AS root ON root.id = child.root_run_id "
+            "WHERE root.id IS NULL OR root.root_run_id <> root.id LIMIT 1"
+        )
+        if invalid_root is not None:
+            raise RuntimeError(
+                "Agent Run scope contains an invalid Root Run reference: "
+                f"{invalid_root['id']}"
+            )
+        invalid_parent = await db.fetch_one(
+            "SELECT child.id FROM ai_agent_runs AS child "
+            "LEFT JOIN ai_agent_runs AS parent ON parent.id = child.parent_run_id "
+            "WHERE (child.id = child.root_run_id AND child.parent_run_id IS NOT NULL) "
+            "OR (child.id <> child.root_run_id AND ("
+            "child.parent_run_id IS NULL OR parent.id IS NULL "
+            "OR parent.root_run_id <> child.root_run_id)) LIMIT 1"
+        )
+        if invalid_parent is not None:
+            raise RuntimeError(
+                "Agent Run scope contains an invalid parent Run reference: "
+                f"{invalid_parent['id']}"
+            )
+        invalid_lease = await db.fetch_one(
+            "SELECT id FROM ai_agent_runs WHERE "
+            "(agent_tree_lease_owner_id IS NULL) <> "
+            "(agent_tree_lease_epoch IS NULL) LIMIT 1"
+        )
+        if invalid_lease is not None:
+            raise RuntimeError(
+                "Agent Run scope contains an incomplete tree lease: "
+                f"{invalid_lease['id']}"
+            )
+
+
+async def _migrate_agent_root_journal(db: DatabaseConnection) -> bool:
+    canonical = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events "
+        "WHERE event_id IS NOT NULL"
+    )
+    if not int((canonical or {}).get("count") or 0):
+        return False
+
+    async with db.transaction():
+        mismatch = await db.fetch_one(
+            "SELECT event.id FROM ai_agent_run_events AS event "
+            "JOIN ai_agent_runs AS run ON run.id = event.run_id "
+            "WHERE event.event_id IS NOT NULL AND ("
+            "(event.root_run_id IS NOT NULL "
+            "AND event.root_run_id <> run.root_run_id) OR "
+            "(event.agent_id IS NOT NULL AND event.agent_id <> run.agent_id) OR "
+            "(event.parent_run_id IS NOT NULL AND "
+            "event.parent_run_id IS NOT run.parent_run_id)) LIMIT 1"
+        )
+        if mismatch is not None:
+            raise RuntimeError(
+                "Canonical Agent output has conflicting Root scope metadata: "
+                f"{mismatch['id']}"
+            )
+        await db.execute(
+            "UPDATE ai_agent_run_events SET "
+            "root_run_id = (SELECT root_run_id FROM ai_agent_runs "
+            "WHERE id = ai_agent_run_events.run_id), "
+            "agent_id = (SELECT agent_id FROM ai_agent_runs "
+            "WHERE id = ai_agent_run_events.run_id), "
+            "parent_run_id = (SELECT parent_run_id FROM ai_agent_runs "
+            "WHERE id = ai_agent_run_events.run_id) "
+            "WHERE event_id IS NOT NULL AND (root_run_id IS NULL "
+            "OR agent_id IS NULL OR (parent_run_id IS NULL AND EXISTS ("
+            "SELECT 1 FROM ai_agent_runs WHERE id = ai_agent_run_events.run_id "
+            "AND parent_run_id IS NOT NULL)))"
+        )
+        unresolved = await db.fetch_one(
+            "SELECT event.id FROM ai_agent_run_events AS event "
+            "LEFT JOIN ai_agent_runs AS run ON run.id = event.run_id "
+            "WHERE event.event_id IS NOT NULL AND (run.id IS NULL "
+            "OR event.root_run_id IS NOT run.root_run_id "
+            "OR event.agent_id IS NOT run.agent_id "
+            "OR event.parent_run_id IS NOT run.parent_run_id) LIMIT 1"
+        )
+        if unresolved is not None:
+            raise RuntimeError(
+                "Canonical Agent output references an unknown Run: "
+                f"{unresolved['id']}"
+            )
+        missing_sequence = await db.fetch_one(
+            "SELECT 1 AS value FROM ai_agent_run_events "
+            "WHERE event_id IS NOT NULL AND root_sequence IS NULL LIMIT 1"
+        )
+        if missing_sequence is not None:
+            await db.execute("""WITH maxima AS (
+                SELECT root_run_id, MAX(root_sequence) AS value
+                FROM ai_agent_run_events
+                WHERE event_id IS NOT NULL AND root_sequence IS NOT NULL
+                GROUP BY root_run_id
+            ), ranked AS (
+                SELECT event.id,
+                    COALESCE(maxima.value, 0) + ROW_NUMBER() OVER (
+                        PARTITION BY event.root_run_id ORDER BY event.id
+                    ) AS value
+                FROM ai_agent_run_events AS event
+                LEFT JOIN maxima ON maxima.root_run_id = event.root_run_id
+                WHERE event.event_id IS NOT NULL
+                    AND event.root_sequence IS NULL
+            )
+            UPDATE ai_agent_run_events
+            SET root_sequence = (
+                SELECT value FROM ranked
+                WHERE ranked.id = ai_agent_run_events.id
+            )
+            WHERE event_id IS NOT NULL AND root_sequence IS NULL""")
+    return True
+
+
+async def _migrate_agent_root_journal_once(db: DatabaseConnection) -> None:
+    applied = await db.fetch_one(
+        "SELECT 1 AS applied FROM app_schema_migrations WHERE id = ?",
+        [_AGENT_ROOT_JOURNAL_MIGRATION_ID],
+    )
+    if applied is not None:
+        return
+    if await _migrate_agent_root_journal(db):
+        await db.execute(
+            "INSERT OR IGNORE INTO app_schema_migrations (id) VALUES (?)",
+            [_AGENT_ROOT_JOURNAL_MIGRATION_ID],
+        )
 
 
 async def _migrate_run_cancellation_receipts(db: DatabaseConnection) -> None:
@@ -374,11 +415,12 @@ async def _migrate_run_cancellation_receipts(db: DatabaseConnection) -> None:
             "ALTER TABLE ai_agent_run_cancellations "
             "RENAME COLUMN root_run_id TO run_id"
         )
-    if "children_canceled" in columns:
-        await db.execute(
-            "ALTER TABLE ai_agent_run_cancellations "
-            "RENAME COLUMN children_canceled TO delegations_canceled"
-        )
+    for removed_column in ("children_canceled", "delegations_canceled"):
+        if removed_column in columns:
+            await db.execute(
+                "ALTER TABLE ai_agent_run_cancellations "
+                f"DROP COLUMN {removed_column}"
+            )
     if "final_status" not in columns:
         await db.execute(
             "ALTER TABLE ai_agent_run_cancellations "
@@ -478,6 +520,11 @@ def _legacy_character_profile_md(row: dict) -> str:
 
 
 async def init_schema(db: DatabaseConnection) -> None:
+    await db.execute("""CREATE TABLE IF NOT EXISTS app_schema_migrations (
+        id TEXT PRIMARY KEY NOT NULL,
+        applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+
     # ── books ────────────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS books (
         id TEXT PRIMARY KEY NOT NULL,
@@ -487,6 +534,14 @@ async def init_schema(db: DatabaseConnection) -> None:
         enable_volume INTEGER DEFAULT 0
     )""")
     await _try_exec(db, "ALTER TABLE books ADD COLUMN enable_volume INTEGER DEFAULT 0")
+
+    from database.continuation_schema import init_continuation_schema
+
+    await init_continuation_schema(db)
+
+    from database.writing_method_schema import init_writing_method_schema
+
+    await init_writing_method_schema(db)
 
     # ── screenplay projects / versioned documents ────────────────
     # 剧本项目与书架作品是“引用”关系而不是所有权关系。source_book_id
@@ -747,16 +802,41 @@ async def init_schema(db: DatabaseConnection) -> None:
         recovery_policy_id TEXT DEFAULT NULL,
         capability_snapshot_digest TEXT DEFAULT NULL,
         capability_snapshot_json TEXT DEFAULT NULL,
+        requested_user_max_generation_tokens INTEGER DEFAULT NULL,
+        result_capacity_target_tokens INTEGER DEFAULT NULL,
+        selected_context_window_tokens INTEGER DEFAULT NULL,
         binding_namespace TEXT DEFAULT NULL,
         binding_aggregate_id TEXT DEFAULT NULL,
         binding_command_id TEXT DEFAULT NULL,
         binding_attributes_json TEXT DEFAULT NULL,
+        root_run_id TEXT DEFAULT NULL,
+        agent_id TEXT DEFAULT NULL,
+        parent_run_id TEXT DEFAULT NULL,
+        agent_tree_lease_owner_id TEXT DEFAULT NULL,
+        agent_tree_lease_epoch INTEGER DEFAULT NULL,
         execution_owner_id TEXT DEFAULT NULL,
         lease_expires_at_ms INTEGER DEFAULT NULL,
         heartbeat_at_ms INTEGER DEFAULT NULL,
         execution_attempt INTEGER NOT NULL DEFAULT 0,
         cancel_requested_at_ms INTEGER DEFAULT NULL,
         cancellation_epoch INTEGER NOT NULL DEFAULT 0,
+        deadline_at_ms INTEGER DEFAULT NULL,
+        runtime_limits_json TEXT NOT NULL DEFAULT '{}',
+        agent_preset_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        plan_title TEXT NOT NULL DEFAULT 'To-dos',
+        plan_goal TEXT DEFAULT NULL,
+        task_spec_json TEXT DEFAULT NULL,
+        work_step_ids_json TEXT DEFAULT NULL,
+        execution_checkpoint_json TEXT DEFAULT NULL,
+        error TEXT DEFAULT NULL,
+        model_attempt_count INTEGER NOT NULL DEFAULT 0,
+        unreported_usage_attempts INTEGER NOT NULL DEFAULT 0,
+        unreported_reasoning_attempts INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        provider_output_events INTEGER NOT NULL DEFAULT 0,
+        provider_output_bytes INTEGER NOT NULL DEFAULT 0,
         final_response TEXT DEFAULT '',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -776,27 +856,93 @@ async def init_schema(db: DatabaseConnection) -> None:
         "recovery_policy_id TEXT DEFAULT NULL",
         "capability_snapshot_digest TEXT DEFAULT NULL",
         "capability_snapshot_json TEXT DEFAULT NULL",
+        "requested_user_max_generation_tokens INTEGER DEFAULT NULL",
+        "result_capacity_target_tokens INTEGER DEFAULT NULL",
+        "selected_context_window_tokens INTEGER DEFAULT NULL",
         "binding_namespace TEXT DEFAULT NULL",
         "binding_aggregate_id TEXT DEFAULT NULL",
         "binding_command_id TEXT DEFAULT NULL",
         "binding_attributes_json TEXT DEFAULT NULL",
+        "root_run_id TEXT DEFAULT NULL",
+        "agent_id TEXT DEFAULT NULL",
+        "parent_run_id TEXT DEFAULT NULL",
+        "agent_tree_lease_owner_id TEXT DEFAULT NULL",
+        "agent_tree_lease_epoch INTEGER DEFAULT NULL",
         "execution_owner_id TEXT DEFAULT NULL",
         "lease_expires_at_ms INTEGER DEFAULT NULL",
         "heartbeat_at_ms INTEGER DEFAULT NULL",
         "execution_attempt INTEGER NOT NULL DEFAULT 0",
         "cancel_requested_at_ms INTEGER DEFAULT NULL",
         "cancellation_epoch INTEGER NOT NULL DEFAULT 0",
+        "deadline_at_ms INTEGER DEFAULT NULL",
+        "runtime_limits_json TEXT NOT NULL DEFAULT '{}'",
+        "agent_preset_snapshot_json TEXT NOT NULL DEFAULT '{}'",
+        "plan_title TEXT NOT NULL DEFAULT 'To-dos'",
+        "plan_goal TEXT DEFAULT NULL",
+        "task_spec_json TEXT DEFAULT NULL",
+        "work_step_ids_json TEXT DEFAULT NULL",
+        "execution_checkpoint_json TEXT DEFAULT NULL",
+        "error TEXT DEFAULT NULL",
+        "model_attempt_count INTEGER NOT NULL DEFAULT 0",
+        "unreported_usage_attempts INTEGER NOT NULL DEFAULT 0",
+        "unreported_reasoning_attempts INTEGER NOT NULL DEFAULT 0",
+        "input_tokens INTEGER NOT NULL DEFAULT 0",
+        "output_tokens INTEGER NOT NULL DEFAULT 0",
+        "reasoning_tokens INTEGER NOT NULL DEFAULT 0",
+        "provider_output_events INTEGER NOT NULL DEFAULT 0",
+        "provider_output_bytes INTEGER NOT NULL DEFAULT 0",
     ):
         await _try_exec(
             db,
             f"ALTER TABLE ai_agent_runs ADD COLUMN {column}",
         )
-    await _drop_agent_run_lineage_columns(db)
+    await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_scope_immutable")
+    await _migrate_agent_run_scope(db)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_root
+        ON ai_agent_runs(root_run_id, id)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_agent_runs_parent
+        ON ai_agent_runs(parent_run_id, id)
+        WHERE parent_run_id IS NOT NULL
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_model_sdk_requests (
+        attempt_id TEXT PRIMARY KEY,
+        run_id TEXT REFERENCES ai_agent_runs(id) ON DELETE CASCADE,
+        record_json TEXT NOT NULL,
+        create_time INTEGER NOT NULL
+    )""")
+    await db.execute("""CREATE TRIGGER IF NOT EXISTS ai_agent_run_sdk_diagnostics_delete
+        AFTER DELETE ON ai_agent_runs BEGIN
+            DELETE FROM ai_model_sdk_requests WHERE run_id = OLD.id;
+        END
+    """)
+
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_model_attempts (
+        run_id TEXT NOT NULL,
+        invocation_id TEXT NOT NULL,
+        settled INTEGER NOT NULL DEFAULT 0,
+        usage_json TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, invocation_id)
+    )""")
+    await db.execute(
+        "DROP TRIGGER IF EXISTS ai_agent_runs_runtime_authority_immutable"
+    )
+    await db.execute("""CREATE TRIGGER ai_agent_runs_runtime_authority_immutable
+        BEFORE UPDATE OF deadline_at_ms, runtime_limits_json,
+            agent_preset_snapshot_json
+        ON ai_agent_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'agent Run runtime authority is immutable');
+        END
+    """)
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_cancellations (
         run_id TEXT PRIMARY KEY NOT NULL,
         cancellation_epoch INTEGER NOT NULL CHECK (cancellation_epoch >= 1),
         status TEXT NOT NULL CHECK (status IN ('draining', 'completed')),
-        delegations_canceled INTEGER NOT NULL DEFAULT 0,
         requested_at_ms INTEGER NOT NULL,
         completed_at_ms INTEGER DEFAULT NULL,
         final_status TEXT DEFAULT NULL,
@@ -819,7 +965,10 @@ async def init_schema(db: DatabaseConnection) -> None:
             tool_protocol_contract,
             recovery_policy_id,
             capability_snapshot_digest,
-            capability_snapshot_json
+            capability_snapshot_json,
+            requested_user_max_generation_tokens,
+            result_capacity_target_tokens,
+            selected_context_window_tokens
         ON ai_agent_runs
         WHEN
             OLD.model_provider IS NOT NEW.model_provider
@@ -833,6 +982,9 @@ async def init_schema(db: DatabaseConnection) -> None:
             OR OLD.recovery_policy_id IS NOT NEW.recovery_policy_id
             OR OLD.capability_snapshot_digest IS NOT NEW.capability_snapshot_digest
             OR OLD.capability_snapshot_json IS NOT NEW.capability_snapshot_json
+            OR OLD.requested_user_max_generation_tokens IS NOT NEW.requested_user_max_generation_tokens
+            OR OLD.result_capacity_target_tokens IS NOT NEW.result_capacity_target_tokens
+            OR OLD.selected_context_window_tokens IS NOT NEW.selected_context_window_tokens
         BEGIN
             SELECT RAISE(ABORT, 'agent run provenance is immutable');
         END
@@ -852,6 +1004,19 @@ async def init_schema(db: DatabaseConnection) -> None:
             OR OLD.binding_attributes_json IS NOT NEW.binding_attributes_json
         BEGIN
             SELECT RAISE(ABORT, 'agent run binding is immutable');
+        END
+    """)
+    await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_scope_immutable")
+    await db.execute("""CREATE TRIGGER ai_agent_runs_scope_immutable
+        BEFORE UPDATE OF
+            root_run_id,
+            agent_id,
+            parent_run_id,
+            agent_tree_lease_owner_id,
+            agent_tree_lease_epoch
+        ON ai_agent_runs
+        BEGIN
+            SELECT RAISE(ABORT, 'agent Run scope is immutable');
         END
     """)
     await db.execute("""CREATE INDEX IF NOT EXISTS
@@ -952,6 +1117,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         occurred_at TEXT DEFAULT NULL,
         emitted_at TEXT DEFAULT NULL,
         source_event_key TEXT DEFAULT NULL,
+        root_run_id TEXT DEFAULT NULL,
+        agent_id TEXT DEFAULT NULL,
+        parent_run_id TEXT DEFAULT NULL,
+        root_sequence INTEGER DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
     for column in (
@@ -967,6 +1136,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         "occurred_at TEXT DEFAULT NULL",
         "emitted_at TEXT DEFAULT NULL",
         "source_event_key TEXT DEFAULT NULL",
+        "root_run_id TEXT DEFAULT NULL",
+        "agent_id TEXT DEFAULT NULL",
+        "parent_run_id TEXT DEFAULT NULL",
+        "root_sequence INTEGER DEFAULT NULL",
     ):
         await _try_exec(
             db,
@@ -994,10 +1167,16 @@ async def init_schema(db: DatabaseConnection) -> None:
         ON ai_agent_run_events(run_id, sequence)
         WHERE sequence IS NOT NULL
     """)
-    await _migrate_agent_lifecycle_events(db)
     await db.execute(
         "DROP TRIGGER IF EXISTS ai_agent_run_events_canonical_immutable"
     )
+    await _migrate_agent_lifecycle_events(db)
+    await _migrate_agent_root_journal_once(db)
+    await db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_ai_agent_run_events_root_sequence
+        ON ai_agent_run_events(root_run_id, root_sequence)
+        WHERE event_id IS NOT NULL
+    """)
     await db.execute("""CREATE TRIGGER ai_agent_run_events_canonical_immutable
         BEFORE UPDATE OF
             event_id,
@@ -1011,7 +1190,11 @@ async def init_schema(db: DatabaseConnection) -> None:
             channel,
             visibility,
             occurred_at,
-            source_event_key
+            source_event_key,
+            root_run_id,
+            agent_id,
+            parent_run_id,
+            root_sequence
         ON ai_agent_run_events
         WHEN OLD.event_id IS NOT NULL
         BEGIN
@@ -1025,12 +1208,32 @@ async def init_schema(db: DatabaseConnection) -> None:
         invocation_id TEXT NOT NULL UNIQUE,
         intent TEXT NOT NULL,
         commit_mode TEXT NOT NULL,
+        output_protocol TEXT DEFAULT NULL,
+        planning_run_id TEXT DEFAULT NULL,
+        planning_operation_id TEXT DEFAULT NULL,
+        planning_revision INTEGER NOT NULL DEFAULT 0,
+        planning_attempt INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'open',
         finish_reason TEXT DEFAULT NULL,
         error_code TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS idx_ai_agent_sdk_attempt
+        ON ai_agent_run_events(json_extract(payload_json, '$.callParameters[0].sdkAttemptId'))
+        WHERE event_type = 'stream.opened'
+    """)
+    for column in (
+        "output_protocol TEXT DEFAULT NULL",
+        "planning_run_id TEXT DEFAULT NULL",
+        "planning_operation_id TEXT DEFAULT NULL",
+        "planning_revision INTEGER NOT NULL DEFAULT 0",
+        "planning_attempt INTEGER NOT NULL DEFAULT 0",
+    ):
+        await _try_exec(
+            db,
+            f"ALTER TABLE ai_agent_output_streams ADD COLUMN {column}",
+        )
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_output_streams_run
         ON ai_agent_output_streams(run_id, create_time, id)
@@ -1044,7 +1247,12 @@ async def init_schema(db: DatabaseConnection) -> None:
             turn_id,
             invocation_id,
             intent,
-            commit_mode
+            commit_mode,
+            output_protocol,
+            planning_run_id,
+            planning_operation_id,
+            planning_revision,
+            planning_attempt
         ON ai_agent_output_streams
         BEGIN
             SELECT RAISE(ABORT, 'agent output stream identity is immutable');
@@ -1141,8 +1349,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         completed_units INTEGER NOT NULL DEFAULT 0,
         failed_units INTEGER NOT NULL DEFAULT 0,
         max_parallelism INTEGER NOT NULL DEFAULT 1,
+        deadline_at_ms INTEGER DEFAULT NULL,
+        budget_limits_json TEXT NOT NULL DEFAULT '{}',
         cancel_requested_at_ms INTEGER DEFAULT NULL,
-        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"unreportedUsageAttempts":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}',
         metadata_json TEXT NOT NULL DEFAULT '{}',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -1169,13 +1379,23 @@ async def init_schema(db: DatabaseConnection) -> None:
     await _try_exec(
         db,
         "ALTER TABLE ai_agent_long_tasks ADD COLUMN usage_json TEXT NOT NULL "
-        "DEFAULT '{\"invocationCount\":0,\"inputTokens\":0,"
-        "\"outputTokens\":0,\"reasoningTokens\":0}'",
+        "DEFAULT '{\"invocationCount\":0,\"unreportedUsageAttempts\":0,\"inputTokens\":0,"
+        "\"generationTokens\":0,\"reasoningTokens\":0}'",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_tasks ADD COLUMN deadline_at_ms INTEGER DEFAULT NULL",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_tasks ADD COLUMN "
+        "budget_limits_json TEXT NOT NULL DEFAULT '{}'",
     )
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_usage (
         task_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
         invocation_count INTEGER NOT NULL,
+        unreported_usage_attempts INTEGER NOT NULL DEFAULT 0,
         input_tokens INTEGER NOT NULL,
         output_tokens INTEGER NOT NULL,
         reasoning_tokens INTEGER DEFAULT NULL,
@@ -1186,6 +1406,11 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_agent_long_tasks_owner_status
         ON ai_agent_long_tasks(namespace, owner_id, kind, status, update_time DESC)
     """)
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_task_usage ADD COLUMN "
+        "unreported_usage_attempts INTEGER NOT NULL DEFAULT 0",
+    )
     # A durable workflow belongs to the conversation that created it.  The
     # earlier project-wide index caused a brand-new conversation to inherit
     # and even resume another conversation's task.  Keep race protection, but
@@ -1232,7 +1457,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         attempt INTEGER NOT NULL DEFAULT 0,
         max_attempts INTEGER NOT NULL DEFAULT 3,
         worker_id TEXT DEFAULT NULL,
+        lease_epoch INTEGER NOT NULL DEFAULT 0,
         lease_expires_at_ms INTEGER DEFAULT NULL,
+        settled_by_worker_id TEXT DEFAULT NULL,
         run_id TEXT DEFAULT NULL,
         error_code TEXT DEFAULT NULL,
         metadata_json TEXT NOT NULL DEFAULT '{}',
@@ -1249,6 +1476,8 @@ async def init_schema(db: DatabaseConnection) -> None:
         "validation_receipt_json TEXT NOT NULL DEFAULT '{}'",
         "failure_json TEXT NOT NULL DEFAULT '{}'",
         "disposition TEXT DEFAULT NULL",
+        "lease_epoch INTEGER NOT NULL DEFAULT 0",
+        "settled_by_worker_id TEXT DEFAULT NULL",
     ):
         await _try_exec(
             db,
@@ -1380,29 +1609,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_agent_artifact_projections_result
         ON ai_agent_artifact_projections(projector_namespace, result_ref)
     """)
-    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_delegations (
-        id TEXT PRIMARY KEY NOT NULL,
-        run_id TEXT NOT NULL,
-        batch_id TEXT NOT NULL,
-        agent_name TEXT NOT NULL,
-        agent_title TEXT NOT NULL,
-        agent_instruction TEXT NOT NULL,
-        objective TEXT NOT NULL,
-        input_json TEXT NOT NULL DEFAULT '{}',
-        context_mode TEXT NOT NULL DEFAULT 'isolated',
-        status TEXT NOT NULL DEFAULT 'queued',
-        required INTEGER NOT NULL DEFAULT 1,
-        priority INTEGER NOT NULL DEFAULT 0,
-        result_summary TEXT DEFAULT NULL,
-        error TEXT DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    await _migrate_legacy_delegations(db)
-    await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_delegations_run_batch_status
-        ON ai_agent_delegations(run_id, batch_id, status, priority DESC, create_time)
-    """)
+    # Obsolete same-Run records have no valid Agent Tree Run identity and
+    # therefore cannot participate in current execution or recovery.
+    await db.execute("DROP TABLE IF EXISTS ai_agent_delegations")
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1471,146 +1680,52 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
-    # ── memory_items：长期记忆统一召回面 ───────────────────────────
-    await db.execute("""CREATE TABLE IF NOT EXISTS memory_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    # Durable business-source delivery to purra-mem0. This is an outbox only;
+    # memory state/version/idempotency remain owned by the component journal.
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_source_heads (
         book_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        scope_type TEXT NOT NULL DEFAULT 'book',
-        scope_id TEXT DEFAULT NULL,
-        content TEXT NOT NULL DEFAULT '',
-        summary TEXT NOT NULL DEFAULT '',
-        keywords TEXT NOT NULL DEFAULT '',
-        importance INTEGER NOT NULL DEFAULT 3,
-        confidence REAL NOT NULL DEFAULT 1.0,
-        status TEXT NOT NULL DEFAULT 'active',
-        pinned INTEGER NOT NULL DEFAULT 0,
-        fingerprint TEXT NOT NULL DEFAULT '',
-        source_type TEXT NOT NULL DEFAULT 'manual',
-        source_id TEXT DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        source_id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        last_used_at DATETIME DEFAULT NULL
+        PRIMARY KEY (book_id, source_id)
     )""")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN keywords TEXT NOT NULL DEFAULT ''")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN importance INTEGER NOT NULL DEFAULT 3")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual'")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN source_id TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE memory_items ADD COLUMN last_used_at DATETIME DEFAULT NULL")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_book_status "
-        "ON memory_items(book_id, status, kind)"
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_source "
-        "ON memory_items(source_type, source_id)"
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_items_scope "
-        "ON memory_items(book_id, scope_type, scope_id)"
-    )
-    await db.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_items_fingerprint "
-        "ON memory_items(book_id, fingerprint) WHERE fingerprint != ''"
-    )
-
-    await db.execute("""CREATE TABLE IF NOT EXISTS memory_links (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_source_deliveries (
+        operation_key TEXT PRIMARY KEY NOT NULL,
         book_id TEXT NOT NULL,
-        from_memory_id INTEGER NOT NULL,
-        to_memory_id INTEGER NOT NULL,
-        relation TEXT NOT NULL,
-        note TEXT NOT NULL DEFAULT '',
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+        source_id TEXT NOT NULL,
+        source_revision TEXT DEFAULT NULL,
+        action TEXT NOT NULL CHECK (
+            action IN ('add', 'extract', 'revoke_revision', 'revoke_source')
+        ),
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'delivering', 'completed', 'failed')
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        receipt_json TEXT DEFAULT NULL,
+        error_code TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_links_book "
-        "ON memory_links(book_id, relation)"
-    )
-
-    await _try_exec(db, """CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
-        USING fts5(content, summary, keywords, tokenize=trigram, content=memory_items, content_rowid=id)""")
-    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_ai
-        AFTER INSERT ON memory_items BEGIN
-            INSERT INTO memory_items_fts(rowid, content, summary, keywords)
-            VALUES (new.id, new.content, new.summary, new.keywords);
-        END""")
-    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_au
-        AFTER UPDATE ON memory_items BEGIN
-            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, summary, keywords)
-                VALUES ('delete', old.id, old.content, old.summary, old.keywords);
-            INSERT INTO memory_items_fts(rowid, content, summary, keywords)
-                VALUES (new.id, new.content, new.summary, new.keywords);
-        END""")
-    await _try_exec(db, """CREATE TRIGGER IF NOT EXISTS memory_items_fts_ad
-        AFTER DELETE ON memory_items BEGIN
-            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, summary, keywords)
-                VALUES ('delete', old.id, old.content, old.summary, old.keywords);
-        END""")
-
-    # 非破坏式迁移：把旧「本书设定 / 伏笔」镜像进统一记忆池。
-    await _try_exec(db, """
-        INSERT INTO memory_items (
-            book_id, kind, scope_type, scope_id, content, importance, status,
-            fingerprint, source_type, source_id, create_time, update_time
-        )
-        SELECT
-            book_id,
-            'canon',
-            CASE
-                WHEN character_id IS NOT NULL THEN 'character'
-                WHEN chapter_id IS NOT NULL THEN 'chapter'
-                ELSE 'book'
-            END,
-            COALESCE(CAST(character_id AS TEXT), chapter_id),
-            content,
-            4,
-            'active',
-            'legacy:spark:' || id,
-            'spark_idea',
-            CAST(id AS TEXT),
-            create_time,
-            create_time
-        FROM ai_memories AS old
-        WHERE NOT EXISTS (
-            SELECT 1 FROM memory_items AS mi
-            WHERE mi.source_type = 'spark_idea' AND mi.source_id = CAST(old.id AS TEXT)
-        )
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_memory_source_deliveries_recovery
+        ON memory_source_deliveries(status, attempt_count, create_time)
     """)
-    await _try_exec(db, """
-        INSERT INTO memory_items (
-            book_id, kind, scope_type, scope_id, content, keywords, importance, status,
-            fingerprint, source_type, source_id, create_time, update_time
-        )
-        SELECT
-            book_id,
-            'foreshadowing',
-            'chapter',
-            chapter_id,
-            content,
-            type || ' ' || status,
-            4,
-            CASE WHEN status = '已回收' THEN 'archived' ELSE 'active' END,
-            'legacy:foreshadowing:' || id,
-            'foreshadowing',
-            CAST(id AS TEXT),
-            create_time,
-            update_time
-        FROM ai_foreshadowing AS old
-        WHERE NOT EXISTS (
-            SELECT 1 FROM memory_items AS mi
-            WHERE mi.source_type = 'foreshadowing' AND mi.source_id = CAST(old.id AS TEXT)
-        )
-    """)
-    await _try_exec(db, "INSERT INTO memory_items_fts(memory_items_fts) VALUES ('rebuild')")
+    await db.execute("""CREATE TABLE IF NOT EXISTS memory_book_deletions (
+        book_id TEXT PRIMARY KEY NOT NULL,
+        operation_key TEXT UNIQUE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (
+            status IN ('pending', 'delivering', 'completed', 'failed')
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        error_code TEXT DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
 
     # ── story_memory_*：章节溯源、可版本化的正式故事状态 ──────────
-    # memory_items 继续承担通用召回；这里保存可审计的项目级当前状态，
+    # Story Memory 保存可审计的项目级当前状态，
     # 以及每章带来的原子变化。两者在后续召回阶段通过适配器连接。
     await db.execute("""CREATE TABLE IF NOT EXISTS story_memory_records (
         id TEXT PRIMARY KEY NOT NULL,
@@ -1984,18 +2099,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
-    # ── book_style ───────────────────────────────────────────────
-    # 每本书一份「风格基调」，强制注入 system prompt（写作专家模式）
-    await db.execute("""CREATE TABLE IF NOT EXISTS book_style (
-        book_id TEXT NOT NULL PRIMARY KEY,
-        pov TEXT DEFAULT '',
-        tone TEXT DEFAULT '',
-        pace TEXT DEFAULT '',
-        banned_rules TEXT DEFAULT '',
-        reference_chapter_ids TEXT DEFAULT '',
-        free_notes TEXT DEFAULT '',
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
+    # The legacy fixed-field style model is intentionally destructive: product
+    # writing methods replace it and no compatibility read is retained.
+    await db.execute("DROP TABLE IF EXISTS " + "book_" + "style")
 
     # ── chapter_canvas ───────────────────────────────────────────
     # 每章一个 AI 草稿区（与 articles 一对一），AI 写到 canvas 上不污染正文，
@@ -2228,5 +2334,11 @@ async def init_schema(db: DatabaseConnection) -> None:
     # used by project deletion has been initialized. This keeps first startup,
     # repeated startup, and a legacy-database upgrade on the same code path.
     await init_screenplay_v2_runtime_schema(db)
+
+    from database.screenplay_tool_cache_schema import init_screenplay_tool_cache_schema
+
+    await init_screenplay_tool_cache_schema(db)
+    from database.writing_tool_cache_schema import init_writing_tool_cache_schema
+    await init_writing_tool_cache_schema(db)
 
     # TODO: migrateEntityIdsToText8 – placeholder for entity ID migration

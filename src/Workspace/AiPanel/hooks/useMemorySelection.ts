@@ -11,6 +11,7 @@ import type { EntityId } from "../../../types";
 const STORAGE_KEY = "purrtypos_ai_memory_selection";
 
 interface PersistedEntry {
+  longTerm: string[];
   memory: (number | string)[];
   foreshadowing: (number | string)[];
 }
@@ -35,11 +36,14 @@ function saveAll(all: Record<string, PersistedEntry>) {
 }
 
 function loadForBook(bookId: EntityId | null | undefined): PersistedEntry {
-  if (bookId == null) return { memory: [], foreshadowing: [] };
+  if (bookId == null) return { longTerm: [], memory: [], foreshadowing: [] };
   const all = loadAll();
   const entry = all[String(bookId)];
-  if (!entry) return { memory: [], foreshadowing: [] };
+  if (!entry) return { longTerm: [], memory: [], foreshadowing: [] };
   return {
+    longTerm: Array.isArray(entry.longTerm)
+      ? entry.longTerm.map(String)
+      : [],
     memory: Array.isArray(entry.memory) ? entry.memory : [],
     foreshadowing: Array.isArray(entry.foreshadowing) ? entry.foreshadowing : [],
   };
@@ -57,6 +61,9 @@ export function useMemorySelection(bookId: EntityId | null | undefined) {
   const [selectedMemoryIds, setSelectedMemoryIds] = React.useState<
     (number | string)[]
   >(initial.memory);
+  const [selectedLongTermMemoryIds, setSelectedLongTermMemoryIds] = React.useState<
+    string[]
+  >(initial.longTerm);
   const [selectedForeshadowingIds, setSelectedForeshadowingIds] = React.useState<
     (number | string)[]
   >(initial.foreshadowing);
@@ -68,18 +75,22 @@ export function useMemorySelection(bookId: EntityId | null | undefined) {
     if (key === lastBookKeyRef.current) return;
     lastBookKeyRef.current = key;
     const next = loadForBook(bookId);
+    setSelectedLongTermMemoryIds(next.longTerm);
     setSelectedMemoryIds(next.memory);
     setSelectedForeshadowingIds(next.foreshadowing);
   }, [bookId]);
 
   React.useEffect(() => {
     saveForBook(bookId, {
+      longTerm: selectedLongTermMemoryIds,
       memory: selectedMemoryIds,
       foreshadowing: selectedForeshadowingIds,
     });
-  }, [bookId, selectedMemoryIds, selectedForeshadowingIds]);
+  }, [bookId, selectedLongTermMemoryIds, selectedMemoryIds, selectedForeshadowingIds]);
 
   return {
+    selectedLongTermMemoryIds,
+    setSelectedLongTermMemoryIds,
     selectedMemoryIds,
     setSelectedMemoryIds,
     selectedForeshadowingIds,

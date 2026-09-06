@@ -11,6 +11,7 @@ const root = path.join(__dirname, '..')
 const outDir = path.join(root, 'build-resources', 'backend')
 const backendSrc = path.join(root, 'backend')
 const purraRequirements = path.join(backendSrc, 'requirements-purra.txt')
+const runtimeRequirements = path.join(backendSrc, 'requirements-runtime.txt')
 const frozenDir = path.join(backendSrc, 'dist', 'purrtypos-backend')
 const frozenExe = path.join(frozenDir, 'purrtypos-backend.exe')
 
@@ -24,6 +25,7 @@ const SKIP_NAMES = new Set([
   '.mypy_cache',
   '.pytest_cache',
   'tests',
+  'vendor',
   '.DS_Store',
 ])
 
@@ -68,19 +70,20 @@ function findPackagingPython() {
 function vendorPurra(dest) {
   const python = findPackagingPython()
   if (!python) {
-    throw new Error('Python with pip is required to install PurrA')
+    throw new Error('Python with pip is required to install PurrA dependencies')
   }
   const result = spawnSync(
     python.command,
     [
       ...python.prefix,
-      '-m', 'pip', 'install', '--no-deps', '--target', dest,
+      '-m', 'pip', 'install', '--target', dest,
+      '-r', runtimeRequirements,
       '-r', purraRequirements,
     ],
     { cwd: root, stdio: 'inherit' },
   )
   if (result.status !== 0) {
-    throw new Error('Failed to install the pinned PurrA dependency')
+    throw new Error('Failed to package the published PurrA dependencies')
   }
 }
 
@@ -99,5 +102,5 @@ if (process.platform === 'win32' && fs.existsSync(frozenExe)) {
   }
   copyDirFiltered(backendSrc, outDir)
   vendorPurra(outDir)
-  console.log('[prepare-backend-resources] Copied backend and installed pinned PurrA →', outDir)
+  console.log('[prepare-backend-resources] Copied backend and installed published PurrA dependencies →', outDir)
 }

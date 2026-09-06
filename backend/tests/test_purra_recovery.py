@@ -125,7 +125,7 @@ def test_retryable_failure_with_checkpoint_resumes_current_unit():
     assert decision.attempts_remaining == 1
 
 
-def test_retryable_failure_without_budget_pauses_instead_of_failing():
+def test_retryable_failure_without_budget_fails_instead_of_pausing():
     decision = decide_failure(
         FailureSignal(
             category=FailureCategory.MODEL_OUTPUT_INVALID,
@@ -136,10 +136,25 @@ def test_retryable_failure_without_budget_pauses_instead_of_failing():
         attempts_remaining=0,
     )
 
-    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+    assert decision.disposition is FailureDisposition.FAIL_PERMANENT
 
 
-def test_unknown_effect_pauses_without_retry():
+def test_systemic_protocol_failure_is_terminal_when_no_recovery_exists():
+    decision = decide_failure(
+        FailureSignal(
+            category=FailureCategory.PROTOCOL_INCOMPATIBLE,
+            code="provider_bad_request",
+            retryable=False,
+            scope="systemic",
+            effect_state=RecoveryEffectState.NOT_STARTED,
+        ),
+        attempts_remaining=3,
+    )
+
+    assert decision.disposition is FailureDisposition.FAIL_PERMANENT
+
+
+def test_unknown_effect_fails_without_retry():
     decision = decide_failure(
         FailureSignal(
             category=FailureCategory.TOOL_EXECUTION,
@@ -150,7 +165,7 @@ def test_unknown_effect_pauses_without_retry():
         attempts_remaining=3,
     )
 
-    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+    assert decision.disposition is FailureDisposition.FAIL_PERMANENT
 
 
 def test_permanent_and_canceled_failures_keep_distinct_terminal_meanings():

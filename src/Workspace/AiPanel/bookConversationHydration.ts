@@ -1,9 +1,10 @@
-import { AgentChunkReplay } from '../../agent-runtime/chunkReplay.ts'
-import type { AiStreamChunk } from '../../agent-runtime/chunkHandlers/types.ts'
 import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
+import {
+  loadCompleteAgentRunSnapshot,
+  replayAgentRunSnapshot,
+} from '../../agent-runtime/runSnapshotHydration.ts'
 import type {
   AiAgentRunSnapshot,
-  AiModelConfig,
   Conversation,
   ProposedSettingDiff,
   SettingDiffCardState,
@@ -69,10 +70,12 @@ export async function hydrateLatestBookRun(input: {
     model: input.snapshot.run.provenance.modelName || '',
     agent_run_id: input.snapshot.run.runId,
   } as Conversation
-  const directSnapshot = { ...input.snapshot, hasMore: false }
   const result = await hydrateBookConversationReadModel([synthetic], {
-    getRunSnapshot: dependencies?.getRunSnapshot
-      ?? (async () => ({ success: true, data: directSnapshot })),
+    getRunSnapshot: async request => {
+      if (request.after == null) return { success: true, data: input.snapshot }
+      if (!dependencies) throw new Error('完整恢复需要读取后续事件页')
+      return dependencies.getRunSnapshot(request)
+    },
   })
   const readModel = result ?? { messages: [], settingDiffOccurrences: [] }
   const messages = readModel.messages.map((message) => (
@@ -121,18 +124,6 @@ export function mergeHydratedBookRun(
       ...latest.settingDiffOccurrences,
     ],
   }
-}
-
-/**
- * Rebuilds Book turns from the authoritative Run journal. The stored
- * Conversation remains the fallback for legacy/non-Agent turns only.
- */
-export async function hydrateBookConversations(
-  rows: Conversation[],
-  dependencies: BookConversationHydrationDependencies,
-): Promise<AgentConversationMessage[] | undefined> {
-  const result = await hydrateBookConversationReadModel(rows, dependencies)
-  return result?.messages
 }
 
 export async function hydrateBookConversationReadModel(
@@ -190,65 +181,40 @@ async function hydrateTurn(
     return { messages: stored, settingDiffOccurrences: [] }
   }
 
-  const loaded = await loadFullSnapshot(runId, dependencies, isCurrent)
+  let loaded: AiAgentRunSnapshot | undefined
+  try {
+    loaded = await loadCompleteAgentRunSnapshot(runId, {
+      getRunSnapshot: dependencies.getRunSnapshot,
+      pageSize: dependencies.pageSize,
+      isCurrent,
+    })
+  } catch (error) {
+    throw new BookConversationHydrationError(
+      error instanceof Error ? error.message : 'Run snapshot unavailable',
+      runId,
+    )
+  }
   if (!loaded || !isCurrent()) {
     return { messages: stored, settingDiffOccurrences: [] }
   }
 
-  const replay = new AgentChunkReplay()
   const model = loaded.run.provenance.modelName || row.model || ''
-  const seed = {
+  const replayed = replayAgentRunSnapshot({
+    snapshot: loaded,
+    prompt: row.prompt,
     turnId: `book-conversation:${row.id}:run:${runId}`,
-    rootRunId: loaded.run.runId,
     sessionId: row.session_id,
-    userContent: row.prompt,
     model,
-    turnStartedAt: performance.now() - Math.max(0, row.duration_ms ?? 0),
-  }
-  const cfg: AiModelConfig = {
-    id: `run-snapshot:${runId}`,
-    name: model,
-    supportsThinking: false,
-    thinkingOnly: false,
-    apiKey: '',
-    baseUrl: '',
-  }
-
-  for (const event of loaded.events) {
-    if (!event.chunk || !isCurrent()) continue
-    replay.dispatch(seed, event.chunk as AiStreamChunk, { cfg })
-  }
-  if (loaded.run.status !== 'running') {
-    replay.dispatch(seed, terminalChunk(loaded), { cfg })
-  }
-
-  const replayed = replay.assistant(seed.turnId) ?? {
-    role: 'assistant' as const,
-    content: '',
-  }
-  const content = loaded.run.status === 'done' && !replayed.longTaskId
-    ? loaded.run.finalResponse || replayed.content || ''
-    : replayed.content || ''
-  const canonicalOutput = replayed.canonicalOutput && loaded.run.status === 'done'
-    ? {
-        ...replayed.canonicalOutput,
-        finalText: content,
-        finalStreamStatus: 'committed' as const,
-        runStatus: 'done' as const,
-        runTerminal: true,
-      }
-    : replayed.canonicalOutput
+  })
+  const content = replayed.content || ''
   const assistant: AgentConversationMessage = {
     ...storedAssistant,
     ...replayed,
     content,
-    canonicalOutput,
     conversationId: row.id,
     agentRunId: runId,
     model: model || storedAssistant.model,
-    durationMs: snapshotDurationMs(loaded)
-      ?? storedAssistant.durationMs
-      ?? replayed.durationMs,
+    durationMs: replayed.durationMs ?? storedAssistant.durationMs,
     ...(loaded.run.status === 'running' ? { isError: false } : {}),
   }
   if (content && loaded.run.status === 'done') {
@@ -307,100 +273,4 @@ function settingDiffResolutions(
   } catch {
     return {}
   }
-}
-
-function snapshotDurationMs(snapshot: AiAgentRunSnapshot): number | undefined {
-  const started = Date.parse(snapshot.run.createdAt || '')
-  const ended = Date.parse(snapshot.run.updatedAt || '')
-  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
-    return undefined
-  }
-  return ended - started
-}
-
-async function loadFullSnapshot(
-  runId: string,
-  dependencies: BookConversationHydrationDependencies,
-  isCurrent: () => boolean,
-): Promise<AiAgentRunSnapshot | undefined> {
-  const pageSize = Math.max(1, Math.floor(dependencies.pageSize ?? 200))
-  let after: number | undefined
-  let snapshot: AiAgentRunSnapshot | undefined
-  const events: AiAgentRunSnapshot['events'] = []
-  const seen = new Set<string>()
-
-  while (isCurrent()) {
-    let result: SnapshotResult
-    try {
-      result = await dependencies.getRunSnapshot({ runId, after, limit: pageSize })
-    } catch (error) {
-      if (!isCurrent()) return undefined
-      throw new BookConversationHydrationError(
-        error instanceof Error ? error.message : 'Run snapshot unavailable',
-        runId,
-      )
-    }
-    if (!result.success || !result.data) {
-      if (!isCurrent()) return undefined
-      throw new BookConversationHydrationError(
-        result.error || 'Run snapshot unavailable',
-        runId,
-      )
-    }
-    snapshot = result.data
-    for (const event of snapshot.events) {
-      const identity = `${event.cursor}:${event.type}`
-      if (seen.has(identity)) continue
-      seen.add(identity)
-      events.push(event)
-    }
-    if (!snapshot.hasMore) break
-    const cursor = snapshot.nextCursor
-    if (!Number.isFinite(cursor) || cursor === after) {
-      throw new BookConversationHydrationError(
-        'Run snapshot pagination did not advance',
-        runId,
-      )
-    }
-    after = cursor
-  }
-
-  if (!snapshot || !isCurrent()) return undefined
-  events.sort((left, right) => left.cursor - right.cursor)
-  return { ...snapshot, events }
-}
-
-function terminalChunk(snapshot: AiAgentRunSnapshot): AiStreamChunk {
-  const { runId, status } = snapshot.run
-  if (status === 'failed' || status === 'blocked' || status === 'canceled') {
-    return {
-      done: true,
-      runId,
-      runResult: { runId, status, errorCode: snapshotErrorCode(snapshot) },
-      model: snapshot.run.provenance.modelName || undefined,
-    }
-  }
-  if (status === 'running') {
-    return { done: true, finalResponseExpected: false, runId }
-  }
-  return {
-    done: true,
-    runId,
-    runResult: { runId, status },
-    model: snapshot.run.provenance.modelName || undefined,
-  }
-}
-
-function snapshotErrorCode(snapshot: AiAgentRunSnapshot): string | undefined {
-  for (let index = snapshot.events.length - 1; index >= 0; index -= 1) {
-    const chunk = snapshot.events[index].chunk as {
-      runResult?: { errorCode?: unknown }
-      payload?: { errorCode?: unknown; error?: unknown }
-    } | undefined
-    const value = chunk?.runResult?.errorCode
-      ?? chunk?.payload?.errorCode
-      ?? chunk?.payload?.error
-    if (typeof value === 'string' && value.trim()) return value
-  }
-  return undefined
 }

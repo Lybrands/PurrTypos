@@ -33,7 +33,7 @@ test("ordinary delegated Agent text remains visible", () => {
   );
 });
 
-test("delegated operations stay as direct rows in the owning execution panel", async () => {
+test("consecutive delegated operations collapse in the owning execution panel", async () => {
   const presentation = await import("./presentation.ts");
 
   assert.equal(typeof presentation.buildSubAgentTimelineItems, "function");
@@ -52,16 +52,27 @@ test("delegated operations stay as direct rows in the owning execution panel", a
         itemDurationsMs: [48, 28],
       },
     },
+    {
+      type: "tools",
+      segmentIndex: 1,
+      segment: {
+        commentaryBlockIndex: null,
+        labels: ["发布候选稿"],
+        itemDurationsMs: [36],
+      },
+    },
   ], "delegation-review-6");
 
   assert.deepEqual(items.map((item: { type: string }) => item.type), [
     "commentary",
-    "tools",
+    "stepGroup",
   ]);
   assert.deepEqual(
-    items[1].type === "tools"
-      ? items[1].segment.labels
+    items[1].type === "stepGroup"
+      ? items[1].parts
+          .filter((part) => part.type === "tools")
+          .flatMap((part) => part.segment.labels)
       : [],
-    ["写入剧本候选稿", "检查剧本候选稿"],
+    ["写入剧本候选稿", "检查剧本候选稿", "发布候选稿"],
   );
 });

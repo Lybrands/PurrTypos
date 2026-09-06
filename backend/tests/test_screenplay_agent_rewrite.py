@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 
 import application.model_runtime as model_runtime
-import application.screenplay_structured_call as screenplay_structured_call
+import application.screenplay_tool_calling as screenplay_tool_calling
 import domains.screenplay_agent.contracts as screenplay_contracts
 from purra.contracts import (
     AgentMessage,
@@ -21,12 +21,7 @@ from purra.contracts import (
     DomainContext,
     RunCreateParams,
     RunStatus,
-    ModelCompletion,
-    ModelFinishReason,
-    ModelStream,
-    ModelStreamChunk,
     ModelRequest,
-    PlanningCapabilities,
     ReasoningMode,
     StepExecutor,
     StepStatus,
@@ -36,13 +31,17 @@ from purra.contracts import (
     TaskStep,
     ToolRiskLevel,
 )
-from purra.api import AgentCore
+from purra.artifacts import ArtifactStatus
 from purra.events import AgentEvent, CoreEventType
-from purra.tools import InMemoryToolCatalog
 from purra.errors import ContractViolationError, ModelGatewayError
 from purra.ports import RunCommit
 from purra.cancellation import OperationCanceled
 from purra.json_values import thaw_json_mapping
+from purra.long_tasks import (
+    LongTaskCreateCommand,
+    LongTaskUnitResult,
+    LongTaskUnitSpec,
+)
 from purra.recovery import (
     FailureCategory,
     FailureDisposition,
@@ -52,6 +51,7 @@ from purra.recovery import (
 from application.screenplay_agent_service import (
     ScreenplayAgentService,
     _ScreenplayTurnRunLifecycle,
+    _execution_recipe_from_metadata,
     _task_failure,
 )
 from application.screenplay_task_resolver import ResolvedScreenplayTask
@@ -62,16 +62,21 @@ from application.screenplay_agent_profile import (
     _ready_checkpoint_keys,
 )
 from application.composition_factory import create_agent_composition
-from application.agent_run_service import AgentRunService
 from application.model_runtime import model_request_from_runtime
-from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
+from application.screenplay_agent_stream import (
+    ScreenplayCanonicalOutputQuery,
+    _with_screenplay_tool_display_names,
+)
 from application.screenplay_agent_task_executor import (
     ScreenplayTaskModelCalls,
     ScreenplayTaskUnitExecutor,
     _document_section_tool_instruction,
+    _validate_deliverable,
+    _validate_document_parts,
     _requires_run,
     _unit_result,
     normalize_screenplay_candidate,
+    StructurePartSplit,
 )
 from application.screenplay_candidate_assembler import (
     aggregate_review_validations,
@@ -88,9 +93,14 @@ from application.screenplay_manifest_compiler import (
     REVIEW_DIMENSIONS,
     compile_screenplay_manifest,
 )
+from application.screenplay_part_contracts import (
+    PART_CONTRACTS,
+    resolve_screenplay_part_contract,
+    screenplay_max_generated_units,
+    screenplay_task_budget_limits,
+)
 from application.screenplay_checkpoint_planning import (
     CHECKPOINT_PLAN_PROTOCOL,
-    ScreenplayCheckpointDecision,
     ScreenplayCheckpointInput,
     ScreenplayCheckpointOutcome,
     ScreenplayCheckpointPlanner,
@@ -107,7 +117,10 @@ from application.screenplay_structured_call import (
     PublicModelResult,
     StructuredModelResult,
 )
-from application.screenplay_candidate_model import ScreenplayCandidateRunResult
+from application.screenplay_tool_calling import (
+    ScreenplayCandidateRunResult,
+    ScreenplayToolCallingService,
+)
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from database.screenplay_agent_schema import init_screenplay_agent_schema
@@ -123,8 +136,6 @@ from domains.screenplay_agent.agent_context import (
     ScreenplayAgentDomainContext,
 )
 from domains.screenplay_agent.contracts import (
-    ScreenplayPlanBinding,
-    ScreenplayPlanPhase,
     ScreenplayScopeKind,
 )
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
@@ -143,14 +154,8 @@ from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
-from infrastructure.persistence.agent_output_publisher import (
-    InProcessAgentOutputPublisher,
-)
-from infrastructure.persistence.run_execution_store import SqliteRunControlStore
-from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from domains.screenplay_agent.adapter import (
     ScreenplayExecutionStateFactory,
-    ScreenplayHostContextProvider,
     ScreenplayToolLoopPolicy,
 )
 from schemas.screenplay_agent import SubmitScreenplayAgentTurnRequest
@@ -166,6 +171,146 @@ from purra.testing import assert_task_orchestration_conforms
 pytestmark = pytest.mark.asyncio
 
 
+async def test_screenplay_part_contracts_do_not_define_provider_token_budgets():
+    assert PART_CONTRACTS
+    assert all(
+        not hasattr(contract, "output_token_cap")
+        for contract in PART_CONTRACTS.values()
+    )
+    assert all(
+        contract.tool_profile != "all"
+        for contract in PART_CONTRACTS.values()
+    )
+    assert all(
+        not hasattr(contract, "reasoning_mode")
+        for contract in PART_CONTRACTS.values()
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "kind", "unit_input", "expected_key"),
+    [
+        ("screenplayDraft", "generate_draft_scene", {}, "draft_scene"),
+        (
+            "screenplayDraft",
+            "generate_episode_metadata",
+            {},
+            "episode_metadata",
+        ),
+        ("review", "generate_review_dimension", {}, "review_dimension"),
+        (
+            "sourceAnalysis",
+            "generate_document_section",
+            {"sectionKey": "characters"},
+            "source_analysis.characters",
+        ),
+        (
+            "sourceAnalysis",
+            "generate_document_section",
+            {
+                "sectionKey": "source_digest:chapter:chapter-1",
+                "sourceChapterDigest": True,
+                "chapterId": "chapter-1",
+            },
+            "source_analysis.chapter_digest",
+        ),
+        (
+            "sourceAnalysis",
+            "generate_document_section",
+            {
+                "sectionKey": "source_digest:reduce:1:1",
+                "sourceDigestReduction": True,
+            },
+            "source_analysis.digest_reduction",
+        ),
+        (
+            "creativeBrief",
+            "generate_document_section",
+            {"sectionKey": "premise"},
+            "creative_brief.premise",
+        ),
+        (
+            "structure",
+            "generate_document_section",
+            {"sectionKey": "series_arc:index", "seriesArcIndex": True},
+            "structure.series_arc_index",
+        ),
+        (
+            "structure",
+            "generate_document_section",
+            {
+                "sectionKey": "series_arc:phase:setup",
+                "documentSectionKey": "series_arc",
+                "phaseKey": "setup",
+            },
+            "structure.series_arc_phase",
+        ),
+        (
+            "structure",
+            "generate_document_section",
+            {"sectionKey": "episode_plan:index", "episodePlanIndex": True},
+            "structure.episode_plan_index",
+        ),
+        (
+            "structure",
+            "generate_document_section",
+            {
+                "sectionKey": "episode_plan:episode-7",
+                "documentSectionKey": "episode_plan",
+                "episodeNumber": 7,
+            },
+            "structure.episode_plan_fragment",
+        ),
+        (
+            "structure",
+            "generate_document_section",
+            {
+                "sectionKey": "character_arcs:index",
+                "characterArcsIndex": True,
+            },
+            "structure.character_arcs_index",
+        ),
+        (
+            "structure",
+            "generate_document_section",
+            {
+                "sectionKey": "character_arcs:character:linyue",
+                "documentSectionKey": "character_arcs",
+                "characterKey": "linyue",
+            },
+            "structure.character_arc_fragment",
+        ),
+        (
+            "sceneList",
+            "generate_document_section",
+            {"sectionKey": "episode-7"},
+            "scene_list_episode",
+        ),
+        ("creativeBrief", "compose_final_response", {}, "final_response"),
+    ],
+)
+async def test_screenplay_part_contract_resolution_is_unique(
+    role,
+    kind,
+    unit_input,
+    expected_key,
+):
+    assert resolve_screenplay_part_contract(
+        role,
+        kind,
+        unit_input,
+    ).key == expected_key
+
+
+async def test_screenplay_part_contract_resolution_fails_closed():
+    with pytest.raises(ValueError, match="screenplay_part_contract_unknown"):
+        resolve_screenplay_part_contract(
+            "creativeBrief",
+            "generate_document_section",
+            {"sectionKey": "invented"},
+        )
+
+
 async def test_creative_brief_section_instructions_match_document_validator_fields():
     positioning = _document_section_tool_instruction(
         "creativeBrief",
@@ -175,6 +320,507 @@ async def test_creative_brief_section_instructions_match_document_validator_fiel
 
     assert '"contentJson":{"fields":{"approach":' in positioning
     assert '"contentJson":{"fields":{"premise":' in premise
+
+    with pytest.raises(ValueError, match="screenplay_part_contract_unknown"):
+        _document_section_tool_instruction("creativeBrief", "invented")
+
+
+def _creative_brief_candidate(section_key: str, content_json: dict):
+    return {
+        "payload": {
+            "sectionKey": section_key,
+            "title": f"{section_key} 标题",
+            "contentJson": content_json,
+        },
+        "contentText": f"## {section_key}",
+    }
+
+
+@pytest.mark.parametrize(
+    ("section_key", "content_json"),
+    [
+        ("positioning", {"fields": {
+            "approach": "人物驱动",
+            "format": "竖屏短剧",
+            "audience": "年轻观众",
+            "tone": "悬疑而温暖",
+        }}),
+        ("premise", {"fields": {
+            "premise": "旧友在停电夜重逢并寻找真相。",
+            "centralConflict": "合作需求与旧日背叛冲突。",
+            "dramaticQuestion": "他们能否在来电前重建信任？",
+        }}),
+        ("characters", {"coreCharacters": [{
+            "key": "lead",
+            "name": "林月",
+            "function": "推动调查",
+            "desire": "查明真相",
+            "obstacle": "无法信任旧友",
+            "changeDirection": "从独行转向合作",
+        }]}),
+        ("world", {
+            "worldRules": ["停电期间所有电子记录都会失真"],
+            "visualIdentity": "冷蓝夜景与暖色手电光对照",
+        }),
+        ("adaptation_rules", {"adaptationRules": [{
+            "rule": "关键线索必须通过人物行动呈现",
+            "reason": "避免解释性对白",
+        }]}),
+    ],
+)
+async def test_creative_brief_section_candidates_have_strict_shapes(
+    section_key,
+    content_json,
+):
+    normalized = normalize_screenplay_candidate(
+        {
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "creative_brief_section",
+            "sectionKey": section_key,
+        },
+        _creative_brief_candidate(section_key, content_json),
+    )
+
+    assert normalized["payload"]["contentJson"] == content_json
+
+
+async def test_creative_brief_section_rejects_extra_fields_and_character_overflow():
+    contract = {
+        "protocol": "purrtypos.screenplay.candidate-validation/v1",
+        "kind": "creative_brief_section",
+        "sectionKey": "characters",
+    }
+    character = {
+        "key": "lead",
+        "name": "林月",
+        "function": "推动调查",
+        "desire": "查明真相",
+        "obstacle": "不信任旧友",
+        "changeDirection": "转向合作",
+    }
+    with pytest.raises(ValueError, match="character fields"):
+        normalize_screenplay_candidate(
+            contract,
+            _creative_brief_candidate(
+                "characters",
+                {"coreCharacters": [character], "episodes": []},
+            ),
+        )
+    with pytest.raises(ValueError, match="count"):
+        normalize_screenplay_candidate(
+            contract,
+            _creative_brief_candidate(
+                "characters",
+                {"coreCharacters": [
+                    {**character, "key": f"lead-{index}"}
+                    for index in range(13)
+                ]},
+            ),
+        )
+
+
+async def test_creative_brief_assembled_document_revalidates_the_complete_contract():
+    content = {
+        "fields": {
+            "approach": "人物驱动",
+            "format": "竖屏短剧",
+            "audience": "年轻观众",
+            "tone": "悬疑而温暖",
+            "premise": "旧友在停电夜重逢并寻找真相。",
+            "centralConflict": "合作需求与旧日背叛冲突。",
+            "dramaticQuestion": "他们能否在来电前重建信任？",
+        },
+        "coreCharacters": [{
+            "key": "lead",
+            "name": "林月",
+            "function": "推动调查",
+            "desire": "查明真相",
+            "obstacle": "无法信任旧友",
+            "changeDirection": "从独行转向合作",
+        }],
+        "worldRules": ["停电期间所有电子记录都会失真"],
+        "visualIdentity": "冷蓝夜景与暖色手电光对照",
+        "adaptationRules": [{
+            "rule": "关键线索必须通过人物行动呈现",
+            "reason": "避免解释性对白",
+        }],
+    }
+    validated = _validate_deliverable(
+        "creativeBrief",
+        {
+            "title": "创作简报",
+            "contentText": "完整简报",
+            "contentJson": content,
+        },
+        structure_id=None,
+        structure_episode_numbers=(),
+        reviewed_draft_id=None,
+    )
+
+    assert validated["contentJson"]["documentKind"] == "creative_brief"
+    with pytest.raises(ValueError, match="document fields"):
+        _validate_deliverable(
+            "creativeBrief",
+            {
+                "title": "创作简报",
+                "contentText": "完整简报",
+                "contentJson": {**content, "episodes": []},
+            },
+            structure_id=None,
+            structure_episode_numbers=(),
+            reviewed_draft_id=None,
+        )
+
+
+def _scene_list_candidate(
+    episode_number: int,
+    *,
+    scene_id: str = "scene-1",
+) -> dict:
+    return {
+        "payload": {
+            "sectionKey": f"episode-{episode_number}",
+            "title": f"第 {episode_number} 集场景表",
+            "contentJson": {"scenes": [{
+                "id": scene_id,
+                "episodeNumber": episode_number,
+                "heading": "咖啡馆·夜",
+                "objective": "确认来意",
+                "conflict": "双方互不信任",
+                "turn": "旧证物出现",
+                "synopsis": "试探中发现共同线索。",
+            }]},
+        },
+        "contentText": f"第 {episode_number} 集场景表",
+    }
+
+
+async def test_late_stage_candidate_contracts_reject_extra_fields_and_review_overflow():
+    protocol = "purrtypos.screenplay.candidate-validation/v1"
+    scene_contract = {
+        "protocol": protocol,
+        "kind": "scene_list_fragment",
+        "episodeNumber": 1,
+    }
+    with pytest.raises(ValueError, match="fragment fields"):
+        candidate = _scene_list_candidate(1)
+        candidate["payload"]["contentJson"]["episodes"] = []
+        normalize_screenplay_candidate(scene_contract, candidate)
+
+    metadata_contract = {
+        "protocol": protocol,
+        "kind": "episode_metadata",
+        "episodeNumber": 1,
+    }
+    with pytest.raises(ValueError, match="metadata number"):
+        normalize_screenplay_candidate(metadata_contract, {
+            "payload": {
+                "episodeNumber": 1,
+                "title": "第一集",
+                "continuitySummary": "人物取得证物。",
+                "executionSummary": "不属于业务合同",
+            },
+            "contentText": "",
+        })
+
+    review_contract = {
+        "protocol": protocol,
+        "kind": "review_dimension",
+        "episodeNumber": 1,
+        "dimension": "continuity",
+        "allowedSceneIds": ["scene-1"],
+        "reviewedDraftId": "draft-1",
+        "reviewedContentDigest": "a" * 64,
+    }
+    with pytest.raises(ValueError, match="exceeds scene count"):
+        normalize_screenplay_candidate(review_contract, {
+            "payload": {
+                "episodeNumber": 1,
+                "reviewDimension": "continuity",
+                "title": "第一集连续性审阅",
+                "contentJson": {
+                    "verdict": "revise",
+                    "issues": [{
+                        "id": f"issue-{number}",
+                        "severity": "major",
+                        "description": f"问题 {number}",
+                        "sceneIds": ["scene-1"],
+                    } for number in (1, 2)],
+                },
+            },
+            "contentText": "需要修订。",
+        })
+
+
+async def test_creative_brief_run_binds_exact_evidence_revision_scope(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+
+    class ToolCalls:
+        context = None
+
+        async def run_candidate(self, **kwargs):
+            self.context = kwargs["domain_context"]
+            candidate = normalize_screenplay_candidate(
+                kwargs["candidate_validation_contract"],
+                _creative_brief_candidate("premise", {"fields": {
+                    "premise": "旧友在停电夜重逢并寻找真相。",
+                    "centralConflict": "合作需求与旧日背叛冲突。",
+                    "dramaticQuestion": "他们能否在来电前重建信任？",
+                }}),
+            )
+            return ScreenplayCandidateRunResult("run-brief-premise", candidate)
+
+    tool_calls = ToolCalls()
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+    )
+    descriptor = {
+        "projectId": workspace["project"]["id"],
+        "targetRole": "creativeBrief",
+        "sourceRevisionRefs": ["analysis-accepted", "brief-baseline"],
+        "baseRevisionId": "brief-baseline",
+        "acceptedRevisionIds": {
+            "sourceAnalysis": "analysis-accepted",
+            "creativeBrief": "brief-baseline",
+        },
+        "structureEpisodeNumbers": [],
+    }
+    unit = {
+        "id": "section:creativeBrief:premise",
+        "kind": "generate_document_section",
+        "dependsOn": ["document:evidence"],
+        "input": {
+            "sectionKey": "premise",
+            "instruction": "修订故事前提",
+            "baseRevisionId": "brief-baseline",
+        },
+    }
+    task = {
+        "id": "task-brief-revision-scope",
+        "projectId": workspace["project"]["id"],
+        "sessionId": session["id"],
+        "turnId": "turn-brief-revision-scope",
+        "rootRunId": "root-brief-revision-scope",
+        "targetRole": "creativeBrief",
+        "units": [{
+            "id": "document:evidence",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"targetRole": "creativeBrief"},
+            "output": {"evidenceDescriptor": descriptor},
+        }, unit],
+    }
+
+    await executor.execute(task=task, unit=unit, runtime=object())
+
+    assert tool_calls.context.deliverable_revision_scope == {
+        "sourceAnalysis": "analysis-accepted",
+        "creativeBrief": "brief-baseline",
+    }
+
+
+async def test_structure_episode_index_and_fragment_candidates_are_bounded():
+    protocol = "purrtypos.screenplay.candidate-validation/v1"
+    index = normalize_screenplay_candidate(
+        {"protocol": protocol, "kind": "structure_episode_plan_index"},
+        {
+            "payload": {
+                "sectionKey": "episode_plan:index",
+                "title": "分集索引",
+                "contentJson": {"episodes": [
+                    {
+                        "number": 1,
+                        "id": "ep01",
+                        "title": "误入犬域",
+                        "summary": "建立主角并进入异空间。",
+                        "sourceChapterIds": ["chapter-1"],
+                    },
+                    {
+                        "number": 2,
+                        "id": "ep02",
+                        "title": "绝境觉醒",
+                        "summary": "完成首次能力爆发。",
+                    },
+                ]},
+            },
+            "contentText": "- 第 1 集\n- 第 2 集",
+        },
+    )
+    assert [
+        episode["number"]
+        for episode in index["payload"]["contentJson"]["episodes"]
+    ] == [1, 2]
+
+    fragment = normalize_screenplay_candidate(
+        {
+            "protocol": protocol,
+            "kind": "structure_episode_plan_fragment",
+            "episodeNumber": 2,
+            "episodeId": "ep02",
+            "episodeTitle": "绝境觉醒",
+        },
+        {
+            "payload": {
+                "sectionKey": "episode_plan:episode-2",
+                "title": "第 2 集：绝境觉醒",
+                "contentJson": {"episodes": [{
+                    "number": 2,
+                    "id": "ep02",
+                    "title": "绝境觉醒",
+                    "summary": "林月在追杀中唤醒金鼓。",
+                    "objective": "救出被围困的同伴。",
+                    "conflict": "能力失控会伤害同伴。",
+                    "turn": "林月主动接受金鼓。",
+                    "hook": "苏文从梦中惊醒。",
+                }]},
+            },
+            "contentText": "## 第 2 集：绝境觉醒",
+        },
+    )
+    assert fragment["payload"]["contentJson"]["episodes"][0]["id"] == "ep02"
+
+    with pytest.raises(ValueError, match="ordered and unique"):
+        normalize_screenplay_candidate(
+            {"protocol": protocol, "kind": "structure_episode_plan_index"},
+            {
+                "payload": {
+                    "sectionKey": "episode_plan:index",
+                    "title": "错误索引",
+                    "contentJson": {"episodes": [{
+                        "number": 2,
+                        "id": "ep02",
+                        "title": "跳号",
+                        "summary": "不允许跳号。",
+                    }]},
+                },
+                "contentText": "错误",
+            },
+        )
+
+
+async def test_structure_series_and_character_candidates_are_bounded():
+    protocol = "purrtypos.screenplay.candidate-validation/v1"
+    series_index = normalize_screenplay_candidate(
+        {"protocol": protocol, "kind": "structure_series_arc_index"},
+        {
+            "payload": {
+                "sectionKey": "series_arc:index",
+                "title": "全剧阶段索引",
+                "contentJson": {"phases": [{
+                    "key": "setup",
+                    "title": "误入犬域",
+                    "objective": "建立主角目标与异世界规则。",
+                }]},
+            },
+            "contentText": "- 误入犬域",
+        },
+    )
+    assert series_index["payload"]["contentJson"]["phases"][0]["key"] == (
+        "setup"
+    )
+
+    phase = normalize_screenplay_candidate(
+        {
+            "protocol": protocol,
+            "kind": "structure_series_arc_phase",
+            "phaseKey": "setup",
+            "phaseTitle": "误入犬域",
+            "phaseObjective": "建立主角目标与异世界规则。",
+        },
+        {
+            "payload": {
+                "sectionKey": "series_arc:phase:setup",
+                "title": "误入犬域",
+                "contentJson": {"seriesArc": {"phases": [{
+                    "key": "setup",
+                    "title": "误入犬域",
+                    "objective": "建立主角目标与异世界规则。",
+                    "centralConflict": "回家与救人不可兼得。",
+                    "turningPoint": "主角主动留下。",
+                    "exitState": "团队正式结盟。",
+                }]}},
+            },
+            "contentText": "## 误入犬域",
+        },
+    )
+    assert phase["payload"]["contentJson"]["seriesArc"]["phases"][0][
+        "centralConflict"
+    ]
+
+    character_index = normalize_screenplay_candidate(
+        {"protocol": protocol, "kind": "structure_character_arcs_index"},
+        {
+            "payload": {
+                "sectionKey": "character_arcs:index",
+                "title": "核心人物索引",
+                "contentJson": {"characters": [{
+                    "key": "linyue",
+                    "name": "林月",
+                }]},
+            },
+            "contentText": "- 林月",
+        },
+    )
+    assert character_index["payload"]["contentJson"]["characters"] == [{
+        "key": "linyue",
+        "name": "林月",
+    }]
+
+    character = normalize_screenplay_candidate(
+        {
+            "protocol": protocol,
+            "kind": "structure_character_arc_fragment",
+            "characterKey": "linyue",
+            "characterName": "林月",
+        },
+        {
+            "payload": {
+                "sectionKey": "character_arcs:character:linyue",
+                "title": "林月人物弧",
+                "contentJson": {"characterArcs": [{
+                    "key": "linyue",
+                    "startState": "只想独自回家。",
+                    "desire": "找到回归现实的方法。",
+                    "turningEpisodes": ["ep01"],
+                    "endState": "选择守护同伴。",
+                }]},
+            },
+            "contentText": "## 林月",
+        },
+    )
+    assert character["payload"]["contentJson"]["characterArcs"][0][
+        "turningEpisodes"
+    ] == ["ep01"]
+
+    with pytest.raises(ValueError, match="cannot contain episode or scene detail"):
+        normalize_screenplay_candidate(
+            {
+                "protocol": protocol,
+                "kind": "structure_series_arc_phase",
+                "phaseKey": "setup",
+                "phaseTitle": "误入犬域",
+                "phaseObjective": "建立主角目标与异世界规则。",
+            },
+            {
+                "payload": {
+                    "sectionKey": "series_arc:phase:setup",
+                    "title": "错误阶段",
+                    "contentJson": {"seriesArc": {"phases": [{
+                        "key": "setup",
+                        "title": "误入犬域",
+                        "objective": "建立主角目标与异世界规则。",
+                        "centralConflict": "冲突",
+                        "turningPoint": "转折",
+                        "exitState": "状态",
+                        "episodes": [{"id": "ep01"}],
+                    }]}},
+                },
+                "contentText": "错误",
+            },
+        )
 
 
 def _checkpoint_unit(
@@ -316,9 +962,83 @@ async def test_checkpoint_planner_receipts_expose_only_public_artifact_facts():
     assert "PROMPT-SENTINEL-DO-NOT-LEAK" not in encoded
 
 
+async def test_checkpoint_treats_expanded_structure_episodes_as_completed_scope():
+    plan = ExecutionPlan(
+        title="设计分集结构",
+        task_spec=_screenplay_task_spec(deliverable="structure"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    units = (
+        SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            required=True,
+            artifact_digest="sha256:" + "a" * 64,
+            error_code=None,
+            failure=None,
+            metadata={
+                "unitKind": "generate_document_section",
+                "input": {
+                    "sectionKey": "episode_plan:index",
+                    "documentSectionKey": "episode_plan",
+                    "episodePlanIndex": True,
+                },
+            },
+        ),
+        SimpleNamespace(
+            status=SimpleNamespace(value="expanded"),
+            required=False,
+            artifact_digest=None,
+            error_code="structure_episode_plan_split_required",
+            failure={"category": "model_output_invalid"},
+            metadata={
+                "unitKind": "expand_structure_episode_plan",
+                "input": {
+                    "sectionKey": "episode_plan",
+                    "splitStrategy": "structure_episode_plan",
+                },
+            },
+        ),
+        SimpleNamespace(
+            status=SimpleNamespace(value="completed"),
+            required=True,
+            artifact_digest="sha256:" + "b" * 64,
+            error_code=None,
+            failure=None,
+            metadata={
+                "unitKind": "generate_document_section",
+                "input": {
+                    "sectionKey": "episode_plan:episode-1",
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 1,
+                },
+            },
+        ),
+    )
+
+    checkpoint = _checkpoint_input(
+        SimpleNamespace(id="task-structure", created_by_run_id="root-structure"),
+        units,
+        {
+            "turnId": "turn-structure",
+            "projectId": "project-structure",
+            "sessionId": 1,
+            "targetRole": "structure",
+            "screenplayScope": {},
+        },
+        "document:sections",
+        plan,
+        plan,
+    )
+
+    assert checkpoint.remaining_scope["episodeNumbers"] == []
+    assert checkpoint.remaining_scope["sectionKeys"] == []
+    assert checkpoint.typed_failures == ()
+
+
 @pytest.mark.parametrize(("kind", "expected"), (
     ("collect_evidence", False),
     ("validate_manifest_part", False),
+    ("project_structure_hooks", False),
     ("generate_draft_scene", True),
     ("generate_episode_metadata", True),
     ("generate_document_section", True),
@@ -383,6 +1103,44 @@ async def test_checkpoint_planner_accepts_only_future_copy_and_dependencies():
     assert "root-1" not in serialized
     assert "sprev-private-root-id" not in serialized
     assert "正文" not in serialized
+
+
+@pytest.mark.parametrize("condition", ["complete", "pending", "unknown", "episode", "failure", "constraint", "missing_receipts"])
+async def test_checkpoint_skips_model_only_for_verified_complete_business_scope(condition):
+    plan = ExecutionPlan(
+        title="创作", task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    remaining = {"pendingBusinessUnits": 0, "episodeNumbers": [], "sectionKeys": []}
+    if condition == "pending":
+        remaining["pendingBusinessUnits"] = 1
+    elif condition == "unknown":
+        del remaining["pendingBusinessUnits"]
+    elif condition == "episode":
+        remaining["episodeNumbers"] = [5]
+
+    class Models:
+        calls = 0
+
+        async def run_json(self, **kwargs):
+            self.calls += 1
+            value = {"protocol": CHECKPOINT_PLAN_PROTOCOL, "outcome": "unchanged"}
+            return StructuredModelResult(kwargs["validate"](value), "root")
+
+    models = Models()
+    decision = await ScreenplayCheckpointPlanner(models, runtime=object()).revise(
+        ScreenplayCheckpointInput(
+            checkpoint_key="episode:4", root_run_id="root", task_id="task", turn_id="turn",
+            project_id="project", session_id=1, target_role="screenplayDraft",
+            original_plan=plan, current_plan=plan, completed_summaries=(),
+            artifact_receipts=() if condition == "missing_receipts" else ({"digest": "sha256:" + "a" * 64},),
+            typed_failures=({"code": "validation_failed"},) if condition == "failure" else (),
+            constraint_changes=({"code": "changed_scope"},) if condition == "constraint" else (),
+            remaining_scope=remaining,
+        )
+    )
+    assert decision.outcome is ScreenplayCheckpointOutcome.UNCHANGED
+    assert models.calls == (0 if condition == "complete" else 1)
 
 
 async def test_checkpoint_loads_current_plan_from_authoritative_root_state(
@@ -466,7 +1224,7 @@ async def test_checkpoint_root_plan_fails_closed_without_one_authoritative_plan_
         )
 
 
-async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
+async def test_stale_ready_checkpoint_is_persistently_failed_not_reemitted(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
@@ -491,7 +1249,7 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
         reservation_epoch=int(reservation["reservation_epoch"]),
     )
 
-    row = await repository.pause_ready_conflict(
+    row = await repository.fail_ready_conflict(
         operation_id="operation-stale",
         checkpoint_key="episode:4",
         code="screenplay_checkpoint_ready_root_plan_conflict",
@@ -500,7 +1258,8 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
         ))["plan_digest"]),
     )
 
-    assert row["status"] == "paused"
+    assert row["status"] == "failed"
+    assert row["outcome"] == ScreenplayCheckpointOutcome.FAILED.value
     assert row["error_code"] == (
         "screenplay_checkpoint_ready_root_plan_conflict"
     )
@@ -536,6 +1295,436 @@ async def test_checkpoint_reservation_is_single_winner_and_expiry_recoverable(
     recovered = await reserve("owner-after-restart")
     assert recovered["_acquired"] is True
     assert recovered["reservation_owner"] == "owner-after-restart"
+
+
+async def test_checkpoint_planning_failure_is_terminal_and_owner_fenced(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    stale = await repository.reserve(
+        operation_id="operation-planning-failure",
+        task_id="task-planning-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-planning-failure",
+        input_digest="sha256:" + "d" * 64,
+        reservation_token="owner-stale",
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans SET reservation_expires_at_ms = 0 "
+        "WHERE operation_id = ?",
+        ["operation-planning-failure"],
+    )
+    recovered = await repository.reserve(
+        operation_id="operation-planning-failure",
+        task_id="task-planning-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-planning-failure",
+        input_digest="sha256:" + "d" * 64,
+        reservation_token="owner-recovered",
+    )
+
+    with pytest.raises(RuntimeError, match="reservation_lost"):
+        await repository.fail_planning(
+            operation_id="operation-planning-failure",
+            checkpoint_key="episode:4",
+            code="model_output_truncated",
+            reservation_owner="owner-stale",
+            reservation_epoch=int(stale["reservation_epoch"]),
+        )
+    failed = await repository.fail_planning(
+        operation_id="operation-planning-failure",
+        checkpoint_key="episode:4",
+        code="model_output_truncated",
+        reservation_owner="owner-recovered",
+        reservation_epoch=int(recovered["reservation_epoch"]),
+    )
+
+    assert failed["status"] == "failed"
+    assert failed["outcome"] == ScreenplayCheckpointOutcome.FAILED.value
+    assert failed["error_code"] == "model_output_truncated"
+    assert failed["reservation_owner"] is None
+    assert failed["reservation_expires_at_ms"] is None
+
+
+async def test_review_checkpoint_gate_waits_for_all_episode_validations(
+    temp_db: DatabaseConnection,
+):
+    from infrastructure.screenplay.long_task_claim_guard import ScreenplayCheckpointClaimGuard
+
+    repository = SqliteLongTaskRepository(
+        temp_db, claim_guard=ScreenplayCheckpointClaimGuard(temp_db),
+    )
+    task = await repository.create(
+        "task-review-checkpoint-gate",
+        LongTaskCreateCommand(
+            namespace="purrtypos.screenplay",
+            kind="screenplay.review",
+            owner_id="project-review-checkpoint-gate",
+            created_by_run_id="root-review-checkpoint-gate",
+            units=(
+                LongTaskUnitSpec(
+                    id="review:1:validation", position=0,
+                    metadata={"unitKind": "validate_manifest_part", "input": {
+                        "validationKind": "review_episode", "episodeNumber": 1,
+                    }},
+                ),
+                LongTaskUnitSpec(
+                    id="review:2:generate", position=1,
+                    dependencies=("review:1:validation",),
+                    metadata={"unitKind": "generate_manifest_part"},
+                ),
+                LongTaskUnitSpec(
+                    id="review:2:validation", position=2,
+                    dependencies=("review:2:generate",),
+                    metadata={"unitKind": "validate_manifest_part", "input": {
+                        "validationKind": "review_episode", "episodeNumber": 2,
+                    }},
+                ),
+                LongTaskUnitSpec(
+                    id="compose-final-response", position=3,
+                    dependencies=("review:2:validation",),
+                    metadata={"unitKind": "compose_final_response"},
+                ),
+            ),
+            metadata={
+                "operationId": "operation-review-checkpoint-gate",
+                "checkpointPlanningEnabled": True,
+            },
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    for unit_id in (
+        "review:1:validation", "review:2:generate", "review:2:validation",
+    ):
+        unit = await repository.claim_ready_unit(
+            task.id, worker_id="review-worker", lease_duration_ms=30_000,
+        )
+        assert unit is not None, f"review stalled before {unit_id}"
+        assert unit.id == unit_id
+        await repository.complete_unit(
+            task.id, unit.id, worker_id="review-worker",
+            lease_epoch=unit.lease_epoch,
+            result=LongTaskUnitResult(output_ref=f"artifact://{unit_id}"),
+        )
+    assert await repository.claim_ready_unit(
+        task.id, worker_id="review-worker", lease_duration_ms=30_000,
+    ) is None
+
+
+@pytest.mark.parametrize("commit_ready_first", (False, True))
+async def test_checkpoint_ready_write_failure_preserves_error_and_terminates_receipt(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+    commit_ready_first: bool,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = ExecutionPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    original_ready = repository.ready
+    original_error = RuntimeError("checkpoint_ready_write_failed")
+
+    async def load_plan(*_args, **_kwargs):
+        return plan
+
+    async def roots(_root_run_id):
+        return None, "root-ready-failure"
+
+    async def revise(_value, _signal):
+        return SimpleNamespace(
+            outcome=ScreenplayCheckpointOutcome.UNCHANGED,
+            plan=None,
+        )
+
+    async def fail_ready(**kwargs):
+        if commit_ready_first:
+            await original_ready(**kwargs)
+        raise original_error
+
+    async def downstream(_update):
+        pytest.fail("failed ready transition must not publish a plan revision")
+
+    monkeypatch.setattr(repository, "load_root_plan", load_plan)
+    monkeypatch.setattr(repository, "continuation_plan_roots", roots)
+    monkeypatch.setattr(repository, "ready", fail_ready)
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(revise=revise),
+        downstream=downstream,
+        task_id="task-ready-failure",
+        root_run_id="root-ready-failure",
+        signal=None,
+    )
+    async with asyncio.timeout(2):
+        with pytest.raises(RuntimeError) as captured:
+            await observer._handle_checkpoint(
+                SimpleNamespace(id="task-ready-failure"),
+                (),
+                {
+                    "turnId": "turn-ready-failure",
+                    "projectId": "project-ready-failure",
+                    "sessionId": 1,
+                    "targetRole": "screenplayDraft",
+                },
+                "operation-ready-failure",
+                "episode:4",
+                SimpleNamespace(),
+            )
+
+    assert captured.value is original_error
+    failed = await repository.load("operation-ready-failure", "episode:4")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "checkpoint_ready_write_failed"
+    assert failed["reservation_owner"] is None
+    assert failed["reservation_expires_at_ms"] is None
+    assert failed["reservation_epoch"] == 1
+    assert bool(failed["plan_digest"]) is commit_ready_first
+
+
+@pytest.mark.parametrize("failure_target", ("downstream", "applied"))
+async def test_checkpoint_applying_exception_fails_owned_receipt_with_original_error(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+    failure_target: str,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = ExecutionPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-apply-failure",
+        task_id="task-apply-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-apply-failure",
+        input_digest="sha256:" + "c" * 64,
+        reservation_token="planner",
+    )
+    ready = await repository.ready(
+        operation_id="operation-apply-failure",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.UNCHANGED,
+        reservation_owner="planner",
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+    original_error = RuntimeError(f"checkpoint_{failure_target}_failed")
+    downstream_calls = 0
+
+    async def downstream(_update):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        raise original_error
+
+    async def acknowledged(*_args, **_kwargs):
+        return ready["plan_digest"]
+
+    async def fail_applied(**_kwargs):
+        raise original_error
+
+    if failure_target == "applied":
+        monkeypatch.setattr(repository, "root_revision_digest", acknowledged)
+        monkeypatch.setattr(repository, "applied", fail_applied)
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=downstream,
+        task_id="task-apply-failure",
+        root_run_id="root-apply-failure",
+        signal=None,
+    )
+    async with asyncio.timeout(2):
+        with pytest.raises(RuntimeError) as captured:
+            await observer._emit_ready(
+                ready,
+                SimpleNamespace(event=AgentEvent(
+                    type=CoreEventType.LONG_TASK_PROGRESS,
+                    payload={"taskId": "task-apply-failure"},
+                )),
+            )
+
+    assert captured.value is original_error
+    failed = await repository.load("operation-apply-failure", "episode:4")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == str(original_error)
+    assert failed["reservation_owner"] is None
+    assert failed["reservation_expires_at_ms"] is None
+    assert failed["reservation_epoch"] == 2
+    assert downstream_calls == (1 if failure_target == "downstream" else 0)
+
+
+@pytest.mark.parametrize("failure_stage", ("reserved", "ready", "applying"))
+async def test_checkpoint_failure_cas_cannot_overwrite_a_newer_lease(
+    temp_db: DatabaseConnection,
+    failure_stage: str,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = ExecutionPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reserved = await repository.reserve(
+        operation_id="operation-failure-fence",
+        task_id="task-failure-fence",
+        checkpoint_key="episode:4",
+        root_run_id="root-failure-fence",
+        input_digest="sha256:" + "b" * 64,
+        reservation_token="planner",
+    )
+    ready = await repository.ready(
+        operation_id="operation-failure-fence",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.UNCHANGED,
+        reservation_owner="planner",
+        reservation_epoch=int(reserved["reservation_epoch"]),
+    )
+    applying = await repository.acquire_applying(
+        operation_id="operation-failure-fence",
+        checkpoint_key="episode:4",
+        digest=str(ready["plan_digest"]),
+        reservation_token="old-applier",
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans SET reservation_expires_at_ms = 0 "
+        "WHERE operation_id = ?",
+        ["operation-failure-fence"],
+    )
+    recovered = await repository.acquire_applying(
+        operation_id="operation-failure-fence",
+        checkpoint_key="episode:4",
+        digest=str(ready["plan_digest"]),
+        reservation_token="new-applier",
+    )
+    stale = {"reserved": reserved, "ready": ready, "applying": applying}[failure_stage]
+    with pytest.raises(RuntimeError, match="reservation_lost"):
+        await repository.fail_execution(stale, code="stale_worker_failed")
+    current = await repository.load("operation-failure-fence", "episode:4")
+    assert current["status"] == "applying"
+    assert current["reservation_owner"] == "new-applier"
+    assert current["reservation_epoch"] == recovered["reservation_epoch"]
+    assert current["error_code"] is None
+
+
+async def test_checkpoint_failure_settlement_keeps_both_errors(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    receipt = await repository.reserve(
+        operation_id="operation-double-failure",
+        task_id="task-double-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-double-failure",
+        input_digest="sha256:" + "a" * 64,
+        reservation_token="planner",
+    )
+    original_error = ModelGatewayError(
+        "provider response was incomplete", code="model_output_truncated",
+    )
+    settlement_error = RuntimeError("checkpoint_failure_write_failed")
+
+    async def fail_settlement(*_args, **_kwargs):
+        raise settlement_error
+
+    monkeypatch.setattr(repository, "fail_execution", fail_settlement)
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=SimpleNamespace(),
+        task_id="task-double-failure",
+        root_run_id="root-double-failure",
+        signal=None,
+    )
+    with pytest.raises(ModelGatewayError) as captured:
+        await observer._fail_execution(receipt, original_error)
+    assert captured.value is original_error
+    assert captured.value.code == "model_output_truncated"
+    assert captured.value.__cause__ is settlement_error
+
+
+async def test_failed_checkpoint_rejects_downstream_claim_without_idle_loop(
+    temp_db: DatabaseConnection,
+):
+    from infrastructure.screenplay.long_task_claim_guard import ScreenplayCheckpointClaimGuard
+
+    repository = SqliteLongTaskRepository(
+        temp_db, claim_guard=ScreenplayCheckpointClaimGuard(temp_db),
+    )
+    task = await repository.create(
+        "task-failed-checkpoint-gate",
+        LongTaskCreateCommand(
+            namespace="purrtypos.screenplay",
+            kind="screenplay.draft",
+            owner_id="project-failed-checkpoint-gate",
+            created_by_run_id="root-failed-checkpoint-gate",
+            units=(
+                LongTaskUnitSpec(
+                    id="episode:4:validation",
+                    position=0,
+                    metadata={
+                        "unitKind": "validate_manifest_part",
+                        "input": {
+                            "validationKind": "draft_episode",
+                            "episodeNumber": 4,
+                        },
+                    },
+                ),
+                LongTaskUnitSpec(
+                    id="compose-final-response",
+                    position=1,
+                    dependencies=("episode:4:validation",),
+                    metadata={"unitKind": "compose_final_response"},
+                ),
+            ),
+            metadata={
+                "operationId": "operation-failed-checkpoint-gate",
+                "checkpointPlanningEnabled": True,
+            },
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    validation = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-checkpoint-gate",
+        lease_duration_ms=30_000,
+    )
+    assert validation is not None
+    await repository.complete_unit(
+        task.id,
+        validation.id,
+        worker_id="worker-checkpoint-gate",
+        lease_epoch=validation.lease_epoch,
+        result=LongTaskUnitResult(output_ref="artifact://episode-4-validation"),
+    )
+    checkpoints = SqliteScreenplayCheckpointRepository(temp_db)
+    reservation = await checkpoints.reserve(
+        operation_id="operation-failed-checkpoint-gate",
+        task_id=task.id,
+        checkpoint_key="episode:4",
+        root_run_id="root-failed-checkpoint-gate",
+        input_digest="sha256:" + "f" * 64,
+        reservation_token="checkpoint-owner",
+    )
+    await checkpoints.fail_planning(
+        operation_id="operation-failed-checkpoint-gate",
+        checkpoint_key="episode:4",
+        code="model_output_truncated",
+        reservation_owner="checkpoint-owner",
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+
+    with pytest.raises(ContractViolationError) as failure:
+        await repository.claim_ready_unit(
+            task.id,
+            worker_id="worker-checkpoint-gate",
+            lease_duration_ms=30_000,
+        )
+    assert failure.value.code == "model_output_truncated"
 
 
 async def test_ready_checkpoint_rebinds_to_continuation_root_after_crash(
@@ -1299,7 +2488,7 @@ async def test_checkpoint_root_digest_hydrates_hidden_tool_authority(
     ) == digest
 
 
-async def test_duplicate_root_revision_event_pauses_ready_receipt(
+async def test_duplicate_root_revision_event_fails_ready_receipt_without_reemission(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
@@ -1350,19 +2539,25 @@ async def test_duplicate_root_revision_event_pauses_ready_receipt(
         root_run_id="root-duplicate-event",
         signal=None,
     )
-    await observer._emit_ready(
-        receipt,
-        SimpleNamespace(event=AgentEvent(
-            type=CoreEventType.LONG_TASK_PROGRESS,
-            payload={"taskId": "task-duplicate-event"},
-        )),
-    )
+    with pytest.raises(ScreenplayCheckpointStateError, match="duplicated"):
+        await observer._emit_ready(
+            receipt,
+            SimpleNamespace(event=AgentEvent(
+                type=CoreEventType.LONG_TASK_PROGRESS,
+                payload={"taskId": "task-duplicate-event"},
+            )),
+        )
 
     assert downstream_calls == 0
     assert (await repository.load(
         "operation-duplicate-event",
         "episode:4",
-    ))["status"] == "paused"
+    ))["status"] == "failed"
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_type = 'run.todos_updated'",
+        ["root-duplicate-event"],
+    ) == {"count": 2}
 
 
 async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event(
@@ -1457,7 +2652,7 @@ async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event
 
 
 @pytest.mark.parametrize("mutation", ("completed", "scope", "step_id"))
-async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutation):
+async def test_checkpoint_planner_only_pauses_for_explicit_reresolution(mutation):
     original = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
@@ -1485,11 +2680,6 @@ async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutati
             target={"screenplay": {
                 "version": 1,
                 "scope": {"kind": "next_episodes", "count": 9},
-                "stepBindings": [
-                    {"stepId": "evidence", "phase": "evidence"},
-                    {"stepId": "create", "phase": "creation"},
-                    {"stepId": "deliver", "phase": "delivery"},
-                ],
             }},
         )
         proposed = replace(current, task_spec=changed_spec)
@@ -1503,30 +2693,30 @@ async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutati
             }
             return StructuredModelResult(kwargs["validate"](value), "child-plan")
 
-    decision = await ScreenplayCheckpointPlanner(Models(), runtime=object()).revise(
-        ScreenplayCheckpointInput(
-            checkpoint_key="episode:4",
-            root_run_id="root-1",
-            task_id="task-1",
-            turn_id="turn-1",
-            project_id="project-1",
-            session_id=1,
-            target_role="screenplayDraft",
-            original_plan=original,
-            current_plan=current,
-            completed_summaries=(),
-            artifact_receipts=(),
-            remaining_scope={},
-        )
+    checkpoint = ScreenplayCheckpointInput(
+        checkpoint_key="episode:4",
+        root_run_id="root-1",
+        task_id="task-1",
+        turn_id="turn-1",
+        project_id="project-1",
+        session_id=1,
+        target_role="screenplayDraft",
+        original_plan=original,
+        current_plan=current,
+        completed_summaries=(),
+        artifact_receipts=(),
+        remaining_scope={},
     )
-    assert decision.outcome is (
-        ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION
-        if mutation == "scope"
-        else ScreenplayCheckpointOutcome.PAUSED
-    )
+    planner = ScreenplayCheckpointPlanner(Models(), runtime=object())
+    if mutation == "scope":
+        decision = await planner.revise(checkpoint)
+        assert decision.outcome is ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION
+        return
+    with pytest.raises(ValueError, match="checkpoint"):
+        await planner.revise(checkpoint)
 
 
-async def test_checkpoint_planner_typed_model_failure_pauses_without_plan():
+async def test_checkpoint_planner_typed_model_failure_propagates():
     original = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
@@ -1540,27 +2730,24 @@ async def test_checkpoint_planner_typed_model_failure_pauses_without_plan():
 
             raise TypedFailure("checkpoint provider unavailable")
 
-    decision = await ScreenplayCheckpointPlanner(
-        Models(),
-        runtime=object(),
-    ).revise(ScreenplayCheckpointInput(
-        checkpoint_key="episode:4",
-        root_run_id="root-1",
-        task_id="task-1",
-        turn_id="turn-1",
-        project_id="project-1",
-        session_id=1,
-        target_role="screenplayDraft",
-        original_plan=original,
-        current_plan=original,
-        completed_summaries=(),
-        artifact_receipts=(),
-    ))
-
-    assert decision == ScreenplayCheckpointDecision(
-        ScreenplayCheckpointOutcome.PAUSED,
-        code="checkpoint_provider_unavailable",
-    )
+    with pytest.raises(RuntimeError, match="provider unavailable") as captured:
+        await ScreenplayCheckpointPlanner(
+            Models(),
+            runtime=object(),
+        ).revise(ScreenplayCheckpointInput(
+            checkpoint_key="episode:4",
+            root_run_id="root-1",
+            task_id="task-1",
+            turn_id="turn-1",
+            project_id="project-1",
+            session_id=1,
+            target_role="screenplayDraft",
+            original_plan=original,
+            current_plan=original,
+            completed_summaries=(),
+            artifact_receipts=(),
+        ))
+    assert captured.value.code == "checkpoint_provider_unavailable"
 
 
 def _semantic_steps() -> tuple[TaskStep, ...]:
@@ -1610,11 +2797,6 @@ def _screenplay_task_spec(
     extension = screenplay or {
         "version": 1,
         "scope": {"kind": "current_stage"},
-        "stepBindings": [
-            {"stepId": "understand-source", "phase": "evidence"},
-            {"stepId": "draft-analysis", "phase": "creation"},
-            {"stepId": "deliver-candidate", "phase": "delivery"},
-        ],
     }
     return TaskSpec(
         goal="分析原作范围",
@@ -1627,7 +2809,7 @@ def _screenplay_task_spec(
     )
 
 
-async def test_screenplay_intent_compiles_versioned_task_spec_and_exact_plan_bindings():
+async def test_screenplay_intent_compiles_versioned_task_spec_without_plan_shaping():
     intent = ScreenplayIntent.from_task_spec(
         _screenplay_task_spec(),
         _semantic_steps(),
@@ -1637,29 +2819,24 @@ async def test_screenplay_intent_compiles_versioned_task_spec_and_exact_plan_bin
     assert intent.instruction == "梳理人物、事件与可改编冲突。"
     assert intent.requested_deliverable == "sourceAnalysis"
     assert intent.scope.kind is ScreenplayScopeKind.CURRENT_STAGE
-    assert [(binding.step_id, binding.phase) for binding in intent.plan_bindings] == [
-        ("understand-source", ScreenplayPlanPhase.EVIDENCE),
-        ("draft-analysis", ScreenplayPlanPhase.CREATION),
-        ("deliver-candidate", ScreenplayPlanPhase.DELIVERY),
-    ]
+    assert not hasattr(intent, "plan_bindings")
     assert "reply" not in intent.to_mapping()
     assert ScreenplayIntent.from_mapping(intent.to_mapping()) == intent
 
 
-async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deserialized():
+async def test_answer_task_spec_needs_no_reply_and_rejects_legacy_fields():
     task_spec = _screenplay_task_spec(operation="answer", deliverable=None)
 
     intent = ScreenplayIntent.from_task_spec(task_spec, _semantic_steps())
-    restored = ScreenplayIntent.from_mapping({
-        "action": "answer",
-        "instruction": "说明当前阶段",
-        "reply": "旧持久化回复不能完成新 Turn",
-    })
 
     assert intent.action is ScreenplayIntentAction.ANSWER
     assert not hasattr(intent, "reply")
-    assert not hasattr(restored, "reply")
-    assert "reply" not in restored.to_mapping()
+    with pytest.raises(ValueError, match="intent fields"):
+        ScreenplayIntent.from_mapping({
+            "action": "answer",
+            "instruction": "说明当前阶段",
+            "reply": "旧持久化回复不能完成新 Turn",
+        })
 
 
 @pytest.mark.parametrize(
@@ -1692,43 +2869,6 @@ async def test_answer_task_spec_needs_no_reply_and_legacy_reply_is_not_deseriali
             }),
             "episode numbers",
         ),
-        (
-            lambda raw: raw["stepBindings"].append(
-                {"stepId": "understand-source", "phase": "review"}
-            ),
-            "exactly once",
-        ),
-        (lambda raw: raw["stepBindings"].pop(), "plan steps"),
-        (
-            lambda raw: raw["stepBindings"].append(
-                {"stepId": "publish-internal-revision", "phase": "delivery"}
-            ),
-            "plan steps",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"phase": "internal"}),
-            "phase",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"stepId": 1}),
-            "step id",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"stepId": True}),
-            "step id",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"phase": 1}),
-            "phase",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"phase": True}),
-            "phase",
-        ),
-        (
-            lambda raw: raw["stepBindings"][0].update({"unknown": True}),
-            "binding fields",
-        ),
     ],
 )
 async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_contracts(
@@ -1738,11 +2878,6 @@ async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_con
     raw = {
         "version": 1,
         "scope": {"kind": "current_stage"},
-        "stepBindings": [
-            {"stepId": "understand-source", "phase": "evidence"},
-            {"stepId": "draft-analysis", "phase": "creation"},
-            {"stepId": "deliver-candidate", "phase": "delivery"},
-        ],
     }
     mutate(raw)
 
@@ -1751,24 +2886,6 @@ async def test_screenplay_task_spec_fails_closed_for_unknown_or_incompatible_con
             _screenplay_task_spec(screenplay=raw),
             _semantic_steps(),
         )
-
-
-@pytest.mark.parametrize("step_id", [1, b"understand-source", True])
-async def test_screenplay_plan_binding_rejects_non_string_step_ids(step_id):
-    with pytest.raises(ValueError, match="step id"):
-        ScreenplayPlanBinding.from_mapping({
-            "stepId": step_id,
-            "phase": "evidence",
-        })
-
-
-@pytest.mark.parametrize("phase", [1, b"evidence", True])
-async def test_screenplay_plan_binding_rejects_non_string_phases(phase):
-    with pytest.raises(ValueError, match="phase"):
-        ScreenplayPlanBinding.from_mapping({
-            "stepId": "understand-source",
-            "phase": phase,
-        })
 
 
 @pytest.mark.parametrize("kind", [1, b"current_stage", True])
@@ -1831,11 +2948,6 @@ async def test_task_spec_scope_is_compatible_with_the_same_stage_command(scope):
     screenplay = {
         "version": 1,
         "scope": scope,
-        "stepBindings": [
-            {"stepId": "understand-source", "phase": "evidence"},
-            {"stepId": "draft-analysis", "phase": "creation"},
-            {"stepId": "deliver-candidate", "phase": "delivery"},
-        ],
     }
     intent = ScreenplayIntent.from_task_spec(
         _screenplay_task_spec(screenplay=screenplay),
@@ -1875,6 +2987,7 @@ async def test_screenplay_domain_context_round_trips_root_and_legacy_child_modes
             "targetRole": "sourceAnalysis",
             "expectedPartType": "document",
             "expectedPartKey": "main",
+            "dependencyPartKeys": ["section:premise", "section:characters"],
         },
     ))
 
@@ -1885,6 +2998,149 @@ async def test_screenplay_domain_context_round_trips_root_and_legacy_child_modes
     assert legacy_child.is_root is False
     assert legacy_child.is_child is True
     assert legacy_child.task_id == "task-1"
+    assert legacy_child.dependency_part_keys == (
+        "section:premise",
+        "section:characters",
+    )
+    assert legacy_child.to_core_context().payload["dependencyPartKeys"] == [
+        "section:premise",
+        "section:characters",
+    ]
+
+    with pytest.raises(ValueError, match="Root context cannot carry dependencies"):
+        ScreenplayAgentDomainContext(
+            project_id="project-1",
+            turn_id="turn-1",
+            dependency_part_keys=("section:premise",),
+        )
+
+
+async def test_screenplay_child_context_round_trips_revision_and_episode_scope():
+    child = ScreenplayAgentDomainContext(
+        project_id="project-1",
+        task_id="task-1",
+        unit_id="draft:2:scene-1",
+        target_role="screenplayDraft",
+        expected_part_type="scene",
+        expected_part_key="scene-1",
+        deliverable_revision_scope={
+            "sceneList": "scene-list-1",
+            "screenplayDraft": "draft-1",
+        },
+        episode_number=2,
+        tool_access="draft_scene",
+    )
+    payload = child.to_core_context().payload
+    restored = ScreenplayAgentDomainContext.from_core_context(
+        child.to_core_context()
+    )
+
+    assert payload["boundEpisodeNumber"] == 2
+    assert restored.episode_number == 2
+    assert restored.deliverable_revision_scope == {
+        "sceneList": "scene-list-1",
+        "screenplayDraft": "draft-1",
+    }
+
+
+@pytest.mark.parametrize("reasoning_effort", (None, "high"))
+async def test_tool_calling_service_preserves_bound_revision_and_episode_scope(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    reasoning_effort,
+):
+    captured = {}
+
+    async def fake_child(**kwargs):
+        assert kwargs["request"].model.max_generation_tokens == 32_768
+        assert kwargs["request"].model.options.get("reasoning_effort") == (
+            reasoning_effort
+        )
+        assert kwargs["request"].metadata["responseAudience"] == "internal"
+        assert kwargs["request"].metadata[
+            "screenplaySceneIdsByEpisode"
+        ] == {
+            "1": ["ep01-scene-1"],
+            "2": ["ep02-scene-1", "ep02-scene-2"],
+        }
+        assert "ep01-scene-1" not in kwargs["request"].latest_user_text()
+        captured["payload"] = thaw_json_mapping(
+            kwargs["request"].domain_context.payload
+        )
+        captured["binding"] = dict(
+            kwargs["options"].binding.attributes[
+                "candidateCompletionProjection"
+            ]["scope"]
+        )
+        return AgentRunResult(
+            run_id="run-bound-scope",
+            status=RunStatus.DONE,
+            final_response="",
+            model="fixture-model",
+        )
+
+    class Candidates:
+        async def load_run(self, run_id):
+            assert run_id == "run-bound-scope"
+            return {
+                "_artifact": SimpleNamespace(status=ArtifactStatus.FINALIZED),
+                "payload": {"sceneId": "scene-1", "sceneText": "正文"},
+                "contentText": "正文",
+            }
+
+    monkeypatch.setattr(screenplay_tool_calling, "run_screenplay_child", fake_child)
+    service = object.__new__(ScreenplayToolCallingService)
+    service._db = temp_db
+    service._runs = object()
+    service._candidates = Candidates()
+    context = ScreenplayAgentDomainContext(
+        project_id="project-1",
+        task_id="task-1",
+        unit_id="draft:2:scene-1",
+        target_role="screenplayDraft",
+        expected_part_type="scene",
+        expected_part_key="scene-1",
+        deliverable_revision_scope={
+            "sceneList": "scene-list-1",
+            "screenplayDraft": "draft-1",
+        },
+        episode_number=2,
+        tool_access="draft_scene",
+    )
+
+    runtime = _request(1, "测试绑定").runtime
+    runtime.baseURL = "https://api.deepseek.com"
+    runtime.options.update({
+        "model": "deepseek-v4-flash",
+        "thinking": {"type": "enabled"},
+    })
+    if reasoning_effort is not None:
+        runtime.options["reasoning_effort"] = reasoning_effort
+    await service.run_candidate(
+        runtime=runtime,
+        session_id=1,
+        system_instruction="只写当前场景",
+        user_payload={"episodeNumber": 2},
+        domain_context=context,
+        conversation_turn_id="turn-1",
+        host_candidate_template={"sceneId": "scene-1"},
+        candidate_validation_contract={
+            "protocol": "purrtypos.screenplay.candidate-validation/v1",
+            "kind": "scene",
+            "expectedSceneId": "scene-1",
+        },
+        scene_ids_by_episode={
+            1: ("ep01-scene-1",),
+            2: ("ep02-scene-1", "ep02-scene-2"),
+        },
+    )
+
+    for payload in (captured["payload"], captured["binding"]):
+        assert payload["boundEpisodeNumber"] == 2
+        assert payload["deliverableRevisionScope"] == {
+            "sceneList": "scene-list-1",
+            "screenplayDraft": "draft-1",
+        }
 
 
 async def test_screenplay_child_part_context_never_generates_a_public_plan():
@@ -1903,10 +3159,39 @@ async def test_screenplay_child_part_context_never_generates_a_public_plan():
         tools_enabled=True,
     )
 
-    assert ScreenplayToolLoopPolicy().should_plan(
-        request,
-        PlanningCapabilities(),
-    ) is False
+    assert not hasattr(ScreenplayToolLoopPolicy(), "should_plan")
+
+
+async def test_screenplay_execution_state_preserves_every_host_bound_scope():
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="只生成当前 Part"),),
+        model=ModelRequest(provider="openai", model="fixture-model"),
+        domain_context=ScreenplayAgentDomainContext(
+            project_id="project-1",
+            task_id="task-1",
+            unit_id="draft:2:scene-1",
+            target_role="screenplayDraft",
+            expected_part_type="scene",
+            expected_part_key="scene-1",
+            dependency_part_keys=("section:structure:index",),
+            deliverable_revision_scope={
+                "sceneList": "scene-list-1",
+                "screenplayDraft": "draft-1",
+            },
+            episode_number=2,
+        ).to_core_context(),
+        mode="agent",
+        tools_enabled=True,
+    )
+
+    state = ScreenplayExecutionStateFactory().create(request)
+
+    assert state.domain["dependencyPartKeys"] == ["section:structure:index"]
+    assert state.domain["deliverableRevisionScope"] == {
+        "sceneList": "scene-list-1",
+        "screenplayDraft": "draft-1",
+    }
+    assert state.domain["boundEpisodeNumber"] == 2
 
 
 @pytest.mark.parametrize(
@@ -1942,77 +3227,6 @@ async def test_screenplay_root_context_rejects_non_object_stage_command():
         ))
 
 
-class _CoreComposition:
-    def __init__(self, db, gateway) -> None:
-        self.provider_capabilities = ProviderCapabilityCache()
-        self._gateway = gateway
-        self._runs = SqliteRunRepository(db)
-        self._outputs = SqliteAgentOutputRepository(
-            db,
-            run_repository=self._runs,
-        )
-        self._publisher = InProcessAgentOutputPublisher()
-        self._leases = SqliteRunControlStore(db)
-        self.last_request = None
-
-    @property
-    def output_repository(self):
-        return self._outputs
-
-    def create_core_for_request(self, request, api_key, **kwargs):
-        self.last_request = request
-        del api_key
-        kwargs.pop("on_required_tool_choice_unsupported", None)
-        context_provider = kwargs.pop(
-            "context_provider_override",
-            ScreenplayHostContextProvider(),
-        )
-        return AgentCore(
-            model_gateway=self._gateway,
-            run_repository=self._runs,
-            planning_policy=ScreenplayToolLoopPolicy(),
-            context_provider=context_provider,
-            execution_state_factory=ScreenplayExecutionStateFactory(),
-            tool_catalog=InMemoryToolCatalog(()),
-            output_repository=self._outputs,
-            output_publisher=self._publisher,
-            execution_lease_store=self._leases,
-            execution_owner_id=self._runs.owner_id,
-            execution_lease_duration_ms=self._runs.lease_duration_ms,
-            **kwargs,
-        )
-
-    def create_response_judge_policies(self, request):
-        del request
-        return ()
-
-    def bind_run_profile(self, request, options):
-        del request
-        if options.binding is None:
-            return options
-        return replace(
-            options,
-            binding=replace(
-                options.binding,
-                attributes={
-                    **dict(options.binding.attributes),
-                    "agentProfile": "screenplay-agent",
-                    "domainNamespace": SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-                },
-            ),
-        )
-
-    def release_core(self, core) -> None:
-        del core
-
-    def observe_event(self, event) -> None:
-        del event
-
-
-def _core_composition(db, gateway):
-    return _CoreComposition(db, gateway)
-
-
 async def _public_text_events(db, run_id: str | None = None):
     where = "AND run_id = ?" if run_id else ""
     return await db.fetch_all(
@@ -2033,11 +3247,6 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         source_revision_refs=("sprev-scenes", "sprev-brief"),
         episode_scene_ids={4: ("ep04_s01", "ep04_s02")},
         original_request="请创作第 4 集，并保留上一集的结尾伏笔。",
-        plan_bindings=(
-            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("draft", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("understand", "draft", "deliver"),
     )
     compiled = compile_screenplay_manifest(**arguments)
@@ -2064,7 +3273,7 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
     assert steps[1].metadata["effectClass"] == "idempotent_write"
     assert steps[1].depends_on == (steps[0].id,)
     assert steps[2].depends_on == (steps[1].id,)
-    assert steps[3].depends_on == (steps[2].id,)
+    assert steps[3].depends_on == (steps[1].id, steps[2].id)
     assert steps[4].depends_on == (steps[3].id,)
     assert steps[5].depends_on == (steps[4].id,)
     assert steps[5].metadata["input"] == {
@@ -2075,14 +3284,74 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         "preserve": [],
         "baseRevisionId": None,
     }
-    assert compiled.recipe.metadata["recipeVersion"] == 5
+    assert compiled.recipe.metadata["recipeVersion"] == 10
     assert compiled.manifest.digest == repeated.manifest.digest
     assert [part.id for part in compiled.manifest.parts] == [
         part.id for part in repeated.manifest.parts
     ]
 
 
-async def test_multi_episode_recipe_obeys_root_public_step_barriers():
+@pytest.mark.parametrize("recipe_version", [7, 8])
+async def test_screenplay_continuation_rejects_obsolete_recipe(recipe_version):
+    with pytest.raises(ValueError, match="Recipe version is unsupported"):
+        _execution_recipe_from_metadata({
+            "kind": "screenplay.screenplayDraft",
+            "recipeVersion": recipe_version,
+            "maxParallelism": 1,
+            "steps": [{
+                "id": "draft:1:scene-1",
+                "kind": "generate_draft_scene",
+                "executor": "screenplay.task.unit",
+            }],
+        })
+
+
+async def test_scene_list_manifest_persists_episode_specific_part_identity():
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="规划两集场景表",
+            requested_deliverable="sceneList",
+        ),
+        target_role="sceneList",
+        source_revision_refs=("structure-head",),
+        document_sections=("episode-1", "episode-2"),
+        plan_steps=_bound_steps("read", "plan", "deliver"),
+    )
+    episode_steps = [
+        step for step in compiled.recipe.steps
+        if step.kind == "generate_document_section"
+    ]
+
+    assert [step.metadata["input"]["episodeNumber"] for step in episode_steps] == [
+        1,
+        2,
+    ]
+    assert all(
+        step.metadata["partContractKey"] == "scene_list_episode"
+        for step in episode_steps
+    )
+
+
+async def test_manifest_maps_one_model_authored_step_without_padding_the_plan():
+    plan_steps = _bound_steps("完成用户要求")
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="形成创意简报",
+            requested_deliverable="creativeBrief",
+        ),
+        target_role="creativeBrief",
+        document_sections=("premise",),
+        plan_steps=plan_steps,
+    )
+
+    assert {step.plan_step_id for step in compiled.recipe.steps} == {
+        plan_steps[0].id,
+    }
+
+
+async def test_multi_episode_recipe_keeps_domain_dependencies_while_mapping_plan():
     compiled = compile_screenplay_manifest(
         intent=ScreenplayIntent(
             action=ScreenplayIntentAction.CREATE,
@@ -2094,11 +3363,6 @@ async def test_multi_episode_recipe_obeys_root_public_step_barriers():
             4: ("ep04_s01",),
             5: ("ep05_s01",),
         },
-        plan_bindings=(
-            ScreenplayPlanBinding("read-sources", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("write-episodes", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver-result", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps(
             "read-sources",
             "write-episodes",
@@ -2107,24 +3371,22 @@ async def test_multi_episode_recipe_obeys_root_public_step_barriers():
     )
 
     steps = {step.id: step for step in compiled.recipe.steps}
-    evidence_ids = {"evidence:4", "evidence:5"}
-    validation_ids = {"episode:4:validation", "episode:5:validation"}
     assert steps["evidence:4"].depends_on == ()
-    assert steps["evidence:5"].depends_on == ()
-    assert set(steps["draft:4:ep04_s01"].depends_on) == evidence_ids
-    assert set(steps["draft:5:ep05_s01"].depends_on) == evidence_ids
-    assert set(steps["compose-final-response"].depends_on) == validation_ids
-    assert {
-        step.plan_step_id for step in compiled.recipe.steps
-        if step.id in evidence_ids
-    } == {"read-sources"}
-    assert {
-        step.plan_step_id for step in compiled.recipe.steps
-        if step.id in validation_ids
-    } == {"write-episodes"}
+    assert steps["draft:4:ep04_s01"].depends_on == ("evidence:4",)
+    assert steps["evidence:5"].depends_on == ("episode:4:validation",)
+    assert steps["draft:5:ep05_s01"].depends_on == ("evidence:5",)
+    assert steps["compose-final-response"].depends_on == (
+        "episode:4:validation",
+        "episode:5:validation",
+    )
+    assert {step.plan_step_id for step in compiled.recipe.steps} == {
+        "read-sources",
+        "write-episodes",
+        "deliver-result",
+    }
 
 
-async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order():
+async def test_manifest_mapping_follows_model_plan_order_without_rewriting_dag():
     plan_steps = _semantic_steps()
     compiled = compile_screenplay_manifest(
         intent=ScreenplayIntent(
@@ -2137,20 +3399,6 @@ async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order(
             4: ("ep04_s01",),
             5: ("ep05_s01",),
         },
-        plan_bindings=(
-            ScreenplayPlanBinding(
-                "deliver-candidate",
-                ScreenplayPlanPhase.DELIVERY,
-            ),
-            ScreenplayPlanBinding(
-                "understand-source",
-                ScreenplayPlanPhase.EVIDENCE,
-            ),
-            ScreenplayPlanBinding(
-                "draft-analysis",
-                ScreenplayPlanPhase.CREATION,
-            ),
-        ),
         plan_steps=plan_steps,
     )
 
@@ -2159,10 +3407,9 @@ async def test_manifest_barriers_follow_root_plan_order_not_binding_array_order(
         step.id for step in plan_steps
     )
     by_id = {step.id: step for step in steps}
-    validation_ids = {"episode:4:validation", "episode:5:validation"}
-    assert set(by_id["compose-final-response"].depends_on) == validation_ids
-    assert steps.index(by_id["compose-final-response"]) > max(
-        steps.index(by_id[unit_id]) for unit_id in validation_ids
+    assert by_id["compose-final-response"].depends_on == (
+        "episode:4:validation",
+        "episode:5:validation",
     )
 
 
@@ -2174,16 +3421,17 @@ async def test_source_analysis_recipe_exposes_semantic_progress_titles():
             requested_deliverable="sourceAnalysis",
         ),
         target_role="sourceAnalysis",
-        plan_bindings=(
-            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("analyze", ScreenplayPlanPhase.CREATION),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
+        source_chapters=({
+            "id": "chapter-1",
+            "title": "第一章",
+            "index": 1,
+        },),
         plan_steps=_bound_steps("understand", "analyze", "deliver"),
     )
 
     assert [step.metadata["displayTitle"] for step in compiled.recipe.steps] == [
-        "读取原作内容",
+        "准备原作范围",
+        "分析第 1 章",
         "分析人物",
         "梳理故事",
         "分析世界观",
@@ -2192,6 +3440,352 @@ async def test_source_analysis_recipe_exposes_semantic_progress_titles():
         "检查分析结果",
         "生成回复",
     ]
+
+
+async def test_source_analysis_manifest_compiles_one_digest_per_authorized_chapter():
+    chapters = tuple({
+        "id": f"chapter-{number}",
+        "title": f"第 {number} 章",
+        "index": number,
+    } for number in range(1, 13))
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="分析授权原作",
+            requested_deliverable="sourceAnalysis",
+        ),
+        target_role="sourceAnalysis",
+        source_chapters=chapters,
+        plan_steps=_bound_steps("read", "analyze", "deliver"),
+    )
+
+    by_id = {step.id: step for step in compiled.recipe.steps}
+    chapter_ids = tuple(f"source-analysis:chapter:chapter-{number}" for number in range(1, 13))
+    assert not any(step.id.startswith("source-analysis:reduce:") for step in by_id.values())
+    assert all(
+        by_id[part_id].metadata["partContractKey"]
+        == "source_analysis.chapter_digest"
+        for part_id in chapter_ids
+    )
+    for section in (
+        "characters",
+        "story",
+        "world",
+        "themes",
+        "adaptation_risks",
+    ):
+        assert by_id[f"section:sourceAnalysis:{section}"].depends_on == chapter_ids
+
+
+async def test_source_analysis_manifest_builds_fixed_twelve_way_reduction_tree():
+    chapters = tuple({
+        "id": f"chapter-{number}",
+        "title": f"第 {number} 章",
+        "index": number,
+    } for number in range(1, 146))
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="分析长篇原作",
+            requested_deliverable="sourceAnalysis",
+        ),
+        target_role="sourceAnalysis",
+        source_chapters=chapters,
+        plan_steps=_bound_steps("read", "analyze", "deliver"),
+    )
+
+    reductions = [
+        step for step in compiled.recipe.steps
+        if step.id.startswith("source-analysis:reduce:")
+    ]
+    assert len(reductions) == 15
+    assert all(1 <= len(step.depends_on) <= 12 for step in reductions)
+    assert all(
+        step.metadata["partContractKey"]
+        == "source_analysis.digest_reduction"
+        for step in reductions
+    )
+    final_frontier = (
+        "source-analysis:reduce:2:1",
+        "source-analysis:reduce:2:2",
+    )
+    for section in (
+        "characters",
+        "story",
+        "world",
+        "themes",
+        "adaptation_risks",
+    ):
+        step = next(
+            value for value in compiled.recipe.steps
+            if value.id == f"section:sourceAnalysis:{section}"
+        )
+        assert step.depends_on == final_frontier
+    assert compiled.recipe.max_parallelism == 12
+
+
+async def test_source_analysis_digest_and_final_sections_have_strict_shapes():
+    protocol = "purrtypos.screenplay.candidate-validation/v1"
+    digest = normalize_screenplay_candidate(
+        {
+            "protocol": protocol,
+            "kind": "source_chapter_digest",
+            "chapterId": "chapter-1",
+        },
+        {
+            "payload": {
+                "sectionKey": "source_digest:chapter:chapter-1",
+                "title": "第一章摘要",
+                "contentJson": {
+                    "chapterId": "chapter-1",
+                    "summary": "主角发现失踪线索。",
+                    "characters": [{"key": "lead", "state": "开始调查"}],
+                    "events": [{
+                        "key": "clue-found",
+                        "summary": "发现线索",
+                        "consequence": "调查启动",
+                    }],
+                    "worldFacts": [{"key": "rule", "summary": "夜间停电"}],
+                    "themes": ["信任"],
+                    "plotThreads": [{"key": "missing", "state": "opened"}],
+                    "adaptationRisks": ["内心活动需要视觉化"],
+                },
+            },
+            "contentText": "主角发现失踪线索。",
+        },
+    )
+    assert digest["payload"]["contentJson"]["chapterId"] == "chapter-1"
+
+    with pytest.raises(ValueError, match="source chapter digest"):
+        normalize_screenplay_candidate(
+            {
+                "protocol": protocol,
+                "kind": "source_chapter_digest",
+                "chapterId": "chapter-1",
+            },
+            {
+                **digest,
+                "payload": {
+                    **digest["payload"],
+                    "contentJson": {
+                        **digest["payload"]["contentJson"],
+                        "episodes": [{"number": 1}],
+                    },
+                },
+            },
+        )
+
+    valid_sections = {
+        "characters": {"characters": []},
+        "story": {"story": {"beats": [], "openThreads": []}},
+        "world": {"world": {"rules": [], "locations": [], "factions": []}},
+        "themes": {"themes": []},
+        "adaptation_risks": {"adaptationRisks": []},
+    }
+    for section, content in valid_sections.items():
+        normalized = normalize_screenplay_candidate(
+            {
+                "protocol": protocol,
+                "kind": "source_analysis_section",
+                "sectionKey": section,
+            },
+            {
+                "payload": {
+                    "sectionKey": section,
+                    "title": section,
+                    "contentJson": content,
+                },
+                "contentText": section,
+            },
+        )
+        assert normalized["payload"]["contentJson"] == content
+
+
+async def test_source_analysis_assembly_excludes_internal_digest_parts():
+    task = {
+        "targetRole": "sourceAnalysis",
+        "units": [{
+            "id": "document:evidence",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"targetRole": "sourceAnalysis"},
+            "output": {"evidenceDescriptor": {
+                "projectId": "project-source",
+                "targetRole": "sourceAnalysis",
+            }},
+        }, {
+            "id": "source-analysis:chapter:chapter-1",
+            "kind": "generate_document_section",
+            "status": "completed",
+            "input": {
+                "sectionKey": "source_digest:chapter:chapter-1",
+                "sourceChapterDigest": True,
+            },
+            "output": {
+                "contentText": "内部逐章摘要不得进入交付物",
+                "contentJson": {"chapterId": "chapter-1"},
+                "runId": "run-chapter-1",
+            },
+        }],
+    }
+    sections = {
+        "characters": {"characters": []},
+        "story": {"story": {"beats": [], "openThreads": []}},
+        "world": {"world": {"rules": [], "locations": [], "factions": []}},
+        "themes": {"themes": []},
+        "adaptation_risks": {"adaptationRisks": []},
+    }
+    for position, (section, content) in enumerate(sections.items(), start=1):
+        task["units"].append({
+            "id": f"section:sourceAnalysis:{section}",
+            "kind": "generate_document_section",
+            "status": "completed",
+            "input": {"sectionKey": section},
+            "output": {
+                "sectionKey": section,
+                "title": section,
+                "contentText": f"{section} 正文",
+                "contentJson": content,
+                "runId": f"run-section-{position}",
+                "sourceRunIds": ["run-chapter-1"],
+            },
+        })
+    validation = {
+        "id": "document:validation",
+        "kind": "validate_manifest_part",
+        "dependsOn": [
+            f"section:sourceAnalysis:{section}" for section in sections
+        ],
+        "input": {"validationKind": "document", "targetRole": "sourceAnalysis"},
+    }
+    task["units"].append(validation)
+
+    result = _validate_document_parts(task, validation)
+
+    assert "内部逐章摘要" not in result["contentText"]
+    assert result["contentJson"] == {
+        "characters": [],
+        "story": {"beats": [], "openThreads": []},
+        "world": {"rules": [], "locations": [], "factions": []},
+        "themes": [],
+        "adaptationRisks": [],
+        "schemaVersion": 1,
+        "documentKind": "source_analysis",
+    }
+    assert result["sourceRunIds"] == (
+        "run-section-1",
+        "run-chapter-1",
+        "run-section-2",
+        "run-section-3",
+        "run-section-4",
+        "run-section-5",
+    )
+
+
+async def test_structure_manifest_persists_index_before_episode_part_expansion():
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="设计分集结构",
+            requested_deliverable="structure",
+        ),
+        target_role="structure",
+        plan_steps=_bound_steps("read", "design", "deliver"),
+    )
+
+    by_id = {step.id: step for step in compiled.recipe.steps}
+    assert [step.id for step in compiled.recipe.steps] == [
+        "document:evidence",
+        "section:structure:series_arc:index",
+        "section:structure:series_arc",
+        "section:structure:episode_plan:index",
+        "section:structure:episode_plan",
+        "section:structure:character_arcs:index",
+        "section:structure:character_arcs",
+        "section:structure:hooks",
+        "document:validation",
+        "compose-final-response",
+    ]
+    assert by_id["section:structure:series_arc"].kind == (
+        "expand_structure_series_arc"
+    )
+    assert by_id["section:structure:series_arc"].depends_on == (
+        "section:structure:series_arc:index",
+    )
+    assert by_id["section:structure:episode_plan:index"].kind == (
+        "generate_document_section"
+    )
+    assert by_id["section:structure:episode_plan:index"].depends_on == (
+        "section:structure:series_arc",
+    )
+    assert by_id["section:structure:episode_plan"].kind == (
+        "expand_structure_episode_plan"
+    )
+    assert by_id["section:structure:episode_plan"].depends_on == (
+        "section:structure:episode_plan:index",
+    )
+    assert by_id["section:structure:character_arcs:index"].depends_on == (
+        "section:structure:episode_plan",
+    )
+    assert by_id["section:structure:character_arcs"].kind == (
+        "expand_structure_character_arcs"
+    )
+    assert by_id["section:structure:character_arcs"].depends_on == (
+        "section:structure:character_arcs:index",
+    )
+    assert by_id["section:structure:hooks"].kind == "project_structure_hooks"
+    assert by_id["section:structure:hooks"].depends_on == (
+        "section:structure:episode_plan",
+        "section:structure:character_arcs",
+    )
+    assert by_id["document:validation"].depends_on == (
+        "section:structure:series_arc",
+        "section:structure:episode_plan",
+        "section:structure:character_arcs",
+        "section:structure:hooks",
+    )
+    assert compiled.recipe.max_parallelism == 12
+
+
+async def test_compiled_recipe_persists_part_contracts_and_nonempty_budget():
+    compiled = compile_screenplay_manifest(
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="设计分集结构",
+            requested_deliverable="structure",
+        ),
+        target_role="structure",
+        plan_steps=_bound_steps("read", "design", "deliver"),
+    )
+
+    ai_steps = [
+        step for step in compiled.recipe.steps
+        if step.kind in {
+            "generate_draft_scene",
+            "generate_episode_metadata",
+            "generate_review_dimension",
+            "generate_document_section",
+            "compose_final_response",
+        }
+    ]
+    assert ai_steps
+    assert all(step.metadata.get("partContractKey") for step in ai_steps)
+    assert all(
+        "partContractKey" not in step.metadata
+        for step in compiled.recipe.steps
+        if step not in ai_steps
+    )
+
+    limits = screenplay_task_budget_limits(
+        compiled.recipe,
+        ReasoningMode.ENABLED,
+    )
+    assert limits.max_invocation_attempts is not None
+    assert limits.max_input_tokens is not None
+    assert limits.max_run_generation_tokens is None
+    assert limits.max_reasoning_tokens is None
+    assert limits.max_invocation_attempts > len(ai_steps) * 8
+    assert screenplay_max_generated_units(compiled.recipe) == 134
 
 
 async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode():
@@ -2205,11 +3799,6 @@ async def test_review_manifest_parallelizes_five_bounded_dimensions_per_episode(
         source_revision_refs=("sprev-draft",),
         episode_scene_ids={1: ("ep01_s01", "ep01_s02")},
         reviewed_draft_id="sprev-draft",
-        plan_bindings=(
-            ScreenplayPlanBinding("understand", ScreenplayPlanPhase.EVIDENCE),
-            ScreenplayPlanBinding("review", ScreenplayPlanPhase.REVIEW),
-            ScreenplayPlanBinding("deliver", ScreenplayPlanPhase.DELIVERY),
-        ),
         plan_steps=_bound_steps("understand", "review", "deliver"),
     )
 
@@ -2372,7 +3961,7 @@ async def test_deterministic_evidence_part_requires_no_dedicated_run(
     _, workspace, session = await _project_and_session(temp_db)
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        candidate_model_service=object(),  # unused by deterministic evidence
+        tool_calling_service=object(),  # unused by deterministic evidence
     )
     before = await temp_db.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_runs"
@@ -2429,10 +4018,6 @@ def _admission_plan(
             target={"screenplay": {
                 "version": 1,
                 "scope": {"kind": "current_stage"},
-                "stepBindings": [
-                    {"stepId": step.id, "phase": phase}
-                    for step, phase in zip(steps, phases, strict=True)
-                ],
             }},
         ),
         steps=steps,
@@ -2470,7 +4055,12 @@ class _AdmissionResolver:
             )
         return ResolvedScreenplayTask(
             target_role=str(intent.requested_deliverable),
-            document_sections=("summary",),
+            document_sections=("characters",),
+            source_chapters=({
+                "id": "chapter-1",
+                "title": "第一章",
+                "index": 1,
+            },),
         )
 
 
@@ -2643,7 +4233,7 @@ async def test_screenplay_profile_admits_formal_plan_as_one_operation_and_privat
         thaw_json_mapping(recipe.metadata),
         ensure_ascii=False,
     )
-    assert "planBindingDigest" in recipe.metadata
+    assert "planMappingDigest" in recipe.metadata
     assert all(step.title not in serialized_metadata for step in plan.steps)
 
 
@@ -2698,7 +4288,7 @@ async def _durable_screenplay_admission(
     ("root_status", "expected_status"),
     (
         (RunStatus.FAILED, "failed"),
-        (RunStatus.CANCELED, "canceled"),
+        (RunStatus.CANCELED, "failed"),
     ),
 )
 async def test_admitted_operation_settles_when_root_fails_before_dispatch(
@@ -2852,6 +4442,15 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
         "SELECT COUNT(*) AS count FROM screenplay_agent_operation_commands "
         "WHERE command_type = 'attachLongTask'"
     ) == {"count": 1}
+    task = await SqliteLongTaskRepository(temp_db).load(first.task_id)
+    assert task is not None
+    assert task.budget_limits.max_invocation_attempts is not None
+    assert task.budget_limits.max_input_tokens is not None
+    assert task.budget_limits.max_run_generation_tokens is None
+    assert task.budget_limits.max_reasoning_tokens is None
+    assert thaw_json_mapping(task.metadata)["maxGeneratedUnits"] == len(
+        decision.execution_recipe.steps
+    )
     operation = await profile._operations.load(decision.metadata["operationId"])
     assert operation is not None
     assert operation.status.value == "running"
@@ -3294,8 +4893,10 @@ async def test_planning_context_contains_state_not_artifact_bodies(
     assert "episodeState" in context
 
 
+@pytest.mark.parametrize('context_method', ['build_context', 'build_planning_context'])
 async def test_composed_screenplay_root_planning_context_uses_db_facts_without_body_leakage(
     temp_db: DatabaseConnection,
+    context_method: str,
 ):
     source_marker = "SCREENPLAY_PLANNER_MUST_NOT_SEE_SOURCE_TEXT_8C4D"
     await temp_db.execute(
@@ -3406,7 +5007,7 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
         provider = composition._profile_registry.require(
             "screenplay"
         ).adapter.context_provider
-        bundle = await provider.build_planning_context(
+        bundle = await getattr(provider, context_method)(
             request,
             ContextBudget(
                 window_tokens=128_000,
@@ -3420,7 +5021,7 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
 
     facts = bundle.diagnostics["hostPlanningFacts"]
     serialized = json.dumps(thaw_json_mapping(facts), ensure_ascii=False)
-    assert facts["project"]["id"] == project_id
+    assert "id" not in facts["project"]
     assert facts["stageCommand"] == command.to_mapping()
     assert "sourceAnalysis" in facts["availableDeliverables"]
     assert facts["acceptedDeliverables"][0]["role"] == "sourceAnalysis"
@@ -3437,6 +5038,9 @@ async def test_composed_screenplay_root_planning_context_uses_db_facts_without_b
     assert "parentRevisionId" not in serialized
     assert "contentText" not in serialized
     assert '"content"' not in serialized
+    assert project_id not in serialized
+    assert "book-planning-leakage" not in serialized
+    assert "chapter-planning-leakage" not in serialized
     for forbidden in (
         "sprev-derived-private",
         "sprev-input-private",
@@ -3554,6 +5158,7 @@ async def test_review_resolver_binds_every_episode_from_current_draft_head():
             "workflow": {
                 "stage": "review",
                 "heads": {
+                    "sceneList": {"id": "scene-list-current"},
                     "screenplayDraft": {"id": "draft-current"},
                     "review": {"id": "review-old"},
                 },
@@ -3569,11 +5174,149 @@ async def test_review_resolver_binds_every_episode_from_current_draft_head():
     )
 
     assert resolved.reviewed_draft_id == "draft-current"
+    assert resolved.source_revision_refs == (
+        "scene-list-current",
+        "draft-current",
+    )
     assert resolved.episode_scene_ids == {
         1: ("ep01_s01",),
         2: ("ep02_s01", "ep02_s02"),
     }
     assert context.requested_draft_revision_ids == ["draft-current"]
+
+
+async def test_late_stage_resolver_binds_only_semantic_input_heads():
+    workspace = {"workflow": {"heads": {
+        "sourceAnalysis": {"id": "analysis-current"},
+        "creativeBrief": {"id": "brief-current"},
+        "structure": {"id": "structure-current"},
+        "sceneList": {"id": "scene-list-current"},
+        "screenplayDraft": {"id": "draft-current"},
+        "review": {"id": "review-unrelated"},
+    }}}
+
+    assert SqliteScreenplayTaskResolver._late_stage_revision_refs(
+        workspace,
+        "sceneList",
+        base_revision_id="scene-list-current",
+    ) == ("structure-current",)
+    assert SqliteScreenplayTaskResolver._late_stage_revision_refs(
+        workspace,
+        "screenplayDraft",
+        base_revision_id="draft-current",
+    ) == (
+        "analysis-current",
+        "brief-current",
+        "structure-current",
+        "scene-list-current",
+        "draft-current",
+    )
+    assert SqliteScreenplayTaskResolver._late_stage_revision_refs(
+        workspace,
+        "review",
+        base_revision_id=None,
+    ) == ("scene-list-current", "draft-current")
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "action", "heads", "expected"),
+    [
+        (
+            "book",
+            ScreenplayIntentAction.CREATE,
+            {
+                "sourceAnalysis": {"id": "analysis-accepted"},
+                "screenplayDraft": {"id": "draft-unrelated"},
+            },
+            ("analysis-accepted",),
+        ),
+        (
+            "original",
+            ScreenplayIntentAction.REVISE,
+            {
+                "creativeBrief": {"id": "brief-baseline"},
+                "review": {"id": "review-unrelated"},
+            },
+            ("brief-baseline",),
+        ),
+    ],
+)
+async def test_creative_brief_resolver_exposes_only_analysis_and_locked_baseline(
+    source_kind,
+    action,
+    heads,
+    expected,
+):
+    class Context:
+        async def head_revision_refs(self, project_id):
+            raise AssertionError(
+                f"creative brief widened {project_id} to every accepted head"
+            )
+
+    resolver = object.__new__(SqliteScreenplayTaskResolver)
+    resolver._context = Context()
+    resolved = await resolver.resolve(
+        workspace={
+            "project": {
+                "id": "project-creative-brief-scope",
+                "source": {"type": source_kind},
+            },
+            "workflow": {"stage": "brief", "heads": heads},
+            "deliverables": [{"role": "creativeBrief"}],
+            "candidates": [],
+        },
+        intent=ScreenplayIntent(
+            action=action,
+            instruction="形成创作简报",
+            requested_deliverable="creativeBrief",
+        ),
+    )
+
+    assert resolved.source_revision_refs == expected
+
+
+async def test_source_analysis_resolver_uses_only_authorized_leaf_identities():
+    class Context:
+        async def head_revision_refs(self, project_id):
+            assert project_id == "project-source"
+            return ()
+
+        async def source_chapter_identities(self, project_id):
+            assert project_id == "project-source"
+            return (
+                {"id": "chapter-2", "title": "第二章", "index": 2},
+                {"id": "chapter-5", "title": "第五章", "index": 5},
+            )
+
+    resolver = object.__new__(SqliteScreenplayTaskResolver)
+    resolver._context = Context()
+    resolved = await resolver.resolve(
+        workspace={
+            "project": {
+                "id": "project-source",
+                "source": {
+                    "type": "book",
+                    "scope": {
+                        "mode": "selected_chapters",
+                        "chapterIds": ["chapter-2", "chapter-5"],
+                    },
+                },
+            },
+            "workflow": {"stage": "sourceAnalysis", "heads": {}},
+            "deliverables": [{"role": "sourceAnalysis"}],
+            "candidates": [],
+        },
+        intent=ScreenplayIntent(
+            action=ScreenplayIntentAction.CREATE,
+            instruction="分析授权章节",
+            requested_deliverable="sourceAnalysis",
+        ),
+    )
+
+    assert resolved.source_chapters == (
+        {"id": "chapter-2", "title": "第二章", "index": 2},
+        {"id": "chapter-5", "title": "第五章", "index": 5},
+    )
 
 
 def _request(session_id: int, content: str):
@@ -3586,8 +5329,8 @@ def _request(session_id: int, content: str):
             "baseURL": "https://provider.example/v1",
             "options": {
                 "model": "planner-model",
-                "model_profile": "deepseek:deepseek-v4-flash",
-                "max_tokens": 32_768,
+                "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+                "max_generation_tokens": 32_768,
             },
             "contextWindow": "128k",
         },
@@ -3600,7 +5343,7 @@ async def test_screenplay_structured_calls_enable_supported_provider_json_mode(
     runtime = _request(1, "测试 JSON mode").runtime
     runtime.options.update({
         "model": "deepseek-v4-flash",
-        "model_profile": "deepseek:deepseek-v4-flash",
+        "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
         "response_format": {"type": "text"},
     })
     runtime.baseURL = "https://api.deepseek.com"
@@ -3645,6 +5388,9 @@ async def test_resumed_task_view_uses_the_active_continuation_root():
 
     executor = object.__new__(ScreenplayTaskUnitExecutor)
     executor._parts = _Parts()
+    executor._long_tasks = SimpleNamespace(
+        list_units=lambda task_id: asyncio.sleep(0, result=())
+    )
     context = SimpleNamespace(
         run_id="run-continuation",
         task=SimpleNamespace(
@@ -3665,12 +5411,464 @@ async def test_resumed_task_view_uses_the_active_continuation_root():
     assert task["rootRunId"] == "run-continuation"
 
 
+async def test_structure_episode_expansion_creates_stable_persisted_children():
+    executor = object.__new__(ScreenplayTaskUnitExecutor)
+    parent = SimpleNamespace(
+        id="section:structure:episode_plan",
+        metadata={
+            "input": {
+                "targetRole": "structure",
+                "sectionKey": "episode_plan",
+                "splitStrategy": "structure_episode_plan",
+                "instruction": "设计分集结构",
+                "constraints": [],
+                "preserve": [],
+                "baseRevisionId": None,
+            },
+            "plannerStepId": "design",
+        },
+    )
+    context = SimpleNamespace(
+        unit=parent,
+        task=SimpleNamespace(metadata={"maxGeneratedUnits": 134, "recipe": {"steps": [
+            {"id": "document:evidence"},
+            {"id": "section:structure:series_arc:index"},
+            {"id": "section:structure:series_arc"},
+            {"id": "section:structure:episode_plan:index"},
+            {"id": "section:structure:episode_plan"},
+            {"id": "section:structure:character_arcs:index"},
+            {"id": "section:structure:character_arcs"},
+            {"id": "section:structure:hooks"},
+            {"id": "document:validation"},
+            {"id": "compose-final-response"},
+        ]}}),
+    )
+    error = StructurePartSplit(
+        "structure_episode_plan",
+        (
+            {
+                "number": 1,
+                "id": "ep01",
+                "title": "误入犬域",
+                "summary": "进入异空间。",
+            },
+            {
+                "number": 2,
+                "id": "ep02",
+                "title": "绝境觉醒",
+                "summary": "首次能力爆发。",
+            },
+        ),
+        index_run_id="run-episode-index",
+    )
+
+    decision = decide_failure(
+        executor.classify_failure(error),
+        attempts_remaining=3,
+    )
+    split = executor.split_unit(context, error)
+
+    assert decision.disposition is FailureDisposition.SPLIT_PART
+    assert [child.id for child in split.children] == [
+        "section:structure:episode_plan:episode-1",
+        "section:structure:episode_plan:episode-2",
+    ]
+    assert split.replacement_dependency_ids == tuple(
+        child.id for child in split.children
+    )
+    assert [child.position for child in split.children] == [22, 23]
+    assert split.children[0].dependencies == (
+        "document:evidence",
+        "section:structure:episode_plan:index",
+    )
+    first_input = thaw_json_mapping(split.children[0].metadata)["input"]
+    assert first_input["sectionKey"] == "episode_plan:episode-1"
+    assert first_input["documentSectionKey"] == "episode_plan"
+    assert first_input["episodeId"] == "ep01"
+    assert first_input["episodeTitle"] == "误入犬域"
+    assert "sourceIndexRunId" not in first_input
+    assert "episodePlanEntry" not in first_input
+    assert thaw_json_mapping(split.children[0].metadata)[
+        "partContractKey"
+    ] == "structure.episode_plan_fragment"
+
+
+@pytest.mark.parametrize(
+    ("strategy", "parent_id", "entries", "dependency_ids", "expected"),
+    [
+        (
+            "structure_series_arc",
+            "section:structure:series_arc",
+            ({
+                "key": "setup",
+                "title": "误入犬域",
+                "objective": "建立目标与规则。",
+            },),
+            (),
+            (
+                "section:structure:series_arc:phase:setup",
+                10,
+                (
+                    "document:evidence",
+                    "section:structure:series_arc:index",
+                ),
+                "structure.series_arc_phase",
+            ),
+        ),
+        (
+            "structure_character_arcs",
+            "section:structure:character_arcs",
+            ({"key": "linyue", "name": "林月"},),
+            (
+                "section:structure:episode_plan:episode-1",
+                "section:structure:episode_plan:episode-2",
+            ),
+            (
+                "section:structure:character_arcs:character:linyue",
+                122,
+                (
+                    "document:evidence",
+                    "section:structure:character_arcs:index",
+                    "section:structure:episode_plan:episode-1",
+                    "section:structure:episode_plan:episode-2",
+                ),
+                "structure.character_arc_fragment",
+            ),
+        ),
+    ],
+)
+async def test_structure_other_expansions_reuse_durable_split_protocol(
+    strategy,
+    parent_id,
+    entries,
+    dependency_ids,
+    expected,
+):
+    recipe_ids = [
+        "document:evidence",
+        "section:structure:series_arc:index",
+        "section:structure:series_arc",
+        "section:structure:episode_plan:index",
+        "section:structure:episode_plan",
+        "section:structure:character_arcs:index",
+        "section:structure:character_arcs",
+        "section:structure:hooks",
+        "document:validation",
+        "compose-final-response",
+    ]
+    parent = SimpleNamespace(
+        id=parent_id,
+        metadata={
+            "input": {
+                "targetRole": "structure",
+                "sectionKey": parent_id.rsplit(":", 1)[-1],
+                "splitStrategy": strategy,
+            },
+            "plannerStepId": "design",
+        },
+    )
+    context = SimpleNamespace(
+        unit=parent,
+        task=SimpleNamespace(metadata={
+            "maxGeneratedUnits": 134,
+            "recipe": {"steps": [{"id": value} for value in recipe_ids]},
+        }),
+    )
+    error = StructurePartSplit(
+        strategy,
+        entries,
+        index_run_id="run-index",
+        dependency_ids=dependency_ids,
+    )
+
+    split = object.__new__(ScreenplayTaskUnitExecutor).split_unit(context, error)
+    child = split.children[0]
+    child_metadata = thaw_json_mapping(child.metadata)
+
+    assert (child.id, child.position, child.dependencies) == expected[:3]
+    assert child_metadata["partContractKey"] == expected[3]
+    assert split.replacement_dependency_ids == (child.id,)
+
+
+async def test_structure_episode_expansion_rejects_first_unit_over_scope():
+    task = {
+        "maxGeneratedUnits": 2,
+        "units": [
+            {
+                "id": "section:structure:episode_plan:index",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {"episodePlanIndex": True},
+                "output": {
+                    "contentJson": {"episodes": [
+                        {"number": 1, "id": "ep01", "title": "第一集"},
+                        {"number": 2, "id": "ep02", "title": "第二集"},
+                    ]},
+                    "runId": "run-episode-index",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan",
+                "kind": "expand_structure_episode_plan",
+                "status": "running",
+                "dependsOn": ["section:structure:episode_plan:index"],
+                "input": {
+                    "sectionKey": "episode_plan",
+                    "splitStrategy": "structure_episode_plan",
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(ValueError, match="screenplay_task_scope_too_large"):
+        ScreenplayTaskModelCalls._expand_structure_part(
+            task,
+            task["units"][1],
+        )
+
+
+async def test_structure_character_expansion_binds_completed_episode_parts():
+    task = {
+        "maxGeneratedUnits": 134,
+        "units": [
+            {
+                "id": "section:structure:character_arcs:index",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {"characterArcsIndex": True},
+                "output": {
+                    "contentJson": {"characters": [
+                        {"key": "linyue", "name": "林月"},
+                        {"key": "suwen", "name": "苏文"},
+                    ]},
+                    "runId": "run-character-index",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:episode-1",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 1,
+                },
+                "output": {"contentJson": {"episodes": [{"id": "ep01"}]}},
+            },
+            {
+                "id": "section:structure:character_arcs",
+                "kind": "expand_structure_character_arcs",
+                "status": "running",
+                "dependsOn": ["section:structure:character_arcs:index"],
+                "input": {
+                    "sectionKey": "character_arcs",
+                    "splitStrategy": "structure_character_arcs",
+                },
+            },
+        ],
+    }
+
+    with pytest.raises(StructurePartSplit) as raised:
+        ScreenplayTaskModelCalls._expand_structure_part(
+            task,
+            task["units"][-1],
+        )
+
+    assert raised.value.strategy == "structure_character_arcs"
+    assert [entry["key"] for entry in raised.value.entries] == [
+        "linyue",
+        "suwen",
+    ]
+    assert raised.value.dependency_ids == (
+        "section:structure:episode_plan:episode-1",
+    )
+
+
+async def test_structure_hooks_are_projected_without_a_model_run():
+    task = {
+        "units": [
+            {
+                "id": "section:structure:episode_plan:episode-2",
+                "status": "completed",
+                "input": {
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 2,
+                },
+                "output": {
+                    "contentJson": {"episodes": [{
+                        "number": 2,
+                        "id": "ep02",
+                        "hook": "苏文突然惊醒。",
+                    }]},
+                    "sourceRunIds": ["run-episode-2"],
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:episode-1",
+                "status": "completed",
+                "input": {
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 1,
+                },
+                "output": {
+                    "contentJson": {"episodes": [{
+                        "number": 1,
+                        "id": "ep01",
+                        "hook": "异响再次出现。",
+                    }]},
+                    "runId": "run-episode-1",
+                },
+            },
+            {
+                "id": "section:structure:character_arcs:character:linyue",
+                "status": "completed",
+                "input": {"documentSectionKey": "character_arcs"},
+                "output": {
+                    "contentJson": {"characterArcs": [{"key": "linyue"}]},
+                    "runId": "run-character-linyue",
+                },
+            },
+        ],
+    }
+    unit = {
+        "kind": "project_structure_hooks",
+        "dependsOn": [item["id"] for item in task["units"]],
+        "input": {"sectionKey": "hooks"},
+    }
+
+    output = await ScreenplayTaskModelCalls.execute(
+        object.__new__(ScreenplayTaskModelCalls),
+        task=task,
+        unit=unit,
+        runtime=object(),
+    )
+
+    assert output["contentJson"]["hooks"] == [
+        {"episodeId": "ep01", "hook": "异响再次出现。"},
+        {"episodeId": "ep02", "hook": "苏文突然惊醒。"},
+    ]
+    assert output["sourceRunIds"] == [
+        "run-episode-2",
+        "run-episode-1",
+        "run-character-linyue",
+    ]
+
+
+async def test_structure_episode_children_atomically_replace_parent_dependency(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteLongTaskRepository(temp_db)
+    parent_id = "section:structure:episode_plan"
+    task = await repository.create(
+        "task-structure-episode-expansion",
+        LongTaskCreateCommand(
+            namespace="purrtypos.screenplay",
+            kind="screenplay.structure",
+            owner_id="project-structure-expansion",
+            created_by_run_id="run-root-structure-expansion",
+            units=(
+                LongTaskUnitSpec(
+                    id=parent_id,
+                    position=0,
+                    metadata={
+                        "executor": "screenplay",
+                        "unitKind": "expand_structure_episode_plan",
+                        "plannerStepId": "design",
+                        "input": {
+                            "targetRole": "structure",
+                            "sectionKey": "episode_plan",
+                            "splitStrategy": "structure_episode_plan",
+                        },
+                    },
+                ),
+                LongTaskUnitSpec(
+                    id="document:validation",
+                    position=1,
+                    dependencies=(parent_id,),
+                    metadata={
+                        "executor": "screenplay",
+                        "unitKind": "validate_manifest_part",
+                        "input": {"validationKind": "document"},
+                    },
+                ),
+            ),
+            metadata={"maxGeneratedUnits": 131, "recipe": {"steps": [
+                {"id": parent_id},
+                {"id": "document:validation"},
+            ]}},
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    claimed = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-structure-expansion",
+        lease_duration_ms=30_000,
+    )
+    assert claimed is not None and claimed.id == parent_id
+
+    executor = object.__new__(ScreenplayTaskUnitExecutor)
+    error = StructurePartSplit(
+        "structure_episode_plan",
+        (
+            {
+                "number": 1,
+                "id": "ep01",
+                "title": "误入犬域",
+                "summary": "进入异空间。",
+            },
+            {
+                "number": 2,
+                "id": "ep02",
+                "title": "绝境觉醒",
+                "summary": "首次能力爆发。",
+            },
+        ),
+        index_run_id="run-episode-index",
+    )
+    context = SimpleNamespace(task=task, unit=claimed)
+    failure = executor.classify_failure(error)
+    decision = decide_failure(
+        failure,
+        attempts_remaining=claimed.max_attempts - claimed.attempt,
+    )
+    split = executor.split_unit(context, error)
+
+    expanded = await repository.expand_unit(
+        task.id,
+        parent_id,
+        worker_id="worker-structure-expansion",
+        lease_epoch=claimed.lease_epoch,
+        split=split,
+        decision=decision,
+    )
+    units = await repository.list_units(task.id)
+    by_id = {unit.id: unit for unit in units}
+
+    assert expanded.total_units == 3
+    assert by_id[parent_id].status.value == "expanded"
+    assert by_id[parent_id].required is False
+    assert by_id["document:validation"].dependencies == (
+        "section:structure:episode_plan:episode-1",
+        "section:structure:episode_plan:episode-2",
+    )
+    assert by_id["section:structure:episode_plan:episode-1"].status.value == (
+        "pending"
+    )
+    assert by_id["section:structure:episode_plan:episode-2"].status.value == (
+        "pending"
+    )
+
+
 @pytest.mark.parametrize(("code", "retryable", "expected_category"), (
     ("tool_execution_failed", True, FailureCategory.TOOL_EXECUTION),
     ("model_output_truncated", True, FailureCategory.MODEL_OUTPUT_INVALID),
     ("invalid_tool_results", True, FailureCategory.MODEL_OUTPUT_INVALID),
     ("max_model_rounds", True, FailureCategory.MODEL_OUTPUT_INVALID),
     ("invalid_tool_arguments_json", True, FailureCategory.MODEL_OUTPUT_INVALID),
+    (
+        "invalid_tool_arguments_schema",
+        True,
+        FailureCategory.MODEL_OUTPUT_INVALID,
+    ),
     ("tool_call_truncated", True, FailureCategory.MODEL_OUTPUT_INVALID),
     ("provider_bad_request", False, FailureCategory.PROTOCOL_INCOMPATIBLE),
 ))
@@ -3687,7 +5885,22 @@ async def test_screenplay_failure_codes_have_typed_durable_dispositions(
 
     assert failure.category is expected_category
     assert failure.code == code
-    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+    assert decision.disposition is FailureDisposition.FAIL_PERMANENT
+
+
+async def test_scene_output_truncation_fails_the_attempt_instead_of_pausing():
+    error = ModelGatewayError(
+        "model output is incomplete",
+        code="model_output_truncated",
+        retryable=False,
+    )
+    failure = classify_screenplay_run_failure(error)
+
+    assert failure.retryable is False
+    assert decide_failure(
+        failure,
+        attempts_remaining=3,
+    ).disposition is FailureDisposition.FAIL_PERMANENT
 
 
 @pytest.mark.parametrize("code", (
@@ -3772,57 +5985,6 @@ async def test_review_failure_is_projected_from_the_operation_part():
     }
 
 
-class _ModelGateway:
-    def __init__(self, api_key: str) -> None:
-        assert api_key == "secret"
-        self.invocations = []
-        self.calls = []
-
-    def describe_invocation(self, messages, invocation):
-        return {
-            "messageCount": len(messages),
-            "model": invocation.request.model,
-        }
-
-    async def stream(self, messages, invocation, signal=None):
-        del signal
-        self.calls.append((tuple(messages), invocation))
-        self.invocations.append(invocation)
-
-        async def chunks():
-            yield ModelStreamChunk(finish_reason=ModelFinishReason.STOP)
-
-        return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-    async def complete(self, messages, invocation, signal=None):
-        del messages, signal
-        self.invocations.append(invocation)
-        return ModelCompletion(
-            message=AgentMessage(role="assistant", content="{}"),
-            model=invocation.request.model,
-            finish_reason=ModelFinishReason.STOP,
-        )
-
-
-class _ScriptedModelGateway(_ModelGateway):
-    def __init__(self, api_key: str, rounds) -> None:
-        super().__init__(api_key)
-        self.rounds = list(rounds)
-
-    async def stream(self, messages, invocation, signal=None):
-        del signal
-        self.calls.append((tuple(messages), invocation))
-        self.invocations.append(invocation)
-        round_chunks = self.rounds.pop(0)
-
-        async def chunks():
-            for chunk in round_chunks:
-                yield chunk
-
-        return ModelStream(chunks=chunks(), model=invocation.request.model)
-
-
-
 async def test_screenplay_stream_replays_canonical_output_journal(
     temp_db: DatabaseConnection,
 ):
@@ -3869,6 +6031,7 @@ async def test_screenplay_stream_replays_canonical_output_journal(
     assert page["chunks"] == [{
         "cursor": page["chunks"][0]["cursor"],
         "runId": begun.run_id,
+        "runRole": "related",
         "turnId": turn["id"],
         "taskId": None,
         "userContent": "创作下一集",
@@ -3891,6 +6054,74 @@ async def test_screenplay_stream_replays_canonical_output_journal(
         },
         "createdAt": page["chunks"][0]["createdAt"],
     }]
+
+
+async def test_screenplay_stream_enriches_tool_operation_display_names():
+    chunk = _with_screenplay_tool_display_names({
+        "kind": "operation.started",
+        "payload": {
+            "kind": "tool",
+            "display": {
+                "labelParams": {
+                    "toolName": "inspectScreenplayProject",
+                },
+            },
+        },
+    })
+
+    assert chunk["payload"]["display"]["labelParams"]["displayNames"] == {
+        "zh-CN": "查看剧本项目",
+    }
+
+    episode_chunk = _with_screenplay_tool_display_names({
+        "kind": "operation.started",
+        "payload": {
+            "kind": "tool",
+            "display": {
+                "labelParams": {
+                    "toolName": "writeScreenplayCandidatePart",
+                    "episodeNumber": 7,
+                },
+            },
+        },
+    })
+    assert episode_chunk["payload"]["display"]["labelParams"][
+        "displayNames"
+    ] == {"zh-CN": "写入第 7 集剧本候选稿"}
+
+
+async def test_screenplay_stream_replaces_stale_operation_semantics_on_replay():
+    chunk = _with_screenplay_tool_display_names(
+        {
+            "kind": "operation.started",
+            "payload": {
+                "kind": "tool",
+                "display": {
+                    "labelParams": {
+                        "toolCallId": "dependency",
+                        "toolName": "readScreenplayTaskDependencies",
+                        "episodeNumber": 1,
+                        "targetDetail": "可读产出清单",
+                        "displayNames": {
+                            "zh-CN": "读取第 1 集任务依赖（可读产出清单）",
+                        },
+                    },
+                },
+            },
+        },
+        projected_params={
+            "episodeNumber": 1,
+            "readTargets": ["第 1 集第 2 场已完成剧本"],
+            "displayNames": {"zh-CN": "读取第 1 集第 2 场已完成剧本"},
+        },
+    )
+
+    params = chunk["payload"]["display"]["labelParams"]
+    assert params["displayNames"] == {
+        "zh-CN": "读取第 1 集第 2 场已完成剧本",
+    }
+    assert params["readTargets"] == ["第 1 集第 2 场已完成剧本"]
+    assert "targetDetail" not in params
 
 
 async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay(
@@ -4027,6 +6258,53 @@ async def test_restart_finishes_a_durable_cancel_request(
     ) == {"cancel_receipt_id": receipt.id}
 
 
+async def test_restart_reconciles_terminal_operation_with_paused_turn(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-terminal-projection-recovery",
+    )
+    turn = await repository.begin_turn(
+        command_id="terminal-operation-before-restart",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="继续生成剧本",
+        stage_command=None,
+        runtime_profile={"provider": "openai", "model": "test"},
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_agent_turns SET status = 'paused', "
+        "error_json = '{\"code\":\"screenplay_task_paused\"}' WHERE id = ?",
+        [turn["id"]],
+    )
+    await temp_db.execute(
+        "INSERT INTO screenplay_agent_operations "
+        "(id, turn_id, project_id, session_id, status, target_role, "
+        "requirements_json, manifest_digest, error_json) "
+        "VALUES ('operation-terminal-before-restart', ?, ?, ?, 'failed', "
+        "'screenplayDraft', '{}', 'sha256:terminal-recovery', "
+        "'{\"code\":\"execution_projection_failed\","
+        "\"message\":\"终态投影失败。\"}')",
+        [turn["id"], workspace["project"]["id"], session["id"]],
+    )
+
+    recovered = await repository.recover_after_restart()
+
+    assert recovered == (turn["id"],)
+    assert await temp_db.fetch_one(
+        "SELECT status, error_json FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    ) == {
+        "status": "failed",
+        "error_json": (
+            '{"code":"execution_projection_failed",'
+            '"message":"终态投影失败。"}'
+        ),
+    }
+
+
 async def _install_head(db, project_id: str, role: str, content: dict) -> str:
     deliverable = await db.fetch_one(
         "SELECT id FROM screenplay_deliverables WHERE project_id = ? AND role = ?",
@@ -4147,47 +6425,20 @@ async def test_review_episode_context_reads_the_requested_immutable_revision(
     )
 
 
-class _StructuredDraftModels:
-    async def run_json(self, **kwargs):
-        payload = kwargs["user_payload"]
-        number = int(payload["episodeNumber"])
-        if kwargs["phase"] == "screenplay_scene_generation":
-            scene = payload["scenePlan"]
-            value = kwargs["validate"]({
-                "sceneId": payload["sceneId"],
-                "processSummary": (
-                    f"场景 {payload['sceneId']} 推演：完成目标与转折。"
-                ),
-                "sceneText": f"{scene['heading']}\n\n第 {number} 集正文",
-            })
-            return StructuredModelResult(value, f"run-scene-{payload['sceneId']}")
-        assert kwargs["phase"] == "screenplay_episode_metadata"
-        value = kwargs["validate"]({
-            "episodeNumber": number,
-            "title": f"第 {number} 集",
-            "executionSummary": f"完成第 {number} 集场景推进与连续性校验。",
-            "continuitySummary": f"第 {number} 集连续性",
-        })
-        return StructuredModelResult(value, f"run-metadata-{number}")
-
-    async def run_public_text(self, **kwargs):
-        del kwargs
-        return PublicModelResult(
-            "第 1 至 2 集候选稿已经完成。可以在候选稿区域查看并继续编辑。",
-            "run-final-response",
-        )
-
-
 class _CheckpointingToolCalls:
     def __init__(self, *, fail_once_key: str | None = None) -> None:
         self.fail_once_key = fail_once_key
         self.failed = False
         self.calls: list[tuple[str, str, ReasoningMode]] = []
+        self.tool_profiles: list[str] = []
         self.user_payloads: list[dict] = []
         self.system_instructions: list[str] = []
+        self.dependency_part_keys: list[tuple[str, ...]] = []
+        self.contexts: list[ScreenplayAgentDomainContext] = []
 
     async def run_candidate(self, **kwargs):
         context = kwargs["domain_context"]
+        self.contexts.append(context)
         part_type = context.expected_part_type
         part_key = context.expected_part_key
         self.calls.append((
@@ -4195,8 +6446,10 @@ class _CheckpointingToolCalls:
             part_key,
             kwargs.get("reasoning_mode", ReasoningMode.DEFAULT),
         ))
+        self.tool_profiles.append(str(context.tool_access))
         self.user_payloads.append(dict(kwargs["user_payload"]))
         self.system_instructions.append(str(kwargs["system_instruction"]))
+        self.dependency_part_keys.append(tuple(context.dependency_part_keys))
         if part_key == self.fail_once_key and not self.failed:
             self.failed = True
             raise ModelGatewayError(
@@ -4223,7 +6476,6 @@ class _CheckpointingToolCalls:
                 "payload": {
                     "episodeNumber": int(part_key),
                     "title": f"第 {part_key} 集",
-                    "executionSummary": "按场景顺序完成本集并保留连续性。",
                     "continuitySummary": f"第 {part_key} 集连续性",
                 },
                 "contentText": "",
@@ -4237,7 +6489,6 @@ class _CheckpointingToolCalls:
                     "episodeNumber": episode_number,
                     "reviewDimension": dimension,
                     "title": f"第 {episode_number} 集 {dimension} 审阅",
-                    "executionSummary": f"核对本集 {dimension} 维度。",
                     "contentJson": {
                         "verdict": (
                             "revise"
@@ -4254,6 +6505,124 @@ class _CheckpointingToolCalls:
                 },
                 "contentText": f"第 {episode_number} 集 {dimension} 审阅正文",
             }
+        elif part_type == "document_section" and part_key == "series_arc:index":
+            candidate = {
+                "artifactId": "artifact-series-index",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": "全剧阶段索引",
+                    "contentJson": {"phases": [
+                        {
+                            "key": "setup",
+                            "title": "进入困局",
+                            "objective": "建立目标。",
+                        },
+                        {
+                            "key": "resolution",
+                            "title": "完成抉择",
+                            "objective": "兑现选择。",
+                        },
+                    ]},
+                },
+                "contentText": "- 进入困局\n- 完成抉择",
+            }
+        elif (
+            part_type == "document_section"
+            and part_key.startswith("series_arc:phase:")
+        ):
+            identity = kwargs["user_payload"]["partIdentity"]
+            candidate = {
+                "artifactId": f"artifact-series-{part_key}",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": identity["phaseTitle"],
+                    "contentJson": {"seriesArc": {"phases": [{
+                        "key": identity["phaseKey"],
+                        "title": identity["phaseTitle"],
+                        "objective": identity["phaseObjective"],
+                        "centralConflict": "回家与救人不可兼得。",
+                        "turningPoint": "主角决定留下。",
+                        "exitState": "团队完成结盟。",
+                    }]}},
+                },
+                "contentText": f"## {identity['phaseTitle']}",
+            }
+        elif part_type == "document_section" and part_key == "episode_plan:index":
+            candidate = {
+                "artifactId": "artifact-episode-index",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": "分集索引",
+                    "contentJson": {"episodes": [{
+                        "number": number,
+                        "id": f"ep{number:02d}",
+                        "title": f"第 {number} 集",
+                        "summary": f"第 {number} 集叙事边界。",
+                    } for number in range(1, 11)]},
+                },
+                "contentText": "十集轻量索引",
+            }
+        elif (
+            part_type == "document_section"
+            and part_key.startswith("episode_plan:episode-")
+        ):
+            episode_number = int(part_key.removeprefix("episode_plan:episode-"))
+            identity = kwargs["user_payload"]["partIdentity"]
+            candidate = {
+                "artifactId": f"artifact-structure-{part_key}",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": f"第 {episode_number} 集分集结构",
+                    "executionSummary": "依据分集索引展开本集。",
+                    "contentJson": {"episodes": [{
+                        "number": episode_number,
+                        "id": identity["episodeId"],
+                        "title": identity["episodeTitle"],
+                        "summary": "进入异空间。",
+                        "objective": "确认规则",
+                        "conflict": "无法返回",
+                        "turn": "能力觉醒",
+                        "hook": "追兵出现",
+                    }]},
+                },
+                "contentText": f"第 {episode_number} 集分集结构正文",
+            }
+        elif (
+            part_type == "document_section"
+            and part_key == "character_arcs:index"
+        ):
+            candidate = {
+                "artifactId": "artifact-character-index",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": "核心人物索引",
+                    "contentJson": {"characters": [
+                        {"key": "linyue", "name": "林月"},
+                        {"key": "suwen", "name": "苏文"},
+                    ]},
+                },
+                "contentText": "- 林月\n- 苏文",
+            }
+        elif (
+            part_type == "document_section"
+            and part_key.startswith("character_arcs:character:")
+        ):
+            identity = kwargs["user_payload"]["partIdentity"]
+            candidate = {
+                "artifactId": f"artifact-character-{part_key}",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": f"{identity['characterName']}人物弧",
+                    "contentJson": {"characterArcs": [{
+                        "key": identity["characterKey"],
+                        "startState": "拒绝承担责任。",
+                        "desire": "找到安全的归途。",
+                        "turningEpisodes": ["ep01", "ep10"],
+                        "endState": "主动承担责任。",
+                    }]},
+                },
+                "contentText": f"## {identity['characterName']}",
+            }
         elif part_type == "document_section" and part_key.startswith("episode-"):
             episode_number = int(part_key.removeprefix("episode-"))
             candidate = {
@@ -4261,7 +6630,6 @@ class _CheckpointingToolCalls:
                 "payload": {
                     "sectionKey": part_key,
                     "title": f"第 {part_key} 集场景表",
-                    "executionSummary": "按本集结构目标规划场景推进。",
                     "contentJson": {"scenes": [{
                         "id": f"scene-{episode_number}",
                         "episodeNumber": episode_number,
@@ -4299,47 +6667,193 @@ class _CheckpointingToolCalls:
         )
 
 
-class _IncrementalEpisodeContext:
-    async def episode_manifest(self, project_id, episode_number):
-        assert project_id and episode_number == 1
-        return {
-            "sceneListId": "scene-list-head",
-            "sceneIds": ("scene-1", "scene-2"),
-        }
+class _SourceAnalysisToolCalls:
+    def __init__(self) -> None:
+        self.calls = []
 
-    async def episode_writing_context(
-        self,
-        project_id,
-        episode_number,
-        *,
-        draft_revision_id=None,
-    ):
-        assert project_id and episode_number == 1
-        assert draft_revision_id == "draft-head"
-        return {
-            "sceneListId": "scene-list-head",
-            "scenePlans": {
-                "scene-1": {"id": "scene-1", "objective": "建立危机"},
-                "scene-2": {"id": "scene-2", "objective": "完成转折"},
+    async def run_candidate(self, **kwargs):
+        context = kwargs["domain_context"]
+        contract = kwargs["candidate_validation_contract"]
+        kind = str(contract["kind"])
+        part_key = str(context.expected_part_key)
+        if kind == "source_chapter_digest":
+            digest_id = str(contract["chapterId"])
+            content = {
+                "chapterId": digest_id,
+                "summary": f"{digest_id} 事件边界",
+                "characters": [],
+                "events": [],
+                "worldFacts": [],
+                "themes": [],
+                "plotThreads": [],
+                "adaptationRisks": [],
+            }
+        elif kind == "source_digest_reduction":
+            digest_id = str(contract["digestId"])
+            content = {
+                "chapterId": digest_id,
+                "summary": "归并后的事件边界",
+                "characters": [],
+                "events": [],
+                "worldFacts": [],
+                "themes": [],
+                "plotThreads": [],
+                "adaptationRisks": [],
+            }
+        elif kind == "source_analysis_section":
+            content = {"characters": []}
+        else:
+            raise AssertionError(kind)
+        candidate = normalize_screenplay_candidate(
+            contract,
+            {
+                "artifactId": f"artifact-{len(self.calls) + 1}",
+                "payload": {
+                    "sectionKey": part_key,
+                    "title": part_key,
+                    "contentJson": content,
+                },
+                "contentText": f"{part_key} 摘要",
             },
-            "currentDraftScenes": {
-                "scene-1": "scene-1 的旧稿",
-                "scene-2": "scene-2 的旧稿",
-            },
-            "previousEpisodeContinuity": None,
-            "reviewRevisionId": "review-head",
-            "reviewIssues": [{
-                "id": "issue-1",
-                "severity": "major",
-                "description": "本集需要统一格式并压缩篇幅。",
-                "relatedSceneIds": ["scene-1"],
-                "crossEpisodeSceneIds": [],
-            }],
-            "acceptedGuidance": {
-                "creativeBrief": {"fields": {"format": "竖屏短剧"}},
-                "structureEpisode": {"number": 1, "summary": "危机出现"},
+        )
+        self.calls.append({
+            "context": context,
+            "payload": dict(kwargs["user_payload"]),
+            "instruction": str(kwargs["system_instruction"]),
+        })
+        return ScreenplayCandidateRunResult(
+            run_id=f"run-source-{len(self.calls)}",
+            candidate=candidate,
+        )
+
+
+async def test_source_analysis_parts_read_only_bound_identities_and_propagate_runs(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    await temp_db.execute(
+        "INSERT INTO books (id, title) VALUES ('source-book-phase4', '原作')"
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_projects SET source_kind = 'book', "
+        "source_book_id = 'source-book-phase4', source_scope_json = ? "
+        "WHERE id = ?",
+        [json.dumps({"mode": "whole_book"}), workspace["project"]["id"]],
+    )
+    tool_calls = _SourceAnalysisToolCalls()
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+    )
+    task = {
+        "id": "task-source-analysis-phase4",
+        "projectId": workspace["project"]["id"],
+        "sessionId": session["id"],
+        "turnId": "turn-source-analysis-phase4",
+        "rootRunId": "root-source-analysis-phase4",
+        "targetRole": "sourceAnalysis",
+        "units": [{
+            "id": "document:evidence",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"targetRole": "sourceAnalysis"},
+            "output": {"evidenceDescriptor": {
+                "projectId": workspace["project"]["id"],
+                "targetRole": "sourceAnalysis",
+            }},
+        }],
+    }
+    for number in (1, 2):
+        unit = {
+            "id": f"source-analysis:chapter:chapter-{number}",
+            "kind": "generate_document_section",
+            "status": "pending",
+            "dependsOn": ["document:evidence"],
+            "input": {
+                "targetRole": "sourceAnalysis",
+                "sectionKey": f"source_digest:chapter:chapter-{number}",
+                "sourceChapterDigest": True,
+                "chapterId": f"chapter-{number}",
+                "chapterTitle": f"第 {number} 章",
+                "chapterIndex": number,
             },
         }
+        task["units"].append(unit)
+        output = await executor.execute(
+            task=task,
+            unit=unit,
+            runtime=object(),
+        )
+        output["contentText"] = f"不得注入下游的第 {number} 章摘要正文"
+        unit.update({"status": "completed", "output": output})
+    reduction = {
+        "id": "source-analysis:reduce:1:1",
+        "kind": "generate_document_section",
+        "status": "pending",
+        "dependsOn": [
+            "source-analysis:chapter:chapter-1",
+            "source-analysis:chapter:chapter-2",
+        ],
+        "input": {
+            "targetRole": "sourceAnalysis",
+            "sectionKey": "source_digest:reduce:1:1",
+            "sourceDigestReduction": True,
+            "digestId": "source-analysis:reduce:1:1",
+            "reductionLevel": 1,
+            "reductionIndex": 1,
+        },
+    }
+    task["units"].append(reduction)
+    reduction_output = await executor.execute(
+        task=task,
+        unit=reduction,
+        runtime=object(),
+    )
+    reduction_output["contentText"] = "不得注入最终栏目的归并正文"
+    reduction.update({"status": "completed", "output": reduction_output})
+    section = {
+        "id": "section:sourceAnalysis:characters",
+        "kind": "generate_document_section",
+        "status": "pending",
+        "dependsOn": ["source-analysis:reduce:1:1"],
+        "input": {
+            "targetRole": "sourceAnalysis",
+            "sectionKey": "characters",
+        },
+    }
+    task["units"].append(section)
+    section_output = await executor.execute(
+        task=task,
+        unit=section,
+        runtime=object(),
+    )
+
+    assert [call["context"].tool_access for call in tool_calls.calls] == [
+        "source_chapter_digest",
+        "source_chapter_digest",
+        "source_digest_reduction",
+        "source_analysis_section",
+    ]
+    assert tool_calls.calls[0]["context"].source_scope["mode"] == "whole_book"
+    assert tool_calls.calls[1]["context"].source_scope["mode"] == "whole_book"
+    assert tool_calls.calls[2]["payload"]["dependencyPartKeys"] == [
+        "source-analysis:chapter:chapter-1",
+        "source-analysis:chapter:chapter-2",
+    ]
+    assert tool_calls.calls[3]["payload"]["dependencyPartKeys"] == [
+        "source-analysis:reduce:1:1"
+    ]
+    assert all(
+        "不得注入" not in str(call["payload"])
+        and "evidenceDescriptor" not in call["payload"]
+        for call in tool_calls.calls
+    )
+    assert section_output["sourceRunIds"] == [
+        "run-source-1",
+        "run-source-2",
+        "run-source-3",
+        "run-source-4",
+    ]
 
 
 class _EvidenceCheckpointOnlyContext:
@@ -4354,28 +6868,21 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
     tool_calls = _CheckpointingToolCalls()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        candidate_model_service=tool_calls,  # type: ignore[arg-type]
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     evidence = {
+        "projectId": workspace["project"]["id"],
+        "targetRole": "screenplayDraft",
+        "acceptedRevisionIds": {
+            "sourceAnalysis": "analysis-head",
+            "creativeBrief": "brief-head",
+            "structure": "structure-head",
+            "sceneList": "scene-list-head",
+        },
         "episodeNumber": 1,
-        "manifest": {
-            "sceneListId": "scene-list-head",
-            "sceneIds": ("scene-1", "scene-2"),
-        },
-        "writingContext": {
-            "sceneListId": "scene-list-head",
-            "scenePlans": {
-                "scene-1": {"id": "scene-1", "objective": "建立危机"},
-                "scene-2": {"id": "scene-2", "objective": "完成转折"},
-            },
-            "currentDraftScenes": {},
-            "previousEpisodeContinuity": None,
-            "reviewRevisionId": None,
-            "reviewIssues": [],
-            "acceptedGuidance": {},
-        },
-        "acceptedDeliverables": [],
+        "sceneIds": ["scene-1", "scene-2"],
+        "sceneListRevisionId": "scene-list-head",
     }
     task: dict[str, object] = {
         "id": "task-formal-evidence-checkpoint",
@@ -4390,13 +6897,16 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
                 "kind": "collect_evidence",
                 "status": "completed",
                 "input": {"episodeNumber": 1},
-                "output": {"evidence": evidence, "evidenceReceipt": "receipt-1"},
+                "output": {
+                    "evidenceDescriptor": evidence,
+                    "evidenceReceipt": "receipt-1",
+                },
             },
             {
                 "id": "draft:1:scene-1",
                 "kind": "generate_draft_scene",
                 "status": "pending",
-                "dependsOn": ["evidence:1"],
+                "dependsOn": ["evidence:1", "evidence:2"],
                 "input": {
                     "episodeNumber": 1,
                     "sceneId": "scene-1",
@@ -4439,6 +6949,16 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
                     "sceneIds": ["scene-1", "scene-2"],
                 },
             },
+            {
+                "id": "evidence:2",
+                "kind": "collect_evidence",
+                "status": "completed",
+                "input": {"episodeNumber": 2},
+                "output": {
+                    "evidenceDescriptor": {"episodeNumber": 2},
+                    "evidenceReceipt": "receipt-2",
+                },
+            },
         ],
     }
 
@@ -4460,6 +6980,40 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
     assert validated["episodeDraft"]["sceneIds"] == ["scene-1", "scene-2"]
     assert len(validated["validationReceipt"]) == 64
     assert [key for _, key, _ in tool_calls.calls] == ["scene-1", "scene-2", "1"]
+    assert tool_calls.tool_profiles == [
+        "draft_scene",
+        "draft_scene",
+        "episode_metadata",
+    ]
+    assert tool_calls.dependency_part_keys == [
+        (),
+        ("draft:1:scene-1",),
+        ("draft:1:scene-2",),
+    ]
+    assert all(
+        context.deliverable_revision_scope == {
+            "sourceAnalysis": "analysis-head",
+            "creativeBrief": "brief-head",
+            "structure": "structure-head",
+            "sceneList": "scene-list-head",
+        }
+        for context in tool_calls.contexts[:2]
+    )
+    assert all(context.episode_number == 1 for context in tool_calls.contexts)
+    assert [payload["dependencyPartKeys"] for payload in tool_calls.user_payloads] == [
+        [],
+        ["draft:1:scene-1"],
+        ["draft:1:scene-2"],
+    ]
+    for payload in tool_calls.user_payloads:
+        assert "previousEpisodeContinuity" not in payload
+        assert "previousSceneTail" not in payload
+        assert "finalSceneTail" not in payload
+    assert validated["sourceRunIds"] == (
+        "run-scene-scene-1-1",
+        "run-scene-scene-2-2",
+        "run-episode_metadata-1-3",
+    )
 
 
 async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
@@ -4469,19 +7023,19 @@ async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
     tool_calls = _CheckpointingToolCalls(fail_once_key="scene-2")
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        candidate_model_service=tool_calls,  # type: ignore[arg-type]
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     evidence = {
-        "manifest": {"sceneListId": "scene-list-head"},
-        "writingContext": {
-            "scenePlans": {
-                "scene-1": {"id": "scene-1", "objective": "建立危机"},
-                "scene-2": {"id": "scene-2", "objective": "完成转折"},
-            },
-            "currentDraftScenes": {},
-            "reviewIssues": [],
+        "projectId": workspace["project"]["id"],
+        "targetRole": "screenplayDraft",
+        "acceptedRevisionIds": {
+            "sceneList": "scene-list-head",
+            "screenplayDraft": "draft-head",
         },
+        "episodeNumber": 1,
+        "sceneIds": ["scene-1", "scene-2"],
+        "sceneListRevisionId": "scene-list-head",
     }
     task = {
         "id": "task-visible-scene-parts",
@@ -4495,7 +7049,7 @@ async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
             "kind": "collect_evidence",
             "status": "completed",
             "input": {"episodeNumber": 1},
-            "output": {"evidence": evidence},
+            "output": {"evidenceDescriptor": evidence},
         }, {
             "id": "draft:1:scene-1",
             "kind": "generate_draft_scene",
@@ -4539,36 +7093,6 @@ async def test_scene_part_truncation_does_not_replay_or_advance_other_parts(
     assert unit.get("output") is None
 
 
-class _IncrementalReviewContext:
-    async def available_episode_numbers(self, project_id, **kwargs):
-        assert project_id and kwargs["draft_revision_id"] == "draft-head"
-        return {"draft": (1, 2), "sceneList": (1, 2), "remaining": ()}
-
-    async def episode_context(self, project_id, episode_number, **kwargs):
-        assert project_id and kwargs["draft_revision_id"] == "draft-head"
-        return {
-            "episode": {
-                "episodeNumber": episode_number,
-                "scenes": [{
-                    "id": f"scene-{episode_number}",
-                    "objective": "核对真实正文",
-                }],
-            },
-            "previousEpisode": (
-                {"continuitySummary": "上一集连续性"}
-                if episode_number > 1 else None
-            ),
-            "currentDraft": {
-                "episodeNumber": episode_number,
-                "sceneIds": [f"scene-{episode_number}"],
-                "sceneTexts": [{
-                    "sceneId": f"scene-{episode_number}",
-                    "contentText": f"第 {episode_number} 集真实正文",
-                }],
-            },
-        }
-
-
 async def test_review_dimension_parts_aggregate_host_side(
     temp_db: DatabaseConnection,
 ):
@@ -4576,19 +7100,9 @@ async def test_review_dimension_parts_aggregate_host_side(
     tool_calls = _CheckpointingToolCalls()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        candidate_model_service=tool_calls,  # type: ignore[arg-type]
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
-    review_input = {
-        "contractVersion": 2,
-        "draftRevisionId": "draft-head",
-        "episodeNumber": 1,
-        "sceneIds": ["scene-1"],
-        "draftContentText": "第 1 集真实正文",
-        "scenePlan": {"scenes": [{"id": "scene-1"}]},
-        "requiredContext": {"previousEpisode": None},
-        "contentDigest": "a" * 64,
-    }
     task = {
         "id": "task-review-dimensions",
         "projectId": workspace["project"]["id"],
@@ -4601,7 +7115,25 @@ async def test_review_dimension_parts_aggregate_host_side(
             "kind": "collect_evidence",
             "status": "completed",
             "input": {"episodeNumber": 1, "evidenceKind": "review_input"},
-            "output": {"evidence": {"reviewInput": review_input}},
+            "output": {"evidenceDescriptor": {
+                "projectId": workspace["project"]["id"],
+                "targetRole": "review",
+                "acceptedRevisionIds": {
+                    "sceneList": "scene-list-head",
+                    "screenplayDraft": "draft-head",
+                },
+                "episodeNumber": 1,
+                "sceneIds": ["scene-1"],
+                "sceneListRevisionId": "scene-list-head",
+                "reviewedDraftId": "draft-head",
+                "reviewInputRef": {
+                    "reviewedRevisionId": "draft-head",
+                    "episodeNumber": 1,
+                    "scenePartRefs": ["draft-head#scene:scene-1"],
+                    "scenePlanRevisionId": "scene-list-head",
+                    "contentDigest": "a" * 64,
+                },
+            }},
         }],
     }
     for dimension in REVIEW_DIMENSIONS:
@@ -4650,28 +7182,34 @@ async def test_review_dimension_parts_aggregate_host_side(
         "episode-1:continuity:issue-1"
     )
     assert len(result["sourceRunIds"]) == 5
-    review_input = tool_calls.user_payloads[0]["reviewInput"]
-    assert review_input["contractVersion"] == 2
-    assert review_input["draftRevisionId"] == "draft-head"
-    assert review_input["episodeNumber"] == 1
-    assert review_input["sceneIds"] == ["scene-1"]
-    assert "第 1 集真实正文" in review_input["draftContentText"]
-    assert review_input["scenePlan"]["scenes"][0]["id"] == "scene-1"
-    assert review_input["contentDigest"] == "a" * 64
+    descriptor = tool_calls.user_payloads[0]["evidenceDescriptor"]
+    assert descriptor["reviewInputRef"]["reviewedRevisionId"] == "draft-head"
+    assert descriptor["reviewInputRef"]["contentDigest"] == "a" * 64
+    assert "draftContentText" not in str(descriptor)
     assert len(tool_calls.user_payloads) == len(REVIEW_DIMENSIONS)
     assert {
-        payload["reviewInput"]["contentDigest"]
+        payload["evidenceDescriptor"]["reviewInputRef"]["contentDigest"]
         for payload in tool_calls.user_payloads
     } == {"a" * 64}
     assert all(
         payload["reviewedDraftId"] == "draft-head"
-        and payload["reviewInput"]["draftRevisionId"] == "draft-head"
+        and payload["evidenceDescriptor"]["reviewInputRef"]
+        ["reviewedRevisionId"] == "draft-head"
         and "previousReview" not in payload
         and "acceptedReview" not in payload
         and "reviewReport" not in payload
         for payload in tool_calls.user_payloads
     )
-    assert "按需调用工具读取" not in tool_calls.system_instructions[0]
+    assert "先调用 getScreenplayEpisodeContext 读取当前集材料" in tool_calls.system_instructions[0]
+    assert "最多提交 1 个问题" in tool_calls.system_instructions[0]
+    assert all(
+        context.episode_number == 1
+        and context.deliverable_revision_scope == {
+            "sceneList": "scene-list-head",
+            "screenplayDraft": "draft-head",
+        }
+        for context in tool_calls.contexts
+    )
 
 
 async def test_review_dimension_failure_stays_a_failed_part_not_a_finding(
@@ -4681,7 +7219,7 @@ async def test_review_dimension_failure_stays_a_failed_part_not_a_finding(
     tool_calls = _CheckpointingToolCalls(fail_once_key="1:dialogue")
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        candidate_model_service=tool_calls,  # type: ignore[arg-type]
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
     executor._context = _EvidenceCheckpointOnlyContext()
     task = {
@@ -4696,15 +7234,25 @@ async def test_review_dimension_failure_stays_a_failed_part_not_a_finding(
             "kind": "collect_evidence",
             "status": "completed",
             "input": {"episodeNumber": 1},
-            "output": {"evidence": {"reviewInput": {
-                "contractVersion": 2,
-                "draftRevisionId": "draft-head",
+            "output": {"evidenceDescriptor": {
+                "projectId": workspace["project"]["id"],
+                "targetRole": "review",
+                "acceptedRevisionIds": {
+                    "sceneList": "scene-list-head",
+                    "screenplayDraft": "draft-head",
+                },
                 "episodeNumber": 1,
                 "sceneIds": ["scene-1"],
-                "draftContentText": "真实正文",
-                "scenePlan": {"scenes": [{"id": "scene-1"}]},
-                "contentDigest": "digest-1",
-            }}},
+                "sceneListRevisionId": "scene-list-head",
+                "reviewedDraftId": "draft-head",
+                "reviewInputRef": {
+                    "reviewedRevisionId": "draft-head",
+                    "episodeNumber": 1,
+                    "scenePartRefs": ["draft-head#scene:scene-1"],
+                    "scenePlanRevisionId": "scene-list-head",
+                    "contentDigest": "digest-1",
+                },
+            }},
         }],
     }
     unit = {
@@ -4739,7 +7287,7 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
     tool_calls = _CheckpointingToolCalls()
     executor = ScreenplayTaskModelCalls(
         temp_db,
-        candidate_model_service=tool_calls,  # type: ignore[arg-type]
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
     )
     task = {
         "id": "task-scene-list-sections",
@@ -4753,11 +7301,13 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
             "kind": "collect_evidence",
             "status": "completed",
             "input": {"targetRole": "sceneList"},
-            "output": {"evidence": {"acceptedDeliverables": [{
-                "role": "structure",
-                "revisionId": "structure-head",
-                "content": {"episodes": [{"number": 1}, {"number": 2}]},
-            }]}},
+            "output": {"evidenceDescriptor": {
+                "projectId": workspace["project"]["id"],
+                "targetRole": "sceneList",
+                "acceptedRevisionIds": {"structure": "structure-head"},
+                "structureRevisionId": "structure-head",
+                "structureEpisodeNumbers": [1, 2],
+            }},
         }],
     }
     for number in (1, 2):
@@ -4769,6 +7319,7 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
             "input": {
                 "targetRole": "sceneList",
                 "sectionKey": f"episode-{number}",
+                "episodeNumber": number,
                 "instruction": "生成场景表",
             },
         }
@@ -4802,3 +7353,729 @@ async def test_scene_list_uses_visible_episode_sections_and_host_validation(
         2,
     ]
     assert len(result["sourceRunIds"]) == 2
+    assert [context.episode_number for context in tool_calls.contexts] == [1, 2]
+    assert all(
+        context.deliverable_revision_scope == {"structure": "structure-head"}
+        for context in tool_calls.contexts
+    )
+
+
+async def test_scene_list_assembly_rejects_cross_episode_duplicate_scene_ids(
+    temp_db: DatabaseConnection,
+):
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=_CheckpointingToolCalls(),  # type: ignore[arg-type]
+    )
+    task = {
+        "targetRole": "sceneList",
+        "units": [{
+            "id": "document:evidence",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"targetRole": "sceneList"},
+            "output": {"evidenceDescriptor": {
+                "structureRevisionId": "structure-head",
+                "structureEpisodeNumbers": [1, 2],
+            }},
+        }, *[{
+            "id": f"section:sceneList:episode-{number}",
+            "kind": "generate_document_section",
+            "status": "completed",
+            "input": {
+                "sectionKey": f"episode-{number}",
+                "episodeNumber": number,
+            },
+            "output": {
+                **_scene_list_candidate(number, scene_id="duplicate-scene")[
+                    "payload"
+                ],
+                "contentText": f"第 {number} 集场景表",
+                "runId": f"run-scene-list-{number}",
+            },
+        } for number in (1, 2)]],
+    }
+    validation = {
+        "id": "document:validation",
+        "kind": "validate_manifest_part",
+        "dependsOn": [
+            "section:sceneList:episode-1",
+            "section:sceneList:episode-2",
+        ],
+        "input": {"validationKind": "document", "targetRole": "sceneList"},
+    }
+    task["units"].append(validation)
+
+    with pytest.raises(ValueError, match="scene ids are invalid"):
+        await executor.execute(task=task, unit=validation, runtime=object())
+
+
+async def test_structure_episode_fragment_reads_part_keys_without_injected_bodies(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    tool_calls = _CheckpointingToolCalls()
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+    )
+    task = {
+        "id": "task-structure-fragment",
+        "projectId": workspace["project"]["id"],
+        "sessionId": session["id"],
+        "turnId": "turn-structure-fragment",
+        "rootRunId": "root-structure-fragment",
+        "targetRole": "structure",
+        "units": [
+            {
+                "id": "document:evidence",
+                "kind": "collect_evidence",
+                "status": "completed",
+                "input": {"targetRole": "structure"},
+                "output": {"evidenceDescriptor": {
+                    "projectId": workspace["project"]["id"],
+                    "targetRole": "structure",
+                }},
+            },
+            {
+                "id": "section:structure:series_arc",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "output": {
+                    "contentJson": {"seriesArc": {"theme": "觉醒"}},
+                    "contentText": "不应直塞的主线正文",
+                    "runId": "run-series",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:index",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "output": {
+                    "contentJson": {"episodes": [{
+                        "number": 1,
+                        "id": "ep01",
+                        "title": "误入犬域",
+                    }]},
+                    "contentText": "不应直塞的索引正文",
+                    "runId": "run-index",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:episode-1",
+                "kind": "generate_document_section",
+                "status": "pending",
+                "dependsOn": [
+                    "document:evidence",
+                    "section:structure:series_arc",
+                    "section:structure:episode_plan:index",
+                ],
+                "input": {
+                    "sectionKey": "episode_plan:episode-1",
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 1,
+                    "episodeId": "ep01",
+                    "episodeTitle": "误入犬域",
+                },
+            },
+        ],
+    }
+
+    output = await executor.execute(
+        task=task,
+        unit=task["units"][-1],
+        runtime=object(),
+    )
+
+    payload = tool_calls.user_payloads[0]
+    assert payload["dependencyPartKeys"] == [
+        "section:structure:series_arc",
+        "section:structure:episode_plan:index",
+    ]
+    assert payload["partIdentity"] == {
+        "episodeNumber": 1,
+        "episodeId": "ep01",
+        "episodeTitle": "误入犬域",
+    }
+    assert "episodePlanEntry" not in payload
+    assert "dependencySections" not in payload
+    assert "不应直塞" not in str(payload)
+    assert output["sourceRunIds"] == [
+        "run-series",
+        "run-index",
+        "run-document_section-episode_plan:episode-1-1",
+    ]
+
+
+async def test_structure_episode_fragments_merge_back_into_one_document_section():
+    task = {
+        "targetRole": "structure",
+        "units": [
+            {
+                "id": "document:evidence",
+                "kind": "collect_evidence",
+                "status": "completed",
+                "input": {"targetRole": "structure"},
+                "output": {"evidenceDescriptor": {
+                    "projectId": "project-structure",
+                    "targetRole": "structure",
+                    "structureEpisodeNumbers": [],
+                }},
+            },
+            {
+                "id": "section:structure:series_arc:phase:setup",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {
+                    "sectionKey": "series_arc:phase:setup",
+                    "documentSectionKey": "series_arc",
+                    "phasePosition": 1,
+                },
+                "output": {
+                    "sectionKey": "series_arc:phase:setup",
+                    "title": "全剧主线",
+                    "contentText": "SERIES-ARC",
+                    "contentJson": {"seriesArc": {"phases": [{
+                        "key": "setup",
+                        "title": "误入犬域",
+                        "objective": "建立目标",
+                        "centralConflict": "回家与救人冲突",
+                        "turningPoint": "主角决定留下",
+                        "exitState": "团队结盟",
+                    }]}},
+                    "runId": "run-series",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:index",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {
+                    "sectionKey": "episode_plan:index",
+                    "documentSectionKey": "episode_plan",
+                    "episodePlanIndex": True,
+                },
+                "output": {
+                    "sectionKey": "episode_plan:index",
+                    "title": "分集索引",
+                    "contentText": "INDEX-MUST-NOT-BE-PUBLISHED",
+                    "contentJson": {"episodes": []},
+                    "runId": "run-index",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan",
+                "kind": "expand_structure_episode_plan",
+                "status": "expanded",
+                "required": False,
+                "input": {
+                    "sectionKey": "episode_plan",
+                    "splitStrategy": "structure_episode_plan",
+                },
+            },
+            {
+                "id": "section:structure:character_arcs:character:linyue",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {
+                    "sectionKey": "character_arcs:character:linyue",
+                    "documentSectionKey": "character_arcs",
+                    "characterPosition": 1,
+                },
+                "output": {
+                    "sectionKey": "character_arcs:character:linyue",
+                    "title": "人物弧",
+                    "contentText": "CHARACTER-ARCS",
+                    "contentJson": {"characterArcs": [{
+                        "key": "linyue",
+                        "startState": "只想回家",
+                        "desire": "找到归途",
+                        "turningEpisodes": ["ep01", "ep02"],
+                        "endState": "选择守护同伴",
+                    }]},
+                    "runId": "run-arcs",
+                },
+            },
+            {
+                "id": "section:structure:hooks",
+                "kind": "project_structure_hooks",
+                "status": "completed",
+                "input": {"sectionKey": "hooks"},
+                "output": {
+                    "sectionKey": "hooks",
+                    "title": "剧情钩子",
+                    "contentText": "HOOKS",
+                    "contentJson": {"hooks": [
+                        {"episodeId": "ep01", "hook": "异响再次出现。"},
+                        {"episodeId": "ep02", "hook": "苏文突然惊醒。"},
+                    ]},
+                    "runId": "run-hooks",
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:episode-1",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {
+                    "sectionKey": "episode_plan:episode-1",
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 1,
+                },
+                "output": {
+                    "sectionKey": "episode_plan:episode-1",
+                    "title": "第 1 集",
+                    "contentText": "EPISODE-1",
+                    "contentJson": {"episodes": [{
+                        "number": 1,
+                        "id": "ep01",
+                            "title": "误入犬域",
+                            "summary": "林月进入犬域。",
+                            "objective": "找到归途。",
+                            "conflict": "必须先救同伴。",
+                            "turn": "选择留下。",
+                            "hook": "异响再次出现。",
+                    }]},
+                    "sourceRunIds": ["run-index", "run-episode-1"],
+                },
+            },
+            {
+                "id": "section:structure:episode_plan:episode-2",
+                "kind": "generate_document_section",
+                "status": "completed",
+                "input": {
+                    "sectionKey": "episode_plan:episode-2",
+                    "documentSectionKey": "episode_plan",
+                    "episodeNumber": 2,
+                },
+                "output": {
+                    "sectionKey": "episode_plan:episode-2",
+                    "title": "第 2 集",
+                    "contentText": "EPISODE-2",
+                    "contentJson": {"episodes": [{
+                        "number": 2,
+                        "id": "ep02",
+                            "title": "绝境觉醒",
+                            "summary": "林月唤醒金鼓。",
+                            "objective": "突破包围。",
+                            "conflict": "能力可能失控。",
+                            "turn": "接受金鼓。",
+                            "hook": "苏文突然惊醒。",
+                    }]},
+                    "sourceRunIds": ["run-index", "run-episode-2"],
+                },
+            },
+        ],
+    }
+    validation = {
+        "id": "document:validation",
+        "kind": "validate_manifest_part",
+        "status": "running",
+        "input": {"validationKind": "document", "targetRole": "structure"},
+    }
+    task["units"].append(validation)
+
+    result = _validate_document_parts(task, validation)
+
+    assert [episode["number"] for episode in result["contentJson"]["episodes"]] == [
+        1,
+        2,
+    ]
+    assert [section["key"] for section in result["sections"]] == [
+        "series_arc",
+        "episode_plan",
+        "character_arcs",
+        "hooks",
+    ]
+    assert result["contentText"].split("\n\n") == [
+        "SERIES-ARC",
+        "EPISODE-1",
+        "EPISODE-2",
+        "CHARACTER-ARCS",
+        "HOOKS",
+    ]
+    assert "INDEX-MUST-NOT-BE-PUBLISHED" not in result["contentText"]
+    assert result["sourceRunIds"] == (
+        "run-series",
+        "run-index",
+        "run-episode-1",
+        "run-episode-2",
+        "run-arcs",
+        "run-hooks",
+    )
+
+
+async def test_scripted_ten_episode_structure_stays_bounded_per_ai_part():
+    protocol = "purrtypos.screenplay.candidate-validation/v1"
+    units: list[dict] = [{
+        "id": "document:evidence",
+        "kind": "collect_evidence",
+        "status": "completed",
+        "input": {"targetRole": "structure"},
+        "output": {"evidenceDescriptor": {
+            "projectId": "project-ten-episodes",
+            "targetRole": "structure",
+            "structureEpisodeNumbers": [],
+        }},
+    }]
+    for position, phase in enumerate((
+        {
+            "key": "setup",
+            "title": "进入困局",
+            "objective": "建立目标。",
+        },
+        {
+            "key": "resolution",
+            "title": "完成抉择",
+            "objective": "兑现人物选择。",
+        },
+    ), 1):
+        candidate = normalize_screenplay_candidate(
+            {
+                "protocol": protocol,
+                "kind": "structure_series_arc_phase",
+                "phaseKey": phase["key"],
+                "phaseTitle": phase["title"],
+                "phaseObjective": phase["objective"],
+            },
+            {
+                "payload": {
+                    "sectionKey": f"series_arc:phase:{phase['key']}",
+                    "title": phase["title"],
+                    "contentJson": {"seriesArc": {"phases": [{
+                        **phase,
+                        "centralConflict": f"阶段 {position} 核心冲突",
+                        "turningPoint": f"阶段 {position} 关键转折",
+                        "exitState": f"阶段 {position} 结束状态",
+                    }]}},
+                },
+                "contentText": f"## {phase['title']}",
+            },
+        )
+        units.append({
+            "id": f"section:structure:series_arc:phase:{phase['key']}",
+            "kind": "generate_document_section",
+            "status": "completed",
+            "input": {
+                "documentSectionKey": "series_arc",
+                "phasePosition": position,
+            },
+            "output": {
+                **candidate["payload"],
+                "contentText": candidate["contentText"],
+                "runId": f"run-phase-{position}",
+            },
+        })
+
+    episode_outputs = []
+    for number in range(1, 11):
+        episode_id = f"ep{number:02d}"
+        candidate = normalize_screenplay_candidate(
+            {
+                "protocol": protocol,
+                "kind": "structure_episode_plan_fragment",
+                "episodeNumber": number,
+                "episodeId": episode_id,
+                "episodeTitle": f"第 {number} 集",
+            },
+            {
+                "payload": {
+                    "sectionKey": f"episode_plan:episode-{number}",
+                    "title": f"第 {number} 集",
+                    "contentJson": {"episodes": [{
+                        "number": number,
+                        "id": episode_id,
+                        "title": f"第 {number} 集",
+                        "summary": f"第 {number} 集只描述自己的叙事边界。",
+                        "objective": f"完成目标 {number}",
+                        "conflict": f"处理冲突 {number}",
+                        "turn": f"发生转折 {number}",
+                        "hook": f"留下钩子 {number}",
+                    }]},
+                },
+                "contentText": f"## 第 {number} 集",
+            },
+        )
+        output = {
+            **candidate["payload"],
+            "contentText": candidate["contentText"],
+            "runId": f"run-episode-{number}",
+        }
+        episode_outputs.append(output)
+        units.append({
+            "id": f"section:structure:episode_plan:episode-{number}",
+            "kind": "generate_document_section",
+            "status": "completed",
+            "input": {
+                "documentSectionKey": "episode_plan",
+                "episodeNumber": number,
+            },
+            "output": output,
+        })
+
+    for position, (key, name) in enumerate((
+        ("linyue", "林月"),
+        ("suwen", "苏文"),
+    ), 1):
+        candidate = normalize_screenplay_candidate(
+            {
+                "protocol": protocol,
+                "kind": "structure_character_arc_fragment",
+                "characterKey": key,
+                "characterName": name,
+            },
+            {
+                "payload": {
+                    "sectionKey": f"character_arcs:character:{key}",
+                    "title": f"{name}人物弧",
+                    "contentJson": {"characterArcs": [{
+                        "key": key,
+                        "startState": "拒绝承担责任。",
+                        "desire": "找到安全的归途。",
+                        "turningEpisodes": ["ep01", "ep10"],
+                        "endState": "主动承担责任。",
+                    }]},
+                },
+                "contentText": f"## {name}",
+            },
+        )
+        units.append({
+            "id": f"section:structure:character_arcs:character:{key}",
+            "kind": "generate_document_section",
+            "status": "completed",
+            "input": {
+                "documentSectionKey": "character_arcs",
+                "characterPosition": position,
+            },
+            "output": {
+                **candidate["payload"],
+                "contentText": candidate["contentText"],
+                "runId": f"run-character-{key}",
+            },
+        })
+
+    hook_unit = {
+        "id": "section:structure:hooks",
+        "kind": "project_structure_hooks",
+        "status": "running",
+        "dependsOn": [
+            str(unit["id"])
+            for unit in units
+            if str(unit.get("id") or "").startswith(
+                "section:structure:episode_plan:episode-"
+            ) or str(unit.get("id") or "").startswith(
+                "section:structure:character_arcs:character:"
+            )
+        ],
+        "input": {"sectionKey": "hooks"},
+    }
+    hook_output = ScreenplayTaskModelCalls._project_structure_hooks(
+        {"units": units},
+        hook_unit,
+    )
+    hook_unit.update({"status": "completed", "output": hook_output})
+    units.append(hook_unit)
+    validation = {
+        "id": "document:validation",
+        "kind": "validate_manifest_part",
+        "status": "running",
+        "input": {"validationKind": "document", "targetRole": "structure"},
+    }
+    units.append(validation)
+
+    result = _validate_document_parts(
+        {"targetRole": "structure", "units": units},
+        validation,
+    )
+
+    assert len(result["contentJson"]["episodes"]) == 10
+    assert len(result["contentJson"]["seriesArc"]["phases"]) == 2
+    assert len(result["contentJson"]["characterArcs"]) == 2
+    assert len(result["contentJson"]["hooks"]) == 10
+    assert all(
+        len(output["contentJson"]["episodes"]) == 1
+        for output in episode_outputs
+    )
+    assert "episode_plan:index" not in result["contentText"]
+
+
+async def test_scripted_gateway_executes_ten_episode_structure_as_small_runs(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    tool_calls = _CheckpointingToolCalls()
+    executor = ScreenplayTaskModelCalls(
+        temp_db,
+        tool_calling_service=tool_calls,  # type: ignore[arg-type]
+    )
+    task = {
+        "id": "task-scripted-structure-ten",
+        "projectId": workspace["project"]["id"],
+        "sessionId": session["id"],
+        "turnId": "turn-scripted-structure-ten",
+        "rootRunId": "run-scripted-structure-ten",
+        "targetRole": "structure",
+        "maxGeneratedUnits": 134,
+        "units": [{
+            "id": "document:evidence",
+            "kind": "collect_evidence",
+            "status": "completed",
+            "input": {"targetRole": "structure"},
+            "output": {"evidenceDescriptor": {
+                "projectId": workspace["project"]["id"],
+                "targetRole": "structure",
+                "sourceRevisionRefs": [],
+                "structureEpisodeNumbers": [],
+            }},
+        }],
+    }
+
+    async def run_part(
+        unit_id: str,
+        unit_input: dict,
+        dependencies: list[str],
+    ) -> dict:
+        unit = {
+            "id": unit_id,
+            "kind": "generate_document_section",
+            "status": "pending",
+            "dependsOn": dependencies,
+            "input": {"targetRole": "structure", **unit_input},
+        }
+        task["units"].append(unit)
+        output = dict(await executor.execute(
+            task=task,
+            unit=unit,
+            runtime=object(),
+        ))
+        unit.update({"status": "completed", "output": output})
+        return output
+
+    series_index_id = "section:structure:series_arc:index"
+    await run_part(
+        series_index_id,
+        {
+            "sectionKey": "series_arc:index",
+            "documentSectionKey": "series_arc",
+            "seriesArcIndex": True,
+        },
+        ["document:evidence"],
+    )
+    phase_ids = []
+    for position, phase in enumerate((
+        ("setup", "进入困局", "建立目标。"),
+        ("resolution", "完成抉择", "兑现选择。"),
+    ), 1):
+        key, title, objective = phase
+        phase_id = f"section:structure:series_arc:phase:{key}"
+        phase_ids.append(phase_id)
+        await run_part(
+            phase_id,
+            {
+                "sectionKey": f"series_arc:phase:{key}",
+                "documentSectionKey": "series_arc",
+                "phaseKey": key,
+                "phaseTitle": title,
+                "phaseObjective": objective,
+                "phasePosition": position,
+            },
+            ["document:evidence", series_index_id],
+        )
+
+    episode_index_id = "section:structure:episode_plan:index"
+    await run_part(
+        episode_index_id,
+        {
+            "sectionKey": "episode_plan:index",
+            "documentSectionKey": "episode_plan",
+            "episodePlanIndex": True,
+        },
+        phase_ids,
+    )
+    episode_ids = []
+    for number in range(1, 11):
+        unit_id = f"section:structure:episode_plan:episode-{number}"
+        episode_ids.append(unit_id)
+        await run_part(
+            unit_id,
+            {
+                "sectionKey": f"episode_plan:episode-{number}",
+                "documentSectionKey": "episode_plan",
+                "episodeNumber": number,
+                "episodeId": f"ep{number:02d}",
+                "episodeTitle": f"第 {number} 集",
+            },
+            ["document:evidence", episode_index_id],
+        )
+
+    character_index_id = "section:structure:character_arcs:index"
+    await run_part(
+        character_index_id,
+        {
+            "sectionKey": "character_arcs:index",
+            "documentSectionKey": "character_arcs",
+            "characterArcsIndex": True,
+        },
+        episode_ids,
+    )
+    character_ids = []
+    for position, (key, name) in enumerate((
+        ("linyue", "林月"),
+        ("suwen", "苏文"),
+    ), 1):
+        unit_id = f"section:structure:character_arcs:character:{key}"
+        character_ids.append(unit_id)
+        await run_part(
+            unit_id,
+            {
+                "sectionKey": f"character_arcs:character:{key}",
+                "documentSectionKey": "character_arcs",
+                "characterKey": key,
+                "characterName": name,
+                "characterPosition": position,
+            },
+            ["document:evidence", character_index_id, *episode_ids],
+        )
+
+    hooks = {
+        "id": "section:structure:hooks",
+        "kind": "project_structure_hooks",
+        "status": "pending",
+        "dependsOn": [*episode_ids, *character_ids],
+        "input": {"targetRole": "structure", "sectionKey": "hooks"},
+    }
+    task["units"].append(hooks)
+    hooks.update({
+        "status": "completed",
+        "output": dict(await executor.execute(
+            task=task,
+            unit=hooks,
+            runtime=object(),
+        )),
+    })
+    validation = {
+        "id": "document:validation",
+        "kind": "validate_manifest_part",
+        "status": "pending",
+        "dependsOn": [*phase_ids, *episode_ids, *character_ids, hooks["id"]],
+        "input": {"validationKind": "document", "targetRole": "structure"},
+    }
+    task["units"].append(validation)
+    result = await executor.execute(
+        task=task,
+        unit=validation,
+        runtime=object(),
+    )
+
+    assert len(tool_calls.calls) == 17
+    assert sum(
+        key.startswith("episode_plan:episode-")
+        for _part_type, key, _reasoning in tool_calls.calls
+    ) == 10
+    assert all(
+        len(payload["partIdentity"]) == 3
+        for payload in tool_calls.user_payloads
+        if str(payload["sectionKey"]).startswith("episode_plan:episode-")
+    )
+    assert "hooks" not in [key for _type, key, _mode in tool_calls.calls]
+    assert len(result["contentJson"]["episodes"]) == 10
+    assert len(result["contentJson"]["hooks"]) == 10

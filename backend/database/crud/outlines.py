@@ -423,17 +423,3 @@ async def get_outline_by_writing_chapter_id(
         "SELECT * FROM outlines WHERE writing_chapter_id = ? LIMIT 1",
         [writing_chapter_id],
     )
-
-
-async def update_outline_xmind(
-    db: DatabaseConnection,
-    outline_id: str,
-    title: str,
-    xmind_data: str | None,
-    file_path: str | None = None,
-) -> dict[str, Any] | None:
-    await db.execute(
-        "UPDATE outlines SET title = ?, xmind_data = ?, file_path = ? WHERE id = ?",
-        [title, xmind_data, file_path, outline_id],
-    )
-    return await db.fetch_one("SELECT * FROM outlines WHERE id = ?", [outline_id])

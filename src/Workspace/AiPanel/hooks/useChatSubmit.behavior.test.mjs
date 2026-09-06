@@ -72,6 +72,10 @@ function renderHook(overrides = {}) {
     agentEnabled: true,
     selectedMemoryIds: ['memory-a'],
     selectedForeshadowingIds: ['foreshadowing-a'],
+    writingMethodOverrides: {
+      forceRevisionIds: ['method-force-a'],
+      excludeRevisionIds: ['method-exclude-a'],
+    },
     sessionScope: 'chapter',
     ...overrides,
     setConversations,
@@ -153,6 +157,135 @@ function rootTransportSnapshot() {
   }
 }
 
+test('batched Provider text is visible output and does not create an empty-response report', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const streamId = 'chat-batched-visible-output'
+  const runId = 'run-batched-visible-output'
+  const requestReceipt = {
+    requestId: streamId,
+    sessionId: 7,
+    status: 'run_bound',
+    runId,
+    cancelRequested: false,
+    rejectionCode: null,
+    revision: 2,
+  }
+  let errorReportPosts = 0
+  const delivered = []
+  globalThis.window = Object.assign(new EventTarget(), {
+    setTimeout: globalThis.setTimeout,
+  })
+  globalThis.fetch = async (input) => {
+    const url = input instanceof Request ? input.url : String(input)
+    if (url.includes(`/api/ai/chat/requests/${streamId}`)) {
+      return jsonResponse({ success: true, data: requestReceipt })
+    }
+    if (url.endsWith('/api/ai/chat/stream')) {
+      return new Response([
+        `data: ${JSON.stringify({ requestReceipt })}`,
+        `data: ${JSON.stringify({
+          eventId: 'batched-visible-output-1',
+          outputStreamId: 'batched-final',
+          runId,
+          turnId: 'turn-batched-visible-output',
+          invocationId: 'invocation-batched-visible-output',
+          sequence: 1,
+          source: 'provider',
+          kind: 'provider.delta_batch',
+          channel: 'final',
+          visibility: 'public',
+          payload: {
+            schemaVersion: 'purra.provider-delta-batch/v1',
+            entries: [{
+              sourceChunkIndex: 1,
+              sourcePartIndex: 0,
+              kind: 'provider.content_delta',
+              payload: { delta: '批量回答' },
+            }],
+          },
+          occurredAt: '2026-08-27T07:34:57Z',
+          emittedAt: '2026-08-27T07:34:57Z',
+        })}`,
+        `data: ${JSON.stringify({
+          done: true,
+          runResult: { runId, status: 'done', errorCode: null },
+        })}`,
+        '',
+      ].join('\n'), { status: 200 })
+    }
+    if (url.endsWith('/api/ai/error-reports')) {
+      errorReportPosts += 1
+      return jsonResponse({ success: true, data: { id: 'unexpected-error-report' } })
+    }
+    throw new Error(`unexpected URL ${url}`)
+  }
+  const unsubscribe = services.ai.onAiChunk(
+    (chunk) => delivered.push(chunk),
+    streamId,
+  )
+  try {
+    services.ai.aiChatStream({
+      streamId,
+      apiKey: 'test-key',
+      sessionId: 7,
+      messages: [{ role: 'user', content: '继续' }],
+      options: { model: 'test-model' },
+      chatAgentMode: 'agent',
+      enableAgentTools: true,
+    })
+    await waitUntil(() => delivered.some((chunk) => chunk.done))
+
+    assert.equal(errorReportPosts, 0)
+    assert.equal(delivered.at(-1)?.runResult?.status, 'done')
+  } finally {
+    unsubscribe()
+    services.ai.abortAiStream(streamId)
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+  }
+})
+
+test('failed reconnect reports connection loss once without fabricating a Run terminal', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWindow = globalThis.window
+  const streamId = 'chat-recovery-exhausted'
+  const receipt = { requestId: streamId, sessionId: 7, status: 'run_bound',
+    runId: 'root-transport', cancelRequested: false, rejectionCode: null, revision: 2 }
+  const delivered = []
+  let subscriptions = 0
+  let commands = 0
+  globalThis.window = Object.assign(new EventTarget(), { setTimeout: globalThis.setTimeout })
+  globalThis.fetch = async input => {
+    const url = String(input)
+    if (url.includes(`/chat/requests/${streamId}`)) return jsonResponse({ success: true, data: receipt })
+    if (url.endsWith('/chat/stream')) {
+      commands++
+      return new Response(`data: ${JSON.stringify({ requestReceipt: receipt })}\n\n`)
+    }
+    if (url.includes('/agent-runs/root-transport/events')) {
+      subscriptions++
+      return new Response('', { status: 404 })
+    }
+    throw new Error(`unexpected request ${url}`)
+  }
+  const unsubscribe = services.ai.onAiChunk(chunk => delivered.push(chunk), streamId)
+  try {
+    services.ai.aiChatStream({ streamId, apiKey: 'test-key', sessionId: 7,
+      messages: [{ role: 'user', content: '恢复测试' }], options: { model: 'test-model' },
+      chatAgentMode: 'agent', enableAgentTools: true, bookId: 'book-1' })
+    await waitUntil(() => delivered.some(chunk => chunk.transportError))
+    assert.equal(subscriptions, 1)
+    assert.equal(commands, 1)
+    assert.equal(delivered.filter(chunk => chunk.transportError).length, 1)
+    assert.equal(delivered.some(chunk => chunk.done || chunk.error || chunk.runResult), false)
+  } finally {
+    unsubscribe()
+    globalThis.fetch = originalFetch
+    globalThis.window = originalWindow
+  }
+})
+
 test('bound backend transport recovers Root after foreign terminal envelopes', async () => {
   const originalFetch = globalThis.fetch
   const originalWindow = globalThis.window
@@ -226,7 +359,8 @@ test('bound backend transport recovers Root after foreign terminal envelopes', a
     }
     if (url.includes('/api/ai/agent-runs/root-transport')) {
       recoveryReads += 1
-      return jsonResponse({ success: true, data: rootTransportSnapshot() })
+      assert.ok(url.includes('/events?sessionId=7&after='))
+      return new Response(`data: ${JSON.stringify({ ...rootTransportSnapshot(), done: true })}\n\n`)
     }
     if (url.endsWith('/api/ai/error-reports')) {
       errorReportPosts += 1
@@ -446,8 +580,18 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   runtime.setChatRuntimeLoading(7, true)
   const first = renderHook({ loading: true })
   assert.equal(first.result.handleSubmit({ content: '冻结 A 请求' }), 'queued')
-  const queued = runtime.getChatRuntimeQueue()[0]
+  let queued = runtime.getChatRuntimeQueue()[0]
   assert.ok(queued)
+  assert.ok(queued.id)
+  assert.equal(first.result.updateQueuedSubmission(queued.id, { editing: true }), true)
+  assert.equal(runtime.updateChatQueuedSubmission(8, 'book-a', queued.id, null), false)
+  assert.equal(first.result.updateQueuedSubmission(queued.id, { content: '修改后的 A 请求', editing: false }), true)
+  queued = runtime.getChatRuntimeQueue()[0]
+  assert.equal(queued.content, '修改后的 A 请求')
+  assert.equal(first.result.handleSubmit({ content: '应被删除的消息' }), 'queued')
+  const deleted = runtime.getChatRuntimeQueue()[1].id
+  assert.equal(first.result.updateQueuedSubmission(deleted, null), true)
+  assert.equal(first.result.updateQueuedSubmission(deleted, { content: 'stale' }), false)
 
   runtime.setChatRuntimeLoading(7, false)
   globalThis.document.documentElement.lang = 'locale-B'
@@ -470,6 +614,10 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
       agentEnabled: false,
       selectedMemoryIds: ['memory-b'],
       selectedForeshadowingIds: ['foreshadowing-b'],
+      writingMethodOverrides: {
+        forceRevisionIds: ['method-force-b'],
+        excludeRevisionIds: ['method-exclude-b'],
+      },
       sessionScope: 'setting',
     })
     assert.equal(second.result.handleSubmit({
@@ -483,6 +631,7 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   }
 
   assert.equal(streamRequest.sessionId, 7)
+  assert.equal(streamRequest.messages.at(-1).content, '修改后的 A 请求')
   assert.equal(streamRequest.locale, 'locale-A')
   assert.equal(streamRequest.bookId, 'book-a')
   assert.equal(streamRequest.chapterId, 'chapter-a')
@@ -491,6 +640,10 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   assert.deepEqual(streamRequest.associatedOutlineIds, ['outline-a'])
   assert.deepEqual(streamRequest.selectedMemoryIds, ['memory-a'])
   assert.deepEqual(streamRequest.selectedForeshadowingIds, ['foreshadowing-a'])
+  assert.deepEqual(streamRequest.writingMethodOverrides, {
+    forceRevisionIds: ['method-force-a'],
+    excludeRevisionIds: ['method-exclude-a'],
+  })
   assert.equal(streamRequest.chatAgentMode, 'agent')
   assert.equal(streamRequest.options.model, 'model-a-name')
 })
@@ -693,7 +846,7 @@ test('production-shaped tool completion hydrates proposal identity before termin
       kind: 'tool.event',
       channel: 'operation',
       visibility: 'public',
-      payload: { toolCallId: 'tool-call-1', status: 'completed' },
+      payload: { toolCallId: 'tool-call-1', toolName: 'updateCharacter', status: 'completed' },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.equal(snapshotReads, 1)
@@ -727,7 +880,6 @@ test('terminal keeps editing disabled until durable conversation persistence set
   globalThis.document = { documentElement: { lang: 'zh-CN' } }
   let onChunk
   let finishSave
-  let associatedTarget
   const originalSubscribe = services.ai.onAiChunk
   const originalStream = services.ai.aiChatStream
   const originalSave = services.conversations.saveConversation
@@ -745,11 +897,7 @@ test('terminal keeps editing disabled until durable conversation persistence set
     finishSave = resolve
   })
   try {
-    const { result } = renderHook({
-      associateAssistantIdentities: (_source, target) => {
-        associatedTarget = target
-      },
-    })
+    const { result } = renderHook()
     assert.equal(result.handleSubmit({ content: '等待持久化' }), 'started')
     onChunk({
       done: true,

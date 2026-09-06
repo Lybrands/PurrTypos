@@ -7,9 +7,12 @@ class MiMoV25ProProfile(ModelProfile):
     profile_id = "mimo:mimo-v2.5-pro"
     model_names = frozenset({"mimo-v2.5-pro"})
     base_urls = frozenset({"https://api.xiaomimimo.com/v1"})
-    max_output_tokens = 131_072
+    max_generation_tokens = 131_072
     capability_source = "https://mimo.mi.com/docs/en-US/api/chat/responses"
     supports_json_object_output = True
+    default_thinking_enabled = False
+    default_temperature_thinking = 0.6
+    default_temperature_non_thinking = 0.6
 
 
 MIMO_V2_5_PRO_PROFILE = MiMoV25ProProfile()

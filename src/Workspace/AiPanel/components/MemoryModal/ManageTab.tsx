@@ -1,4 +1,3 @@
-import React from 'react'
 import type { WritingChapter } from './types'
 import type { MemoryModalController } from './useMemoryModal'
 import ForeshadowingManager from './ForeshadowingManager'

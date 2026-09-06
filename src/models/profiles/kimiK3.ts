@@ -1,6 +1,4 @@
-import type { AiModelConfig } from '../../types'
-import { normalizeBaseUrl, normalizePresetContextWindow } from '../shared'
-import type { BuiltinModelProfile } from '../types'
+import type { BuiltinModelPresentation } from '../types'
 
 const provider = {
   id: 'moonshot',
@@ -15,39 +13,11 @@ const preset = {
   providerId: 'moonshot',
   name: 'kimi-k3',
   label: 'Kimi K3',
-  summary: '1M 上下文，Max 思考模式',
-  contextWindowOptions: ['32k', '256k', '1m'],
-  contextWindow: '1m',
-  supportsThinking: true,
-  thinkingOnly: true,
-  thinkingEnabled: true,
-  customizeTemperature: false,
-  temperatureThinking: 1,
-  temperatureNonThinking: 1,
+  summary: '1M 上下文，Max 思考模式，最大 1M 输出',
   recommended: true,
 } as const
 
-function matches(config: AiModelConfig) {
-  return config.name === preset.name && normalizeBaseUrl(config.baseUrl) === provider.baseUrl
-}
-
-export const kimiK3Profile: BuiltinModelProfile = {
+export const kimiK3Profile: BuiltinModelPresentation = {
   provider,
   preset,
-  matches,
-  migrate(config) {
-    if (!matches(config)) return config
-    return {
-      ...config,
-      presetId: preset.id,
-      providerId: provider.id,
-      apiProvider: provider.apiProvider,
-      baseUrl: provider.baseUrl,
-      supportsThinking: preset.supportsThinking,
-      thinkingOnly: preset.thinkingOnly,
-      thinkingEnabled: preset.thinkingEnabled,
-      contextWindow: normalizePresetContextWindow(config.contextWindow, preset),
-      customizeTemperature: preset.customizeTemperature,
-    }
-  },
 }

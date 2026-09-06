@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from purra.artifacts import ArtifactStatus
+from purra.json_values import thaw_json_mapping
 
 from application.screenplay_agent_context import ScreenplayAgentContextQuery
 from domains.screenplay.source_scope import (
     is_restricted_source_scope,
+    parse_source_scope,
     scoped_chapters,
     scoped_outline_ids,
     source_scope_summary,
 )
 from domains.screenplay_agent.tools.errors import ScreenplayToolInputError
 from infrastructure.persistence.writing import SqliteStoryMemoryRecallRepository
+from infrastructure.persistence.sqlite_artifact_repository import (
+    SqliteArtifactRepository,
+)
 from utils.book_structure import load_chapter_texts
 from utils.text import extract_text_from_lexical
 
@@ -44,6 +51,133 @@ class ScreenplayToolQuery:
         self._db = db
         self._screenplay = ScreenplayAgentContextQuery(db)
         self._story_memory = SqliteStoryMemoryRecallRepository(db)
+        self._artifacts = SqliteArtifactRepository(db)
+
+    async def task_dependencies(self, scope, arguments) -> dict[str, Any]:
+        requested = arguments.get("partKeys")
+        if requested is not None and (
+            not isinstance(requested, list)
+            or not 1 <= len(requested) <= 12
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.strip()) > 256
+                for value in requested
+            )
+        ):
+            raise ScreenplayToolInputError(
+                "partKeys must contain between 1 and 12 valid Part keys.",
+                guidance=(
+                    "Use completed Part keys from this task; request at most 12 at once."
+                ),
+            )
+        part_keys = tuple(value.strip() for value in requested or ())
+        if len(part_keys) != len(set(part_keys)):
+            raise ScreenplayToolInputError(
+                "partKeys must be unique.",
+                guidance="Remove duplicate Part keys and retry the read.",
+            )
+        task_id = str(scope.get("taskId") or "").strip()
+        unit_id = str(scope.get("unitId") or "").strip()
+        project_id = str(scope.get("projectId") or "").strip()
+        current = await self._db.fetch_one(
+            "SELECT 1 FROM ai_agent_long_tasks AS t "
+            "JOIN ai_agent_long_task_units AS u ON u.task_id = t.id "
+            "WHERE t.id = ? AND t.owner_id = ? AND u.unit_id = ?",
+            [task_id, project_id, unit_id],
+        )
+        if current is None:
+            raise ScreenplayToolInputError(
+                "The current task Unit does not exist in the bound project.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        rows = await self._db.fetch_all(
+            "SELECT unit_id, semantic_key, status, output_ref, metadata_json "
+            "FROM ai_agent_long_task_units WHERE task_id = ? ORDER BY position, unit_id",
+            [task_id],
+        )
+        by_key = {
+            str(row.get("semantic_key") or row["unit_id"]): row
+            for row in rows
+        }
+        if requested is None:
+            cursor, limit = _page(arguments)
+            available = [
+                {"partKey": key, "kind": _json(row.get("metadata_json")).get("kind", "")}
+                for key, row in by_key.items()
+                if row.get("status") == "completed"
+                and str(row.get("output_ref") or "").startswith("screenplay-part-artifact://")
+            ]
+            page = available[cursor:cursor + limit]
+            return {
+                "parts": page, "nextCursor": cursor + len(page),
+                "hasMore": cursor + len(page) < len(available),
+            }
+        dependencies = []
+        content_limit = min(16_000, max(2_000, 36_000 // len(part_keys)))
+        for key in part_keys:
+            row = by_key.get(key)
+            if (
+                row is None
+                or str(row.get("status") or "") != "completed"
+                or not str(row.get("output_ref") or "").startswith("screenplay-part-artifact://")
+            ):
+                raise ScreenplayToolInputError(
+                    "The requested Part is not a completed output in this task.",
+                    guidance=(
+                        "Omit partKeys to list available completed Parts."
+                    ),
+                    details={"invalidPartKeys": [key]},
+                )
+            output = await self._part_output(
+                str(row["output_ref"]),
+                project_id=project_id,
+                task_id=task_id,
+                unit_id=str(row["unit_id"]),
+            )
+            dependencies.append(_task_dependency_payload(
+                row,
+                output,
+                content_limit=content_limit,
+                full_text=scope.get("toolAccess") == "episode_metadata",
+            ))
+        return {"dependencies": dependencies}
+
+    async def _part_output(
+        self,
+        output_ref: str,
+        *,
+        project_id: str,
+        task_id: str,
+        unit_id: str,
+    ) -> dict[str, Any]:
+        prefix = "screenplay-part-artifact://"
+        if not output_ref.startswith(prefix):
+            raise RuntimeError("screenplay dependency output is not a Part Artifact")
+        artifact = await self._artifacts.load(output_ref.removeprefix(prefix))
+        if artifact is None or artifact.status is not ArtifactStatus.FINALIZED:
+            raise RuntimeError("screenplay dependency Part Artifact is not finalized")
+        if (
+            artifact.namespace != "purrtypos.screenplay"
+            or artifact.kind != "manifest_part"
+            or artifact.owner_id != project_id
+            or artifact.owner_ref.kind != "long_task_unit"
+            or artifact.owner_ref.id != f"{task_id}:{unit_id}"
+        ):
+            raise RuntimeError("screenplay dependency Part Artifact scope conflicts")
+        batches = tuple(await self._artifacts.list_batches(artifact.id))
+        if len(batches) != 1 or len(batches[0].items) != 1:
+            raise RuntimeError("screenplay dependency Part Artifact is incomplete")
+        item = thaw_json_mapping(batches[0].items[0])
+        payload = item.get("payload")
+        if not isinstance(payload, Mapping):
+            raise RuntimeError("screenplay dependency Part payload is invalid")
+        return {
+            **dict(payload),
+            "runId": str(
+                payload.get("runId") or artifact.created_by_run_id or ""
+            ),
+        }
 
     async def inspect_project(self, scope, _arguments) -> dict[str, Any]:
         project = await self._project(scope)
@@ -72,6 +206,17 @@ class ScreenplayToolQuery:
         project_id = str(scope["projectId"])
         role = str(arguments["role"])
         revision_id = str(arguments.get("revisionId") or "").strip()
+        episode = arguments.get("episodeNumber")
+        requested_representation = arguments.get("representation")
+        defaults = scope.get("deliverableRevisionScope") or {}
+        if scope.get("toolAccess") == "draft_scene":
+            bound_revision = str(defaults.get(role) or "").strip()
+            if not bound_revision or (revision_id and revision_id != bound_revision):
+                raise ScreenplayToolInputError(
+                    "Scene reads require a bound reference revision.",
+                    guidance="Use the role and revisionId from the bound scene materials.",
+                )
+        revision_id = revision_id or str(defaults.get(role) or "").strip()
         if revision_id:
             row = await self._db.fetch_one(
                 "SELECT r.id FROM screenplay_revisions AS r "
@@ -98,8 +243,32 @@ class ScreenplayToolQuery:
             if row is None:
                 return {"role": role, "available": False}
             revision_id = str(row["id"])
-        episode = arguments.get("episodeNumber")
-        if episode is not None:
+        if episode is not None and role == "structure":
+            part = await self._db.fetch_one(
+                "SELECT payload_json, content_text FROM screenplay_revision_parts "
+                "WHERE revision_id = ? AND part_type = 'document' "
+                "AND part_key = 'main'",
+                [revision_id],
+            )
+            payload = _json((part or {}).get("payload_json"))
+            selected = next((
+                dict(item)
+                for item in payload.get("episodes") or ()
+                if isinstance(item, Mapping)
+                and int(item.get("number") or 0) == int(episode)
+            ), None)
+            part = (
+                {
+                    "payload_json": json.dumps(
+                        {"episode": selected},
+                        ensure_ascii=False,
+                    ),
+                    "content_text": "",
+                }
+                if selected is not None
+                else None
+            )
+        elif episode is not None:
             part = await self._db.fetch_one(
                 "SELECT payload_json, content_text FROM screenplay_revision_parts "
                 "WHERE revision_id = ? AND part_type = 'episode' AND part_key = ?",
@@ -112,27 +281,64 @@ class ScreenplayToolQuery:
                 "AND part_key = 'main'",
                 [revision_id],
             )
-        return {
+            if part is None:
+                numbers = await self._screenplay.revision_episode_numbers(revision_id)
+                if numbers:
+                    return {
+                        "role": role, "revisionId": revision_id, "available": True,
+                        "episodeNumbers": list(numbers), "requiresEpisodeNumber": True,
+                    }
+        result = {
             "role": role,
             "revisionId": revision_id,
             "available": part is not None,
-            **(
-                {
-                    "payload": _bounded_payload(
-                        _json(part.get("payload_json")),
-                        32_000,
-                    ),
-                    "contentText": _clip(part.get("content_text"), 32_000),
-                }
-                if part is not None
-                else {}
-            ),
         }
+        if part is None:
+            return result
+        content = _json(part.get("payload_json"))
+        sections = arguments.get("sectionKeys")
+        if sections is not None:
+            if (
+                not isinstance(sections, list) or not 1 <= len(sections) <= 12
+                or any(not isinstance(key, str) or key not in content for key in sections)
+                or len(set(sections)) != len(sections)
+                or requested_representation == "text"
+            ):
+                raise ScreenplayToolInputError(
+                    "sectionKeys must identify distinct existing structured sections.",
+                    guidance="Select keys from the document section index and use structured representation.",
+                    details={
+                        "availableSectionKeys": list(content),
+                        "readRequests": _section_read_requests(content, role, revision_id, episode),
+                    },
+                )
+            content = {key: content[key] for key in sections}
+            result["sectionKeys"] = sections
+        if requested_representation == "section_index":
+            return {
+                **result, **_scene_analysis_index(content),
+                "readRequests": _section_read_requests(content, role, revision_id, episode),
+            }
+        structured = _bounded_payload(
+            content,
+            32_000,
+        )
+        text = _clip(part.get("content_text"), 32_000)
+        representation = str(
+            requested_representation
+            or ("structured" if structured else "text")
+        )
+        result.update({
+            "representation": representation,
+            "content": structured if representation == "structured" else text,
+        })
+        return result
 
     async def search_deliverables(self, scope, arguments) -> dict[str, Any]:
         query = str(arguments["query"]).strip()
         roles = tuple(str(item) for item in arguments.get("roles") or ())
         limit = max(1, min(50, int(arguments.get("limit") or 12)))
+        version_filter = "" if arguments.get("includeHistory") else "AND h.revision_id IS NOT NULL "
         params: list[object] = [str(scope["projectId"]), f"%{query}%"]
         role_sql = ""
         if roles:
@@ -140,17 +346,19 @@ class ScreenplayToolQuery:
             params.extend(roles)
         params.append(limit)
         rows = await self._db.fetch_all(
-            "SELECT h.revision_id, d.role, p.part_type, p.part_key, "
-            "p.content_text FROM screenplay_revisions AS r "
-            "JOIN screenplay_project_heads AS h ON h.revision_id = r.id "
-            "JOIN screenplay_deliverables AS d ON d.id = h.deliverable_id "
-            "JOIN screenplay_revision_parts AS p ON p.revision_id = h.revision_id "
-            "WHERE h.project_id = ? AND p.content_text LIKE ?"
-            f"{role_sql} ORDER BY d.role, p.position LIMIT ?",
+            "SELECT r.id AS revision_id, d.role, p.part_type, p.part_key, "
+            "p.content_text, h.revision_id IS NOT NULL AS accepted "
+            "FROM screenplay_revisions AS r "
+            "LEFT JOIN screenplay_project_heads AS h ON h.revision_id = r.id "
+            "JOIN screenplay_deliverables AS d ON d.id = r.deliverable_id "
+            "JOIN screenplay_revision_parts AS p ON p.revision_id = r.id "
+            "WHERE r.project_id = ? AND p.content_text LIKE ? "
+            f"{version_filter}{role_sql} ORDER BY d.role, r.revision_no DESC, p.position LIMIT ?",
             params,
         )
         return {"matches": [{
             "revisionId": str(row["revision_id"]),
+            "accepted": bool(row["accepted"]),
             "role": str(row["role"]),
             "partType": str(row["part_type"]),
             "partKey": str(row["part_key"]),
@@ -159,8 +367,19 @@ class ScreenplayToolQuery:
 
     async def episode_context(self, scope, arguments) -> dict[str, Any]:
         project_id = str(scope["projectId"])
-        episode_number = int(arguments["episodeNumber"])
-        revision_id = str(arguments.get("draftRevisionId") or "").strip() or None
+        episode_number = arguments.get("episodeNumber", scope.get("boundEpisodeNumber"))
+        if isinstance(episode_number, bool) or not isinstance(episode_number, int) or episode_number < 1:
+            raise ScreenplayToolInputError(
+                "A positive episodeNumber is required.",
+                guidance="Specify an episodeNumber to read.",
+            )
+        defaults = scope.get("deliverableRevisionScope") or {}
+        revision_id = str(
+            arguments.get("draftRevisionId") or defaults.get("screenplayDraft") or ""
+        ).strip() or None
+        scene_list_revision_id = str(
+            arguments.get("sceneListRevisionId") or defaults.get("sceneList") or ""
+        ).strip() or None
         if revision_id and not await self._revision_matches_role(
             project_id, revision_id, "screenplayDraft"
         ):
@@ -172,26 +391,46 @@ class ScreenplayToolQuery:
                 ),
                 details={"invalidDraftRevisionId": revision_id},
             )
-        available = await self._screenplay.available_episode_numbers(
-            project_id,
-            draft_revision_id=revision_id,
-        )
-        if episode_number not in available["sceneList"]:
+        if scene_list_revision_id and not await self._revision_matches_role(
+            project_id, scene_list_revision_id, "sceneList"
+        ):
             raise ScreenplayToolInputError(
-                "episodeNumber does not exist in the accepted scene list.",
+                "sceneListRevisionId is not a sceneList revision in this project.",
+                guidance=(
+                    "Use the sceneList revisionId from the task evidence descriptor "
+                    "or inspectScreenplayProject."
+                ),
+                details={"invalidSceneListRevisionId": scene_list_revision_id},
+            )
+        available_scene_numbers = (
+            await self._screenplay.revision_episode_numbers(
+                scene_list_revision_id
+            )
+            if scene_list_revision_id
+            else (
+                await self._screenplay.available_episode_numbers(
+                    project_id,
+                    draft_revision_id=revision_id,
+                )
+            )["sceneList"]
+        )
+        if episode_number not in available_scene_numbers:
+            raise ScreenplayToolInputError(
+                "episodeNumber does not exist in the selected scene list.",
                 guidance=(
                     "Use an episode number present in the accepted sceneList "
                     "deliverable."
                 ),
                 details={
                     "invalidEpisodeNumber": episode_number,
-                    "availableEpisodeNumbers": list(available["sceneList"]),
+                    "availableEpisodeNumbers": list(available_scene_numbers),
                 },
             )
         context = await self._screenplay.episode_context(
             project_id,
             episode_number,
             draft_revision_id=revision_id,
+            scene_list_revision_id=scene_list_revision_id,
         )
         return {
             **context,
@@ -200,6 +439,98 @@ class ScreenplayToolQuery:
                 context.get("currentDraft"),
                 60_000,
             ),
+        }
+
+    async def scene_context(self, scope, _arguments) -> dict[str, Any]:
+        if (
+            str(scope.get("toolAccess") or "") != "draft_scene"
+            or str(scope.get("expectedPartType") or "") != "scene"
+        ):
+            raise ScreenplayToolInputError(
+                "The bound Run is not a draft scene.",
+                guidance="Use this tool only from a draft scene Part.",
+            )
+        scene_id = str(scope.get("expectedPartKey") or "").strip()
+        if not scene_id:
+            raise ScreenplayToolInputError(
+                "The current scene identity is missing.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        episode_context = await self.episode_context(scope, {})
+        episode = episode_context.get("episode")
+        scenes = episode.get("scenes") if isinstance(episode, Mapping) else None
+        matches = [
+            dict(item)
+            for item in scenes or ()
+            if isinstance(item, Mapping)
+            and str(item.get("id") or "").strip() == scene_id
+        ]
+        if len(matches) != 1:
+            raise ScreenplayToolInputError(
+                "The current scene is absent or duplicated in the bound scene list.",
+                guidance="Stop this Run and rebuild it from the accepted scene list.",
+            )
+        dependency_keys = scope.get("dependencyPartKeys") or ()
+        if not isinstance(dependency_keys, (list, tuple)) or any(
+            not isinstance(value, str) or not value.strip()
+            for value in dependency_keys
+        ):
+            raise ScreenplayToolInputError(
+                "The current scene dependency scope is invalid.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        dependency_result = (
+            await self.task_dependencies(
+                scope,
+                {"partKeys": list(dependency_keys)},
+            )
+            if dependency_keys
+            else {"dependencies": []}
+        )
+        revision_scope = scope.get("deliverableRevisionScope") or {}
+        if not isinstance(revision_scope, Mapping):
+            raise ScreenplayToolInputError(
+                "The current scene Revision scope is invalid.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        upstream: dict[str, Any] = {}
+        for role in ("sourceAnalysis", "creativeBrief", "structure"):
+            revision_id = str(revision_scope.get(role) or "").strip()
+            if not revision_id:
+                continue
+            material = await self.read_deliverable(scope, {
+                "role": role,
+                "revisionId": revision_id,
+                "representation": "section_index" if role == "sourceAnalysis" else "structured",
+                **({"episodeNumber": scope["boundEpisodeNumber"]} if role == "structure" else {}),
+            })
+            if material.get("available"):
+                upstream[role] = {
+                    "revisionId": revision_id,
+                    **({"representation": "section_index", "sections": material.get("sections", []),
+                        "readRequests": material.get("readRequests", [])}
+                       if role == "sourceAnalysis" else {"content": material.get("content")}),
+                }
+        episode_plan = {
+            key: value
+            for key, value in dict(episode or {}).items()
+            if key != "scenes"
+        }
+        return {
+            "sceneListId": episode_context.get("sceneListId"),
+            "episodeNumber": scope.get("boundEpisodeNumber"),
+            "sceneId": scene_id,
+            "episodePlan": episode_plan,
+            "scenePlan": matches[0],
+            "previousEpisode": episode_context.get("previousEpisode"),
+            "currentSceneDraft": _current_scene_draft(
+                episode_context.get("currentDraft"),
+                scene_id,
+            ),
+            "dependencies": dependency_result.get("dependencies") or [],
+            "sourceAnalysis": upstream.get("sourceAnalysis"),
+            "creativeBrief": upstream.get("creativeBrief"),
+            "episodeStructure": upstream.get("structure"),
         }
 
     async def inspect_source_structure(self, scope, arguments) -> dict[str, Any]:
@@ -474,32 +805,6 @@ class ScreenplayToolQuery:
             "hasMore": len(rows) > limit,
         }
 
-    async def read_style(self, scope, _arguments) -> dict[str, Any]:
-        project = await self._source_project(scope)
-        row = await self._db.fetch_one(
-            "SELECT * FROM book_style WHERE book_id = ?",
-            [str(project["source_book_id"])],
-        )
-        allowed_chapter_ids = {
-            str(item["id"])
-            for item in await scoped_chapters(self._db, project)
-        }
-        references = tuple(
-            chapter_id
-            for chapter_id in _json_string_list(
-                (row or {}).get("reference_chapter_ids")
-            )
-            if chapter_id in allowed_chapter_ids
-        )
-        return {"style": {
-            "pov": str((row or {}).get("pov") or ""),
-            "tone": str((row or {}).get("tone") or ""),
-            "pace": str((row or {}).get("pace") or ""),
-            "bannedRules": str((row or {}).get("banned_rules") or ""),
-            "referenceChapterIds": list(references),
-            "freeNotes": str((row or {}).get("free_notes") or ""),
-        }}
-
     @staticmethod
     def source_refs(
         tool_name: str,
@@ -516,7 +821,6 @@ class ScreenplayToolQuery:
             "readSourceBackground": "full",
             "querySourceStoryFacts": "search",
             "readSourceOutline": "referenced",
-            "readSourceStyle": "full",
         }.get(tool_name)
         if coverage is None:
             return ()
@@ -549,16 +853,10 @@ class ScreenplayToolQuery:
                 "outlines", "outline", "outlineId", "content"
             ),
         }.get(tool_name, ("", "", "", ""))
-        if tool_name in {"readSourceBackground", "readSourceStyle"}:
-            value = result.get(
-                "content" if tool_name == "readSourceBackground" else "style"
-            )
+        if tool_name == "readSourceBackground":
+            value = result.get("content")
             return ({
-                "sourceType": (
-                    "story_background"
-                    if tool_name == "readSourceBackground"
-                    else "book_style"
-                ),
+                "sourceType": "story_background",
                 "sourceId": "main",
                 "sourceRevision": _digest(value),
                 "coverageMode": coverage,
@@ -600,6 +898,20 @@ class ScreenplayToolQuery:
         book_id = str(project.get("source_book_id") or "").strip()
         if not book_id or book_id != str(scope.get("sourceBookId") or ""):
             raise ValueError("screenplay project has no bound source book")
+        run_scope = scope.get("sourceScope")
+        if isinstance(run_scope, Mapping) and is_restricted_source_scope(run_scope):
+            persisted_ids = {
+                str(item["id"])
+                for item in await scoped_chapters(self._db, project)
+            }
+            narrowed = parse_source_scope(run_scope)
+            narrowed_ids = set(narrowed["chapterIds"])
+            if not narrowed_ids or not narrowed_ids.issubset(persisted_ids):
+                raise ValueError("screenplay source Run scope widens project scope")
+            project["source_scope_json"] = json.dumps(
+                narrowed,
+                ensure_ascii=False,
+            )
         return project
 
     @staticmethod
@@ -701,18 +1013,6 @@ def _tool_scope_summary(scope_value: object) -> dict[str, Any]:
     return summary
 
 
-def _json_string_list(value: object) -> tuple[str, ...]:
-    try:
-        parsed = json.loads(str(value or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ()
-    if not isinstance(parsed, list):
-        return ()
-    return tuple(dict.fromkeys(
-        text for item in parsed if (text := str(item).strip())
-    ))
-
-
 def _excerpt(text: str, query: str, radius: int = 500) -> str:
     index = text.lower().find(query.lower())
     if index < 0:
@@ -762,6 +1062,105 @@ def _bounded_payload(value: object, limit: int) -> dict[str, Any] | None:
     }
 
 
+def _scene_analysis_index(content: object) -> dict[str, Any]:
+    values = content if isinstance(content, Mapping) else {}
+    return {
+        "representation": "section_index",
+        "sections": [
+            {"key": str(key), "characters": len(json.dumps(value, ensure_ascii=False))}
+            for key, value in values.items()
+            if key not in {"schemaVersion", "documentKind"}
+        ],
+    }
+
+
+def _section_read_requests(content, role, revision_id, episode=None):
+    return [
+        {"role": role, "revisionId": revision_id,
+         "representation": "structured", "sectionKeys": [str(key)],
+         **({"episodeNumber": episode} if episode is not None else {})}
+        for key in content
+        if key not in {"schemaVersion", "documentKind"}
+    ]
+
+
+def _task_dependency_payload(
+    row: Mapping[str, Any],
+    output: Mapping[str, Any],
+    *,
+    content_limit: int,
+    full_text: bool = False,
+) -> dict[str, Any]:
+    metadata = _json(row.get("metadata_json"))
+    content = output.get("contentJson")
+    episode = output.get("episodeDraft")
+    if isinstance(content, Mapping):
+        content_json = _bounded_payload(content, content_limit) or {}
+    elif isinstance(episode, Mapping):
+        content_json = {
+            key: episode[key]
+            for key in (
+                "episodeNumber",
+                "title",
+                "sceneIds",
+                "continuitySummary",
+            )
+            if key in episode
+        }
+    else:
+        excluded = {
+            "artifactId",
+            "artifactDigest",
+            "candidateArtifactId",
+            "contentText",
+            "episodeDraft",
+            "evidenceDescriptor",
+            "evidenceReceipt",
+            "finalResponse",
+            "runId",
+            "sceneText",
+            "sourceRunIds",
+            "validationReceipt",
+        }
+        content_json = {
+            key: value
+            for key, value in output.items()
+            if key not in excluded
+        }
+        content_json = _bounded_payload(content_json, content_limit) or {}
+    text = str(output.get("contentText") or output.get("sceneText") or "")
+    if not text and isinstance(episode, Mapping):
+        text = str(episode.get("contentText") or "")
+    source_run_refs: list[str] = []
+    source_values = output.get("sourceRunIds")
+    for value in (
+        output.get("runId"),
+        *(
+            source_values
+            if isinstance(source_values, (list, tuple))
+            else ()
+        ),
+    ):
+        run_id = str(value or "").strip()
+        if run_id and run_id not in source_run_refs:
+            source_run_refs.append(run_id)
+    return {
+        "partKey": str(row.get("semantic_key") or row["unit_id"]),
+        "kind": str(
+            metadata.get("unitKind")
+            or metadata.get("partKind")
+            or "unknown"
+        ),
+        "contentJson": content_json,
+        **(({
+            "contentText": _clip(text, content_limit),
+            "contentTextCharacters": len(text),
+            "contentTextTruncated": len(text) > content_limit,
+        } if full_text else {"contentTextTail": text[-1_200:]}) if text else {}),
+        "sourceRunRefs": source_run_refs,
+    }
+
+
 def _continuity_only(value: object) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
@@ -770,6 +1169,31 @@ def _continuity_only(value: object) -> dict[str, Any] | None:
         for key in ("episodeNumber", "title", "continuitySummary")
         if value.get(key) is not None
     }
+
+
+def _current_scene_draft(
+    value: object,
+    scene_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    result = {
+        key: value[key]
+        for key in ("episodeNumber", "title", "continuitySummary")
+        if key in value
+    }
+    raw_scenes = value.get("sceneTexts") or value.get("scenes") or ()
+    if isinstance(raw_scenes, list):
+        selected = next((
+            dict(item)
+            for item in raw_scenes
+            if isinstance(item, Mapping)
+            and str(item.get("sceneId") or item.get("id") or "").strip()
+            == scene_id
+        ), None)
+        if selected is not None:
+            result["scene"] = selected
+    return result or None
 
 
 __all__ = ["ScreenplayToolQuery"]

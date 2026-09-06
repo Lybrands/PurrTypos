@@ -41,7 +41,7 @@ const turndown = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
   // 每个空块（如 <p></p>）输出占位，避免多个空白行被合并
-  blankReplacement(content: string, node: HTMLElement) {
+  blankReplacement(_content: string, node: HTMLElement) {
     const blockTags = /^(P|DIV|H[1-6]|LI|TR|BLOCKQUOTE|PRE|HR|TABLE|THEAD|TBODY|TFOOT|TH|TD)$/i
     const isBlock = blockTags.test(node.nodeName)
     return isBlock ? `\n\n${BLANK_PLACEHOLDER}\n\n` : ''

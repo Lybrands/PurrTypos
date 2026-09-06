@@ -37,7 +37,6 @@ ROOT_COMPLETION_PROJECTOR = (
     / "screenplay"
     / "agent_root_completion_projector.py"
 )
-AGENT_SERVICE = BACKEND_DIR / "application" / "screenplay_agent_service.py"
 AGENT_PROFILE = BACKEND_DIR / "application" / "screenplay_agent_profile.py"
 REMOVED_RUNTIME_FILES = (
     BACKEND_DIR / "database" / "crud" / "screenplay_read_model.py",

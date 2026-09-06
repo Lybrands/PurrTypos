@@ -47,12 +47,6 @@ export function createScreenplayConversationSessionLifecycle() {
     canAct(token: ScreenplayConversationLoadToken | undefined): boolean {
       return Boolean(token && isCurrent(token) && !initializing)
     },
-    runIfCurrent<T>(
-      token: ScreenplayConversationLoadToken | undefined,
-      action: () => T,
-    ): T | undefined {
-      return token && isCurrent(token) && !initializing ? action() : undefined
-    },
     currentToken: () => current,
     currentIdentity: () => current?.identity,
     setDraft(token: ScreenplayConversationLoadToken, value: string): void {

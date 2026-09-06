@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Header
+from fastapi.responses import Response
 
 from application.screenplay_v2_service import ScreenplayV2ProjectService
 from dependencies import get_db
@@ -81,6 +82,16 @@ async def get_screenplay_v2_workspace(project_id: str):
         project_id
     )
     return {"success": True, "data": workspace}
+
+
+@router.post("/projects/{project_id}/export/pdf", response_class=Response)
+async def export_screenplay_v2_pdf(project_id: str):
+    content = await ScreenplayV2ProjectService(get_db()).export_pdf(project_id)
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="screenplay.pdf"'},
+    )
 
 
 @router.patch("/projects/{project_id}")
@@ -300,6 +311,7 @@ __all__ = [
     "create_screenplay_v2_working_copy_from_revision",
     "delete_screenplay_v2_project",
     "ensure_current_screenplay_v2_session",
+    "export_screenplay_v2_pdf",
     "finalize_screenplay_v2_project",
     "get_latest_screenplay_v2_review_for_draft",
     "get_screenplay_v2_revision",

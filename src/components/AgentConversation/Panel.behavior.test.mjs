@@ -9,6 +9,7 @@ let vite
 let AgentConversationPanel
 let AgentMessageFooter
 let ExecutionLog
+let ExecutionLogStepGroup
 let buildAgentModelLabels
 let formatAgentMessageTime
 
@@ -24,7 +25,7 @@ before(async () => {
   ;({ default: AgentMessageFooter } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/MessageFooter.tsx',
   ))
-  ;({ default: ExecutionLog } = await vite.ssrLoadModule(
+  ;({ default: ExecutionLog, ExecutionLogStepGroup } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/ExecutionLog/index.tsx',
   ))
   ;({ buildAgentModelLabels, formatAgentMessageTime } = await vite.ssrLoadModule(
@@ -100,8 +101,14 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   assert.match(markup, /正在恢复对话/)
 })
 
-test('message time always uses local HH:mm without a date', () => {
-  assert.equal(formatAgentMessageTime('2024-01-02T08:43:00'), '08:43')
+test('message time uses local calendar-day labels before falling back to a date', () => {
+  const now = new Date('2026-08-27T00:30:00')
+
+  assert.equal(formatAgentMessageTime('2026-08-27T23:43:00', now), '23:43')
+  assert.equal(formatAgentMessageTime('2026-08-26T23:43:00', now), '昨天 23:43')
+  assert.equal(formatAgentMessageTime('2026-08-25T08:43:00', now), '前天 08:43')
+  assert.equal(formatAgentMessageTime('2026-08-23T08:43:00', now), '8月23日 08:43')
+  assert.equal(formatAgentMessageTime('2025-12-30T08:43:00', now), '2025年12月30日 08:43')
 })
 
 test('active execution log title does not append animated ellipsis', () => {
@@ -116,7 +123,40 @@ test('active execution log title does not append animated ellipsis', () => {
   assert.doesNotMatch(markup, /a-blink-dots|\.\.\./)
 })
 
+test('execution panel shows status while nested groups retain their execution heading', () => {
+  for (const active of [false, true]) {
+    const markup = renderToStaticMarkup(React.createElement(ExecutionLog, {
+      logKey: `execution-headings-${active}`,
+      title: active ? '正在进行' : '已完成',
+      active,
+      autoOpen: true,
+      children: React.createElement(ExecutionLogStepGroup, {
+        groupKey: `step-count-${active}`,
+        stepCount: 9,
+        active,
+        activeLabel: '读取剧本交付物',
+        completedDurationMs: 65,
+        children: React.createElement('span', null, '读取剧本交付物'),
+      }),
+    }))
+    const { document } = parseHTML(`<html><body>${markup}</body></html>`)
+    const outerTitle = document.querySelector('.work-log__toggle').textContent
+    const innerTitle = document.querySelector('.work-log-step-group__toggle').textContent
+    assert.match(outerTitle, active ? /正在进行/ : /已完成/)
+    assert.doesNotMatch(outerTitle, /个步骤|读取剧本交付物/)
+    assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /执行了9 个步骤/)
+    assert.doesNotMatch(innerTitle, /正在进行|已完成/)
+    assert.match(markup, /读取剧本交付物/)
+  }
+})
+
 test('assistant footer places actions before hover-only time', () => {
+  const today = new Date()
+  const todayAt0843 = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, '0'),
+    String(today.getDate()).padStart(2, '0'),
+  ].join('-') + 'T08:43:00'
   const model = {
     id: 'model-1',
     name: 'deepseek-v4-flash',
@@ -128,12 +168,12 @@ test('assistant footer places actions before hover-only time', () => {
   }
   const userFooter = React.createElement(AgentMessageFooter, {
     side: 'user',
-    sentAt: '2024-01-02T08:43:00',
+    sentAt: todayAt0843,
     actions: React.createElement('button', { 'aria-label': '复制消息' }, '复制'),
   })
   const assistantFooter = React.createElement(AgentMessageFooter, {
     side: 'assistant',
-    sentAt: '2024-01-02T08:43:00',
+    sentAt: todayAt0843,
     model: 'deepseek-v4-flash',
     modelLabels: buildAgentModelLabels([model]),
     actionsPersistent: true,

@@ -11,8 +11,9 @@ description: 当某条长期记忆已经过时、不应默认召回，但仍需�
 {
   "type": "object",
   "properties": {
-    "id": { "type": "number", "description": "长期记忆 ID；先用 searchMemories 获取" }
+    "id": { "type": "string", "description": "长期记忆 ID；先用 searchMemories 获取" },
+    "version": { "type": "integer", "minimum": 1, "description": "searchMemories 返回的当前版本" }
   },
-  "required": ["id"]
+  "required": ["id", "version"]
 }
 ```

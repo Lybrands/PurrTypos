@@ -10,6 +10,10 @@ import {
 } from './taskPlan.ts'
 import { buildHistoryConverter } from './chatHistory.ts'
 import { calculateContextUsage } from './contextUsage.ts'
+import {
+  buildNovelAnalysisTaskPlan,
+  buildNovelAnalysisTiming,
+} from '../NovelSourcesPage/analysisTaskPlan.ts'
 test('task progress hides protocol Respond and uses sequential position', () => {
   const plan = {
     title: '任务',
@@ -33,6 +37,23 @@ test('history conversion never invents Assistant prose', () => {
     role: 'assistant',
     content: '模型原文',
   })
+})
+
+test('history keeps public answers independently of execution status and drops error-only messages', () => {
+  const convert = buildHistoryConverter()
+  for (const status of ['done', 'failed', 'canceled', 'paused', 'running']) {
+    assert.deepEqual(convert({ role: 'assistant', content: '公开正文', isError: true,
+      error: '连接中断', canonicalOutput: { runStatus: status, finalText: '公开正文' },
+    }), { role: 'assistant', content: '公开正文' })
+  }
+  assert.deepEqual(convert({ role: 'assistant', content: '已保存的部分正文', isError: true }),
+    { role: 'assistant', content: '已保存的部分正文' })
+  assert.deepEqual(convert({ role: 'assistant', content: '', isError: true,
+    canonicalOutput: { finalText: '流式部分正文', finalStreamStatus: 'aborted' },
+  }), { role: 'assistant', content: '流式部分正文' })
+  assert.equal(convert({ role: 'assistant', content: '连接中断', error: '连接中断', isError: true }), null)
+  assert.equal(convert({ role: 'assistant', content: '', error: '连接中断', reasoning: '私有思考' }), null)
+  assert.equal(convert({ role: 'tool', content: '工具结果' }), null)
 })
 
 test('context indicator uses the final prepared input estimate including tool schemas', () => {
@@ -160,7 +181,7 @@ test('switching to a different model window keeps the current conversation estim
       },
     }],
     windowTokens: 1000000,
-    modelName: 'deepseek-v4-pro',
+    modelName: 'deepseek-v4-flash',
   })
 
   assert.ok(usage.usedTokens > 18921)
@@ -184,8 +205,8 @@ test('models with the same window keep usage but do not claim provider calibrati
       },
     }],
     windowTokens: 1000000,
-    modelConfigId: 'builtin_deepseek_deepseek_v4_pro',
-    modelName: 'deepseek-v4-pro',
+    modelConfigId: 'builtin_deepseek_deepseek_v4_flash',
+    modelName: 'deepseek-v4-flash',
   })
 
   assert.ok(usage.usedTokens > 24000)
@@ -254,7 +275,7 @@ test('current input draft is excluded until the request is sent', () => {
       { role: 'assistant', content: '已有回答' },
     ],
     windowTokens: 1000000,
-    modelName: 'deepseek-v4-pro',
+    modelName: 'deepseek-v4-flash',
   }
   const withoutDraft = calculateContextUsage(baseParams)
   const withDraft = calculateContextUsage({
@@ -440,4 +461,70 @@ test('completed task capsule exists only while the final answer is streaming', (
     ...conversations,
     { role: 'assistant', content: '新的历史消息' },
   ], true), undefined)
+})
+
+test('novel-analysis timing resumes the shared ticker and freezes terminal duration', () => {
+  const startedAt = Date.parse('2026-08-28T10:00:00Z')
+  const baseRun = {
+    runId: 'run-1', commandId: 'command-1', taskId: 'task-1', taskRevision: 1,
+    totalUnits: 1, completedUnits: 0, failedUnits: 0,
+    createTime: '2026-08-28 10:00:00',
+  }
+
+  assert.deepEqual(buildNovelAnalysisTiming({
+    ...baseRun, runStatus: 'running', taskStatus: 'running',
+  }, startedAt + 6500, 15000), { turnStartedAt: 8500 })
+  assert.deepEqual(buildNovelAnalysisTiming({
+    ...baseRun, runStatus: 'failed', taskStatus: 'failed',
+    updateTime: '2026-08-28 10:00:09.250',
+  }, startedAt + 20000, 30000), { durationMs: 9250 })
+})
+
+test('novel-analysis protocol units never masquerade as a model plan', () => {
+  const plan = buildNovelAnalysisTaskPlan({
+    runId: 'run-1', runStatus: 'running', commandId: 'command-1',
+    taskId: 'task-1', taskStatus: 'running', taskRevision: 1,
+    totalUnits: 2, completedUnits: 0, failedUnits: 0,
+    units: [{
+      unitId: 'extract', title: '分析章节', kind: 'extract_section',
+      status: 'running', attempt: 0, maxAttempts: 2,
+    }, {
+      unitId: 'review', title: '形成结果', kind: 'build_review_artifact',
+      status: 'pending', attempt: 0, maxAttempts: 1,
+    }],
+  })
+
+  assert.equal(plan, undefined)
+})
+
+test('novel-analysis semantic steps aggregate mapped durable units', () => {
+  const plan = buildNovelAnalysisTaskPlan({
+    runId: 'run-1', runStatus: 'running', commandId: 'command-1',
+    taskId: 'task-1', taskStatus: 'running', taskRevision: 1,
+    totalUnits: 3, completedUnits: 2, failedUnits: 0,
+    analysisPlan: {
+      title: '人物与因果分析', goal: '核对事实链',
+      steps: [{
+        id: 'facts', title: '梳理事实链', type: 'analyze', executor: 'model',
+        dependsOn: [],
+      }, {
+        id: 'review', title: '复核证据', type: 'review', executor: 'model',
+        dependsOn: ['facts'],
+      }],
+    },
+    units: [{
+      unitId: 'extract', title: '分析章节', kind: 'extract_section',
+      plannerStepId: 'facts', status: 'completed', attempt: 1, maxAttempts: 2,
+    }, {
+      unitId: 'aggregate', title: '聚合事实', kind: 'aggregate_story',
+      plannerStepId: 'facts', status: 'completed', attempt: 1, maxAttempts: 2,
+    }, {
+      unitId: 'review', title: '形成结果', kind: 'build_review_artifact',
+      plannerStepId: 'review', status: 'running', attempt: 1, maxAttempts: 1,
+    }],
+  })
+
+  assert.ok(plan)
+  assert.equal(plan.title, '人物与因果分析')
+  assert.deepEqual(plan.steps.map((step) => step.status), ['done', 'running'])
 })

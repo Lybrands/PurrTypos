@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,20 +11,14 @@ from fastapi import FastAPI
 from application.agent_run_queries import AgentRunQueryService
 from application.writing_proposal_read_model import (
     SqliteWritingProposalReadModel,
-    unseen_product_chunks,
 )
 from application.agent_composition import set_agent_composition
-from application.agent_composition import get_agent_composition
-from application.agent_cancellation_service import AgentCancellationService
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from database.crud.screenplay_project_deletion import (
     delete_screenplay_project_data,
 )
 from dependencies import set_db
-from domains.screenplay_agent.agent_context import (
-    SCREENPLAY_AGENT_DOMAIN_NAMESPACE,
-)
 from infrastructure.persistence.run_store import (
     create_run,
     get_latest_run_for_session,
@@ -41,10 +34,6 @@ from infrastructure.persistence.run_execution_store import now_ms
 from infrastructure.persistence.sqlite_run_snapshot_reader import (
     SqliteRunSnapshotReader,
 )
-from infrastructure.persistence.sqlite_delegation_repository import (
-    SqliteDelegationRepository,
-)
-from purra.errors import ContractViolationError
 from routers.ai import router as ai_router
 from tests.support.asgi_sse import request_json
 from purra.output import (
@@ -148,13 +137,33 @@ async def _seed_run(db: DatabaseConnection) -> str:
 
 async def test_run_snapshot_pages_events_with_a_stable_cursor(temp_db):
     run_id = await _seed_run(temp_db)
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET model_attempt_count = 2, "
+        "unreported_usage_attempts = 1, input_tokens = 1200, "
+        "output_tokens = 80, reasoning_tokens = 25, "
+        "provider_output_events = 12, provider_output_bytes = 3456 WHERE id = ?",
+        [run_id],
+    )
     service = _queries(temp_db)
 
     first = await service.get_snapshot(run_id, limit=2)
     assert first is not None
-    assert first["version"] == 1
+    assert first["version"] == 2
     assert first["run"]["runId"] == run_id
     assert first["run"]["status"] == "running"
+    assert first["run"]["activity"] == {
+        "modelAttemptCount": 2,
+        "usage": {
+            "inputTokens": 1200,
+            "generationTokens": 80,
+            "reasoningTokens": 25,
+            "totalTokens": 1280,
+            "unreportedAttempts": 1,
+            "unreportedReasoningAttempts": 0,
+        },
+        "providerOutputEvents": 12,
+        "providerOutputBytes": 3456,
+    }
     assert "prompt" not in first["run"]
     assert first["todos"][0]["id"] == "read"
     assert first["todos"][0]["type"] == "read"
@@ -448,17 +457,6 @@ async def test_setting_diff_projection_preserves_interleaved_tool_occurrences(
     ] == ["新 A", "新 B"]
 
 
-async def test_live_product_projection_emits_each_snapshot_occurrence_once():
-    events = [
-        {"proposalId": "run:call:0", "chunk": {"proposedSettingDiff": {"proposalId": "run:call:0"}}},
-        {"proposalId": "run:call:2", "chunk": {"proposedSettingDiff": {"proposalId": "run:call:2"}}},
-    ]
-    seen = {"run:call:0"}
-
-    assert unseen_product_chunks(events, seen) == [events[1]["chunk"]]
-    assert unseen_product_chunks(events, seen) == []
-
-
 async def test_latest_session_run_route_returns_prompt_and_snapshot(temp_db):
     run_id = await _seed_run(temp_db)
     app = FastAPI()
@@ -650,7 +648,6 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert first.json()["data"] == {
         "status": "canceled",
         "newlyRequested": True,
-        "delegationsCanceled": 0,
         "terminalized": True,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -658,7 +655,6 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert second.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -736,7 +732,6 @@ async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db)
     assert response.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -780,7 +775,6 @@ async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
     assert response.json()["data"] == {
         "status": "cancel_requested",
         "newlyRequested": True,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "draining",
         "cancellationEpoch": 1,

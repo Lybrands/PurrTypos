@@ -21,6 +21,7 @@ from application.screenplay_candidate_assembler import ScreenplayCandidateAssemb
 from application.screenplay_part_artifacts import ScreenplayPartArtifactQuery
 from domains.screenplay_agent.agent_context import SCREENPLAY_AGENT_DOMAIN_NAMESPACE
 from domains.screenplay_agent import OperationUsage
+from domains.screenplay_agent.recovery import screenplay_failure_message
 from infrastructure.persistence.sqlite_screenplay_operation_repository import (
     SqliteScreenplayOperationRepository,
 )
@@ -224,36 +225,68 @@ class ScreenplayAgentRootCompletionProjector:
                 "ORDER BY update_time DESC, checkpoint_key DESC LIMIT 1",
                 [operation_id],
             )
-            code = str((paused or {}).get("error_code") or "screenplay_task_paused")
-            message = _terminal_message(code, paused=True)
-            operation = await self._operations.pause(
+            if paused is not None:
+                code = str(
+                    paused.get("error_code") or "screenplay_task_paused"
+                )
+                message = _terminal_message(code, paused=True)
+                await self._operations.pause(
+                    operation_id,
+                    code=code,
+                    message=message,
+                    command_id=(
+                        f"operation:root-pause:{operation_id}:"
+                        f"{root_run_id}:{code}"
+                    ),
+                )
+                await self._turns.pause_task(
+                    str(turn["id"]),
+                    code=code,
+                    message=message,
+                )
+                return
+        if status is RunStatus.CANCELED:
+            unit_failure = None
+            if task is not None:
+                unit_failure = await self._db.fetch_one(
+                    "SELECT error_code FROM ai_agent_long_task_units "
+                    "WHERE task_id = ? AND error_code IS NOT NULL "
+                    "ORDER BY CASE status WHEN 'failed' THEN 0 ELSE 1 END, "
+                    "position ASC LIMIT 1",
+                    [task.id],
+                )
+            code = str(
+                error
+                or (unit_failure or {}).get("error_code")
+                or "screenplay_root_canceled_without_request"
+            )[:240]
+            message = _terminal_message(code)
+            if task is not None and not task.status.terminal:
+                await self._long_tasks.fail(
+                    task.id,
+                    decision=FailureDecision(
+                        category=FailureCategory.BUSINESS_INVARIANT,
+                        code=code,
+                        disposition=FailureDisposition.FAIL_PERMANENT,
+                        attempts_remaining=0,
+                        effect_state=RecoveryEffectState.UNKNOWN,
+                        checkpoint_available=False,
+                        scope=FailureScope.SYSTEMIC,
+                    ),
+                )
+            await self._operations.fail(
                 operation_id,
                 code=code,
                 message=message,
                 command_id=(
-                    f"operation:root-pause:{operation_id}:"
+                    f"operation:root-fail:{operation_id}:"
                     f"{root_run_id}:{code}"
                 ),
             )
-            await self._turns.pause_task(
+            await self._turns.fail_task(
                 str(turn["id"]),
                 code=code,
                 message=message,
-            )
-            return
-        if status is RunStatus.CANCELED:
-            if task is not None and not task.status.terminal:
-                await self._long_tasks.cancel(task.id)
-            receipt_id = str(turn.get("cancel_receipt_id") or "").strip()
-            if not receipt_id:
-                receipt = await self._operations.request_cancel(
-                    str(turn["id"]),
-                    idempotency_key=f"root-terminal-cancel:{turn['id']}",
-                )
-                receipt_id = receipt.id
-            await self._operations.settle_cancel(
-                str(turn["id"]),
-                receipt_id=receipt_id,
             )
             return
         code = str(error or status.value or "screenplay_root_failed")[:240]
@@ -365,10 +398,17 @@ class ScreenplayAgentRootCompletionProjector:
                 usage=OperationUsage(
                     invocation_count=len(payloads),
                     input_tokens=sum(int(item.get("inputTokens") or 0) for item in payloads),
-                    output_tokens=sum(int(item.get("outputTokens") or 0) for item in payloads),
-                    reasoning_tokens=sum(
-                        int(item.get("reasoningOutputTokens") or 0)
+                    generation_tokens=sum(
+                        int(item.get("generationTokens") or 0)
                         for item in payloads
+                    ),
+                    reasoning_tokens=(
+                        None
+                        if any(item.get("reasoningTokens") is None for item in payloads)
+                        else sum(
+                            int(item.get("reasoningTokens") or 0)
+                            for item in payloads
+                        )
                     ),
                 ),
                 expected_revision=operation.revision,
@@ -492,7 +532,7 @@ def _json_mapping(value: object) -> dict[str, object]:
 def _terminal_message(code: str, *, paused: bool = False) -> str:
     if paused:
         return "剧本任务已安全暂停，可在确认后继续。"
-    return str(code or "剧本 Agent Root Run 未完成")
+    return screenplay_failure_message(code)
 
 
 def _require_root_identity(

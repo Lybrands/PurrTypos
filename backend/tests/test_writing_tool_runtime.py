@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 import dependencies
-from purra.cancellation import await_with_cancellation
 from purra.contracts import (
     ExecutionState,
     ToolBatchOutcome,
@@ -22,8 +21,8 @@ from database.connection import DatabaseConnection
 from domains.writing.policies import WRITING_TOOL_POLICIES
 from domains.writing.tools.contracts import ToolResult, _err
 from exceptions import DatabaseNotReadyError
-from infrastructure.persistence.writing.sqlite_writing_tool_memory_repository import (
-    SqliteWritingToolMemoryRepository,
+from infrastructure.persistence.writing import (
+    SqliteWritingSourceRepository,
 )
 from infrastructure.writing import (
     WritingSkillCatalog,
@@ -41,7 +40,6 @@ SKILL_ITEMS = tuple(
 REPLANNING_EVIDENCE_TOOL_NAMES = frozenset({
     "batchGetChapterContents",
     "getBookCharacters",
-    "getBookStyle",
     "getChapterContent",
     "getGlobalOutline",
     "getSettingEntities",
@@ -54,10 +52,20 @@ REPLANNING_EVIDENCE_TOOL_NAMES = frozenset({
 })
 
 
-def _tool_dependencies(db) -> WritingToolDependencies:
+class _MemoryOperations:
+    def __init__(self):
+        self.calls = []
+
+    async def add_source(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"id": "memory-1", "version": 1, "state": "active"}
+
+
+def _tool_dependencies(db, memories=None) -> WritingToolDependencies:
     return WritingToolDependencies(
         db,
-        SqliteWritingToolMemoryRepository(db),
+        SqliteWritingSourceRepository(db),
+        memories or _MemoryOperations(),
     )
 
 
@@ -156,17 +164,30 @@ def _edit_request(
 async def test_catalog_replans_only_after_explicit_evidence_reads(
     tool_name: str,
     expected: ToolPlanningDisposition,
+    monkeypatch,
 ):
+    from infrastructure.writing.retrieval import WritingMemoryRetriever, WritingMethodRetriever
+
     async def _successful(_ctx, _args, _send_chunk):
         return ToolResult('{"evidence":"new fact"}')
 
+    async def _retrieved(self, request, signal=None):
+        return ()
+
+    retriever = {
+        "searchMemories": WritingMemoryRetriever,
+        "searchWritingMethods": WritingMethodRetriever,
+    }.get(tool_name)
+    if retriever is not None:
+        monkeypatch.setattr(retriever, "retrieve", _retrieved)
     catalog = build_writing_tool_catalog(
         dependencies=WritingToolDependencies(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
         ),
         skill_items=SKILL_ITEMS,
-        handler_overrides={tool_name: _successful},
+        handler_overrides={} if retriever is not None else {tool_name: _successful},
     )
     registration = next(
         item for item in catalog.registrations()
@@ -175,7 +196,7 @@ async def test_catalog_replans_only_after_explicit_evidence_reads(
 
     result = await registration.handler(
         ExecutionState(domain={"bookId": "book-a"}),
-        {},
+        {"query": "evidence"} if retriever is not None else {},
     )
 
     assert result.error_code is None
@@ -191,13 +212,14 @@ async def test_failed_evidence_read_keeps_the_current_plan():
         dependencies=WritingToolDependencies(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
         ),
         skill_items=SKILL_ITEMS,
-        handler_overrides={"getBookStyle": _failed},
+        handler_overrides={"getStoryBackground": _failed},
     )
     registration = next(
         item for item in catalog.registrations()
-        if item.schema.name == "getBookStyle"
+        if item.schema.name == "getStoryBackground"
     )
 
     result = await registration.handler(
@@ -211,77 +233,74 @@ async def test_failed_evidence_read_keeps_the_current_plan():
 
 @pytest.mark.asyncio
 async def test_two_catalogs_keep_explicit_db_dependencies_isolated(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ):
-    from infrastructure.writing.tools.handlers import book_style_tools
+    from infrastructure.writing.tools.handlers import story_background_tools
 
     global_db = object()
-    first_db = object()
-    second_db = object()
+    first_db = DatabaseConnection(tmp_path / "first")
+    second_db = DatabaseConnection(tmp_path / "second")
+    await first_db.init()
+    await second_db.init()
     monkeypatch.setattr(dependencies, "_db_instance", global_db)
     observed: list[tuple[object, str]] = []
 
-    async def _get_book_style(db, book_id):
+    async def _get_story_background(db, book_id):
         await asyncio.sleep(0)
         observed.append((db, book_id))
         return None
 
-    monkeypatch.setattr(book_style_tools, "get_book_style", _get_book_style)
-    first = _registration(first_db, "getBookStyle")
-    second = _registration(second_db, "getBookStyle")
-
-    await asyncio.gather(
-        first.handler(ExecutionState(domain={"bookId": "first"}), {}),
-        second.handler(ExecutionState(domain={"bookId": "second"}), {}),
+    monkeypatch.setattr(
+        story_background_tools, "get_story_background", _get_story_background
     )
-
-    assert set(observed) == {(first_db, "first"), (second_db, "second")}
-    assert dependencies.get_db() is global_db
-
-
-@pytest.mark.asyncio
-async def test_memory_repository_writes_work_with_no_global_db(
-    tmp_path,
-    monkeypatch,
-):
-    first_dir = tmp_path / "first"
-    second_dir = tmp_path / "second"
-    first_dir.mkdir()
-    second_dir.mkdir()
-    first_db = DatabaseConnection(first_dir)
-    second_db = DatabaseConnection(second_dir)
-    await first_db.init()
-    await second_db.init()
-    monkeypatch.setattr(dependencies, "_db_instance", None)
     try:
-        first = _registration(first_db, "createMemory")
-        second = _registration(second_db, "createMemory")
-        first_result, second_result = await asyncio.gather(
-            first.handler(
-                ExecutionState(domain={"bookId": "shared-book"}),
-                {"kind": "summary", "content": "first database only"},
-            ),
-            second.handler(
-                ExecutionState(domain={"bookId": "shared-book"}),
-                {"kind": "summary", "content": "second database only"},
-            ),
+        first = _registration(first_db, "getStoryBackground")
+        second = _registration(second_db, "getStoryBackground")
+        await asyncio.gather(
+            first.handler(ExecutionState(domain={"bookId": "first"}), {}),
+            second.handler(ExecutionState(domain={"bookId": "second"}), {}),
         )
-
-        assert first_result.error_code is None
-        assert second_result.error_code is None
-        first_rows = await first_db.fetch_all(
-            "SELECT content FROM memory_items ORDER BY id"
-        )
-        second_rows = await second_db.fetch_all(
-            "SELECT content FROM memory_items ORDER BY id"
-        )
-        assert first_rows == [{"content": "first database only"}]
-        assert second_rows == [{"content": "second database only"}]
-        with pytest.raises(DatabaseNotReadyError):
-            dependencies.get_db()
+        assert set(observed) == {(first_db, "first"), (second_db, "second")}
+        assert dependencies.get_db() is global_db
     finally:
         await first_db.close()
         await second_db.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_uses_host_book_and_trusted_tool_call_id(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    memories = _MemoryOperations()
+    try:
+        catalog = build_writing_tool_catalog(
+            dependencies=_tool_dependencies(db, memories),
+            skill_items=SKILL_ITEMS,
+        )
+        registration = next(
+            item for item in catalog.registrations()
+            if item.schema.name == "createMemory"
+        )
+        missing = await registration.handler(
+            ExecutionState(domain={"bookId": "book-a"}),
+            {"kind": "summary", "content": "需要记住"},
+        )
+        created = await registration.handler(
+            ExecutionState(domain={"bookId": "book-a"}),
+            {
+                "kind": "summary",
+                "content": "需要记住",
+                "__toolCallId": "call-1",
+            },
+        )
+
+        assert missing.error_code == "tool_execution_failed"
+        assert created.error_code is None
+        assert memories.calls[0]["book_id"] == "book-a"
+        assert memories.calls[0]["key"] == "tool-create:call-1"
+        assert memories.calls[0]["source"].id == "tool:call-1"
+    finally:
+        await db.close()
 
 
 def test_clear_db_only_clears_the_expected_lifespan_owner(monkeypatch):
@@ -303,75 +322,18 @@ def test_all_bound_handlers_keep_the_writing_operation_call_signature():
         WritingToolDependencies(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
         ),
     )
 
-    assert len(bound) == 36
+    assert set(bound) == set(WRITING_TOOL_POLICIES) - {
+        "searchMemories", "searchWritingMethods",
+    }
     for name, handler in bound.items():
         assert isinstance(handler, partial)
         assert handler.func is WRITING_TOOL_OPERATIONS[name]
         assert inspect.iscoroutinefunction(handler)
         assert len(inspect.signature(handler).parameters) == 3
-
-
-@pytest.mark.asyncio
-async def test_confirmed_memory_write_returns_receipt_when_canceled_during_commit(
-    tmp_path,
-    monkeypatch,
-):
-    db = DatabaseConnection(tmp_path)
-    await db.init()
-    try:
-        registration = _registration(db, "createMemory")
-        connection = db._ensure_conn()
-        original_commit = connection.commit
-        durable = asyncio.Event()
-        release_ack = asyncio.Event()
-        commit_cancel_count = 0
-
-        async def _commit_then_hold_ack():
-            nonlocal commit_cancel_count
-            await original_commit()
-            durable.set()
-            try:
-                await release_ack.wait()
-            except asyncio.CancelledError:
-                commit_cancel_count += 1
-                raise
-
-        monkeypatch.setattr(connection, "commit", _commit_then_hold_ack)
-        assert registration.cancellation_linearizable is True
-        task = asyncio.create_task(await_with_cancellation(
-            registration.handler(
-                ExecutionState(domain={"bookId": "book-a"}),
-                {"kind": "summary", "content": "已经提交的记忆"},
-            ),
-            None,
-            completion_wins_after_cancel=(
-                registration.cancellation_linearizable
-            ),
-        ))
-        await asyncio.wait_for(durable.wait(), timeout=1)
-
-        task.cancel()
-        await asyncio.sleep(0)
-        task.cancel()
-        await asyncio.sleep(0)
-        assert not task.done()
-        assert commit_cancel_count == 0
-
-        release_ack.set()
-        result = await asyncio.wait_for(task, timeout=1)
-        assert result.error_code is None
-        assert '"success": true' in result.content
-        assert commit_cancel_count == 0
-        row = await db.fetch_one(
-            "SELECT content FROM memory_items WHERE book_id = ?",
-            ["book-a"],
-        )
-        assert row == {"content": "已经提交的记忆"}
-    finally:
-        await db.close()
 
 
 @pytest.mark.asyncio

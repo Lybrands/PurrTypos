@@ -5,9 +5,11 @@ import type {
   ElectronAPI,
 } from "../../types";
 import {
+  canonicalProviderTextDelta,
   isCanonicalOutputEvent,
   type CanonicalOutputEvent,
 } from "../../agent-runtime/canonicalOutput.ts";
+import { resolveLocalizedToolDisplayName } from "../AgentConversation/toolCallLabels.ts";
 
 type AiStreamRequest = Parameters<ElectronAPI["aiChatStream"]>[0];
 export type AiDebugChunk = Parameters<
@@ -34,6 +36,7 @@ export interface AiDebugTool {
   batchIndex: number;
   index: number;
   name: string;
+  displayName?: string;
   argumentsText: string;
   argumentsValue: unknown;
   status: AiDebugToolStatus;
@@ -69,6 +72,17 @@ export interface AiDebugModelCall {
   revision?: number;
   judgeIndex?: number;
   parameters?: Record<string, unknown>;
+}
+
+export interface AiDebugTokenUsage {
+  inputTokens: number;
+  generationTokens: number;
+  reasoningTokens: number | null;
+  totalTokens: number;
+  unreportedAttempts: number;
+  unreportedReasoningAttempts: number;
+  modelAttempts: number;
+  complete: boolean;
 }
 
 export interface AiDebugMessage {
@@ -107,6 +121,7 @@ export interface AiDebugDelegationActivity {
 export interface AiDebugRun {
   id: string;
   turnId?: string;
+  conversationRootRunId?: string;
   sessionId?: number;
   conversationId?: number;
   source: string;
@@ -126,6 +141,7 @@ export interface AiDebugRun {
   tools: AiDebugTool[];
   events: AiDebugEvent[];
   eventCount: number;
+  tokenUsage?: AiDebugTokenUsage;
   contextBudget?: unknown;
   contextCompaction?: unknown;
   agentRunId?: string;
@@ -136,7 +152,7 @@ export interface AiDebugRun {
   error?: string;
   errorReport?: AiErrorReport;
   abortRequested?: boolean;
-  persistedEventCursor?: number;
+  providerOutputEvents?: number;
 }
 
 interface AiDebugState {
@@ -155,22 +171,113 @@ export interface AiDebugTurnGroup {
   prompt: string;
 }
 
+export interface AiDebugConversationLifecycle {
+  status: AiDebugRunStatus;
+  ended: boolean;
+  endReason: string;
+  authoritativeRunId?: string;
+}
+
+/** Root execution identity for one turn, if the journal has established it. */
+export function aiDebugTurnRootRunId(
+  group: AiDebugTurnGroup | undefined,
+): string | undefined {
+  if (!group) return undefined;
+  const declaredRoots = [...new Set(
+    group.runs
+      .map((run) => String(run.conversationRootRunId || "").trim())
+      .filter(Boolean),
+  )];
+  if (declaredRoots.length === 1) return declaredRoots[0];
+  if (declaredRoots.length > 1) return undefined;
+  if (group.runs.length === 1) {
+    return String(group.runs[0].agentRunId || "").trim() || undefined;
+  }
+  return undefined;
+}
+
+/** Stable identity for one user turn; never falls back to an arbitrary child Run. */
+export function aiDebugTurnDiagnosticId(
+  group: AiDebugTurnGroup | undefined,
+): string {
+  if (!group) return "idle";
+  const rootRunId = aiDebugTurnRootRunId(group);
+  if (rootRunId) return rootRunId;
+  if (group.runs.length === 1) {
+    const run = group.runs[0];
+    return run.turnId || run.id;
+  }
+  const turnIds = [...new Set(
+    group.runs.map((run) => String(run.turnId || "").trim()).filter(Boolean),
+  )];
+  return turnIds.length === 1 ? turnIds[0] : group.key;
+}
+
 const MAX_TURNS = 20;
 const MAX_EVENTS_PER_RUN = 200;
 const SENSITIVE_KEY =
   /^(api[-_]?key|authorization|password|passwd|secret|access[-_]?token|refresh[-_]?token|token)$/i;
-const TERMINAL_STATUSES = new Set<AiDebugRunStatus>([
-  "dispatched",
-  "completed",
-  "aborted",
-  "failed",
-]);
 const FINAL_STATUSES = new Set<AiDebugRunStatus>([
   "completed",
   "aborted",
   "failed",
 ]);
 const DEBUG_STORE_ENABLED = import.meta.env?.DEV !== false;
+
+export function isAiDebugRunActive(run: AiDebugRun | undefined): boolean {
+  return Boolean(run && !FINAL_STATUSES.has(run.status));
+}
+
+export function aiDebugCurrentRunId(runs: readonly AiDebugRun[]): string | undefined {
+  return [...runs]
+    .filter(isAiDebugRunActive)
+    .sort((left, right) => (
+      right.startedAt - left.startedAt
+      || right.updatedAt - left.updatedAt
+      || right.id.localeCompare(left.id)
+    ))[0]?.id;
+}
+
+export function aiDebugTurnTokenUsage(
+  runs: readonly AiDebugRun[],
+): AiDebugTokenUsage | undefined {
+  const usages = runs.flatMap((run) => run.tokenUsage ? [run.tokenUsage] : []);
+  if (!usages.length) return undefined;
+  const total = usages.reduce<AiDebugTokenUsage>((sum, usage) => ({
+    inputTokens: sum.inputTokens + usage.inputTokens,
+    generationTokens: sum.generationTokens + usage.generationTokens,
+    reasoningTokens: (
+      sum.reasoningTokens === null || usage.reasoningTokens === null
+        ? null
+        : sum.reasoningTokens + usage.reasoningTokens
+    ),
+    totalTokens: sum.totalTokens + usage.totalTokens,
+    unreportedAttempts: sum.unreportedAttempts + usage.unreportedAttempts,
+    unreportedReasoningAttempts: (
+      sum.unreportedReasoningAttempts + usage.unreportedReasoningAttempts
+    ),
+    modelAttempts: sum.modelAttempts + usage.modelAttempts,
+    complete: sum.complete && usage.complete,
+  }), {
+    inputTokens: 0,
+    generationTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    unreportedAttempts: 0,
+    unreportedReasoningAttempts: 0,
+    modelAttempts: 0,
+    complete: true,
+  });
+  const everyRunSettled = runs.every((run) => {
+    if (isAiDebugRunActive(run)) return false;
+    const observedModelCalls = run.modelCalls.reduce(
+      (count, call) => count + call.count,
+      0,
+    );
+    return observedModelCalls === 0 || run.tokenUsage?.complete === true;
+  });
+  return { ...total, complete: total.complete && everyRunSettled };
+}
 
 let state: AiDebugState = {
   runs: [],
@@ -179,6 +286,23 @@ let state: AiDebugState = {
 let eventSequence = 0;
 let notifyScheduled = false;
 const listeners = new Set<() => void>();
+const visibilityListeners = new Set<() => void>();
+let inspectorVisible = false;
+
+export function setAiDebugInspectorVisible(visible: boolean): void {
+  if (!DEBUG_STORE_ENABLED || inspectorVisible === visible) return;
+  inspectorVisible = visible;
+  visibilityListeners.forEach(listener => listener());
+}
+
+export function getAiDebugInspectorVisible(): boolean {
+  return inspectorVisible;
+}
+
+export function subscribeAiDebugInspectorVisibility(listener: () => void): () => void {
+  visibilityListeners.add(listener);
+  return () => visibilityListeners.delete(listener);
+}
 
 function latestUserPrompt(run: AiDebugRun): string {
   const message = [...run.request.messages]
@@ -219,11 +343,72 @@ export function groupAiDebugRunsByTurn(runs: AiDebugRun[]): AiDebugTurnGroup[] {
     });
   }
   return [...groups.values()]
-    .map((group) => ({
-      ...group,
-      runs: [...group.runs].sort((left, right) => right.startedAt - left.startedAt),
-    }))
+    .map((group) => {
+      const runs = [...group.runs].sort((left, right) => right.startedAt - left.startedAt);
+      const rootRunId = aiDebugTurnRootRunId({ ...group, runs });
+      const rootRun = rootRunId
+        ? runs.find((run) => run.agentRunId === rootRunId)
+        : undefined;
+      return {
+        ...group,
+        runs,
+        sessionId: rootRun?.sessionId ?? group.sessionId,
+        conversationId: rootRun?.conversationId ?? group.conversationId,
+        source: rootRun?.source || group.source,
+        prompt: (rootRun && latestUserPrompt(rootRun)) || group.prompt,
+      };
+    })
     .sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function isFinalRun(run: AiDebugRun): boolean {
+  return FINAL_STATUSES.has(run.status);
+}
+
+/** Project one user turn from its authoritative root Run, not a child model Run. */
+export function aiDebugConversationLifecycle(
+  group: AiDebugTurnGroup,
+): AiDebugConversationLifecycle {
+  const declaredRootRunId = group.runs.find(
+    (run) => run.conversationRootRunId,
+  )?.conversationRootRunId;
+  const explicitRoot = group.runs.find((run) => (
+    Boolean(run.conversationRootRunId)
+    && run.agentRunId === run.conversationRootRunId
+  ));
+  if (declaredRootRunId && !explicitRoot) {
+    const activeRun = group.runs.find((run) => !isFinalRun(run));
+    return {
+      status: activeRun?.status ?? "preparing",
+      ended: false,
+      endReason: "尚未结束",
+      authoritativeRunId: declaredRootRunId,
+    };
+  }
+  const authoritative = explicitRoot
+    ?? group.runs.find((run) => !isFinalRun(run))
+    ?? group.runs.find((run) => run.status === "failed")
+    ?? group.runs.find((run) => run.status === "aborted")
+    ?? group.runs[0];
+  if (!authoritative) {
+    return { status: "starting", ended: false, endReason: "尚未结束" };
+  }
+  if (!isFinalRun(authoritative)) {
+    return {
+      status: authoritative.status,
+      ended: false,
+      endReason: "尚未结束",
+      authoritativeRunId: authoritative.agentRunId || authoritative.id,
+    };
+  }
+  return {
+    status: authoritative.status,
+    ended: true,
+    endReason: authoritative.status === "completed"
+      ? "正常完成"
+      : authoritative.error || (authoritative.status === "aborted" ? "已中止" : "执行失败"),
+    authoritativeRunId: authoritative.agentRunId || authoritative.id,
+  };
 }
 
 function retainRecentTurns(runs: AiDebugRun[]): AiDebugRun[] {
@@ -234,7 +419,7 @@ function retainRecentTurns(runs: AiDebugRun[]): AiDebugRun[] {
 }
 
 function scheduleNotify(): void {
-  if (notifyScheduled) return;
+  if (notifyScheduled || listeners.size === 0) return;
   notifyScheduled = true;
   const notify = () => {
     notifyScheduled = false;
@@ -348,7 +533,7 @@ function compactEventPayload(chunk: AiDebugChunk): unknown {
 
 function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
   if (isCanonicalOutputEvent(chunk)) {
-    if (chunk.kind === "provider.content_delta") {
+    if (canonicalProviderTextDelta(chunk)) {
       return chunk.channel === "final"
         ? { type: "response", label: "收到 Provider 最终回答增量" }
         : { type: "commentary", label: "收到 Provider 执行说明增量" };
@@ -380,6 +565,7 @@ function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
     }
     return { type: "event", label: `Agent 事件 · ${chunk.kind}` };
   }
+  if (successfulTerminal(chunk)) return { type: "done", label: "本轮完成" };
   if (chunk.error) return { type: "error", label: chunk.error };
   if (chunk.done && chunk.errorReport) {
     return { type: "error", label: chunk.errorReport.errorMessage };
@@ -394,6 +580,10 @@ function chunkSummary(chunk: AiDebugChunk): { type: string; label: string } {
 
 function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
   if (FINAL_STATUSES.has(run.status)) return run.status;
+  const resultStatus = String(chunk.runResult?.status || "");
+  if (resultStatus === "done") return "completed";
+  if (resultStatus === "failed" || resultStatus === "blocked") return "failed";
+  if (resultStatus === "canceled") return "aborted";
   if (isCanonicalOutputEvent(chunk)) {
     if (chunk.kind === "run.lifecycle") {
       const status = String(chunk.payload.status || "");
@@ -401,7 +591,7 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
       if (status === "failed" || status === "blocked") return "failed";
       if (status === "canceled") return "aborted";
     }
-    if (chunk.kind === "provider.content_delta") {
+    if (canonicalProviderTextDelta(chunk)) {
       return chunk.channel === "final" ? "responding" : "planning";
     }
     if (chunk.kind === "operation.started") {
@@ -423,6 +613,32 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
       : "completed";
   }
   return run.status;
+}
+
+function successfulTerminal(chunk: AiDebugChunk): boolean {
+  if (String(chunk.runResult?.status || "") === "done") return true;
+  return isCanonicalOutputEvent(chunk)
+    && chunk.kind === "run.lifecycle"
+    && String(chunk.payload.status || "") === "done";
+}
+
+function runTerminalError(chunk: AiDebugChunk): string | undefined {
+  if (successfulTerminal(chunk)) return undefined;
+  const runResultStatus = String(chunk.runResult?.status || "");
+  if (["failed", "blocked", "canceled"].includes(runResultStatus)) {
+    const errorCode = String(chunk.runResult?.errorCode || "").trim();
+    if (errorCode) return errorCode;
+  }
+  if (isCanonicalOutputEvent(chunk) && chunk.kind === "run.lifecycle") {
+    const status = String(chunk.payload.status || "");
+    if (["failed", "blocked", "canceled"].includes(status)) {
+      const errorCode = String(
+        chunk.payload.errorCode || chunk.payload.reasonCode || chunk.payload.error || "",
+      ).trim();
+      if (errorCode) return errorCode;
+    }
+  }
+  return chunk.error || chunk.errorReport?.errorMessage || undefined;
 }
 
 function appendEvent(run: AiDebugRun, chunk: AiDebugChunk, now: number): AiDebugEvent[] {
@@ -452,13 +668,23 @@ function upsertTools(
     ) {
       const display = chunk.payload.display as Record<string, unknown> | undefined;
       const params = display?.labelParams as Record<string, unknown> | undefined;
+      const rawDisplayNames = params?.displayNames;
+      const displayNames = rawDisplayNames
+        && typeof rawDisplayNames === "object"
+        && !Array.isArray(rawDisplayNames)
+        ? Object.fromEntries(
+          Object.entries(rawDisplayNames as Record<string, unknown>)
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        )
+        : undefined;
       tools = [...tools, {
         id: operationId,
         batchIndex: tools.length,
         index: 0,
         name: String(params?.toolName || "工具操作"),
-        argumentsText: "{}",
-        argumentsValue: {},
+        displayName: resolveLocalizedToolDisplayName(displayNames),
+        argumentsText: "",
+        argumentsValue: undefined,
         status: "running",
         cached: false,
         startedAt: Date.parse(String(chunk.payload.startedAt || chunk.occurredAt)),
@@ -616,7 +842,7 @@ function updateDelegationActivities(
   next = {
     ...next,
     status,
-    finishedAt: TERMINAL_STATUSES.has(status)
+    finishedAt: FINAL_STATUSES.has(status)
       ? next.finishedAt ?? now
       : next.finishedAt,
     error: metadata.error || next.error,
@@ -649,6 +875,94 @@ function canonicalRuntimeData(event: CanonicalOutputEvent | null): {
   return { eventType, data: data as Record<string, unknown> };
 }
 
+function nonNegativeUsageInteger(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function nullableUsageInteger(value: unknown): number | null {
+  return value === null || value === undefined
+    ? null
+    : nonNegativeUsageInteger(value);
+}
+
+function persistedTokenUsage(
+  activity: AiAgentRunSnapshot['run']['activity'],
+  complete: boolean,
+): AiDebugTokenUsage | undefined {
+  const usage = activity?.usage;
+  if (!usage) return undefined;
+  const inputTokens = nonNegativeUsageInteger(usage.inputTokens);
+  const generationTokens = nonNegativeUsageInteger(usage.generationTokens);
+  return {
+    inputTokens,
+    generationTokens,
+    reasoningTokens: nullableUsageInteger(usage.reasoningTokens),
+    totalTokens: nonNegativeUsageInteger(usage.totalTokens) || inputTokens + generationTokens,
+    unreportedAttempts: nonNegativeUsageInteger(usage.unreportedAttempts),
+    unreportedReasoningAttempts: nonNegativeUsageInteger(
+      usage.unreportedReasoningAttempts,
+    ),
+    modelAttempts: nonNegativeUsageInteger(activity?.modelAttemptCount),
+    complete,
+  };
+}
+
+function runtimeTokenUsage(
+  current: AiDebugTokenUsage | undefined,
+  runtimeData: ReturnType<typeof canonicalRuntimeData>,
+  modelAttempts: number,
+): AiDebugTokenUsage | undefined {
+  if (current?.complete || runtimeData?.eventType !== 'context.usage_recorded') {
+    return current;
+  }
+  const inputTokens = nonNegativeUsageInteger(runtimeData.data.actualInputTokens);
+  const generationTokens = nonNegativeUsageInteger(
+    runtimeData.data.actualGenerationTokens,
+  );
+  return {
+    inputTokens,
+    generationTokens,
+    reasoningTokens: nullableUsageInteger(runtimeData.data.reasoningTokens),
+    totalTokens: nonNegativeUsageInteger(runtimeData.data.actualTotalTokens)
+      || inputTokens + generationTokens,
+    unreportedAttempts: 0,
+    unreportedReasoningAttempts: (
+      runtimeData.data.reasoningTokens === null
+      || runtimeData.data.reasoningTokens === undefined
+        ? 1
+        : 0
+    ),
+    modelAttempts,
+    complete: false,
+  };
+}
+
+function mergeDebugAgentPlan(
+  current: unknown,
+  runtimeData: ReturnType<typeof canonicalRuntimeData>,
+): unknown {
+  if (!runtimeData) return current;
+  if (runtimeData.eventType === 'run.todos_updated') return runtimeData.data;
+  if (runtimeData.eventType !== 'run.todo_updated') return current;
+  if (!current || typeof current !== 'object' || Array.isArray(current)) return current;
+  const plan = current as Record<string, unknown>;
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const step = runtimeData.data.step;
+  if (!step || typeof step !== 'object' || Array.isArray(step)) return current;
+  const update = step as Record<string, unknown>;
+  const stepId = String(runtimeData.data.step_id || update.id || '');
+  return {
+    ...plan,
+    steps: steps.map((item) => (
+      item && typeof item === 'object' && !Array.isArray(item)
+        && String((item as Record<string, unknown>).id || '') === stepId
+        ? { ...(item as Record<string, unknown>), ...update }
+        : item
+    )),
+  };
+}
+
 function canonicalModel(event: CanonicalOutputEvent | null): string | undefined {
   if (event?.kind !== "operation.started" || event.payload.kind !== "model") {
     return undefined;
@@ -667,7 +981,13 @@ function canonicalModel(event: CanonicalOutputEvent | null): string | undefined 
 export function startAiDebugRun(
   streamId: string,
   request: AiStreamRequest,
-  context: { turnId?: string; conversationId?: number } = {},
+  context: {
+    turnId?: string;
+    conversationId?: number;
+    conversationRootRunId?: string;
+    source?: string;
+    openInspector?: boolean;
+  } = {},
 ): void {
   if (!DEBUG_STORE_ENABLED) return;
   const now = Date.now();
@@ -679,10 +999,11 @@ export function startAiDebugRun(
   const run: AiDebugRun = {
     id: streamId,
     turnId: context.turnId,
+    conversationRootRunId: context.conversationRootRunId,
     sessionId: request.sessionId,
     conversationId: context.conversationId,
-    source: sourceLabel(streamId),
-    taskType: initialTaskType(streamId, request),
+    source: context.source || sourceLabel(streamId),
+    taskType: context.source ? `${context.source}任务` : initialTaskType(streamId, request),
     status: "starting",
     startedAt: now,
     updatedAt: now,
@@ -696,7 +1017,7 @@ export function startAiDebugRun(
       id: ++eventSequence,
       at: now,
       type: "request",
-      label: `开始 ${sourceLabel(streamId)}`,
+      label: `开始 ${context.source || sourceLabel(streamId)}`,
       payload: { messages, ...sanitized },
     }],
     eventCount: 1,
@@ -709,133 +1030,38 @@ export function startAiDebugRun(
     runs: retainRecentTurns([run, ...withoutSameId]),
     selectedRunId: streamId,
   });
+  if (context.openInspector !== false) setAiDebugInspectorVisible(true);
 }
 
-function persistedRunStatus(
-  status: AiAgentRunSnapshot['run']['status'],
-): AiDebugRunStatus {
-  if (status === 'done') return 'completed';
-  if (status === 'canceled') return 'aborted';
-  if (status === 'failed' || status === 'blocked') return 'failed';
-  return 'preparing';
-}
-
-function persistedTimestamp(value: string | null | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value)
-    ? value
-    : `${value.replace(' ', 'T')}Z`;
+function persistedTimestamp(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    ? `${value.replace(' ', 'T')}Z` : value;
   const timestamp = Date.parse(normalized);
-  return Number.isFinite(timestamp) ? timestamp : fallback;
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
-function persistedDebugRunId(runId: string): string {
-  return `screenplay-${runId}`;
-}
-
-/** Rebuild a debug entry from the canonical persisted Run event stream. */
-export function hydrateAiDebugRunSnapshot(data: {
-  snapshot: AiAgentRunSnapshot;
-  prompt: string;
-  source?: string;
-  turnId?: string;
-}): void {
+/** Apply durable counters and timestamps, independently of browser replay speed. */
+export function recordAiDebugRunUsageSnapshot(
+  snapshot: AiAgentRunSnapshot,
+): void {
   if (!DEBUG_STORE_ENABLED) return;
-  const { snapshot } = data;
   const runId = String(snapshot.run.runId || '').trim();
   if (!runId) return;
-  const debugRunId = persistedDebugRunId(runId);
-  const existing = state.runs.find(
-    (run) => run.agentRunId === runId || run.id === debugRunId,
+  const usage = persistedTokenUsage(
+    snapshot.run.activity,
+    snapshot.run.status !== 'running',
   );
-
-  if (!existing || existing.persistedEventCursor == null) {
-    const now = Date.now();
-    const startedAt = persistedTimestamp(snapshot.run.createdAt, now);
-    const source = String(data.source || '').trim() || 'Agent 历史恢复';
-    const run: AiDebugRun = {
-      id: debugRunId,
-      turnId: data.turnId,
-      sessionId: snapshot.run.sessionId ?? undefined,
-      conversationId: snapshot.run.conversationId ?? undefined,
-      source,
-      taskType: '持久化 Agent Run',
-      status: persistedRunStatus(snapshot.run.status),
-      startedAt,
-      updatedAt: persistedTimestamp(snapshot.run.updatedAt, now),
-      finishedAt: snapshot.run.status === 'running'
-        ? undefined
-        : persistedTimestamp(snapshot.run.updatedAt, now),
-      request: {
-        messages: data.prompt.trim()
-          ? [{ role: 'user', content: data.prompt }]
-          : [],
-        meta: { recovered: true },
-      },
-      model: snapshot.run.provenance.modelName ?? undefined,
-      // Preserve Provider-authored public text already observed before detach.
-      output: existing?.output ?? '',
-      commentary: existing?.commentary ?? '',
-      modelCalls: [],
-      tools: [],
-      events: [{
-        id: ++eventSequence,
-        at: startedAt,
-        type: 'recovered',
-        label: '从持久化事件恢复 Agent Run',
-        payload: { runId },
-      }],
-      eventCount: 1,
-      agentRunId: runId,
-      agentPlan: snapshot.todos.length
-        ? { status: snapshot.run.status, steps: snapshot.todos }
-        : undefined,
-      delegations: snapshot.delegations.items.map((item) => sanitizeValue(item)),
-      delegationActivities: [],
-      approvals: [],
-      persistedEventCursor: 0,
-    };
-    // Snapshot monitoring starts only after the live stream is detached. At
-    // that boundary the persisted event stream is authoritative, so replace
-    // any partial live debug copy instead of merging and duplicating events.
-    const withoutSameRun = state.runs.filter(
-      (item) => item.id !== debugRunId && item.agentRunId !== runId,
-    );
-    setState({
-      runs: retainRecentTurns([run, ...withoutSameRun]),
-      selectedRunId: debugRunId,
-    });
-  }
-
-  const currentCursor = state.runs.find(
-    (run) => run.agentRunId === runId || run.id === debugRunId,
-  )?.persistedEventCursor ?? 0;
-  let nextCursor = currentCursor;
-  for (const event of [...snapshot.events].sort((left, right) => (
-    left.cursor - right.cursor
-  ))) {
-    if (event.cursor <= currentCursor) continue;
-    if (event.chunk) {
-      recordAiDebugRunEvent(runId, event.chunk as AiDebugChunk);
-    }
-    nextCursor = Math.max(nextCursor, event.cursor);
-  }
-  replaceRunByAgentRunId(runId, (run) => {
-    const terminal = snapshot.run.status !== 'running' && !snapshot.hasMore;
-    return {
-      ...run,
-      turnId: data.turnId ?? run.turnId,
-      sessionId: snapshot.run.sessionId ?? run.sessionId,
-      conversationId: snapshot.run.conversationId ?? run.conversationId,
-      model: snapshot.run.provenance.modelName ?? run.model,
-      status: terminal ? persistedRunStatus(snapshot.run.status) : run.status,
-      updatedAt: persistedTimestamp(snapshot.run.updatedAt, run.updatedAt),
-      finishedAt: terminal
-        ? persistedTimestamp(snapshot.run.updatedAt, run.updatedAt)
-        : run.finishedAt,
-      persistedEventCursor: Math.max(nextCursor, snapshot.nextCursor),
-    };
-  });
+  const startedAt = persistedTimestamp(snapshot.run.createdAt);
+  const updatedAt = persistedTimestamp(snapshot.run.updatedAt);
+  const terminal = ['done', 'failed', 'canceled'].includes(snapshot.run.status);
+  replaceRunByAgentRunId(runId, (run) => ({
+    ...run, tokenUsage: usage ?? run.tokenUsage,
+    model: run.model || snapshot.run.provenance.modelName || undefined,
+    startedAt: startedAt ?? run.startedAt,
+    updatedAt: updatedAt ?? run.updatedAt,
+    finishedAt: terminal ? updatedAt ?? run.finishedAt : run.finishedAt,
+  }));
 }
 
 export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void {
@@ -843,13 +1069,12 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
   const now = Date.now();
   replaceRun(streamId, (run) => {
     const status = nextStatus(run, chunk);
-    const terminal = TERMINAL_STATUSES.has(status);
+    const terminal = FINAL_STATUSES.has(status);
     const runId = getAgentRunId(chunk);
     const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
-    const delta = canonicalEvent?.kind === "provider.content_delta"
-      ? String(canonicalEvent.payload.delta || "")
-      : "";
+    const delta = canonicalEvent ? canonicalProviderTextDelta(canonicalEvent) : "";
     const runtimeData = canonicalRuntimeData(canonicalEvent);
+    const succeeded = successfulTerminal(chunk);
     const delegation = canonicalEvent?.kind === "delegation.event"
       ? canonicalEvent.payload
       : null;
@@ -871,6 +1096,11 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
       tools: upsertTools(run, chunk, now),
       events: appendEvent(run, chunk, now),
       eventCount: run.eventCount + 1,
+      tokenUsage: runtimeTokenUsage(
+        run.tokenUsage,
+        runtimeData,
+        run.modelCalls.reduce((count, call) => count + call.count, 0),
+      ),
       contextBudget: runtimeData?.eventType.startsWith("context.")
         ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
         : run.contextBudget,
@@ -878,32 +1108,32 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
         ? runtimeData.data
         : run.contextCompaction,
       agentRunId: runId || run.agentRunId,
-      agentPlan: runtimeData?.eventType.startsWith("run.todo")
-        ? runtimeData.data
-        : run.agentPlan,
+      agentPlan: mergeDebugAgentPlan(run.agentPlan, runtimeData),
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
         : run.delegations,
       delegationActivities: updateDelegationActivities(run, chunk, now),
       approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: chunk.error || chunk.errorReport?.errorMessage || run.error,
-      errorReport: chunk.errorReport ?? run.errorReport,
+      error: succeeded ? undefined : runTerminalError(chunk) || run.error,
+      errorReport: succeeded ? undefined : chunk.errorReport ?? run.errorReport,
     };
   });
 }
 
-/** Feed the screenplay persisted SSE into the same live diagnostic store. */
-export function recordScreenplayAiDebugChunk(data: {
+/** Observe the conversation's existing SSE reader, without a diagnostic poller. */
+export function recordAgentConversationDebugChunk(data: {
   runId: string;
-  turnId: string;
-  sessionId: number;
+  turnId?: string;
+  conversationRootRunId?: string;
+  sessionId?: number;
+  source?: string;
   prompt: string;
   model?: string;
   chunk: AiDebugChunk;
 }): void {
   if (!DEBUG_STORE_ENABLED) return;
   const existing = state.runs.find((run) => run.agentRunId === data.runId);
-  const streamId = existing?.id ?? persistedDebugRunId(data.runId);
+  const streamId = existing?.id ?? `agent-${data.runId}`;
   if (!existing) {
     startAiDebugRun(streamId, {
       streamId,
@@ -916,80 +1146,23 @@ export function recordScreenplayAiDebugChunk(data: {
       chatAgentMode: "agent",
     }, {
       turnId: data.turnId,
+      conversationRootRunId: data.conversationRootRunId,
+      source: data.source || 'Agent 对话',
+      openInspector: false,
     });
+  } else if (
+    data.conversationRootRunId
+    && existing.conversationRootRunId !== data.conversationRootRunId
+  ) {
+    replaceRun(streamId, (run) => ({
+      ...run,
+      conversationRootRunId: data.conversationRootRunId,
+    }));
   }
   recordAiDebugChunk(streamId, data.chunk);
-}
-
-/**
- * Attach a durable same-Run event to its owning diagnostic entry.
- */
-export function recordAiDebugRunEvent(
-  rootAgentRunId: string,
-  chunk: AiDebugChunk,
-): void {
-  if (!DEBUG_STORE_ENABLED || !rootAgentRunId) return;
-  const now = Date.now();
-  replaceRunByAgentRunId(rootAgentRunId, (run) => {
-    const status = FINAL_STATUSES.has(run.status)
-      ? run.status
-      : chunk.aborted
-        ? "aborted"
-        : chunk.error
-          ? "failed"
-          : chunk.done
-            ? "completed"
-            : nextStatus(
-                run.status === "dispatched" ? { ...run, status: "preparing" } : run,
-                chunk,
-              );
-    const terminal = TERMINAL_STATUSES.has(status);
-    const canonicalEvent = isCanonicalOutputEvent(chunk) ? chunk : null;
-    const delta = canonicalEvent?.kind === "provider.content_delta"
-      ? String(canonicalEvent.payload.delta || "")
-      : "";
-    const runtimeData = canonicalRuntimeData(canonicalEvent);
-    const delegation = canonicalEvent?.kind === "delegation.event"
-      ? canonicalEvent.payload
-      : null;
-    const approval = runtimeData?.eventType.startsWith("approval.")
-      ? { eventType: runtimeData.eventType, ...runtimeData.data }
-      : null;
-    return {
-      ...run,
-      status,
-      taskType: updatedTaskType(run, chunk),
-      updatedAt: now,
-      finishedAt: terminal ? run.finishedAt ?? now : undefined,
-      model: canonicalModel(canonicalEvent) || chunk.model || run.model,
-      output: run.output + (canonicalEvent?.channel === "final" ? delta : ""),
-      commentary: run.commentary + (
-        canonicalEvent?.channel === "commentary" ? delta : ""
-      ),
-      modelCalls: appendModelCall(run, chunk, now),
-      tools: upsertTools(run, chunk, now),
-      events: appendEvent(run, chunk, now),
-      eventCount: run.eventCount + 1,
-      contextBudget: runtimeData?.eventType.startsWith("context.")
-        ? { ...(run.contextBudget as Record<string, unknown> | undefined), ...runtimeData.data }
-        : run.contextBudget,
-      contextCompaction: runtimeData?.eventType.startsWith("conversation.compaction.")
-        ? runtimeData.data
-        : run.contextCompaction,
-      // Canonical events never replace the owning Run identity.
-      agentRunId: rootAgentRunId,
-      agentPlan: runtimeData?.eventType.startsWith("run.todo")
-        ? runtimeData.data
-        : run.agentPlan,
-      delegations: delegation
-        ? upsertDebugDelegation(run.delegations, delegation)
-        : run.delegations,
-      delegationActivities: updateDelegationActivities(run, chunk, now),
-      approvals: approval ? [...run.approvals, sanitizeValue(approval)] : run.approvals,
-      error: chunk.error || chunk.errorReport?.errorMessage || run.error,
-      errorReport: chunk.errorReport ?? run.errorReport,
-    };
-  });
+  if (data.source && existing && existing.source !== data.source) {
+    replaceRun(streamId, run => ({ ...run, source: data.source! }));
+  }
 }
 
 export function recordAiDebugErrorReportStatus(
@@ -1097,11 +1270,6 @@ export function subscribeAiDebugStore(listener: () => void): () => void {
 
 export function getAiDebugSnapshot(): AiDebugState {
   return state;
-}
-
-export function selectAiDebugRun(runId: string): void {
-  if (!state.runs.some((run) => run.id === runId)) return;
-  setState({ ...state, selectedRunId: runId });
 }
 
 export function clearAiDebugRuns(): void {

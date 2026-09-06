@@ -33,10 +33,15 @@ class WritingExecutionStateFactory:
             "associatedChapterIds": list(context.associated_chapter_ids),
             "associatedOutlineIds": list(context.associated_outline_ids),
             "selectedMemoryIds": list(context.selected_memory_ids),
+            "selectedLongTermMemoryIds": list(
+                context.selected_long_term_memory_ids
+            ),
             "selectedForeshadowingIds": list(context.selected_foreshadowing_ids),
             "chatAgentMode": request.mode or "",
             "contextWindow": (
                 context.context_window_label
                 or _WINDOW_LABELS.get(request.context_window or 0)
             ),
+            "creationMode": context.creation_mode,
+            "continuationBinding": deepcopy(dict(context.continuation_binding or {})),
         })

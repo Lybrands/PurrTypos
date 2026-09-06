@@ -12,7 +12,6 @@ AI_ROUTER = BACKEND_DIR / "routers" / "ai.py"
 AGENT_COMPOSITION = BACKEND_DIR / "application" / "agent_composition.py"
 PORT_ONLY_SERVICES = (
     BACKEND_DIR / "application" / "agent_run_queries.py",
-    BACKEND_DIR / "application" / "run_execution_control.py",
     BACKEND_DIR / "application" / "agent_stability_service.py",
     BACKEND_DIR / "application" / "conversation_compaction.py",
 )

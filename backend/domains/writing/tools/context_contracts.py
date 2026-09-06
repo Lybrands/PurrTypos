@@ -48,6 +48,7 @@ _PRODUCES: dict[str, tuple[str, ...]] = {
     "listSettingEntities": ("world.entityCatalog",),
     "searchMemories": ("memory.matches",),
     "searchSparkIdeas": ("sparkIdea.matches",),
+    "readContinuationSourceSection": ("continuation.sourceSection",),
 }
 _PREREQUISITE_OVERRIDES: dict[str, tuple[str, ...]] = {
     # Editing requires the current source, not merely a locator catalogue.

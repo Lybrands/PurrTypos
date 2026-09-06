@@ -7,6 +7,7 @@ import type {
   AiStreamChunk,
 } from '../../../agent-runtime/chunkHandlers/types'
 import { normalizeApiProvider } from '../../../modelCatalog'
+import { buildStreamOptions } from '../../../agent-runtime/streamOptions'
 import type { AiModelConfig, AiSession, EntityId } from '../../../types'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
 import {
@@ -186,6 +187,7 @@ function settleQueue(
 
   queueMicrotask(() => {
     const queue = dependencies.getQueue()
+    if (queue.some(item => item.sessionId === dependencies.sessionId && item.editing)) return
     const nextIndex = queue.findIndex(
       (submission) => submission.sessionId === dependencies.sessionId,
     )
@@ -374,6 +376,10 @@ function maybeGenerateSessionTitle(
     prompt: `User:\n${snapshot.userText}\n\nAssistant:\n${titleSource}`.trim(),
     apiProvider: normalizeApiProvider(dependencies.modelConfig.apiProvider),
     model: dependencies.apiModelName,
+    options: buildStreamOptions({
+      cfg: dependencies.modelConfig,
+      selectedModel: dependencies.apiModelName,
+    }).options,
   }).then(async (result) => {
     if (!result.success || !result.data?.trim()) return
     const title = result.data.trim()

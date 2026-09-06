@@ -15,6 +15,7 @@ from purra.contracts import (
     ModelRequest,
     TaskSpec,
     TaskContextRequest,
+    ToolPlanningRequirement,
 )
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.associated_context import (
@@ -23,7 +24,7 @@ from domains.writing.associated_context import (
     OutlineContextFact,
 )
 from domains.writing.context import (
-    WRITING_AGENT_POLICY_CONTEXT,
+    WRITING_DOMAIN_POLICY_CONTEXT,
     WRITING_BINDING_CONTEXT,
     WRITING_EVIDENCE_POLICY_CONTEXT,
     WRITING_RETRIEVAL_CONTEXT,
@@ -35,6 +36,7 @@ from domains.writing.memory_context import (
     MemoryContextBlock,
     SelectedMemoryContextFact,
 )
+from domains.writing.unified_memory_context import MemoryContextPack, StoryMemoryContextBlock
 from domains.writing.policies import WRITING_TOOL_POLICIES
 from domains.writing.prompts import (
     build_writing_evidence_policy,
@@ -58,9 +60,19 @@ SKILL_ITEMS = tuple(
 )
 
 
+def _memory_pack(text: str, *, selected_fact=None) -> MemoryContextPack:
+    return MemoryContextPack(
+        text=text,
+        semantic=MemoryContextBlock(text=text, selected_fact=selected_fact),
+        story=StoryMemoryContextBlock(),
+        token_estimate=estimate_json_tokens(text),
+    )
+
+
 def _catalog(**overrides):
     return build_writing_tool_catalog(
         dependencies=WritingToolDependencies(
+            object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
         ),
@@ -109,7 +121,7 @@ def test_unscoped_session_binding_states_that_no_host_material_exists():
     )
 
     assert "未绑定任何作品或章节" in binding
-    assert "宿主没有注入" in binding
+    assert "没有可用的书籍正文" in binding
     assert "不得猜测" in binding
     assert "一般知识问答" in binding
 
@@ -332,9 +344,17 @@ def test_writing_adapter_builds_a_closed_complete_catalog():
     names = {registration.schema.name for registration in registrations}
 
     assert names == set(WRITING_TOOL_POLICIES)
-    assert len(names) == 36
-    assert adapter.tool_catalog.enabled_names(_request()) == names
+    assert len(names) == 37
+    assert adapter.tool_catalog.enabled_names(_request()) == (
+        names - {"searchWritingMethods", "readContinuationSourceSection"}
+    )
+    assert adapter.tool_catalog.enabled_names(_request(
+        writing_method_recommendation_requested=True,
+    )) == names - {"readContinuationSourceSection"}
     assert len({id(registration.handler) for registration in registrations}) == len(names)
+    assert {
+        registration.planning_requirement for registration in registrations
+    } == {ToolPlanningRequirement.OPTIONAL}
 
 
 @pytest.mark.asyncio
@@ -377,11 +397,13 @@ async def test_writing_handler_adapter_translates_domain_effects(monkeypatch):
 @pytest.mark.asyncio
 async def test_writing_context_provider_honors_one_shared_retrieval_budget(monkeypatch):
     class _Source:
-        async def build_memory(self, context, request, token_budget):
-            return "记忆" * 1_000
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            assert query == request.latest_user_text()
+            assert task is None
+            return _memory_pack("记忆" * 1_000)
 
         async def build_associated(self, context, request, token_budget):
-            return "章节" * 2_000
+            return AssociatedContextResult(text="章节" * 2_000)
 
     request = _request()
     claims = writing_context_claims(request)
@@ -428,23 +450,25 @@ async def test_writing_staged_recall_uses_resolved_task_spec_query():
         def __init__(self):
             self.queries = []
 
-        async def build_memory(self, context, request, token_budget):
-            raise AssertionError("latest-user recall must not run for this task")
-
-        async def build_memory_for_query(
+        async def build_memory(
             self,
             context,
             request,
             token_budget,
+            *,
             query,
+            task=None,
+            signal=None,
         ):
+            assert request.latest_user_text() == "把刚才那个再改得压抑一点。"
+            assert task is not None
             del context, request, token_budget
             self.queries.append(query)
-            return "第二章雪夜见面场景的既有设定"
+            return _memory_pack("第二章雪夜见面场景的既有设定")
 
         async def build_associated(self, context, request, token_budget):
             del context, request, token_budget
-            return ""
+            return AssociatedContextResult()
 
     context = WritingDomainContext(
         book_id="book-1",
@@ -474,7 +498,7 @@ async def test_writing_staged_recall_uses_resolved_task_spec_query():
 
     planning = await provider.build_planning_context(request, budget)
     assert [block.name for block in planning.blocks] == [
-        WRITING_AGENT_POLICY_CONTEXT,
+        WRITING_DOMAIN_POLICY_CONTEXT,
         "writing_planning_facts",
     ]
     assert planning.diagnostics["planningContextMode"] == "lightweight_manifest"
@@ -580,8 +604,8 @@ async def test_writing_context_provider_injects_trusted_summary_delivery_scope()
 @pytest.mark.asyncio
 async def test_writing_context_provider_revokes_complete_fact_after_outer_truncation():
     class _Source:
-        async def build_memory(self, context, request, token_budget):
-            return MemoryContextBlock(
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            return _memory_pack(
                 text="用户勾选记忆",
                 selected_fact=SelectedMemoryContextFact(
                     requested_count=1,
@@ -657,8 +681,8 @@ async def test_writing_context_provider_revokes_complete_fact_after_outer_trunca
 @pytest.mark.asyncio
 async def test_complete_selected_evidence_prevents_unrequested_discovery_planning():
     class _Source:
-        async def build_memory(self, context, request, token_budget):
-            return MemoryContextBlock(
+        async def build_memory(self, context, request, token_budget, *, query, task=None, signal=None):
+            return _memory_pack(
                 text="用户勾选记忆",
                 selected_fact=SelectedMemoryContextFact(
                     requested_count=1,

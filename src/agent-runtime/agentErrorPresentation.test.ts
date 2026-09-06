@@ -11,4 +11,8 @@ test('transport error codes are localized only in the product read model', () =>
     presentAgentRunError('blocked', null),
     'Agent 未完成全部计划步骤，已安全停止。',
   )
+  assert.equal(
+    presentAgentRunError('failed', 'model_invocation_deadline_exceeded'),
+    '模型单次处理超过当前时限，已安全停止。',
+  )
 })

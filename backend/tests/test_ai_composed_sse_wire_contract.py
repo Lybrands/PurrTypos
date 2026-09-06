@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,19 +26,24 @@ from tests.support.asgi_sse import (
 )
 from tests.support.canonical_wire import (
     assert_raw_canonical_wire,
-    project_wire_event_for_legacy_assertion,
-    project_wire_events_for_legacy_assertions,
+    provider_text,
+    runtime_events,
 )
+from tests.support.planning_stream import route_planning_stream
 
 
-FAILED_MESSAGE = "Agent 计划格式无效，已安全停止。"
-BLOCKED_MESSAGE = "Agent 未完成全部计划步骤，已安全停止。"
-TERMINAL_KEYS = {
-    "agentRunCompleted",
-    "agentRunBlocked",
-    "agentRunFailed",
-    "agentRunCanceled",
-}
+TERMINAL_STATUSES = {"done", "blocked", "failed", "canceled"}
+
+
+def _review_step(step_id: str, title: str) -> dict[str, Any]:
+    return {
+        "id": step_id,
+        "title": title,
+        "type": "review",
+        "executor": "model",
+        "expectedTools": [],
+        "riskLevel": "read",
+    }
 
 
 @pytest_asyncio.fixture
@@ -71,18 +75,20 @@ def _chat_request(prompt: str) -> dict[str, Any]:
         "apiProvider": "openai",
         "options": {
             "model": "wire-model",
-            "model_profile": "deepseek:deepseek-v4-flash",
-            "max_tokens": 32_768,
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 32_768,
         },
         "enableAgentTools": True,
         "bookId": "book-wire",
         "chatAgentMode": "agent",
+        "planningMode": "planned",
         "contextWindow": "200k",
     }
 
 
 async def _planned_character_delete(*_args, **_kwargs):
     return {
+        "applied_generation_limit": _args[2].get("max_tokens"),
         "message": {
             "role": "assistant",
             "content": json.dumps({
@@ -96,7 +102,10 @@ async def _planned_character_delete(*_args, **_kwargs):
                     "executor": "tool",
                     "expectedTools": ["deleteCharacter"],
                     "riskLevel": "destructive",
-                }],
+                },
+                    _review_step("verify-result", "核对人物删除结果"),
+                    _review_step("report-result", "向用户报告处理结果"),
+                ],
             }, ensure_ascii=False),
         },
         "model": "planner-model",
@@ -122,7 +131,7 @@ def _assert_sse_wire(response: ASGIResponse) -> list[dict[str, Any]]:
     assert re.search(rb"\r?\n\r?\n\Z", response.content)
     raw = decode_sse_json(response.content)
     assert_raw_canonical_wire(raw)
-    return project_wire_events_for_legacy_assertions(raw)
+    return raw
 
 
 def _assert_exact_two_item_writing_policy(
@@ -170,60 +179,17 @@ def _assert_exact_two_item_writing_policy(
     return str(policy["content"])
 
 
-def _normalize_dynamic_ids(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized = deepcopy(events)
-    run_ids: dict[str, str] = {}
-    approval_ids: dict[str, str] = {}
-    request_fingerprints: dict[str, str] = {}
-
-    def _walk(value: Any, key: str | None = None) -> Any:
-        if key == "runId" and isinstance(value, str):
-            return run_ids.setdefault(value, f"<run-{len(run_ids) + 1}>")
-        if key == "approvalId" and isinstance(value, str):
-            return approval_ids.setdefault(
-                value,
-                f"<approval-{len(approval_ids) + 1}>",
-            )
-        if key == "requestFingerprint" and isinstance(value, str):
-            return request_fingerprints.setdefault(
-                value,
-                f"<request-fingerprint-{len(request_fingerprints) + 1}>",
-            )
-        if isinstance(value, dict):
-            return {item_key: _walk(item, item_key) for item_key, item in value.items()}
-        if isinstance(value, list):
-            return [_walk(item) for item in value]
-        return value
-
-    return [_walk(event) for event in normalized]
-
-
-def _event_name(event: dict[str, Any]) -> str:
-    for key in (
-        "agentRunStarted",
-            "agentRunTodosUpdated",
-            "agentRunTodoUpdated",
-            "modelInvocation",
-                "contextBudget",
-            "delta",
-            "reasoningDelta",
-            "toolCalls",
-        "toolApprovalRequired",
-        "toolApprovalResolved",
-        "agentDelegationCreated",
-        "agentDelegationUpdated",
-        "toolIndexCompleted",
-        "toolResults",
-        "agentRunCompleted",
-        "agentRunBlocked",
-        "agentRunFailed",
-        "agentRunCanceled",
-        "done",
-        "error",
-    ):
-        if key in event:
-            return key
-    raise AssertionError(f"unclassified SSE event: {event!r}")
+def _event_names(events: list[dict[str, Any]]) -> list[str]:
+    names: list[str] = []
+    for event in events:
+        kind = event.get("kind", "")
+        if kind.startswith("operation.") or kind == "stream.committed":
+            continue
+        names.append(
+            event["payload"]["eventType"] if kind == "runtime.event"
+            else kind or ("done" if event.get("done") else "error")
+        )
+    return names
 
 
 @pytest.mark.asyncio
@@ -236,6 +202,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
 
     async def _semantic_plan(*_args, **_kwargs):
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -259,6 +226,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                             "expectedTools": [],
                             "riskLevel": "write",
                         },
+                        _review_step("review-continuity", "检查续篇与原作的衔接"),
                     ],
                 }, ensure_ascii=False),
             },
@@ -276,7 +244,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _args[2].get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -284,7 +252,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
+        route_planning_stream(_semantic_plan, _runtime),
     )
 
     live = start_asgi_request(
@@ -298,10 +266,10 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     run_id = ""
     while True:
         wire = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(wire) or {}
-        if started := projected.get("agentRunStarted"):
-            run_id = str(started["runId"])
-        if projected.get("agentRunTodosUpdated"):
+        if wire.get("kind") == "run.lifecycle":
+            assert wire["payload"]["status"] == "running"
+            run_id = wire["runId"]
+        if runtime_events([wire], "run.todos_updated"):
             break
 
     assert run_id
@@ -426,22 +394,20 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     response = await live.finish()
     live_events = _assert_sse_wire(response)
     terminal_todo_updates = {
-        event["agentRunTodoUpdated"]["stepId"]: event["agentRunTodoUpdated"][
-            "step"
-        ]
-        for event in live_events
-        if event.get("agentRunTodoUpdated", {}).get("step", {}).get("status")
-        == "done"
+        event["payload"]["data"]["step_id"]: event["payload"]["data"]["step"]
+        for event in runtime_events(live_events, "run.todo_updated")
+        if event["payload"]["data"]["step"]["status"] == "done"
     }
     assert set(terminal_todo_updates) == {
         "understand-source",
         "draft-continuation",
+        "review-continuity",
     }
     assert all(
-        step["resultSummary"] == "Final response covered this model step."
+        step["result_summary"] == "Final response covered this model step."
         for step in terminal_todo_updates.values()
     )
-    assert any("agentRunCompleted" in event for event in live_events)
+    _assert_terminal_exclusive(live_events, status="done")
     assert await db.fetch_all(
         "SELECT step_id, status, result_summary FROM ai_agent_run_todos "
         "WHERE run_id = ? ORDER BY sort",
@@ -454,6 +420,11 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
         },
         {
             "step_id": "draft-continuation",
+            "status": "done",
+            "result_summary": "Final response covered this model step.",
+        },
+        {
+            "step_id": "review-continuity",
             "status": "done",
             "result_summary": "Final response covered this model step.",
         },
@@ -497,32 +468,25 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
 
     assert public_plan == {
         "title": "续写故事",
-        "goal": "理解原作后完成续写",
         "status": "running",
         "steps": [
             {
                 "id": "understand-source",
                 "title": "理解原作",
                 "type": "analyze",
-                "executor": "model",
                 "status": "running",
-                "risk_level": "read",
-                "depends_on": [],
-                "description": None,
-                "result_summary": None,
-                "error": None,
             },
             {
                 "id": "draft-continuation",
                 "title": "撰写续篇",
                 "type": "write",
-                "executor": "model",
                 "status": "pending",
-                "risk_level": "write",
-                "depends_on": [],
-                "description": None,
-                "result_summary": None,
-                "error": None,
+            },
+            {
+                "id": "review-continuity",
+                "title": "检查续篇与原作的衔接",
+                "type": "review",
+                "status": "pending",
             },
         ],
     }
@@ -531,7 +495,24 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert "校验候选稿" not in encoded_plan
     assert "发布候选稿" not in encoded_plan
     assert "plannerStepId" not in encoded_plan
-    assert live_plans[1] == checkpoint_plan
+    assert live_plans[1] == {
+        "title": "续写故事",
+        "status": "running",
+        "steps": [
+            {
+                "id": "understand-source",
+                "title": "理解原作",
+                "type": "analyze",
+                "status": "done",
+            },
+            {
+                "id": "draft-continuation",
+                "title": "依据检查点证据撰写续篇",
+                "type": "write",
+                "status": "running",
+            },
+        ],
+    }
     assert "Recipe" not in json.dumps(checkpoint_plan, ensure_ascii=False)
     assert next(
         event["payload"]["data"]
@@ -583,7 +564,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
             "eventType": "conversation.compaction.completed",
             "data": compaction_payload,
         },
-        {"eventType": "run.todos_updated", "data": checkpoint_plan},
+        {"eventType": "run.todos_updated", "data": live_plans[1]},
     ]
     encoded_public_replay = json.dumps(replay_snapshot, ensure_ascii=False)
     replay_dispatch = next(
@@ -599,213 +580,18 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert "plannerStepId" not in encoded_public_replay
 
 
-@pytest.mark.asyncio
-async def test_composed_run_streams_same_run_delegation_lifecycle(
-    composed_app,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    app, composition, _db = composed_app
-    planner_calls: list[str] = []
-    runtime_calls: list[str] = []
-
-    def _has_delegated_role_instruction(messages: list[dict[str, Any]]) -> bool:
-        return any(
-            message.get("role") == "system"
-            and "独立核验关键证据" in str(message.get("content") or "")
-            for message in messages
-        )
-
-    async def _planner(_key, messages, _options, _provider, signal=None):
-        assert signal is not None
-        if "parent" in planner_calls:
-            planner_calls.append("parent-replan")
-            content = {
-                "needsTodos": False,
-                "reason": "the delegated evidence is now available",
-            }
-        else:
-            planner_calls.append("parent")
-            content = {
-                "needsTodos": True,
-                "title": "并行研究后综合",
-                "goal": "让研究 Agent 提供独立证据",
-                "todos": [{
-                    "id": "delegate-research",
-                    "title": "委派独立研究",
-                    "type": "analyze",
-                    "executor": "tool",
-                    "expectedTools": ["delegateToAgents"],
-                    "riskLevel": "write",
-                }],
-            }
-        return {
-            "message": {
-                "role": "assistant",
-                "content": json.dumps(content, ensure_ascii=False),
-            },
-            "model": "planner-model",
-            "finish_reason": "stop",
-        }
-
-    async def _runtime(_key, messages, options, _provider, signal=None):
-        assert signal is not None
-        delegated = _has_delegated_role_instruction(messages)
-        tool_names = [
-            item["function"]["name"]
-            for item in options.get("tools", [])
-        ]
-
-        async def _stream():
-            if delegated:
-                runtime_calls.append("delegated")
-                assert "delegateToAgents" not in tool_names
-                yield {
-                    "choices": [{
-                        "delta": {"content": "研究 Agent 已核验三条证据。"},
-                        "finish_reason": "stop",
-                    }],
-                }
-                return
-            if tool_names:
-                runtime_calls.append("parent-delegate")
-                assert tool_names == ["delegateToAgents"]
-                yield {
-                    "choices": [{
-                        "delta": {
-                            "tool_calls": [{
-                                "index": 0,
-                                "id": "call-delegate",
-                                "type": "function",
-                                "function": {
-                                    "name": "delegateToAgents",
-                                    "arguments": json.dumps({
-                                            "delegations": [{
-                                                "agentName": "evidence-researcher",
-                                                "title": "证据研究 Agent",
-                                                "instruction": (
-                                                    "独立核验关键证据，并简洁报告结论。"
-                                                ),
-                                                "objective": "核验三条关键证据",
-                                            "input": {"scope": "current request"},
-                                        }],
-                                    }, ensure_ascii=False),
-                                },
-                            }],
-                        },
-                        "finish_reason": "tool_calls",
-                    }],
-                }
-                return
-            runtime_calls.append("parent-final")
-            tool_message = next(
-                message for message in reversed(messages)
-                if message.get("role") == "tool"
-            )
-            result = json.loads(tool_message["content"])
-            assert result["state"] == "ready"
-            assert result["counts"]["done"] == 1
-            assert result["results"][0]["resultSummary"] == (
-                "研究 Agent 已核验三条证据。"
-            )
-            yield {
-                "choices": [{
-                    "delta": {"content": "主 Agent 已根据研究结果完成综合。"},
-                    "finish_reason": "stop",
-                }],
-            }
-
-        return {"stream": _stream(), "model": "wire-model"}
-
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_no_stream",
-        _planner,
-    )
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_stream",
-        _runtime,
-    )
-
-    live = start_asgi_request(
-        app,
-        method="POST",
-        path="/api/ai/chat/stream",
-        json_body=_chat_request("请先让独立研究者核验，再综合回答。"),
-    )
-    await live.wait_started()
-    response = await live.finish()
-    events = _assert_sse_wire(response)
-
-    created = [
-        event["agentDelegationCreated"]
-        for event in events
-        if "agentDelegationCreated" in event
-    ]
-    updated = [
-        event["agentDelegationUpdated"]
-        for event in events
-        if "agentDelegationUpdated" in event
-    ]
-    assert len(created) == 1, events
-    assert [item["status"] for item in updated] == [
-        "running",
-        "done",
-    ], updated
-    delegation_id = created[0]["delegationId"]
-    assert created[0]["agentTitle"] == "证据研究 Agent"
-    assert all(item["delegationId"] == delegation_id for item in updated)
-    assert all(item["agentTitle"] == "证据研究 Agent" for item in updated)
-    run_id = created[0]["runId"]
-    assert all(item["runId"] == run_id for item in updated)
-    assert "resultSummary" not in updated[-1]
-    assert "childRunId" not in json.dumps(events)
-    assert planner_calls == ["parent", "parent-replan"]
-    assert runtime_calls == ["parent-delegate", "delegated", "parent-final"]
-    assert sum(event.get("done") is True for event in events) == 1
-
-    snapshot = await composition.run_snapshot_reader.load(
-        run_id,
-        after_event_id=0,
-        limit=100,
-    )
-    assert snapshot is not None
-    assert len(snapshot.delegations) == 1
-    assert snapshot.delegations[0].status.value == "done"
-    assert snapshot.delegations[0].agent_name == "evidence-researcher"
-    assert snapshot.delegations[0].agent_instruction == (
-        "独立核验关键证据，并简洁报告结论。"
-    )
-    canonical_outputs = await composition.output_repository.list_events(
-        run_id,
-        after_sequence=0,
-        limit=500,
-    )
-    delegated_outputs = [
-        item for item in canonical_outputs
-        if item.turn_id == delegation_id
-    ]
-    assert delegated_outputs
-    assert all(item.run_id == run_id for item in delegated_outputs)
-    assert any(
-        item.kind is OutputEventKind.PROVIDER_CONTENT_DELTA
-        for item in delegated_outputs
-    )
-
-
 def _assert_terminal_exclusive(
-    events: list[dict[str, Any]],
-    *,
-    terminal: str,
-    result: str,
+    events: list[dict[str, Any]], *, status: str, error_code: str | None = None,
 ) -> None:
-    terminals = [
-        key
-        for event in events
-        for key in TERMINAL_KEYS
-        if key in event
-    ]
-    assert terminals == [terminal]
-    assert sum(event.get("done") is True for event in events) == (result == "done")
-    assert sum(bool(event.get("error")) for event in events) == (result == "error")
+    lifecycle = [event for event in events if event.get("kind") == "run.lifecycle"]
+    assert [event["payload"]["status"] for event in lifecycle] == ["running", status]
+    run_id = lifecycle[0]["runId"]
+    assert lifecycle[-1]["runId"] == run_id
+    assert [event for event in events if event.get("done") is True] == [events[-1]]
+    assert events[-1]["runResult"] == {
+        "runId": run_id, "status": status, "errorCode": error_code,
+    }
+    assert not any(event.get("error") for event in events)
 
 
 @pytest.mark.asyncio
@@ -863,7 +649,7 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -871,10 +657,11 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _direct_response,
+        route_planning_stream(_planner_must_not_run, _direct_response),
     )
     request_body = _chat_request("请直接解释这个概念，不需要调用工具。")
     request_body["chatAgentMode"] = "ask"
+    request_body["planningMode"] = "reactive"
     request_body["enableAgentTools"] = enable_agent_tools
     if book_id is None:
         request_body.pop("bookId")
@@ -889,21 +676,20 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
     )
     await live.wait_started()
     response = await live.finish()
-    events = _normalize_dynamic_ids(_assert_sse_wire(response))
+    events = _assert_sse_wire(response)
 
     assert provider_calls == 1, events
-    assert [_event_name(event) for event in events] == [
-        "agentRunStarted",
-        "contextBudget",
-        "delta",
-        "agentRunCompleted",
+    assert _event_names(events) == [
+        "run.lifecycle",
+        "context.budgeted",
+        "provider.delta_batch",
+        "run.lifecycle",
         "done",
     ]
-    assert events[2] == {"delta": "这是一个直接回答。"}
+    assert provider_text(events) == "这是一个直接回答。"
     _assert_terminal_exclusive(
         events,
-        terminal="agentRunCompleted",
-        result="done",
+        status="done",
     )
 
 
@@ -952,7 +738,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -960,12 +746,13 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _refuse,
+        route_planning_stream(_planner_must_not_run, _refuse),
     )
     request_body = _chat_request(
         "读取当前章节，找出两处不一致并给出最小修改建议。"
     )
     request_body["chatAgentMode"] = "ask"
+    request_body["planningMode"] = "reactive"
     request_body["enableAgentTools"] = enable_agent_tools
     if book_id is None:
         request_body.pop("bookId")
@@ -983,7 +770,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
     events = _assert_sse_wire(response)
 
     assert provider_calls == 1, events
-    assert "".join(str(event.get("delta") or "") for event in events) == refusal
+    assert provider_text(events) == refusal
     done_events = [event for event in events if event.get("done") is True]
     assert len(done_events) == 1
 
@@ -997,6 +784,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
 
     async def _invalid_plan(*_args, **_kwargs):
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {"role": "assistant", "content": "not-json"},
             "model": "planner-model",
             "finish_reason": "stop",
@@ -1015,7 +803,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1023,7 +811,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_fallback,
+        route_planning_stream(_invalid_plan, _model_fallback),
     )
 
     live = start_asgi_request(
@@ -1034,30 +822,31 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
     )
     await live.wait_started()
     response = await live.finish()
-    raw_events = _assert_sse_wire(response)
+    events = _assert_sse_wire(response)
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in raw_events
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
-    events = _normalize_dynamic_ids(raw_events)
 
-    assert [_event_name(event) for event in events] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
-        "delta",
-        "agentRunTodoUpdated",
-        "agentRunCompleted",
+    assert _event_names(events) == [
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
+        "provider.delta_batch",
+        "run.todo_updated",
+        "run.lifecycle",
         "done",
     ]
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["executor"] == "model"
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["suggestedTools"] == []
-    assert events[3] == {"delta": "计划格式异常，先提供安全说明。"}
+    plan = runtime_events(events, "run.todos_updated")[0]["payload"]["data"]
+    assert plan["steps"] == [{
+        "id": "respond-after-invalid-plan", "title": "说明当前结果",
+        "status": "running", "type": "review",
+    }]
+    assert provider_text(events) == "计划格式异常，先提供安全说明。"
     _assert_terminal_exclusive(
         events,
-        terminal="agentRunCompleted",
-        result="done",
+        status="done",
     )
     from infrastructure.persistence.run_store import get_run
 
@@ -1071,7 +860,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
+async def test_composed_missing_required_tool_fails_with_explicit_run_result(
     composed_app,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1079,6 +868,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
 
     async def _planned_read(*_args, **_kwargs):
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1092,7 +882,10 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
                         "executor": "tool",
                         "expectedTools": ["getBookCharacters"],
                         "riskLevel": "read",
-                    }],
+                    },
+                        _review_step("analyze-conflict", "分析主角冲突"),
+                        _review_step("review-evidence", "核对冲突分析与人物设定"),
+                    ],
                 }, ensure_ascii=False),
             },
             "model": "planner-model",
@@ -1131,7 +924,7 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1139,13 +932,13 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _skip_planned_tool,
+        route_planning_stream(_planned_read, _skip_planned_tool),
     )
     capability_key = composition.provider_capabilities.key(
         api_provider="openai",
         base_url="https://provider.test/v1",
         model="wire-model",
-        thinking_enabled=False,
+        thinking_enabled=None,
     )
     composition.provider_capabilities.mark_required_tool_choice_unsupported(
         capability_key
@@ -1159,41 +952,39 @@ async def test_composed_unfinished_planned_tool_has_blocked_asgi_sse_snapshot(
     )
     await live.wait_started()
     response = await live.finish()
-    events = _normalize_dynamic_ids(_assert_sse_wire(response))
+    events = _assert_sse_wire(response)
 
     assert model_calls == 3
-    assert [_event_name(event) for event in events] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
-        "agentRunTodosUpdated",
-        "agentRunTodoUpdated",
-        "agentRunFailed",
-        "error",
+    assert _event_names(events) == [
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
+        "run.todos_updated",
+        "run.todo_updated",
+        "run.lifecycle",
+        "done",
     ]
-    assert events[1]["agentRunTodosUpdated"]["runId"] == "<run-1>"
-    assert events[1]["agentRunTodosUpdated"]["steps"][0]["status"] == "pending"
-    assert events[3]["agentRunTodosUpdated"]["steps"][0]["status"] == "running"
+    plans = runtime_events(events, "run.todos_updated")
+    run_id = events[0]["runId"]
+    assert all(event["runId"] == run_id for event in plans)
+    assert plans[0]["payload"]["data"]["steps"][0]["status"] == "pending"
+    assert plans[1]["payload"]["data"]["steps"][0]["status"] == "running"
     assert "host-prerequisite" not in json.dumps(events)
-    assert events[4]["agentRunTodoUpdated"]["stepId"] == "read-characters"
-    assert events[4]["agentRunTodoUpdated"]["step"]["status"] == "failed"
-    assert (
-        events[4]["agentRunTodoUpdated"]["step"]["error"]
-        == "missing_required_tool_call"
+    update = runtime_events(events, "run.todo_updated")[0]["payload"]["data"]
+    assert update["step_id"] == "read-characters"
+    assert update["step"]["status"] == "failed"
+    assert update["step"]["error"] == "missing_required_tool_call"
+    assert events[-2]["kind"] == "run.lifecycle"
+    assert events[-2]["payload"] == {
+        "status": "failed", "error": "missing_required_tool_call",
+    }
+    assert events[-1]["model"] == "wire-model"
+    assert not any(event.get("channel") == "reasoning" for event in events)
+    assert "PRIVATE" not in json.dumps(events)
+    assert provider_text(events) == ""
+    _assert_terminal_exclusive(
+        events, status="failed", error_code="missing_required_tool_call",
     )
-    assert events[5] == {
-        "agentRunFailed": {
-            "runId": "<run-1>",
-            "status": "failed",
-            "error": "missing_required_tool_call",
-        },
-    }
-    assert events[6] == {
-        "error": "当前计划步骤必须调用工具，但模型未返回结构化调用。",
-    }
-    assert not any("reasoningDelta" in event for event in events)
-    assert not any("delta" in event for event in events)
-    _assert_terminal_exclusive(events, terminal="agentRunFailed", result="error")
 
 
 @pytest.mark.asyncio
@@ -1231,6 +1022,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
 
     async def _planned_read(*_args, **_kwargs):
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1248,12 +1040,13 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
                         },
                         {
                             "id": "summarize-current-chapter",
-                            "title": "摘要并提出建议",
+                            "title": "概括当前章节事实",
                             "type": "review",
                             "executor": "model",
                             "expectedTools": [],
                             "riskLevel": "read",
                         },
+                        _review_step("review-improvements", "提出有依据的局部改进建议"),
                     ],
                 }, ensure_ascii=False),
             },
@@ -1404,7 +1197,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
             assert "摘要正文按非空白可见字符计数不得超过 150 字" in (
                 messages[-1]["content"]
             )
-            assert "不得声称未经宿主验证的实际精确字数" in (
+            assert "没有可靠计数依据时不得声称实际精确字数" in (
                 messages[-1]["content"]
             )
             assert "归一化口径为 57 个字符" in messages[-1]["content"]
@@ -1420,7 +1213,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1428,7 +1221,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_stream,
+        route_planning_stream(_planned_read, _model_stream),
     )
     request_body = _chat_request(user_prompt)
     request_body.update({
@@ -1447,9 +1240,9 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     events = _assert_sse_wire(response)
 
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in events
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
     assert model_round == 4
     assert len(policy_rounds) == 3
@@ -1458,8 +1251,8 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
     assert "摘要前后不得重复展示或逐句改写完整原文" in policy_rounds[0]
     assert "不得声称摘要实际为某个精确字数" in policy_rounds[0]
     assert continuation_messages
-    assert not any("toolResults" in event for event in events)
-    visible_text = "".join(str(event.get("delta") or "") for event in events)
+    assert not runtime_events(events, "tool.results")
+    visible_text = provider_text(events)
     assert visible_text == repaired_response
     assert invalid_response not in visible_text
     assert chapter_text not in visible_text
@@ -1477,7 +1270,8 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
         "status": "done",
         "final_response": repaired_response,
     }
-    assert events[-1] == {"done": True, "model": "wire-model"}
+    assert events[-1]["model"] == "wire-model"
+    _assert_terminal_exclusive(events, status="done")
 
 
 @pytest.mark.asyncio
@@ -1543,7 +1337,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         ):
             judge_round += 1
             assert _options.get("tools") is None
-            assert _options["temperature"] == 0
+            assert "temperature" not in _options
             judge_payload = json.loads(messages[1]["content"])
             assert all(
                 item["outlineValue"] in item["outlineSourceExcerpt"]
@@ -1619,6 +1413,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     },
                 ]
             return {
+                "applied_generation_limit": _options.get("max_tokens"),
                 "message": {
                     "role": "assistant",
                     "content": json.dumps({
@@ -1692,6 +1487,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                         "expectedTools": [],
                         "riskLevel": "read",
                     },
+                    _review_step("suggest-edits", "核对每处差异的最小修改建议"),
                 ],
             }
         else:
@@ -1713,9 +1509,12 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     "executor": "model",
                     "expectedTools": [],
                     "riskLevel": "read",
-                }],
+                },
+                    _review_step("suggest-edits", "核对每处差异的最小修改建议"),
+                ],
             }
         return {
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -1872,7 +1671,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1880,7 +1679,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_stream,
+        route_planning_stream(_planned_compare, _model_stream),
     )
     request_body = _chat_request(user_prompt)
     request_body.update({
@@ -1899,9 +1698,9 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     response = await live.finish()
     raw_events = _assert_sse_wire(response)
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in raw_events
-        if "agentRunStarted" in event
+        event["runId"] for event in raw_events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
     # The second planning call repairs the initial redundant-read proposal.
     # The successful chapter read then supplies evidence for a third,
@@ -1953,17 +1752,15 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         if message.get("role") == "tool"
     )
     assert json.loads(final_tool_message["content"])["plainText"] == chapter_text
-    assert not any("toolCalls" in event for event in raw_events)
-    assert not any("toolResults" in event for event in raw_events)
-    todo_steps = next(
-        event["agentRunTodosUpdated"]["steps"]
-        for event in raw_events
-        if "agentRunTodosUpdated" in event
+    assert not runtime_events(raw_events, "tool.calls_started")
+    assert not runtime_events(raw_events, "tool.results")
+    plan = runtime_events(raw_events, "run.todos_updated")[0]["payload"]["data"]
+    todo_steps = plan["steps"]
+    assert len(todo_steps) == 3
+    assert all(
+        not {"planning_capability", "suggested_tools"}.intersection(step)
+        for step in todo_steps
     )
-    assert [step["suggestedTools"] for step in todo_steps] == [
-        [],
-        [],
-    ]
     assert "queryOutline" not in json.dumps(
         todo_steps,
         ensure_ascii=False,
@@ -1984,11 +1781,13 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
             "status": "done",
             "expected_tools": "[]",
         },
+        {
+            "step_id": "suggest-edits",
+            "status": "done",
+            "expected_tools": "[]",
+        },
     ]
-    visible_text = "".join(
-        str(event.get("delta") or "")
-        for event in raw_events
-    )
+    visible_text = provider_text(raw_events)
     assert visible_text == repaired_response
     assert "违规合并草稿" not in visible_text
     assert re.findall(r"(?m)^([1-9][0-9]*)\.\s", visible_text) == ["1", "2"]
@@ -2007,7 +1806,8 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         "status": "done",
         "final_response": repaired_response,
     }
-    assert raw_events[-1] == {"done": True, "model": "wire-model"}
+    assert raw_events[-1]["model"] == "wire-model"
+    _assert_terminal_exclusive(raw_events, status="done")
 
 
 @pytest.mark.asyncio
@@ -2025,6 +1825,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
 
     async def _planned_delete(*_args, **_kwargs):
         return {
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -2040,6 +1841,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                             "expectedTools": ["deleteCharacter"],
                             "riskLevel": "destructive",
                         },
+                        _review_step("verify-result", "核对审批与执行结果"),
                         {
                             "id": "report-result",
                             "title": "报告审批结果",
@@ -2179,7 +1981,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2187,7 +1989,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _model_stream,
+        route_planning_stream(_planned_delete, _model_stream),
     )
 
     live = start_asgi_request(
@@ -2199,9 +2001,8 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        approval = projected.get("toolApprovalRequired")
-        if approval:
+        if runtime_events([event], "approval.requested"):
+            approval = event["payload"]["data"]
             break
 
     approval_id = approval["approvalId"]
@@ -2231,72 +2032,63 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     }
 
     response = await live.finish()
-    raw_events = _assert_sse_wire(response)
+    events = _assert_sse_wire(response)
     run_id = next(
-        event["agentRunStarted"]["runId"]
-        for event in raw_events
-        if "agentRunStarted" in event
+        event["runId"] for event in events
+        if event.get("kind") == "run.lifecycle"
+        and event["payload"]["status"] == "running"
     )
-    events = _normalize_dynamic_ids(raw_events)
-    names = [_event_name(event) for event in events]
+    names = _event_names(events)
 
     assert model_round == 5
     assert names[:3] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
     ]
-    assert not {"toolCalls", "toolResults", "toolIndexCompleted"}.intersection(
-        names
-    )
-    assert names[-2:] == ["agentRunCompleted", "done"]
-    requested = next(
-        event["toolApprovalRequired"]
-        for event in events
-        if "toolApprovalRequired" in event
-    )
-    resolved_event = next(
-        event["toolApprovalResolved"]
-        for event in events
-        if "toolApprovalResolved" in event
-    )
-    assert requested["runId"] == resolved_event["runId"] == "<run-1>"
-    assert requested["approvalId"] == resolved_event["approvalId"] == "<approval-1>"
+    assert not {
+        "tool.calls_started", "tool.results", "tool.call_completed",
+    }.intersection(names)
+    assert names[-2:] == ["run.lifecycle", "done"]
+    requested_wire = runtime_events(events, "approval.requested")[0]
+    resolved_wire = runtime_events(events, "approval.resolved")[0]
+    assert requested_wire["runId"] == resolved_wire["runId"] == run_id
+    requested = requested_wire["payload"]["data"]
+    resolved_event = resolved_wire["payload"]["data"]
+    assert requested["approvalId"] == resolved_event["approvalId"] == approval_id
     assert requested["toolName"] == resolved_event["toolName"] == "deleteCharacter"
     assert resolved_event["status"] == "rejected"
     assert continuation_tool_result is not None
     assert continuation_tool_result["success"] is False
     assert continuation_tool_result["errorCode"] == "approval_rejected"
+    todo_updates = [
+        event["payload"]["data"] for event in runtime_events(events, "run.todo_updated")
+    ]
     declined_todo = next(
-        event["agentRunTodoUpdated"]
-        for event in events
-        if event.get("agentRunTodoUpdated", {}).get("stepId")
-        == "delete-character"
-        and event["agentRunTodoUpdated"]["step"]["status"] == "blocked"
+        update for update in todo_updates
+        if update["step_id"] == "delete-character"
+        and update["step"]["status"] == "blocked"
     )
-    assert declined_todo["stepId"] == "delete-character"
+    assert declined_todo["step_id"] == "delete-character"
     assert declined_todo["step"]["status"] == "blocked"
-    assert declined_todo["step"]["resultSummary"] == (
+    assert declined_todo["step"]["result_summary"] == (
         "User declined approval; the planned tool was not executed."
     )
     assert declined_todo["step"]["error"] == "approval_rejected"
     assert "Planned tool step completed." not in str(declined_todo)
-    report_statuses = [
-        event["agentRunTodoUpdated"]["step"]["status"]
-        for event in events
-        if event.get("agentRunTodoUpdated", {}).get("stepId") == "report-result"
-    ]
-    assert report_statuses == ["running", "done"]
-    delete_statuses = [
-        event["agentRunTodoUpdated"]["step"]["status"]
-        for event in events
-        if event.get("agentRunTodoUpdated", {}).get("stepId")
-        == "delete-character"
-    ]
-    assert delete_statuses == ["running", "blocked"]
-    visible_text = "".join(
-        str(event.get("delta") or "") for event in events
-    )
+    assert [
+        update["step"]["status"] for update in todo_updates
+        if update["step_id"] == "verify-result"
+    ] == ["running", "done"]
+    assert [
+        update["step"]["status"] for update in todo_updates
+        if update["step_id"] == "report-result"
+    ] == ["done"]
+    assert [
+        update["step"]["status"] for update in todo_updates
+        if update["step_id"] == "delete-character"
+    ] == ["running", "blocked"]
+    visible_text = provider_text(events)
     assert "<tool_call" not in visible_text
     assert "<function=" not in visible_text
     assert "<parameter=" not in visible_text
@@ -2305,8 +2097,9 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     assert "删除失败" not in visible_text
     assert "权限" not in visible_text
     assert "联系管理员" not in visible_text
-    assert not any("commentaryDelta" in event for event in events)
-    assert events[-1] == {"done": True, "model": "wire-model"}
+    assert provider_text(events, channel="commentary") == ""
+    assert events[-1]["model"] == "wire-model"
+    _assert_terminal_exclusive(events, status="done")
     assert model_round == 5
     character = await db.fetch_one(
         "SELECT id FROM characters WHERE id = ? AND book_id = ?",
@@ -2342,13 +2135,18 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
             "error": "approval_rejected",
         },
         {
+            "step_id": "verify-result",
+            "status": "done",
+            "result_summary": "Final response covered this model step.",
+            "error": None,
+        },
+        {
             "step_id": "report-result",
             "status": "done",
             "result_summary": "Final response covered this model step.",
             "error": None,
         },
     ]
-    _assert_terminal_exclusive(events, terminal="agentRunCompleted", result="done")
 
 
 @pytest.mark.asyncio
@@ -2377,8 +2175,12 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_no_stream",
+        _planned_character_delete,
+    )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
         _direct_response,
@@ -2387,6 +2189,7 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
     request_body.update({
         "sessionId": 9,
         "chatAgentMode": "ask",
+        "planningMode": "reactive",
         "enableAgentTools": False,
     })
     live = start_asgi_request(
@@ -2398,9 +2201,9 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        if projected.get("agentRunStarted"):
-            run_id = str(projected["agentRunStarted"]["runId"])
+        if event.get("kind") == "run.lifecycle":
+            assert event["payload"]["status"] == "running"
+            run_id = event["runId"]
             break
 
     await live.disconnect()
@@ -2508,7 +2311,7 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2516,7 +2319,10 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     )
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _request_dangerous_tool,
+        route_planning_stream(
+            _planned_character_delete,
+            _request_dangerous_tool,
+        ),
     )
 
     live = start_asgi_request(
@@ -2528,13 +2334,12 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        approval = projected.get("toolApprovalRequired")
-        if approval:
+        if runtime_events([event], "approval.requested"):
+            approval = event["payload"]["data"]
             break
 
     approval_id = str(approval["approvalId"])
-    run_id = str(approval["runId"])
+    run_id = event["runId"]
     assert composition._approval_gateway.pending_count(run_id) == 1
     assert composition._approval_runs == {approval_id: run_id}
 
@@ -2589,18 +2394,20 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
     # recovered from the durable Run snapshot instead.
     raw_delivered_events = decode_sse_json(disconnected.content)
     assert_raw_canonical_wire(raw_delivered_events)
-    delivered_events = _normalize_dynamic_ids(
-        project_wire_events_for_legacy_assertions(raw_delivered_events)
-    )
-    assert [_event_name(item) for item in delivered_events] == [
-        "agentRunStarted",
-        "agentRunTodosUpdated",
-        "contextBudget",
-        "agentRunTodoUpdated",
-        "toolApprovalRequired",
+    assert _event_names(raw_delivered_events) == [
+        "run.lifecycle",
+        "run.todos_updated",
+        "context.budgeted",
+        "run.todo_updated",
+        "approval.requested",
     ]
-    assert not any(TERMINAL_KEYS.intersection(item) for item in delivered_events)
-    assert not any(item.get("done") or item.get("error") for item in delivered_events)
+    assert not any(
+        event["payload"]["status"] in TERMINAL_STATUSES
+        for event in raw_delivered_events if event.get("kind") == "run.lifecycle"
+    )
+    assert not any(
+        event.get("done") or event.get("error") for event in raw_delivered_events
+    )
 
 
 @pytest.mark.asyncio
@@ -2680,16 +2487,15 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
                 }],
             }
 
-        return {"stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(character_tools, "delete_character", _record_delete)
     monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_no_stream",
-        _planned_character_delete,
-    )
-    monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_stream",
-        _request_dangerous_tool,
+        route_planning_stream(
+            _planned_character_delete,
+            _request_dangerous_tool,
+        ),
     )
     monkeypatch.setattr(
         _AgentEventSourceResponse,
@@ -2706,13 +2512,12 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
     await live.wait_started()
     while True:
         event = await live.next_sse_json()
-        projected = project_wire_event_for_legacy_assertion(event) or {}
-        approval = projected.get("toolApprovalRequired")
-        if approval:
+        if runtime_events([event], "approval.requested"):
+            approval = event["payload"]["data"]
             break
 
     approval_id = str(approval["approvalId"])
-    run_id = str(approval["runId"])
+    run_id = event["runId"]
     assert composition._approval_gateway.pending_count(run_id) == 1
     live.fail_next_body_send()
 

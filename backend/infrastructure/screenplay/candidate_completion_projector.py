@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from purra.contracts import RunStatus
 from purra.errors import RunCommitProjectionError
 from purra.ports import RunCommit
+from purra.structured_output import parse_json_object
 
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE,
@@ -16,6 +17,9 @@ from domains.screenplay_agent.candidate_projection import (
 )
 from infrastructure.screenplay.tools.candidate_artifact import (
     ScreenplayCandidateArtifacts,
+)
+from infrastructure.screenplay.tools.read_evidence import (
+    consumed_task_part_keys,
 )
 
 
@@ -84,6 +88,23 @@ class ScreenplayCandidateCompletionProjector:
             ):
                 raise ValueError("candidate projection contract is invalid")
             await self._validate_started_event(run_id, turn_id)
+            await self._validate_dependency_read(run_id, scope)
+            if str(scope.get("toolAccess") or "") == "draft_scene":
+                episode_number = scope.get("boundEpisodeNumber")
+                has_scene_context = await self._has_successful_tool_read(
+                    run_id,
+                    "getScreenplaySceneContext",
+                    episode_number=episode_number,
+                )
+                has_legacy_episode_context = (
+                    await self._has_successful_tool_read(
+                        run_id,
+                        "getScreenplayEpisodeContext",
+                        episode_number=episode_number,
+                    )
+                )
+                if not (has_scene_context or has_legacy_episode_context):
+                    raise ValueError("draft scene context was not read")
             host_capture = projection.get("hostCapture")
             if isinstance(host_capture, Mapping):
                 candidate = _host_candidate(
@@ -132,6 +153,56 @@ class ScreenplayCandidateCompletionProjector:
         ):
             raise ValueError("candidate projection turn identity is invalid")
 
+    async def _validate_dependency_read(
+        self,
+        run_id: str,
+        scope: Mapping[str, object],
+    ) -> None:
+        dependency_part_keys = scope.get("dependencyPartKeys", [])
+        if (
+            not isinstance(dependency_part_keys, list)
+            or any(
+                not isinstance(value, str) or not value.strip()
+                for value in dependency_part_keys
+            )
+            or len(dependency_part_keys) != len(set(dependency_part_keys))
+        ):
+            raise ValueError("candidate dependency scope is invalid")
+        if not dependency_part_keys:
+            return
+        if not set(dependency_part_keys).issubset(
+            await consumed_task_part_keys(self._db, run_id)
+        ):
+            raise ValueError("candidate dependencies were not read")
+
+    async def _has_successful_tool_read(
+        self,
+        run_id: str,
+        tool_name: str,
+        *,
+        episode_number: int | None = None,
+    ) -> bool:
+        row = await self._db.fetch_one(
+            "SELECT 1 AS present FROM ai_agent_run_events AS started "
+            "JOIN ai_agent_run_events AS finished "
+            "ON finished.run_id = started.run_id "
+            "AND finished.event_type = 'operation.finished' "
+            "AND json_extract(finished.payload_json, '$.operationId') = "
+            "json_extract(started.payload_json, '$.operationId') "
+            "WHERE started.run_id = ? "
+            "AND started.event_type = 'operation.started' "
+            "AND json_extract(started.payload_json, '$.kind') = 'tool' "
+            "AND json_extract("
+            "started.payload_json, '$.display.labelParams.toolName'"
+            ") = ? "
+            "AND (? IS NULL OR json_extract(started.payload_json, "
+            "'$.display.labelParams.episodeNumber') = ?) "
+            "AND json_extract(finished.payload_json, '$.status') = 'succeeded' "
+            "LIMIT 1",
+            [run_id, tool_name, episode_number, episode_number],
+        )
+        return row is not None
+
 
 def _json_mapping(value: object) -> dict[str, object]:
     if isinstance(value, Mapping):
@@ -147,6 +218,8 @@ def _host_candidate(
     capture: Mapping[str, object],
     validated_result: str | None,
 ) -> dict[str, object]:
+    if capture.get("format") == "json":
+        return dict(parse_json_object(str(validated_result or "")))
     template = capture.get("candidateTemplate")
     if not isinstance(template, Mapping):
         raise ValueError("host candidate template is missing")

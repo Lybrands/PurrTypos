@@ -4,6 +4,7 @@ import {
   ArrowLeftIcon,
   DashboardIcon,
   HomeIcon,
+  StoryMemoryIcon,
   StorySettingIcon,
 } from '@/purr-components'
 import { PurrButton, PurrSpin, PurrTooltip } from '@/purr-components'
@@ -28,6 +29,7 @@ import NotebookToolbar from './DirectorNotebook/NotebookToolbar'
 import type { OpenSettingPanelDetail } from './SettingPanel'
 import {
   DASHBOARD_TAB,
+  CANON_TAB,
   EDITOR_TAB_KEY,
   SETTING_TAB,
   type WorkspaceUtilityTab,
@@ -55,18 +57,19 @@ interface WorkspaceProps {
   bookId?: EntityId | null
   bookTitle?: string
   enableVolume?: boolean
+  creationMode?: 'original' | 'continuation'
   onBack?: () => void
   onGoHome?: () => void
   onOpenSettings: () => void
   modelConfigs?: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   syncOutlineChapter?: boolean
   onReady?: () => void
 }
 
 type WorkspaceFullscreenPanel = 'right' | null
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false, onReady }: WorkspaceProps) {
+export default function Workspace({ bookId, bookTitle, enableVolume = false, creationMode = 'original', onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false, onReady }: WorkspaceProps) {
   const {
     panelState,
     updateFloating,
@@ -236,9 +239,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
 
   /**
    * 删除写作章节后清理对应的 chapter / volume 大纲记录。
-   *
-   * 注意：后端 delete_chapter 不会级联删除 outline；旧实现误用 getOutlineByWritingChapter
-   * 导致每次删章节都会把整个写作大纲删掉。这里改为按章节维度精确清理。
+   * 后端不会级联删除大纲，因此按 writing_chapter_id 匹配并清理。
    */
   const handleWritingChapterDeleted = React.useCallback(async (writingChapterId: EntityId) => {
     if (bookId == null) return
@@ -316,6 +317,15 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
    * 顶栏工具统一在右侧「正文 / 功能」组合面板中打开对应标签。
    */
   const headerPanelToggles = React.useMemo<HeaderPanelToggle[]>(() => [
+    ...(creationMode === 'continuation' ? [{
+      key: 'canon',
+      icon: <StoryMemoryIcon style={{ fontSize: 16 }} />,
+      tooltip: panelState.right.open && activeUtilityTabKey === CANON_TAB.key
+        ? '返回正文'
+        : '继承正史',
+      active: panelState.right.open && activeUtilityTabKey === CANON_TAB.key,
+      onClick: () => toggleUtilityTab(CANON_TAB),
+    }] : []),
     {
       key: 'setting',
       icon: <StorySettingIcon style={{ fontSize: 16 }} />,
@@ -334,7 +344,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, onB
       active: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key,
       onClick: () => toggleUtilityTab(DASHBOARD_TAB),
     },
-  ], [activeUtilityTabKey, panelState.right.open, toggleUtilityTab])
+  ], [activeUtilityTabKey, creationMode, panelState.right.open, toggleUtilityTab])
 
   const paletteCommands = React.useMemo<CommandItem[]>(
     () =>

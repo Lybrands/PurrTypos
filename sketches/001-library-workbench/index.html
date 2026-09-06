@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PurrTypos 创作资源 · 工作台方案</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #f4f1ed; --surface: #fffefa; --surface-2: #f9f6f2; --ink: #292421;
+      --muted: #837a74; --line: #ded7d1; --accent: #c94361; --accent-soft: #fbecef;
+      --shadow: 0 16px 48px rgba(55, 39, 31, .09);
+    }
+    body { margin: 0; height: 100vh; overflow: hidden; color: var(--ink); background: var(--bg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, textarea, select { font: inherit; }
+    button { color: inherit; cursor: pointer; }
+    .appbar { position: relative; display: flex; height: 52px; padding: 0 20px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .crumbs, .app-actions { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; }
+    .app-actions { justify-content: flex-end; }
+    .crumb { padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; }
+    .crumb:hover { background: rgba(255,255,255,.7); }
+    .crumb.muted { color: var(--muted); }
+    .slash { color: #b9afa8; }
+    .logo { position: absolute; left: 50%; font: 800 20px/1 Georgia, serif; letter-spacing: -2px; transform: translateX(-50%); }
+    .icon { display: grid; width: 32px; height: 32px; padding: 0; place-items: center; border: 0; border-radius: 9px; background: transparent; }
+    .icon:hover { background: var(--surface); }
+    .page { display: flex; height: calc(100vh - 52px); padding: 28px 5vw 24px; flex-direction: column; overflow: hidden; }
+    .titlebar { display: flex; width: 100%; max-width: 1180px; margin: 0 auto 18px; align-items: flex-end; justify-content: space-between; gap: 20px; flex-shrink: 0; }
+    .eyebrow { color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .18em; }
+    h1 { margin: 2px 0 4px; font-size: 30px; letter-spacing: -.04em; }
+    .subtitle { margin: 0; color: var(--muted); }
+    .actions { display: flex; gap: 9px; }
+    .btn { min-height: 38px; padding: 0 15px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 2px 7px rgba(55,39,31,.05); }
+    .btn:hover { border-color: #c8bbb3; transform: translateY(-1px); }
+    .btn.primary { color: #fff; border-color: var(--accent); background: var(--accent); box-shadow: 0 8px 18px rgba(201,67,97,.2); }
+    .library-switch { display: flex; width: 100%; max-width: 1180px; margin: 0 auto 14px; gap: 18px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+    .library-switch button { padding: 9px 4px 10px; color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; }
+    .library-switch button.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .workspace { display: grid; width: 100%; min-height: 0; max-width: 1180px; margin: 0 auto; overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); flex: 1; grid-template-columns: 260px minmax(0, 1fr); }
+    .rail { min-height: 0; padding: 12px; overflow: auto; border-right: 1px solid var(--line); background: var(--surface-2); }
+    .rail-head { display: flex; padding: 4px 8px 10px; color: var(--muted); font-size: 12px; justify-content: space-between; }
+    .row { display: block; width: 100%; padding: 12px; text-align: left; border: 1px solid transparent; border-radius: 11px; background: transparent; }
+    .row + .row { margin-top: 4px; }
+    .row:hover { background: #fff; }
+    .row.active { border-color: #eac4ce; background: var(--accent-soft); }
+    .row strong, .row small { display: block; }
+    .row small { margin-top: 4px; color: var(--muted); }
+    .dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #5ea976; }
+    .editor { min-width: 0; min-height: 0; padding: 22px 24px; overflow: auto; }
+    .editor-head { display: flex; margin-bottom: 16px; align-items: center; justify-content: space-between; gap: 12px; }
+    .editor-title { display: flex; min-width: 0; align-items: center; gap: 10px; }
+    .editor-title input { width: min(430px, 60vw); padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font-size: 19px; font-weight: 650; }
+    .badge { padding: 4px 8px; color: var(--muted); border-radius: 999px; background: #f1ece7; font-size: 11px; white-space: nowrap; }
+    .field { display: grid; margin-bottom: 12px; gap: 6px; }
+    .field span { color: var(--muted); font-size: 12px; }
+    .field input, .field textarea, .field select { width: 100%; padding: 10px 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+    .field textarea { min-height: 185px; resize: vertical; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .editor-footer { display: flex; padding-top: 14px; border-top: 1px solid var(--line); align-items: center; justify-content: space-between; }
+    .save-state { color: var(--muted); font-size: 12px; }
+    .source-workspace { grid-template-columns: 310px minmax(0, 1fr); }
+    .source-detail h2 { margin: 0 0 4px; font-size: 22px; }
+    .source-meta { display: flex; margin: 12px 0 18px; flex-wrap: wrap; gap: 8px; }
+    .meta-chip { padding: 6px 9px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); font-size: 12px; }
+    .boundary { display: flex; padding: 13px 14px; margin-bottom: 16px; align-items: flex-start; gap: 10px; border: 1px solid #ead7b4; border-radius: 11px; background: #fff9ec; }
+    .boundary strong { display: block; margin-bottom: 2px; }
+    .boundary p { margin: 0; color: #756a59; font-size: 12px; }
+    .analysis-card { display: grid; padding: 16px; border: 1px solid var(--line); border-radius: 12px; grid-template-columns: 1fr auto; gap: 12px; }
+    .analysis-card h3 { margin: 0 0 4px; }
+    .analysis-card p { margin: 0; color: var(--muted); }
+    .progress { height: 6px; margin-top: 12px; overflow: hidden; border-radius: 99px; background: #ece7e2; }
+    .progress span { display: block; width: 68%; height: 100%; background: var(--accent); }
+    .hidden { display: none !important; }
+    .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; padding: 24px; place-items: center; background: rgba(35,28,25,.42); backdrop-filter: blur(5px); }
+    .modal { width: min(520px, 100%); overflow: hidden; border: 1px solid rgba(255,255,255,.5); border-radius: 18px; background: var(--surface); box-shadow: 0 24px 90px rgba(35,28,25,.28); }
+    .modal-head { display: flex; padding: 19px 22px 14px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .modal-head h2 { margin: 0; font-size: 20px; }
+    .modal-body { padding: 20px 22px; }
+    .mode-grid { display: grid; margin-bottom: 17px; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mode { padding: 14px; text-align: left; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+    .mode.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px rgba(201,67,97,.08); }
+    .mode strong, .mode small { display: block; }
+    .mode small { margin-top: 4px; color: var(--muted); }
+    .modal-foot { display: flex; padding: 14px 22px 20px; justify-content: flex-end; gap: 9px; }
+    @media (max-width: 760px) {
+      .page { padding: 20px; }
+      .crumb.muted, .slash, .logo { display: none; }
+      .titlebar { align-items: flex-start; flex-direction: column; }
+      .workspace, .source-workspace { grid-template-columns: 1fr; }
+      .rail { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <header class="appbar">
+    <nav class="crumbs" aria-label="页面位置">
+      <button class="crumb" onclick="toast('返回首页')">⌂ 首页</button><span class="slash">/</span>
+      <button class="crumb muted" onclick="toast('返回我的书架')">我的书架</button><span class="slash">/</span>
+      <span id="currentCrumb" class="crumb">写作方法库</span>
+    </nav>
+    <div class="logo">PurrTypos</div>
+    <div class="app-actions"><button class="icon" aria-label="切换主题">☾</button></div>
+  </header>
+
+  <main class="page">
+    <div class="titlebar">
+      <div><span id="eyebrow" class="eyebrow">WRITING METHODS</span><h1 id="pageTitle">写作方法库</h1><p id="pageSubtitle" class="subtitle">把方法写成可发布、可组合、可追溯的创作资产。</p></div>
+      <div class="actions">
+        <button id="secondaryAction" class="btn" onclick="openModal('guided')">引导创建</button>
+        <button id="primaryAction" class="btn primary" onclick="openModal('blank')">＋ 新建方法</button>
+      </div>
+    </div>
+    <nav class="library-switch" aria-label="创作资源">
+      <button id="methodSwitch" class="active" onclick="showPage('methods')">写作方法</button>
+      <button onclick="toast('切换到写作方案')">写作方案</button>
+      <button id="sourceSwitch" onclick="showPage('sources')">小说来源</button>
+    </nav>
+
+    <section id="methodPage" class="workspace">
+      <aside class="rail"><div class="rail-head"><span>全部方法</span><span>4</span></div>
+        <button class="row active"><strong>场景张力</strong><small>内置 · 已发布 v1</small></button>
+        <button class="row"><strong>克制的第一人称</strong><small><span class="dot"></span>草稿已保存</small></button>
+        <button class="row"><strong>信息差悬念</strong><small>我的 · 已发布 v2</small></button>
+        <button class="row"><strong>清晰叙事</strong><small>内置 · 已发布 v1</small></button>
+      </aside>
+      <article class="editor">
+        <div class="editor-head"><div class="editor-title"><input value="场景张力" aria-label="方法名称" /><span class="badge">内置 · 只读</span></div><button class="btn">复制为我的方法</button></div>
+        <label class="field"><span>方法说明</span><input value="通过目标、阻力和变化组织局部场景。" /></label>
+        <label class="field"><span>方法正文 · Markdown</span><textarea># 场景张力
+
+明确场景中的即时目标与阻力，让场景结束时至少有一项关系、信息或行动条件发生变化。
+
+## 使用方式
+- 确认人物此刻想得到什么
+- 设置可见阻力与隐性代价</textarea></label>
+        <div class="editor-footer"><span class="save-state">已发布版本不会被草稿覆盖</span><div class="actions"><button class="btn">版本记录</button><button class="btn primary">主动发布</button></div></div>
+      </article>
+    </section>
+
+    <section id="sourcePage" class="workspace source-workspace hidden">
+      <aside class="rail"><div class="rail-head"><span>只读来源</span><span>3</span></div>
+        <button class="row active"><strong>雾港来信</strong><small>TXT · 18 章 · v1</small></button>
+        <button class="row"><strong>长夜以北</strong><small>原创作品冻结 · 42 章</small></button>
+        <button class="row"><strong>无声剧场</strong><small>Markdown · 12 章 · v2</small></button>
+      </aside>
+      <article class="editor source-detail">
+        <div class="editor-head"><div><h2>雾港来信</h2><span class="subtitle">来源正文只读 · 最近冻结于 2026-08-26</span></div><button class="btn">查看原文</button></div>
+        <div class="source-meta"><span class="meta-chip">v1 不可变版本</span><span class="meta-chip">18 章</span><span class="meta-chip">126,840 字</span><span class="meta-chip">TXT</span></div>
+        <div class="boundary"><span>ⓘ</span><div><strong>模型数据边界</strong><p>只有你确认启动分析后，系统才会按章节和任务预算向所选模型发送必要片段，不会发送整部作品。</p></div></div>
+        <div class="analysis-card"><div><h3>证据化来源分析</h3><p>GLM-5.3-Flash · 已完成 12 / 18 章 · 可暂停和恢复</p><div class="progress"><span></span></div></div><div class="actions"><button class="btn">查看进度</button><button class="btn primary">继续分析</button></div></div>
+      </article>
+    </section>
+  </main>
+
+  <div id="modal" class="modal-backdrop hidden" onclick="if(event.target===this) closeModal()">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head"><h2 id="modalTitle">新建写作方法</h2><button class="icon" onclick="closeModal()" aria-label="关闭">×</button></div>
+      <div class="modal-body">
+        <div class="mode-grid"><button id="guidedMode" class="mode" onclick="chooseMode('guided')"><strong>引导创建</strong><small>从目标、使用方式和避免事项开始</small></button><button id="blankMode" class="mode" onclick="chooseMode('blank')"><strong>空白创建</strong><small>直接进入自由 Markdown 草稿</small></button></div>
+        <label class="field"><span>方法名称</span><input id="methodName" placeholder="例如：克制的第一人称" /></label>
+        <label class="field"><span>方法类型</span><select><option>专项技法</option><option>主风格</option></select></label>
+      </div>
+      <div class="modal-foot"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="createDraft()">创建草稿</button></div>
+    </section>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    function showPage(page) {
+      const source = page === 'sources';
+      $('methodPage').classList.toggle('hidden', source); $('sourcePage').classList.toggle('hidden', !source);
+      $('methodSwitch').classList.toggle('active', !source); $('sourceSwitch').classList.toggle('active', source);
+      $('pageTitle').textContent = source ? '小说来源库' : '写作方法库'; $('currentCrumb').textContent = $('pageTitle').textContent;
+      $('eyebrow').textContent = source ? 'SOURCE LIBRARY' : 'WRITING METHODS';
+      $('pageSubtitle').textContent = source ? '管理只读来源版本，并从准确版本启动证据化分析。' : '把方法写成可发布、可组合、可追溯的创作资产。';
+      $('secondaryAction').classList.toggle('hidden', source); $('primaryAction').textContent = source ? '⇧ 导入文本来源' : '＋ 新建方法';
+      $('primaryAction').onclick = source ? () => toast('打开导入确认流程') : () => openModal('blank');
+    }
+    function openModal(mode) { $('modal').classList.remove('hidden'); chooseMode(mode); setTimeout(() => $('methodName').focus(), 0); }
+    function closeModal() { $('modal').classList.add('hidden'); }
+    function chooseMode(mode) { $('guidedMode').classList.toggle('active', mode === 'guided'); $('blankMode').classList.toggle('active', mode === 'blank'); }
+    function createDraft() { closeModal(); toast('已创建草稿，进入编辑区'); }
+    function toast(text) { const el = document.createElement('div'); el.textContent = text; Object.assign(el.style,{position:'fixed',right:'22px',bottom:'22px',zIndex:50,padding:'10px 14px',borderRadius:'10px',color:'#fff',background:'#292421',boxShadow:'0 10px 30px #0003'}); document.body.appendChild(el); setTimeout(()=>el.remove(),1400); }
+  </script>
+</body>
+</html>

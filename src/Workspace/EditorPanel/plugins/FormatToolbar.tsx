@@ -1,6 +1,5 @@
 // ─── 富文本格式栏 ────────────────────────────────────────────────
 
-import React from 'react'
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext'
 import { $getSelection, $isRangeSelection, FORMAT_TEXT_COMMAND } from 'lexical'
 import { PurrDropdown } from '@/purr-components'

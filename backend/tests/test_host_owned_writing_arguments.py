@@ -64,6 +64,7 @@ def _core_catalog(*, handler_overrides=None):
         dependencies=WritingToolDependencies(
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
         ),
         skill_items=tuple(_skill_items()),
         handler_overrides=handler_overrides,
@@ -228,7 +229,11 @@ async def test_core_scope_rejects_conflict_before_approval_then_binds_host_for_h
     )
 
     assert completed.outcome is ToolBatchOutcome.COMPLETED
-    assert calls == [{"characterId": 7, "bookId": "book-a"}]
+    assert calls == [{
+        "characterId": 7,
+        "__toolCallId": "call-1",
+        "bookId": "book-a",
+    }]
     assert len(approval.requests) == 1
     assert "bookId" not in approval.requests[0].summary
     assert "book-a" not in approval.requests[0].summary
@@ -313,6 +318,7 @@ async def test_core_binding_thaws_nested_model_arguments_for_writing_handler():
     assert calls == [{
         "names": ["测试人物"],
         "filters": {"tags": ["主角"]},
+        "__toolCallId": "call-nested",
         "bookId": "book-a",
     }]
     assert isinstance(calls[0]["names"], list)

@@ -21,7 +21,7 @@ class WritingDomainAdapter:
     tool_catalog: ToolCatalog
     context_strategy: ContextStrategy = ContextStrategy.STAGED
     context_provider: ContextProvider | None = None
-    runtime_limits: RuntimeLimits = RuntimeLimits()
+    runtime_limits: RuntimeLimits = RuntimeLimits(max_run_generation_tokens=None)
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
     @classmethod
