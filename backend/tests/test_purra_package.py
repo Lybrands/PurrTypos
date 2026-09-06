@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import inspect
-import json
 from importlib import metadata
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 import purra
 import purra_anthropic
@@ -20,18 +17,12 @@ import pytest
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
 PURRA_VERSION = "0.5.0"
-PURRA_MEM0_VERSION = "0.5.0"
 PURRA_REQUIREMENTS = (
-    "./backend/vendor/purra-0.5.0-py3-none-any.whl",
-    "./backend/vendor/purra_openai-0.5.0-py3-none-any.whl",
-    "./backend/vendor/purra_anthropic-0.5.0-py3-none-any.whl",
-    "-e ../purra/integrations/mem0/python[managed]",
+    "purra==0.5.0",
+    "purra-openai==0.5.0",
+    "purra-anthropic==0.5.0",
+    "purra-mem0[managed]==0.5.0",
 )
-PURRA_WHEEL_SHA256 = {
-    "purra": "54205c17c840dd28d2748dd237514ce280cb98ef388131ad6862f36c8fa97f7b",
-    "purra_openai": "0519aca750861206564431fd50153db669c56dd713d575ec2a658f577e76faf4",
-    "purra_anthropic": "b26b999470a7d4e29bc92478fd86527cb332fc0801a1356b7157d1705634dff9",
-}
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
     "httpx2>=2.7.0,<3",
@@ -41,6 +32,7 @@ RUNTIME_CONSTRAINTS = {
 }
 ALLOWED_PROVIDER_COMPOSITION = {
     "application/agent_composition.py",
+    "application/model_request_service.py",
 }
 PUBLIC_PURRA_HOST_MODULES = frozenset({
     "purra.api",
@@ -112,8 +104,8 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
-@pytest.mark.parametrize("package", [purra, purra_openai, purra_anthropic])
-def test_purra_is_loaded_from_the_pinned_local_wheel(package):
+@pytest.mark.parametrize("package", [purra, purra_openai, purra_anthropic, purra_mem0])
+def test_purra_is_loaded_from_the_pinned_published_distribution(package):
     requirements = tuple(
         line.strip()
         for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
@@ -122,27 +114,17 @@ def test_purra_is_loaded_from_the_pinned_local_wheel(package):
         if line.strip()
     )
     name = package.__name__
-    wheel_path = BACKEND_DIR / "vendor" / f"{name}-{PURRA_VERSION}-py3-none-any.whl"
     package_path = Path(package.__file__).resolve()
     distribution = metadata.distribution(name)
     distribution_root = Path(distribution.locate_file("")).resolve()
 
     assert requirements == PURRA_REQUIREMENTS
-    assert hashlib.sha256(wheel_path.read_bytes()).hexdigest() == PURRA_WHEEL_SHA256[name]
-    assert metadata.version(name) == PURRA_VERSION
-    direct_url = json.loads(distribution.read_text("direct_url.json"))
-    installed_from = Path(unquote(urlparse(direct_url["url"]).path)).resolve()
-    assert installed_from == wheel_path.resolve()
-    assert direct_url["archive_info"]["hashes"]["sha256"] == PURRA_WHEEL_SHA256[name]
+    assert distribution.version == PURRA_VERSION
+    assert distribution.read_text("direct_url.json") is None
     assert package_path == distribution_root / name / "__init__.py"
     assert "site-packages" in package_path.parts
     assert not package_path.is_relative_to((ROOT_DIR.parent / "purra").resolve())
-    assert "/packages/purra/src/" not in package_path.as_posix()
     assert not (ROOT_DIR / "packages" / "purra").exists()
-
-    script = (ROOT_DIR / "scripts" / "prepare-backend-resources.cjs").read_text(encoding="utf-8")
-    assert PURRA_WHEEL_SHA256[name] in script
-    assert f"./backend/vendor/{wheel_path.name}" in script
 
 
 def test_provider_gateway_exports_come_from_installed_wheels():
@@ -191,18 +173,6 @@ def test_product_code_has_no_removed_planning_policy_compatibility_layer():
     assert not violations, "Removed planning compatibility remains:\n" + "\n".join(
         violations
     )
-
-
-def test_purra_mem0_is_loaded_from_the_local_editable_distribution():
-    package_path = Path(purra_mem0.__file__).resolve()
-    source = (ROOT_DIR.parent / "purra" / "integrations" / "mem0" / "python").resolve()
-
-    assert metadata.version("purra-mem0") == PURRA_MEM0_VERSION
-    direct_url = json.loads(
-        metadata.distribution("purra-mem0").read_text("direct_url.json")
-    )
-    assert direct_url == {"url": source.as_uri(), "dir_info": {"editable": True}}
-    assert package_path == source / "src" / "purra_mem0" / "__init__.py"
 
 
 def test_runtime_distribution_constrains_shared_provider_dependencies():
@@ -289,6 +259,8 @@ def test_raw_provider_gateway_is_confined_to_the_composition_root():
 def test_business_code_cannot_construct_direct_model_invocations():
     observed: set[str] = set()
     for path in _application_python_files():
+        if _relative(path) == "application/model_request_service.py":
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         if any(
             isinstance(node, ast.Call)

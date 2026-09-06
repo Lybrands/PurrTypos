@@ -16,9 +16,20 @@ import {
 } from './timeline.ts'
 
 test('native Provider progress grows one stable live region from real chunks', () => {
+  const operation: CanonicalOutputEvent = {
+    eventId: 'model-start-1', runId: 'run-1', turnId: 'turn-1',
+    invocationId: 'invocation-1', outputStreamId: null, sequence: 1,
+    source: 'runtime', kind: 'operation.started', channel: 'operation', visibility: 'public',
+    occurredAt: '2026-09-02T08:00:00Z', emittedAt: '2026-09-02T08:00:00Z',
+    payload: {
+      operationId: 'model-operation-1',
+      kind: 'model',
+      display: { labelKey: 'agent.operation.model', labelParams: {} },
+    },
+  }
   const progress: CanonicalOutputEvent = {
     eventId: 'agent-progress-1', runId: 'run-1', turnId: 'turn-1',
-    invocationId: 'invocation-1', outputStreamId: 'stream-1', sequence: 1,
+    invocationId: 'invocation-1', outputStreamId: 'stream-1', sequence: 2,
     source: 'provider', kind: 'agent.progress', channel: 'commentary', visibility: 'public',
     occurredAt: '2026-09-02T08:00:01Z', emittedAt: '2026-09-02T08:00:01Z',
     payload: {
@@ -27,7 +38,10 @@ test('native Provider progress grows one stable live region from real chunks', (
       text: '正在核对人物动机',
     },
   }
-  let output = reduceCanonicalOutput(initialCanonicalOutputState(), progress)
+  let output = reduceCanonicalOutput(
+    reduceCanonicalOutput(initialCanonicalOutputState(), operation),
+    progress,
+  )
   const message: AgentConversationMessage = {
     role: 'assistant', content: '', canonicalOutput: output,
   }
@@ -36,7 +50,7 @@ test('native Provider progress grows one stable live region from real chunks', (
     isStreaming: true,
   })
 
-  assert.equal(getAgentProcessingLabel(message), '正在核对人物动机')
+  assert.equal(getAgentProcessingLabel(message), '正在思考')
   assert.deepEqual(firstTimeline, [{
     type: 'commentary',
     md: '正在核对人物动机',
@@ -46,7 +60,7 @@ test('native Provider progress grows one stable live region from real chunks', (
   output = reduceCanonicalOutput(output, {
     ...progress,
     eventId: 'agent-progress-2',
-    sequence: 2,
+    sequence: 3,
     payload: {
       ...progress.payload,
       sourceChunkIndex: 2,
@@ -125,6 +139,7 @@ test('planning uses public narration instead of an executable operation row', ()
       const label = phase === 'planning' ? '制定计划' : '调整计划'
       assert.equal(getAgentProcessingLabel(message), `正在${label}`)
       output = reduceCanonicalOutput(output, progress)
+      assert.equal(getAgentProcessingLabel({ ...message, canonicalOutput: output }), `正在${label}`)
       output = reduceCanonicalOutput(output, privateJson)
       output = reduceCanonicalOutput(output, finished)
       output = reduceCanonicalOutput(output, finished)
@@ -234,15 +249,18 @@ test('canonical timeline filters model operations, localizes tools, and groups c
   )
 })
 
-test('screenplay read labels retain the requested episode and task purpose after completion', () => {
+test('parameterized backend tool labels survive live and restored canonical timelines', () => {
   for (const [toolName, label] of [
     ['readScreenplayDeliverable', '读取第 2 集场景表'],
     ['readScreenplayDeliverable', '为第 1 集读取创作简报'],
     ['readScreenplayDeliverable', '读取原作分析'],
-    ['readScreenplayTaskDependencies', '读取任务依赖：第 1 集第 1 场产出'],
-    ['readScreenplayTaskDependencies', '读取任务依赖：第 1 集第 2 场产出'],
-    ['searchSourceText', '为第 1 集检索原文：母亲 庆功宴 起床'],
-    ['readSourceChapters', '为第 1 集读取原文章节：第1章 清河桥'],
+    ['readScreenplayTaskDependencies', '读取第 1 集第 1 场已完成剧本'],
+    ['readScreenplayTaskDependencies', '读取第 1 集第 2 场已完成剧本'],
+    ['searchSourceText', '为第 1 集在原文中查找“母亲 庆功宴 起床”'],
+    ['readSourceChapters', '为第 1 集读取第1章 清河桥的原文'],
+    ['getChapterContent', '查看《第一章 雨夜》正文'],
+    ['searchMemories', '检索与“红门 钥匙”相关的长期记忆'],
+    ['readNovelAnalysisInput', '读取《第一章 雨夜》第 0–1200 字符作为分析材料'],
   ]) {
     const event: CanonicalOutputEvent = {
       eventId: 'read-start', runId: 'run-1', turnId: null,
@@ -978,7 +996,7 @@ test('runtime metadata falls back to model-neutral thinking copy', () => {
   )
 })
 
-test('only model commentary from the current invocation becomes the standby title', () => {
+test('commentary stays in the transcript and never becomes the standby title', () => {
   const base = initialCanonicalOutputState()
   const canonicalOutput = {
     ...base,
@@ -1023,13 +1041,13 @@ test('only model commentary from the current invocation becomes the standby titl
   }
   assert.equal(
     getAgentProcessingLabel(safe),
-    '正在梳理人物关系与关键冲突',
+    '正在执行工具',
   )
   assert.deepEqual(
     buildAssistantTimeline(safe, { messageIndex: 0 })
       .filter((part) => part.type === 'commentary')
       .map((part) => part.md),
-    ['正在梳理人物关系与关键冲突'],
+    ['**正在梳理人物关系与关键冲突**'],
   )
 
   const unsafe: AgentConversationMessage = {
@@ -1047,13 +1065,43 @@ test('only model commentary from the current invocation becomes the standby titl
       ],
     },
   }
-  assert.equal(getAgentProcessingLabel(unsafe), '正在思考')
+  assert.equal(getAgentProcessingLabel(unsafe), '正在执行工具')
   assert.deepEqual(
     buildAssistantTimeline(unsafe, { messageIndex: 0 })
       .filter((part) => part.type === 'commentary')
       .map((part) => part.md),
-    ['正在梳理人物关系与关键冲突'],
+    ['**正在梳理人物关系与关键冲突**', '调用 inspectScreenplayProject，处理 run_abcd1234。'],
   )
+})
+
+test('standby ignores live, committed, aborted and replayed prose from the active invocation', () => {
+  for (const text of ['已读取材料，现提交分析候选。', '说明正文'.repeat(100)]) {
+    for (const committed of [false, true]) {
+      for (const aborted of [false, true]) {
+        const canonicalOutput = {
+          ...initialCanonicalOutputState(),
+          commentaryBlocks: [{ outputStreamId: 'public-description', invocationId: 'current',
+            firstSequence: 2, lastSequence: 3, startedAt: '2026-09-06T09:00:00Z',
+            text, committed, aborted }],
+          agentProgress: [{ eventId: 'public-progress', outputStreamId: 'progress', invocationId: 'current',
+            text, sequence: 4, sourceChunkIndex: 1, occurredAt: '2026-09-06T09:00:00Z' }],
+          operationOrder: ['current-model'],
+          operations: { 'current-model': { operationId: 'current-model', runId: 'child', invocationId: 'current',
+            kind: 'model', firstSequence: 1, status: 'running' as const,
+            startedAt: '2026-09-06T09:00:00Z', display: { labelParams: {} } } },
+        }
+        const message: AgentConversationMessage = { role: 'assistant', content: text, streamingContent: text,
+          commentary: text, canonicalOutput }
+        assert.equal(getAgentProcessingLabel(message), '正在思考')
+        assert.equal(getAgentProcessingLabel({ ...message, canonicalOutput: {
+          ...canonicalOutput, finalStreamStatus: 'open',
+        } }), '正在生成回复')
+        assert.equal(getAgentProcessingLabel({ ...message, canonicalOutput: {
+          ...canonicalOutput, runTerminal: true,
+        } }), '')
+      }
+    }
+  }
 })
 
 test('standby does not reuse a plan, previous invocation, or tool row title', () => {
@@ -1073,13 +1121,22 @@ test('standby does not reuse a plan, previous invocation, or tool row title', ()
         committed: true,
         aborted: false,
       }],
-      operationOrder: ['current-tool'],
+      agentProgress: [{
+        eventId: 'previous-progress',
+        outputStreamId: 'previous-progress-stream',
+        invocationId: 'previous-invocation',
+        sourceChunkIndex: 1,
+        text: '核对上一步资料',
+        sequence: 1,
+        occurredAt: '2026-08-12T00:00:00Z',
+      }],
+      operationOrder: ['current-model'],
       operations: {
-        'current-tool': {
-          operationId: 'current-tool',
+        'current-model': {
+          operationId: 'current-model',
           runId: 'run-1',
           invocationId: 'current-invocation',
-          kind: 'tool',
+          kind: 'model',
           firstSequence: 2,
           status: 'running',
           startedAt: '2026-08-12T00:00:01Z',
@@ -1105,4 +1162,25 @@ test('standby does not reuse a plan, previous invocation, or tool row title', ()
   }
 
   assert.equal(getAgentProcessingLabel(message), '正在思考')
+})
+
+test('public commentary streams paragraphs without the status-title length filter', () => {
+  const body = '先检查证据。\n\n- ' + '保留公开分析说明。'.repeat(45)
+  let state = initialCanonicalOutputState()
+  const event: CanonicalOutputEvent = {
+    eventId: 'paragraph-1', runId: 'run-1', turnId: 'turn-1', invocationId: 'invocation-1',
+    outputStreamId: 'output-1', sequence: 1, source: 'provider', kind: 'provider.content_delta',
+    channel: 'commentary', visibility: 'public', payload: { delta: body },
+    occurredAt: '2026-09-06T00:00:00Z', emittedAt: '2026-09-06T00:00:00Z',
+  }
+  state = reduceCanonicalOutput(state, event)
+  const message = { role: 'assistant' as const, content: '', canonicalOutput: state }
+  const parts = buildAssistantTimeline(message, { messageIndex: 0, isStreaming: true })
+  assert.equal(parts[0]?.type, 'commentary')
+  assert.equal(parts[0]?.type === 'commentary' ? parts[0].md : '', body)
+  assert.deepEqual(reduceCanonicalOutput(state, event), state)
+  const next = reduceCanonicalOutput(state, { ...event, eventId: 'paragraph-2', sequence: 2, payload: { delta: '\n继续核对。' } })
+  const growing = buildAssistantTimeline({ ...message, canonicalOutput: next }, { messageIndex: 0, isStreaming: true })
+  assert.equal(growing[0]?.type === 'commentary' ? growing[0].md : '', body + '\n继续核对。')
+  assert.equal(growing[0]?.type === 'commentary' ? growing[0].regionKey : '', parts[0]?.type === 'commentary' ? parts[0].regionKey : '')
 })

@@ -27,17 +27,24 @@
 # 1. 安装前端依赖
 npm install
 
-# 2. 确认同级 ../purra 是本地 PurrA 0.5.0 源码，再从本仓库根目录安装
+# 2. 从本仓库根目录安装后端依赖
 pip install -r backend/requirements.txt
 ```
 
-PurrA 通过 `backend/requirements-purra.txt` 中的 `-e ../purra` 可编辑安装，
-当前机器的源码位于 `/Users/liuyubin/Lybrand_project/purra`。修改框架代码后需
-重启后端进程。打包从同一本地目录安装实际包文件，不会把可编辑路径带入发行包。
-离线打包需先安装后端依赖，其中包含 PurrA 构建需要的 `setuptools>=77.0.3`。
+PurrA Core、OpenAI、Anthropic 和 Mem0 集成通过
+`backend/requirements-purra.txt` 固定引用 PyPI 正式发布的 0.5.0 包，
+Mem0 保留 `managed` 扩展依赖。开发、CI 和分发打包使用同一份依赖清单，
+无需同级 PurrA 源码目录。
 
-当前依赖包含尚未发布的本地改动，单独克隆 PurrTypos 无法安装完整后端。
-GitHub CI 也需要先获得同一份 PurrA 源码并放到同级目录；本地切换不包含框架发布。
+如果已有环境安装过同版本的本地 wheel 或可编辑包，先替换这四个包，再检查完整依赖：
+
+```bash
+python -m pip install --force-reinstall --no-deps -r backend/requirements-purra.txt
+python -m pip install -r backend/requirements.txt
+python -m pip check
+```
+
+更新后重启后端进程，使其加载正式发布包。
 
 如 Electron 二进制下载失败（"Electron failed to install correctly"），可尝试：
 
@@ -163,9 +170,15 @@ PurrTypos/
 
 ## 长期记忆
 
-- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由本地 PurrA 0.5.0 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不再维护平行的长期记忆表或召回实现。
+- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由 PurrA 0.5.0 发布包 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不再维护平行的长期记忆表或召回实现。
 - PurrTypos 只保留业务源到组件的投递策略与持久化 outbox（`memory_source_heads` / `memory_source_deliveries`）。用户保存与业务提交先在 SQLite 中完成，组件投递失败会如实返回并由恢复流程重试。
 - Story Memory 仍是独立的章节证据状态账本，用于版本、来源失效和审阅；它与可编辑的通用长期记忆具有不同生命周期。模型输入由两者共同组装，并在调用 Provider 前校验版本化 evidence receipt。
+
+## Agent 规范
+
+小说写作、小说分析和剧本 Agent 的公共输入、流式输出与恢复遵循[共享对话与执行规范](docs/design/shared-agent-conversation-contract.md)。各领域保留材料选择、工具、审批和交付物规则。
+
+模型配置解析、Provider 参数核验与后台调用已使用公共边界，契约和验收记录见[模型请求公共入口与适配规范](docs/design/2026-09-06-model-request-boundary-refactor.md)。蒸馏质量验证单独进行。
 
 ## 健康检查
 

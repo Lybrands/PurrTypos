@@ -70,7 +70,7 @@ async def create_analysis_candidates(
     analysis_id: str, body: CreateAnalysisCandidatesRequest
 ):
     return _ok(await _call(_candidates().create_from_analysis(
-        analysis_id, craft_card_ids=body.craftCardIds,
+        analysis_id,
     )))
 
 

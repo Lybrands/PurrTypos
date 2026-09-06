@@ -72,7 +72,7 @@ export function buildNovelAnalysisTaskPlan(run: NovelAnalysisRun): AiTaskPlan | 
         executor: step.executor === 'tool' ? 'tool' : 'model',
         dependsOn: step.dependsOn,
         status: unitStatus(units),
-        error: units.find((unit) => unit.errorCode)?.errorCode || undefined,
+        error: units.find((unit) => unit.status === 'failed' && unit.errorCode)?.errorCode || undefined,
       }
     }),
   }

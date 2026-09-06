@@ -20,11 +20,15 @@ from purra.contracts import (
     ModelStreamActivity, ModelStreamChunk, ReasoningMode, RunCreateParams,
     ToolCallDelta, ToolChoiceMode, ToolSchema,
 )
-from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
+from purra.errors import (
+    ContractViolationError,
+    ModelGatewayError,
+    UnsupportedModelFeatureError,
+)
 from purra.json_values import thaw_json_mapping
 from purra.model_protocol import (
     ModelProtocolCapabilities, ReasoningControl, generic_capability_snapshot,
-    resolve_invocation_output_limit,
+    resolve_invocation_output_budget,
 )
 from purra.ports import RunCommit
 
@@ -32,7 +36,7 @@ from purra.ports import RunCommit
 def _invocation(provider, *, options=None, reasoning=ReasoningMode.DEFAULT, cap=4096):
     snapshot = replace(
         generic_capability_snapshot(),
-        max_call_output_tokens=8192,
+        max_generation_tokens=8192,
         protocol=ModelProtocolCapabilities(reasoning_control=ReasoningControl.SELECTABLE),
     )
     return ModelInvocation(
@@ -40,13 +44,17 @@ def _invocation(provider, *, options=None, reasoning=ReasoningMode.DEFAULT, cap=
             provider=provider,
             model="test-model",
             capability_snapshot=snapshot,
+            max_generation_tokens=cap,
             options={
                 "baseURL": "https://api.openai.com/v1" if provider == "openai" else "https://api.anthropic.com",
                 "context_window": "128k",
                 **(options or {}),
             },
         ),
-        output_limit=resolve_invocation_output_limit(snapshot, explicit_user_override=cap),
+        output_budget=resolve_invocation_output_budget(
+            snapshot,
+            max_generation_tokens=cap,
+        ),
         reasoning_mode=reasoning,
     )
 
@@ -95,10 +103,10 @@ async def test_native_openai_preserves_roles_and_uses_managed_output_limit(monke
     )
     assert result.message.content == "Ready"
     assert result.usage.total_tokens == 12
-    assert result.applied_output_limit == 4096
+    assert result.applied_generation_limit == 4096
     assert requests[0]["messages"][0]["role"] == "developer"
     assert requests[0]["max_completion_tokens"] == 4096
-    assert requests[0]["reasoning_effort"] == "medium"
+    assert "reasoning_effort" not in requests[0]
     assert requests[0]["store"] is False
     assert not {"max_tokens", "baseURL", "context_window", "thinking", "model_profile"} & requests[0].keys()
     assert all(client.is_closed for client in clients)
@@ -113,7 +121,16 @@ async def test_anthropic_signed_tool_continuation_survives_business_checkpoint(m
     responses = iter([_anthropic_response(content=blocks, stop="tool_use"), _anthropic_response()])
     clients, requests = _mock_sdk(monkeypatch, "anthropic", lambda _: httpx2.Response(200, json=next(responses)))
     invocation = replace(
-        _invocation("anthropic", options={"thinking": {"type": "enabled"}}, reasoning=ReasoningMode.ENABLED),
+        _invocation(
+            "anthropic",
+            options={
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 2048,
+                },
+            },
+            reasoning=ReasoningMode.ENABLED,
+        ),
         tools=(ToolSchema("readSource", "Read source", {"type": "object", "properties": {}}),),
         tool_choice=ToolChoiceMode.AUTO,
     )
@@ -200,7 +217,7 @@ async def test_native_stream_usage_and_client_lifecycle(monkeypatch, provider, s
         assert "".join(chunk.content_delta for chunk in chunks if isinstance(chunk, ModelStreamChunk)) == "Ready"
         assert chunks[-1].finish_reason is ModelFinishReason.STOP
         assert chunks[-1].usage.total_tokens == 12
-        assert stream.applied_output_limit == 4096
+        assert stream.applied_generation_limit == 4096
     assert all(client.is_closed for client in clients)
 
 
@@ -312,12 +329,46 @@ async def test_native_required_tool_rejection_updates_capability_cache(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_anthropic_thinking_never_increases_output_budget(monkeypatch):
+async def test_anthropic_thinking_requires_explicit_budget_before_client_creation(monkeypatch):
     clients, requests = _mock_sdk(monkeypatch, "anthropic", lambda _: pytest.fail("must not send request"))
-    with pytest.raises(UnsupportedModelFeatureError):
+    with pytest.raises(ContractViolationError) as caught:
         await gateways.ProviderModelGateway("test-key").complete([AgentMessage("user", "Hello")], _invocation(
-            "anthropic", options={"thinking": {"type": "enabled"}}, reasoning=ReasoningMode.ENABLED, cap=1024,
+            "anthropic",
+            options={"thinking": {"type": "enabled"}},
+            reasoning=ReasoningMode.ENABLED,
+            cap=4096,
         ))
+    assert caught.value.code == "anthropic_thinking_budget_required"
+    assert clients == requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [1023, 4096, True])
+async def test_anthropic_invalid_explicit_budget_fails_before_client_creation(
+    monkeypatch,
+    budget,
+):
+    clients, requests = _mock_sdk(
+        monkeypatch,
+        "anthropic",
+        lambda _: pytest.fail("must not send request"),
+    )
+    with pytest.raises(ContractViolationError) as caught:
+        await gateways.ProviderModelGateway("test-key").complete(
+            [AgentMessage("user", "Hello")],
+            _invocation(
+                "anthropic",
+                options={
+                    "thinking": {
+                        "type": "enabled",
+                        "budget_tokens": budget,
+                    },
+                },
+                reasoning=ReasoningMode.ENABLED,
+                cap=4096,
+            ),
+        )
+    assert caught.value.code == "anthropic_thinking_budget_invalid"
     assert clients == requests == []
 
 
@@ -328,14 +379,21 @@ async def test_registered_vendors_keep_business_routing(monkeypatch, profile):
 
     async def complete(key, messages, options, provider, signal):
         captured.append((options, provider))
-        return {"message": {"role": "assistant", "content": "Ready"}, "finish_reason": "stop", "applied_output_limit": options["max_tokens"]}
+        return {
+            "message": {"role": "assistant", "content": "Ready"},
+            "finish_reason": "stop",
+            "applied_generation_limit": options["max_tokens"],
+        }
 
     monkeypatch.setattr(gateways.provider_router, "create_chat_no_stream", complete)
     provider = "zai" if profile.profile_id.startswith("zai:") else "openai"
     snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
     invocation = ModelInvocation(
         request=ModelRequest(provider=provider, model=next(iter(profile.model_names)), capability_snapshot=snapshot, options={"baseURL": next(iter(profile.base_urls))}),
-        output_limit=resolve_invocation_output_limit(snapshot, explicit_user_override=None),
+        output_budget=resolve_invocation_output_budget(
+            snapshot,
+            max_generation_tokens=None,
+        ),
     )
     result = await gateways.ProviderModelGateway("test-key").complete([AgentMessage("user", "Hello")], invocation)
     assert result.message.content == "Ready"

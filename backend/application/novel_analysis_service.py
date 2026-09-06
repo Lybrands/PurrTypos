@@ -24,7 +24,6 @@ from purra.contracts import (
 )
 from purra.long_tasks import LongTaskRunRelation
 from purra.json_values import thaw_json_mapping
-from purra.model_protocol import resolve_invocation_output_limit
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
@@ -36,10 +35,13 @@ from purra.task_admission import (
     TaskAdmissionDecision,
 )
 
+from domains.writing_distillation import validate_report, render_skill, assessment_passed
+
+from application.agent_conversation_input import conversation_messages, conversation_input_metadata
+from infrastructure.persistence.agent_conversation_history import analysis_history
 from application.agent_cancellation_service import AgentCancellationService
 from application.agent_run_service import AgentRunService
 from application.model_runtime import (
-    fit_output_limit_to_context,
     model_request_from_runtime,
     reasoning_mode_from_options,
     runtime_context_window_tokens,
@@ -319,27 +321,24 @@ class NovelAnalysisService:
             segments=segments,
             input_token_budget=input_token_budget,
         )
-        model_request = model_request_from_runtime(runtime)
+        model_request = model_request_from_runtime(runtime, task_reasoning_preference="economical")
         window = runtime_context_window_tokens(runtime)
-        output_limit = resolve_invocation_output_limit(
-            model_request.capability_snapshot,
-            model_request.options.get("max_tokens"),
-        )
-        output_limit = fit_output_limit_to_context(output_limit, window)
         request = AgentRunRequest(
-            messages=(AgentMessage(
+            messages=conversation_messages((*await analysis_history(self._db, source_revision_id, run_command_id), AgentMessage(
                 role=MessageRole.USER,
                 content=(
                     prompt or "分析这部小说的全局故事概览、事实脉络和写作技法。"
                 ),
-            ),),
+            )), context_window=window),
             model=model_request,
             domain_context=context.to_core_context(),
             mode="novel_source_analysis",
             context_window=window,
             tools_enabled=False,
             metadata={
+                **conversation_input_metadata(source="persisted_public_turns", scope=f"analysis:{source_revision_id}"),
                 "failedResumeAttempts": failed_resume_attempts,
+                "progressAudience": "public",
             },
         )
         try:
@@ -348,11 +347,10 @@ class NovelAnalysisService:
                 api_key=runtime.apiKey.get_secret_value(),
                 options=AgentCoreRunOptions(
                     turn_id=f"novel-analysis:{run_command_id}",
-                    output_limit=output_limit,
                     default_context_window_tokens=window,
                     force_planned_tool_choice=False,
                     require_tool_call=False,
-                    reasoning_mode=reasoning_mode_from_options(runtime.options),
+                    reasoning_mode=reasoning_mode_from_options(model_request.options),
                     binding=RunBinding(
                         namespace="novel_source_analysis",
                         aggregate_id=source_revision_id,
@@ -401,18 +399,15 @@ class NovelAnalysisService:
             interaction_kind="follow_up",
             analysis_artifact_ref=artifact_ref,
         )
-        model_request = model_request_from_runtime(runtime)
+        model_request = model_request_from_runtime(runtime, task_reasoning_preference="economical")
         window = runtime_context_window_tokens(runtime)
-        output_limit = resolve_invocation_output_limit(
-            model_request.capability_snapshot,
-            model_request.options.get("max_tokens"),
-        )
-        output_limit = fit_output_limit_to_context(output_limit, window)
         request = AgentRunRequest(
-            messages=(AgentMessage(role=MessageRole.USER, content=prompt),),
+            messages=conversation_messages((*await analysis_history(self._db, source_revision_id, command_id),
+                AgentMessage(role=MessageRole.USER, content=prompt)), context_window=window),
             model=model_request,
             domain_context=context.to_core_context(),
             mode="novel_source_analysis_follow_up",
+            metadata=conversation_input_metadata(source="persisted_public_turns", scope=f"analysis:{source_revision_id}"),
             context_window=window,
             tools_enabled=False,
             planning_mode=PlanningMode.REACTIVE,
@@ -423,11 +418,10 @@ class NovelAnalysisService:
                 api_key=runtime.apiKey.get_secret_value(),
                 options=AgentCoreRunOptions(
                     turn_id=f"novel-analysis-follow-up:{command_id}",
-                    output_limit=output_limit,
                     default_context_window_tokens=window,
                     force_planned_tool_choice=False,
                     require_tool_call=False,
-                    reasoning_mode=reasoning_mode_from_options(runtime.options),
+                    reasoning_mode=reasoning_mode_from_options(model_request.options),
                     binding=RunBinding(
                         namespace="novel_source_analysis",
                         aggregate_id=source_revision_id,
@@ -733,6 +727,7 @@ class NovelAnalysisService:
             "coverage": dict(source.get("coverage") or {}),
             "conflicts": list(source.get("conflicts") or ()),
             "reviewStatus": "reviewed",
+            "distillation": source["distillation"],
         }
         validated = await self._validated_publish_payload(corrected)
         return await self._artifacts.write(
@@ -838,8 +833,16 @@ class NovelAnalysisService:
             validated_overview["contentDigest"] = canonical_digest(
                 validated_overview
             )
+        try:
+            report = value["distillation"]
+            skill = validate_report(report, cards)
+        except (ValueError, KeyError, TypeError) as error:
+            raise AppError("写作方法蒸馏记录不完整或与已检验版本不一致", 422) from error
         return {
             "analysisSchemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
+            "distillation": report,
+            "writingSkill": {**skill, "markdown": render_skill(skill)},
+            "skillReviewStatus": "pending_review" if assessment_passed(report["assessment"]) else "needs_revision",
             "sourceRevisionId": revision_id,
             "sectionIds": list(section_ids),
             "facts": facts,
@@ -885,6 +888,9 @@ class NovelAnalysisService:
                     digest,
                     json.dumps({
                         "artifactId": artifact_id,
+                        "distillation": payload["distillation"],
+                        "writingSkill": payload["writingSkill"],
+                        "skillReviewStatus": payload["skillReviewStatus"],
                         "coverage": payload["coverage"],
                         "conflicts": payload["conflicts"],
                         **(
@@ -1018,6 +1024,9 @@ class NovelAnalysisService:
             "contentDigest": analysis["content_digest"],
             "summary": summary,
             "storyOverview": summary.get("storyOverview"),
+            "distillation": summary.get("distillation"),
+            "writingSkill": summary.get("writingSkill"),
+            "skillReviewStatus": summary.get("skillReviewStatus"),
             "facts": [{
                 "id": item["id"],
                 "factKind": item["fact_kind"],

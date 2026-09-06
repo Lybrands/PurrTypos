@@ -9,6 +9,15 @@ import type {
 import type { RevisionLibraryTarget } from './screenplayProjectModel.ts'
 import { structuredContentToMarkdown } from './revisionDocumentView.ts'
 
+export const REVISION_LIBRARY_ROLE_ORDER: readonly ScreenplayV2DeliverableRole[] = [
+  'sourceAnalysis', 'creativeBrief', 'structure', 'sceneList', 'screenplayDraft', 'review',
+]
+
+export function revisionLibraryRoles(workspace: ScreenplayV2Workspace): ScreenplayV2DeliverableRole[] {
+  const available = new Set(workspace.deliverables.map((item) => item.role))
+  return REVISION_LIBRARY_ROLE_ORDER.filter((role) => available.has(role))
+}
+
 export interface WorkingCopyEditorDraft {
   mainText: string
   partText: string[]
@@ -146,7 +155,7 @@ export function reviewComparisonForPart(
 export function defaultRevisionLibraryRole(
   workspace: ScreenplayV2Workspace,
 ): ScreenplayV2DeliverableRole {
-  const roles = workspace.deliverables.map((item) => item.role)
+  const roles = revisionLibraryRoles(workspace)
   return [...roles].reverse().find((role) => (
     workspace.workflow.heads[role]
     || workspace.candidates.some((candidate) => candidate.role === role)

@@ -32,7 +32,7 @@ async def init_screenplay_agent_schema(db) -> None:
         finalization_receipt_id TEXT DEFAULT NULL UNIQUE,
         cancel_receipt_id TEXT DEFAULT NULL UNIQUE,
         cancel_requested_at_ms INTEGER DEFAULT NULL,
-        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}',
         active_capability_snapshot_json TEXT DEFAULT NULL,
         error_json TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -58,7 +58,7 @@ async def init_screenplay_agent_schema(db) -> None:
         await db.execute(
             "ALTER TABLE screenplay_agent_operations ADD COLUMN usage_json "
             "TEXT NOT NULL DEFAULT '{\"invocationCount\":0,\"inputTokens\":0,"
-            "\"outputTokens\":0,\"reasoningTokens\":0}'"
+            "\"generationTokens\":0,\"reasoningTokens\":0}'"
         )
     if "active_capability_snapshot_json" not in operation_columns:
         await db.execute(
@@ -398,17 +398,25 @@ async def _migrate_legacy_task_outputs(db) -> None:
                 "message": "Legacy task output has no finalized Artifact authority.",
             }, ensure_ascii=False, separators=(",", ":"))
             await db.execute(
-                "UPDATE ai_agent_long_tasks SET status = 'paused', error_code = ? "
+                "UPDATE ai_agent_long_tasks SET status = 'failed', error_code = ? "
                 "WHERE id = ? AND status IN ('pending','running','paused')",
                 ["artifact_migration_required", task_id],
             )
             await db.execute(
-                "UPDATE screenplay_agent_operations SET status = 'paused', "
+                "UPDATE screenplay_agent_operations SET status = 'failed', "
                 "error_json = ?, revision = revision + 1 WHERE long_task_id = ? "
                 "AND status IN ('queued','running','paused')",
+                [error, task_id],
+            )
+            await db.execute(
+                "UPDATE screenplay_agent_turns SET status = 'failed', "
+                "error_json = ?, update_time = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status IN ('queued','planning','running','paused')",
                 [error, task_id],
             )
     await db.execute("DROP TABLE screenplay_agent_task_outputs")
 
 
-__all__ = ["init_screenplay_agent_schema"]
+__all__ = [
+    "init_screenplay_agent_schema",
+]

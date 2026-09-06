@@ -35,6 +35,7 @@ import {
   setChatRuntimeStreamId,
   subscribeChatRuntime,
   updateChatRuntimeMessages,
+  updateChatQueuedSubmission,
 } from "./chatRuntimeStore";
 import { createAiStreamId } from "../../../utils/aiStream";
 import { createBookChunkHost } from './bookChunkHost'
@@ -372,10 +373,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       const sessionId = targetSessionId;
-      if (sessionLoading && !submitOverride?.truncationCommitted) {
+      if ((sessionLoading || getChatRuntimeQueue().some(item => item.sessionId === sessionId && item.editing))
+        && !submitOverride?.truncationCommitted) {
         const currentSessionTitle =
           sessions.find((session) => session.id === sessionId)?.title ?? ''
         const queuedItem: QueuedChatSubmission = {
+          id: createAiStreamId('queued-turn'),
           content: userText,
           sessionId,
           bookId: requestBookId,
@@ -456,6 +459,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         sessions.find((s) => s.id === sessionId)?.title ?? "";
       const prefixHasHistory = editIndex > 0;
       const frozenContext: QueuedChatSubmission = {
+        id: createAiStreamId('edited-turn'),
         content: userText,
         sessionId,
         bookId: requestBookId,
@@ -934,14 +938,16 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   React.useEffect(() => {
     if (dequeueInProgressRef.current || queuedSubmissions.length === 0) return;
 
-    const readyIndex = queuedSubmissions.findIndex(
+    const currentQueue = getChatRuntimeQueue();
+    const readyIndex = currentQueue.findIndex(
       (submission) =>
-        !getChatSessionRuntime(submission.sessionId)?.loading,
+        !getChatSessionRuntime(submission.sessionId)?.loading
+        && !currentQueue.some(item => item.sessionId === submission.sessionId && item.editing),
     );
     if (readyIndex < 0) return;
 
-    const nextSubmission = queuedSubmissions[readyIndex];
-    const remainingQueue = queuedSubmissions.filter(
+    const nextSubmission = currentQueue[readyIndex];
+    const remainingQueue = currentQueue.filter(
       (_submission, index) => index !== readyIndex,
     );
     dequeueInProgressRef.current = true;
@@ -982,6 +988,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     handleAbort,
     queuedCount: activeQueuedSubmissions.length,
     queuedMessages: activeQueuedSubmissions.map((item) => item.content),
+    queuedSubmissions: activeQueuedSubmissions.map(({ id, sessionId, content }) => ({ id, sessionId, content })),
+    updateQueuedSubmission: (id: string, patch: Parameters<typeof updateChatQueuedSubmission>[3]) =>
+      activeSessionId != null && bookId != null
+        ? updateChatQueuedSubmission(activeSessionId, bookId, id, patch) : false,
     sessionActivities,
     stopping: getChatSessionRuntime(activeSessionId)?.stopping ?? false,
   };

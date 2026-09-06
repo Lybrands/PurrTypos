@@ -850,3 +850,32 @@ test('onSettled is delivered at most once even when the host throws', () => {
   assert.equal(harness.readReplacementCount(), 1)
   assert.equal(harness.readMessages().at(-1)?.content, '已投影终稿')
 })
+
+test('each received chunk commits DOM text before the next chunk arrives', async () => {
+  const React = await import('react')
+  const { parseHTML } = await import('linkedom')
+  const { createRoot } = await import('react-dom/client')
+  const { commitAgentChunk, createCommitScheduler } = await import('./chunkHandlers/commitScheduler.ts')
+  const { window } = parseHTML('<html><body><div id="stream-root"></div></body></html>')
+  const previousWindow = globalThis.window
+  const previousDocument = globalThis.document
+  Object.assign(globalThis, { window, document: window.document })
+  const container = window.document.getElementById('stream-root')!
+  const root = createRoot(container)
+  let schedule: ReturnType<typeof createCommitScheduler>['scheduleCommit']
+  function Stream() {
+    const [messages, setMessages] = React.useState<AgentConversationMessage[]>([])
+    schedule = createCommitScheduler(setMessages).scheduleCommit
+    return React.createElement('p', null, messages.map(message => message.content).join(''))
+  }
+  try {
+    commitAgentChunk(() => root.render(React.createElement(Stream)))
+    for (const [piece, expected] of [['第一块', '第一块'], ['第二块', '第一块第二块']]) {
+      schedule!(previous => [...previous, { role: 'assistant', content: piece } as AgentConversationMessage])
+      assert.equal(container.textContent, expected)
+    }
+  } finally {
+    commitAgentChunk(() => root.unmount())
+    Object.assign(globalThis, { window: previousWindow, document: previousDocument })
+  }
+})

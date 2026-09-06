@@ -24,10 +24,11 @@ from purra.api import (
     AgentModelTask,
     AgentModelTextResult,
 )
-from purra.model_protocol import FeatureSupport, InvocationOutputLimit
+from purra.model_protocol import FeatureSupport
 from purra.ports import CancellationSignal
 from application.agent_composition import AgentComposition
 from application.run_binding import RunBindingLifecycle
+from application.agent_public_progress import RequiredPublicProgress
 from infrastructure.models.capabilities import normalize_thinking_enabled
 AgentRunUpdate = AgentOutputEvent | AgentRunResult
 
@@ -53,7 +54,6 @@ class AgentRunService:
         api_key: str,
         messages: Sequence[AgentMessage],
         model_request,
-        output_limit: InvocationOutputLimit,
         reasoning_mode,
         signal: CancellationSignal | None,
     ) -> AgentModelTextResult:
@@ -64,12 +64,12 @@ class AgentRunService:
             run_id=run_id,
             turn_id=turn_id,
             reasoning_mode=reasoning_mode,
+            model_request=model_request,
         )
         return await runner.stream_text(
             messages,
             AgentModelTask(
                 request=model_request,
-                output_limit=output_limit,
             ),
             signal,
         )
@@ -121,6 +121,14 @@ class AgentRunService:
                 )
             ),
         }
+        if (
+            request.tools_enabled
+            and request.metadata.get("responseAudience") == "internal"
+            and request.metadata.get("progressAudience") == "public"
+        ):
+            progress = RequiredPublicProgress(composition.output_repository)
+            options = replace(options, response_validators=(*options.response_validators, progress))
+            create_core_kwargs["public_progress_requirement"] = progress
         if long_task_executor is not None:
             create_core_kwargs["long_task_executor"] = long_task_executor
         core = composition.create_core_for_request(

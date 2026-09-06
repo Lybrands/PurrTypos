@@ -34,7 +34,7 @@ interface InlineEditLayerProps {
   /** 外部清空选区状态（点击关闭后） */
   onClearSelection: () => void
   modelConfigs: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   selectedModelId: string
   /** 用户在 popover 内切换模型时回调，让外层持久化（与 ai-floating 共享一份选择） */
   onSelectedModelChange?: (id: string) => void

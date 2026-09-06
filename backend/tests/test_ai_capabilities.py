@@ -8,6 +8,7 @@ ai_capabilities 行为快照。
 from __future__ import annotations
 
 import pytest
+from purra.errors import ContractViolationError
 
 from infrastructure.models.profiles.base import ModelProfile
 
@@ -71,37 +72,62 @@ class TestBuildAnthropicThinkingParam:
         assert param is None
         assert max_out == 8192
 
-    def test_enabled_basic(self):
-        param, max_out = build_anthropic_thinking_param(True, 8192)
-        assert param == {"type": "enabled", "budget_tokens": 4096}
+    def test_enabled_preserves_explicit_budget_and_generation_limit(self):
+        configured = {
+            "type": "enabled",
+            "budget_tokens": 3072,
+        }
+        param, max_out = build_anthropic_thinking_param(
+            True,
+            8192,
+            configured,
+        )
+        assert param == configured
         assert max_out == 8192
-        assert max_out > param["budget_tokens"]
+        assert param is not configured
 
-    def test_min_budget_floor_1024(self):
-        # max_out=1024 → budget floor=1024，因 budget>=max_out 触发膨胀
-        param, max_out = build_anthropic_thinking_param(True, 1024)
-        assert param["budget_tokens"] == 1024
-        assert max_out == 1024 + 2048
+    @pytest.mark.parametrize(
+        "thinking",
+        [None, {"type": "enabled"}],
+    )
+    def test_enabled_without_explicit_budget_fails_closed(self, thinking):
+        with pytest.raises(ContractViolationError) as caught:
+            build_anthropic_thinking_param(
+                True,
+                8192,
+                thinking,
+            )
 
-    def test_max_budget_cap_32000(self):
-        # max_tokens 很大时 budget 上限应被 32000 截住
-        param, max_out = build_anthropic_thinking_param(True, 200000)
-        assert param["budget_tokens"] == 32000
-        assert max_out > 32000
+        assert caught.value.code == "anthropic_thinking_budget_required"
 
-    def test_invalid_max_tokens_uses_default(self):
-        # 非 int / 非正数 → 默认 8192
-        param, max_out = build_anthropic_thinking_param(True, None)
-        assert param == {"type": "enabled", "budget_tokens": 4096}
+    @pytest.mark.parametrize("budget", [1023, 4096, True, "2048"])
+    def test_invalid_explicit_budget_is_never_clamped(self, budget):
+        with pytest.raises(ContractViolationError) as caught:
+            build_anthropic_thinking_param(
+                True,
+                4096,
+                {"type": "enabled", "budget_tokens": budget},
+            )
+
+        assert caught.value.code == "anthropic_thinking_budget_invalid"
+
+    @pytest.mark.parametrize("max_tokens", [None, 0, -10, True])
+    def test_enabled_requires_a_resolved_generation_limit(self, max_tokens):
+        with pytest.raises(ContractViolationError) as caught:
+            build_anthropic_thinking_param(
+                True,
+                max_tokens,
+                {"type": "enabled", "budget_tokens": 1024},
+            )
+
+        assert caught.value.code == "anthropic_generation_limit_required"
+
+    def test_adaptive_thinking_is_preserved_without_inventing_a_budget(self):
+        param, max_out = build_anthropic_thinking_param(
+            True,
+            8192,
+            {"type": "adaptive"},
+        )
+
+        assert param == {"type": "adaptive"}
         assert max_out == 8192
-
-        param2, max_out2 = build_anthropic_thinking_param(True, -10)
-        assert param2 == {"type": "enabled", "budget_tokens": 4096}
-        assert max_out2 == 8192
-
-    @pytest.mark.parametrize("max_in", [2048, 4096, 8192, 16384])
-    def test_invariant_max_gt_budget(self, max_in: int):
-        param, max_out = build_anthropic_thinking_param(True, max_in)
-        assert param is not None
-        # 关键约束：Anthropic 要求 max_tokens > budget
-        assert max_out > param["budget_tokens"]

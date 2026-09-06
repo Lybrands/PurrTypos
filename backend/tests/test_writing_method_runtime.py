@@ -160,7 +160,10 @@ def test_request_digest_includes_exact_turn_overrides():
 
     assert _writing_chat_request_digest(forced) != _writing_chat_request_digest(excluded)
     assert WritingDomainContext.from_core_context(
-        to_writing_agent_request(forced, {"model": "model"}).domain_context
+        to_writing_agent_request(forced, {
+            "model": "model", "profile_max_generation_tokens": 8_192, "context_window": "128k",
+            "supports_thinking": False, "thinking_only": False,
+        }).domain_context
     ).writing_method_overrides == {
         "forceRevisionIds": ["revision-a"],
         "excludeRevisionIds": [],
@@ -179,10 +182,16 @@ def test_only_structured_recommendation_request_opens_catalog_capability():
         bookId="book-1",
     )
     ordinary_context = WritingDomainContext.from_core_context(
-        to_writing_agent_request(ordinary, {"model": "model"}).domain_context
+        to_writing_agent_request(ordinary, {
+            "model": "model", "profile_max_generation_tokens": 8_192, "context_window": "128k",
+            "supports_thinking": False, "thinking_only": False,
+        }).domain_context
     )
     requested_context = WritingDomainContext.from_core_context(
-        to_writing_agent_request(requested, {"model": "model"}).domain_context
+        to_writing_agent_request(requested, {
+            "model": "model", "profile_max_generation_tokens": 8_192, "context_window": "128k",
+            "supports_thinking": False, "thinking_only": False,
+        }).domain_context
     )
     assert ordinary_context.writing_method_recommendation_requested is False
     assert requested_context.writing_method_recommendation_requested is True

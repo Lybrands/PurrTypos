@@ -8,6 +8,11 @@ from typing import Any
 
 from application.sse_mapping import canonical_output_to_sse_chunk
 from application.agent_event_stream import projection_version
+from application.screenplay_tool_presentation import (
+    ScreenplayToolPresentationReadModel,
+    operation_tool_call_key,
+    operation_tool_name,
+)
 from domains.screenplay_agent.tools.catalog import screenplay_tool_display_names
 from exceptions import NotFoundError
 
@@ -49,14 +54,33 @@ class ScreenplayCanonicalOutputQuery:
             )
         )
         run_roles = await self._run_roles(tuple(event.run_id for _, event in page))
-        chunks = []
+        prepared = []
+        tool_calls: dict[tuple[str, str], str] = {}
         for cursor, event in page:
             if event.turn_id is None:
                 continue
             chunk = canonical_output_to_sse_chunk(event)
             if chunk is None:
                 continue
-            chunk = _with_screenplay_tool_display_names(chunk)
+            call_key = operation_tool_call_key(event.run_id, chunk)
+            tool_name = operation_tool_name(chunk)
+            if call_key is not None and tool_name is not None:
+                tool_calls[call_key] = tool_name
+            prepared.append((cursor, event, chunk))
+        presentations = await ScreenplayToolPresentationReadModel(
+            self._db
+        ).project(tool_calls)
+        chunks = []
+        for cursor, event, chunk in prepared:
+            call_key = operation_tool_call_key(event.run_id, chunk)
+            chunk = _with_screenplay_tool_display_names(
+                chunk,
+                projected_params=(
+                    presentations.get(call_key)
+                    if call_key is not None
+                    else None
+                ),
+            )
             turn = turns.get(event.turn_id, {})
             runtime_profile = _object(turn.get("runtime_profile_json"))
             chunks.append({
@@ -150,6 +174,8 @@ def _object(value: object) -> dict[str, Any]:
 
 def _with_screenplay_tool_display_names(
     chunk: dict[str, Any],
+    *,
+    projected_params: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if chunk.get("kind") != "operation.started":
         return chunk
@@ -162,6 +188,24 @@ def _with_screenplay_tool_display_names(
     label_params = display.get("labelParams")
     if not isinstance(label_params, Mapping):
         return chunk
+    if projected_params is not None:
+        semantic_fields = {
+            "episodeNumber",
+            "deliverableRole",
+            "taskEpisodeNumber",
+            "readTargets",
+            "searchQuery",
+            "targetDetail",
+            "displayNames",
+        }
+        label_params = {
+            **{
+                key: value
+                for key, value in label_params.items()
+                if key not in semantic_fields
+            },
+            **projected_params,
+        }
     tool_name = str(label_params.get("toolName") or "").strip()
     episode_number = label_params.get("episodeNumber")
     if (
@@ -180,6 +224,7 @@ def _with_screenplay_tool_display_names(
     role = label_params.get("deliverableRole")
     targets = label_params.get("readTargets")
     query = label_params.get("searchQuery")
+    target_detail = label_params.get("targetDetail")
     display_names = screenplay_tool_display_names(
         tool_name,
         episode_number=episode_number,
@@ -188,6 +233,9 @@ def _with_screenplay_tool_display_names(
         read_targets=tuple(value for value in targets if isinstance(value, str))
         if isinstance(targets, (list, tuple)) else (),
         search_query=query if isinstance(query, str) else None,
+        target_detail=(
+            target_detail if isinstance(target_detail, str) else None
+        ),
     )
     if not display_names:
         return chunk

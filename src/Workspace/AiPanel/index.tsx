@@ -71,7 +71,7 @@ interface AiPanelProps {
   modelConfigs: AiModelConfig[]
   onUpdateModelConfig?: (
     id: string,
-    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>,
   ) => void
   onOpenModelSettings: () => void
   conversationSidebarOpen?: boolean
@@ -370,7 +370,8 @@ export default function AiPanel({
   const {
     handleSubmit: doSubmit,
     handleAbort,
-    queuedMessages,
+    queuedSubmissions,
+    updateQueuedSubmission,
     sessionActivities,
     stopping,
   } = useChatSubmit({
@@ -864,7 +865,7 @@ export default function AiPanel({
     messages: conversations,
     prependedHistory,
     activities: sessionActivities,
-    queuedMessages,
+    queuedSubmissions,
     prompt: activePrompt,
     setPrompt,
     initializing: Boolean(
@@ -887,6 +888,7 @@ export default function AiPanel({
       closeSession,
       renameSession: (id, title) => handleRenameSession(Number(id), title),
       send: handleSubmit,
+      updateQueuedSubmission,
       abort: handleAbort,
       editMessage: handleEditMessage,
       resolveToolApproval: handleResolveToolApproval,

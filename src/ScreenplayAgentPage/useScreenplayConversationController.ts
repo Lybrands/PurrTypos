@@ -18,6 +18,7 @@ import type {
 } from '../types.ts'
 
 export interface ScreenplayQueuedSubmission {
+  editing?: boolean
   id: string
   projectId: string
   sessionId: number
@@ -62,6 +63,7 @@ export interface ScreenplayConversationBindings {
     | 'openHistorySession'
     | 'deleteSession'
     | 'send'
+    | 'updateQueuedSubmission'
     | 'abort'
     | 'resume'
     | 'editMessage'
@@ -116,7 +118,8 @@ export function createScreenplayConversationController(
       setValue: bindings.setPrompt,
       placeholder: '输入希望 Agent 完成的任务',
       ariaLabel: '输入希望剧本 Agent 完成的任务',
-      submitDisabled: bindings.initializing || !bindings.prompt.trim() || !selectedModel,
+      ready: !bindings.initializing && bindings.activeSessionId != null,
+      submitDisabled: bindings.initializing || bindings.activeSessionId == null || !bindings.prompt.trim() || !selectedModel,
       selectedModel,
       modelConfigs: bindings.modelConfigs,
       selectModel: bindings.setSelectedModelId,

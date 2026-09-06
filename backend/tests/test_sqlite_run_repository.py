@@ -70,6 +70,9 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "recovery_policy_id",
         "capability_snapshot_digest",
         "capability_snapshot_json",
+        "requested_user_max_generation_tokens",
+        "result_capacity_target_tokens",
+        "selected_context_window_tokens",
         "binding_namespace",
         "binding_aggregate_id",
         "binding_command_id",
@@ -96,6 +99,7 @@ async def test_sqlite_repository_maps_the_complete_write_side_contract(run_db):
         "error",
         "model_attempt_count",
         "unreported_usage_attempts",
+        "unreported_reasoning_attempts",
         "input_tokens",
         "output_tokens",
         "reasoning_tokens",
@@ -181,7 +185,7 @@ async def test_run_model_budget_is_idempotent_and_records_overage(run_db):
         prompt="budgeted run",
         mode="agent",
         runtime_limits=RuntimeLimits(
-            max_run_output_tokens=None,
+            max_run_generation_tokens=None,
             max_model_invocation_attempts=1,
             max_input_tokens=5,
         ),
@@ -195,7 +199,7 @@ async def test_run_model_budget_is_idempotent_and_records_overage(run_db):
         await repository.reserve_model_attempt(run_id, "model-call-2")
     assert attempt_error.value.code == "runtime_budget_exceeded"
 
-    usage = ModelTokenUsage(input_tokens=6, output_tokens=2)
+    usage = ModelTokenUsage(input_tokens=6, generation_tokens=2)
     with pytest.raises(ContractViolationError) as usage_error:
         await repository.settle_model_attempt(run_id, "model-call-1", usage)
     assert usage_error.value.code == "runtime_budget_exceeded"
@@ -209,6 +213,42 @@ async def test_run_model_budget_is_idempotent_and_records_overage(run_db):
     assert row["model_attempt_count"] == 1
     assert row["input_tokens"] == 6
     assert row["output_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_reasoning_usage_is_preserved_and_fails_a_finite_budget(
+    run_db,
+):
+    repository = SqliteRunRepository(run_db)
+    run_id = await repository.create(RunCreateParams(
+        session_id=None,
+        prompt="reasoning usage",
+        mode="agent",
+        runtime_limits=RuntimeLimits(
+            max_run_generation_tokens=None,
+            max_reasoning_tokens=10,
+        ),
+    ))
+    await repository.reserve_model_attempt(run_id, "model-call-1")
+
+    with pytest.raises(ContractViolationError) as captured:
+        await repository.settle_model_attempt(
+            run_id,
+            "model-call-1",
+            ModelTokenUsage(input_tokens=6, generation_tokens=8),
+        )
+
+    assert captured.value.code == "runtime_budget_exceeded"
+    assert captured.value.details["budgetKind"] == "reasoning_tokens_unreported"
+    row = await run_db.fetch_one(
+        "SELECT unreported_reasoning_attempts, reasoning_tokens "
+        "FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    )
+    assert row == {
+        "unreported_reasoning_attempts": 1,
+        "reasoning_tokens": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -311,6 +351,8 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
             tool_protocol_contract="host_tools",
             recovery_policy_id="purra.default.v1",
             capability_snapshot_digest="c" * 64,
+            requested_user_max_generation_tokens=80_000,
+            result_capacity_target_tokens=16_384,
         ),
     )
 
@@ -319,8 +361,12 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         prompt="immutable provenance",
         mode="agent",
         provenance=provenance,
+        requested_user_max_generation_tokens=80_000,
+        result_capacity_target_tokens=16_384,
+        selected_context_window_tokens=200_000,
     ))
     row = await get_run(run_db, run_id)
+    snapshot = await repository.get(run_id)
 
     assert row is not None
     assert {
@@ -331,6 +377,15 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         "request_profile_digest": row["request_profile_digest"],
         "requested_reasoning_mode": row["requested_reasoning_mode"],
         "capability_snapshot_digest": row["capability_snapshot_digest"],
+        "requested_user_max_generation_tokens": row[
+            "requested_user_max_generation_tokens"
+        ],
+        "result_capacity_target_tokens": row[
+            "result_capacity_target_tokens"
+        ],
+        "selected_context_window_tokens": row[
+            "selected_context_window_tokens"
+        ],
         "capability_snapshot": json.loads(row["capability_snapshot_json"]),
     } == {
         "model_provider": "openai",
@@ -340,6 +395,9 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         "request_profile_digest": "b" * 64,
         "requested_reasoning_mode": "enabled",
         "capability_snapshot_digest": "c" * 64,
+        "requested_user_max_generation_tokens": 80_000,
+        "result_capacity_target_tokens": 16_384,
+        "selected_context_window_tokens": 200_000,
         "capability_snapshot": {
             "schemaVersion": 1,
             "profileId": "test:profile",
@@ -347,6 +405,9 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
             "digest": "c" * 64,
         },
     }
+    assert snapshot.requested_user_max_generation_tokens == 80_000
+    assert snapshot.result_capacity_target_tokens == 16_384
+    assert snapshot.selected_context_window_tokens == 200_000
     with pytest.raises(sqlite3.IntegrityError, match="provenance is immutable"):
         await run_db.execute(
             "UPDATE ai_agent_runs SET model_name = ? WHERE id = ?",
@@ -356,6 +417,11 @@ async def test_run_provenance_migration_persists_once_and_rejects_updates(run_db
         await run_db.execute(
             "UPDATE ai_agent_runs SET capability_snapshot_json = ? WHERE id = ?",
             ['{"digest":"replacement"}', run_id],
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="provenance is immutable"):
+        await run_db.execute(
+            "UPDATE ai_agent_runs SET result_capacity_target_tokens = ? WHERE id = ?",
+            [8_192, run_id],
         )
 
     # Provenance-free callers remain valid for operational runs that do not
@@ -1226,22 +1292,22 @@ async def test_new_run_output_budget_persists_and_settles_across_calls(run_db, l
     repository = SqliteRunRepository(run_db)
     run_id = await repository.create(RunCreateParams(
         session_id=None, prompt="output budget", mode="agent",
-        runtime_limits=RuntimeLimits(max_run_output_tokens=limit),
+        runtime_limits=RuntimeLimits(max_run_generation_tokens=limit),
     ))
     row = await run_db.fetch_one("SELECT runtime_limits_json FROM ai_agent_runs WHERE id = ?", [run_id])
     stored = json.loads(row["runtime_limits_json"])
-    assert stored["max_run_output_tokens"] == limit
+    assert stored["max_run_generation_tokens"] == limit
     assert "max_output_tokens" not in stored
     await repository.reserve_model_attempt(run_id, "first")
-    await repository.settle_model_attempt(run_id, "first", ModelTokenUsage(input_tokens=1, output_tokens=2))
+    await repository.settle_model_attempt(run_id, "first", ModelTokenUsage(input_tokens=1, generation_tokens=2))
     await repository.reserve_model_attempt(run_id, "second")
     if limit is None:
-        await repository.settle_model_attempt(run_id, "second", ModelTokenUsage(input_tokens=1, output_tokens=2))
+        await repository.settle_model_attempt(run_id, "second", ModelTokenUsage(input_tokens=1, generation_tokens=2))
     else:
         with pytest.raises(ContractViolationError) as error:
-            await repository.settle_model_attempt(run_id, "second", ModelTokenUsage(input_tokens=1, output_tokens=2))
+            await repository.settle_model_attempt(run_id, "second", ModelTokenUsage(input_tokens=1, generation_tokens=2))
         assert error.value.code == "runtime_budget_exceeded"
-        assert error.value.details["budgetKind"] == "output_tokens"
+        assert error.value.details["budgetKind"] == "generation_tokens"
     row = await run_db.fetch_one("SELECT output_tokens FROM ai_agent_runs WHERE id = ?", [run_id])
     assert row["output_tokens"] == 4
 
@@ -1263,9 +1329,9 @@ async def test_old_run_budget_cannot_silently_become_unlimited(run_db):
 
 @pytest.mark.parametrize("value", [
     {"maxOutputTokens": 1},
-    {"max_run_output_tokens": 1},
+    {"max_run_generation_tokens": 1},
     {"maxRunOutputToken": 1},
-    {"maxRunOutputTokens": -1},
+    {"maxRunGenerationTokens": -1},
 ])
 def test_invalid_long_task_budget_cannot_silently_become_unlimited(value):
     from infrastructure.persistence.sqlite_long_task_repository import _budget_limits

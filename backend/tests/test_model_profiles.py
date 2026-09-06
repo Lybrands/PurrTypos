@@ -33,7 +33,7 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
     assert glm.protocol_capabilities().reasoning_control is (
         ReasoningControl.ALWAYS_ENABLED
     )
-    assert glm.output_capabilities().max_call_output_tokens == 131_072
+    assert glm.output_capabilities().max_generation_tokens == 131_072
     assert resolve_model_profile(
         "deepseek:deepseek-v4-flash",
         "deepseek-v4-flash",
@@ -60,14 +60,26 @@ def test_registry_resolves_each_builtin_profile_and_generic_fallback():
         "https://api.xiaomimimo.com/v1",
     )
     assert mimo.profile_id == "mimo:mimo-v2.5-pro"
-    assert mimo.output_capabilities().max_call_output_tokens == 131_072
+    assert mimo.output_capabilities().max_generation_tokens == 131_072
     generic = resolve_model_profile(
         None,
         "custom-model",
         "https://proxy.example/v1",
     )
     assert generic.profile_id == "generic"
-    assert generic.output_capabilities().max_call_output_tokens is None
+    assert generic.output_capabilities().max_generation_tokens is None
+    custom_builtin_identity = resolve_model_profile(
+        None,
+        "deepseek-v4-flash",
+        "https://api.deepseek.com",
+    )
+    assert custom_builtin_identity.profile_id == "generic"
+    with pytest.raises(ValueError, match="unknown model profile"):
+        resolve_model_profile(
+            "unknown:profile",
+            "custom-model",
+            "https://proxy.example/v1",
+        )
 
 
 def test_minimax_profile_owns_reasoning_request_and_response_normalization():
@@ -111,7 +123,7 @@ def test_kimi_k3_profile_rejects_unsupported_reasoning_override():
         profile.build_openai_extra_body(False)
     snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
     assert snapshot.actionable is True
-    assert snapshot.max_call_output_tokens == 1_048_576
+    assert snapshot.max_generation_tokens == 1_048_576
     assert snapshot.source == (
         "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart"
     )
@@ -190,13 +202,13 @@ def test_builtin_profiles_publish_stable_versioned_capability_snapshots():
     assert set(first) == set(second)
     assert len(first) == len(BUILTIN_MODEL_PROFILES)
     for profile_id, snapshot in first.items():
-        assert snapshot.schema_version == 1
+        assert snapshot.schema_version == 2
         assert snapshot.profile_id == profile_id
         assert snapshot.provider_protocol
         assert snapshot.digest() == second[profile_id].digest()
         assert len(snapshot.digest()) == 64
         if snapshot.actionable:
-            assert snapshot.max_call_output_tokens is not None
+            assert snapshot.max_generation_tokens is not None
 
 
 @pytest.mark.parametrize(
@@ -220,7 +232,7 @@ def test_actionable_profile_output_limits_are_owned_by_each_profile(
     snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
 
     assert snapshot.actionable is True
-    assert snapshot.max_call_output_tokens == expected_max_output
+    assert snapshot.max_generation_tokens == expected_max_output
 
 @pytest.mark.parametrize(
     ("profile_id", "expected_parameter"),
@@ -252,16 +264,79 @@ def test_runtime_mapping_preserves_explicit_output_limit_and_reasoning_choice():
         contextWindow="1m",
         options={
             "model": "deepseek-v4-flash",
-            "model_profile": "deepseek:deepseek-v4-flash",
-            "max_tokens": 256_000,
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 256_000,
             "thinking": {"type": "enabled"},
         },
     )
 
     request = model_request_from_runtime(runtime)
 
-    assert request.options["max_tokens"] == 256_000
+    assert request.max_generation_tokens == 256_000
+    assert "max_tokens" not in request.options
     assert request.options["thinking"] == {"type": "enabled"}
     assert request.capability_snapshot.profile_id == "deepseek:deepseek-v4-flash"
     assert request.capability_snapshot.context_window_tokens == 1_000_000
     assert normalize_thinking_enabled(dict(request.options)) is True
+
+
+def test_custom_runtime_keeps_profile_capability_separate_from_user_ceiling():
+    runtime = SimpleNamespace(
+        apiProvider="openai",
+        baseURL="https://proxy.example/v1",
+        contextWindow="256k",
+        options={
+            "model": "custom-model",
+            "profile_max_generation_tokens": 200_000,
+            "max_generation_tokens": 80_000,
+            "supports_thinking": False,
+            "thinking_only": False,
+        },
+    )
+
+    request = model_request_from_runtime(runtime)
+
+    assert request.capability_snapshot.profile_id == "generic"
+    assert request.capability_snapshot.max_generation_tokens == 200_000
+    assert request.max_generation_tokens == 80_000
+    assert "profile_max_generation_tokens" not in request.options
+    assert "max_generation_tokens" not in request.options
+
+
+def test_custom_runtime_can_use_profile_capability_without_a_user_ceiling():
+    runtime = SimpleNamespace(
+        apiProvider="openai",
+        baseURL="https://proxy.example/v1",
+        contextWindow="256k",
+        options={
+            "model": "custom-model",
+            "profile_max_generation_tokens": 200_000,
+            "supports_thinking": False,
+            "thinking_only": False,
+        },
+    )
+
+    request = model_request_from_runtime(runtime)
+
+    assert request.capability_snapshot.max_generation_tokens == 200_000
+    assert request.max_generation_tokens is None
+
+
+def test_custom_runtime_does_not_reinterpret_user_ceiling_as_profile_capability():
+    runtime = SimpleNamespace(
+        apiProvider="openai",
+        baseURL="https://proxy.example/v1",
+        contextWindow="256k",
+        options={
+            "model": "custom-model",
+            "max_generation_tokens": 80_000,
+            "supports_thinking": False,
+            "thinking_only": False,
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="custom model requires profile_max_generation_tokens",
+    ):
+        model_request_from_runtime(runtime)

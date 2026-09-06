@@ -37,7 +37,12 @@ from purra.output import MAX_AGENT_PROGRESS_CHARS
 from purra.ports import CancellationSignal
 from purra.cancellation import raise_if_stopped
 from infrastructure.models import provider_router
-from infrastructure.models.capabilities import reasoning_mode_from_options
+from infrastructure.models.profiles.descriptors import DESCRIPTOR_KEY, TRACE_KEY
+from infrastructure.models.request_boundary import CheckedClient, describe_attempt, managed_send
+from infrastructure.models.capabilities import (
+    build_anthropic_thinking_param,
+    reasoning_mode_from_options,
+)
 from purra.stream_ownership import OwnedAsyncIterator, close_async_resource
 from config import DEV_DIAGNOSTICS_ENABLED
 from constants import AGENT_PUBLIC_PROGRESS_PREFIX
@@ -52,6 +57,7 @@ class ProviderModelGateway:
         *,
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         public_progress_from_content: bool = False,
+        request_observer=None,
     ):
         self._api_key = str(api_key or "").strip()
         if not self._api_key:
@@ -60,6 +66,7 @@ class ProviderModelGateway:
             on_required_tool_choice_unsupported
         )
         self._public_progress_from_content = bool(public_progress_from_content)
+        self._request_observer = request_observer
 
     def describe_invocation(
         self,
@@ -68,6 +75,7 @@ class ProviderModelGateway:
     ) -> dict[str, Any]:
         native = _uses_native_adapter(invocation)
         options = _provider_options(invocation)
+        options.pop("_capability_snapshot", None)
         if native:
             options = thaw_json_mapping(_native_invocation(invocation, options).request.options)
         parameters = build_model_call_parameters(
@@ -75,6 +83,8 @@ class ProviderModelGateway:
             invocation,
             provider_options=options,
         )
+        parameters["sdkAttemptId"] = describe_attempt(self, invocation)
+        parameters["modelResolution"] = thaw_json_mapping(invocation.request.options.get(TRACE_KEY) or {})
         if DEV_DIAGNOSTICS_ENABLED:
             parameters["inputMessages"] = [
                 _diagnostic_provider_message(
@@ -88,6 +98,7 @@ class ProviderModelGateway:
             ]
         return parameters
 
+    @managed_send
     async def stream(
         self,
         messages: Sequence[AgentMessage],
@@ -152,9 +163,10 @@ class ProviderModelGateway:
                 enabled=self._public_progress_from_content and bool(invocation.tools),
             ),
             model=str(result.get("model") or request.model),
-            applied_output_limit=result.get("applied_output_limit"),
+            applied_generation_limit=result.get("applied_generation_limit"),
         )
 
+    @managed_send
     async def complete(
         self,
         messages: Sequence[AgentMessage],
@@ -197,15 +209,15 @@ class ProviderModelGateway:
             model=str(result.get("model") or request.model),
             finish_reason=_normalize_finish_reason(result.get("finish_reason")),
             usage=_normalize_model_usage(result.get("usage")),
-            applied_output_limit=result.get("applied_output_limit"),
+            applied_generation_limit=result.get("applied_generation_limit"),
         )
 
     def _native_gateway(self, invocation: ModelInvocation):
         if invocation.request.provider == "anthropic":
             client = AsyncAnthropic(api_key=self._api_key, base_url="https://api.anthropic.com")
-            return AnthropicMessagesGateway(client), client
+            return AnthropicMessagesGateway(CheckedClient(client, protocol="anthropic")), client
         client = AsyncOpenAI(api_key=self._api_key, base_url="https://api.openai.com/v1")
-        return OpenAIChatCompletionsGateway(client), client
+        return OpenAIChatCompletionsGateway(CheckedClient(client, protocol="openai")), client
 
     def _request_error(
         self,
@@ -246,7 +258,18 @@ def _uses_native_adapter(invocation: ModelInvocation) -> bool:
 
 def _native_invocation(invocation: ModelInvocation, options: dict) -> ModelInvocation:
     options = dict(options)
-    for key in ("model", "model_profile", "baseURL", "context_window", "tools", "tool_choice"):
+    for key in (
+        "model",
+        "model_profile",
+        "baseURL",
+        "context_window",
+        "tools",
+        "tool_choice",
+        "max_tokens",
+        "_capability_snapshot",
+        DESCRIPTOR_KEY,
+        TRACE_KEY,
+    ):
         options.pop(key, None)
     mode = invocation.reasoning_mode
     if invocation.request.provider == "openai":
@@ -254,12 +277,12 @@ def _native_invocation(invocation: ModelInvocation, options: dict) -> ModelInvoc
         if invocation.request.protocol_capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
             mode = ReasoningMode.DEFAULT
     elif mode is ReasoningMode.ENABLED:
-        thinking = options.get("thinking") or {"type": "enabled"}
-        if thinking.get("type") == "enabled" and "budget_tokens" not in thinking:
-            cap = invocation.max_call_output_tokens
-            if cap is None or cap <= 1024:
-                raise UnsupportedModelFeatureError("Anthropic thinking requires an output limit above 1024")
-            options["thinking"] = {**thinking, "budget_tokens": min(32_000, max(1024, cap // 2))}
+        thinking, _ = build_anthropic_thinking_param(
+            True,
+            invocation.max_generation_tokens,
+            options.get("thinking"),
+        )
+        options["thinking"] = thinking
     return replace(
         invocation,
         request=replace(invocation.request, options=options),
@@ -288,13 +311,14 @@ def _provider_options(
             code="model_configuration_conflict",
         )
     options["model"] = request.model
+    options["_capability_snapshot"] = request.capability_snapshot.to_mapping()
     options.pop("model_profile", None)
     if request.profile_id is not None:
         options["model_profile"] = request.profile_id
     options.pop("tools", None)
     options.pop("tool_choice", None)
-    if invocation.max_call_output_tokens is not None:
-        options["max_tokens"] = invocation.max_call_output_tokens
+    if invocation.max_generation_tokens is not None:
+        options["max_tokens"] = invocation.max_generation_tokens
     if capabilities.reasoning_control is ReasoningControl.UNAVAILABLE:
         options.pop("thinking_enabled", None)
         options.pop("thinking", None)
@@ -554,7 +578,7 @@ def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     else:
         return None
 
-    output_tokens = (
+    generation_tokens = (
         _usage_int(raw, "completion_tokens")
         if _usage_int(raw, "completion_tokens") is not None
         else (_usage_int(raw, "output_tokens") or 0)
@@ -562,6 +586,7 @@ def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     total_tokens = _usage_int(raw, "total_tokens")
     prompt_details = raw.get("prompt_tokens_details")
     completion_details = raw.get("completion_tokens_details")
+    output_details = raw.get("output_tokens_details")
     cached_input_tokens = (
         _usage_int(prompt_details, "cached_tokens")
         if isinstance(prompt_details, Mapping)
@@ -569,17 +594,19 @@ def _normalize_model_usage(raw: Any) -> ModelTokenUsage | None:
     )
     if cached_input_tokens is None:
         cached_input_tokens = _usage_int(raw, "cache_read_input_tokens") or 0
-    reasoning_output_tokens = (
+    reasoning_tokens = (
         _usage_int(completion_details, "reasoning_tokens")
         if isinstance(completion_details, Mapping)
         else None
-    ) or 0
+    )
+    if reasoning_tokens is None and isinstance(output_details, Mapping):
+        reasoning_tokens = _usage_int(output_details, "thinking_tokens")
     return ModelTokenUsage(
         input_tokens=input_tokens,
-        output_tokens=output_tokens,
+        generation_tokens=generation_tokens,
         total_tokens=total_tokens,
         cached_input_tokens=cached_input_tokens,
-        reasoning_output_tokens=reasoning_output_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
 
@@ -606,11 +633,12 @@ def _normalize_finish_reason(value) -> ModelFinishReason | None:
         "max_output_tokens",
         "max_completion_tokens",
         "token_limit",
+        "model_context_window_exceeded",
     }:
         return ModelFinishReason.LENGTH
     if normalized in {"tool_calls", "function_call"}:
         return ModelFinishReason.TOOL_CALLS
-    if normalized in {"content_filter", "safety", "blocked"}:
+    if normalized in {"content_filter", "safety", "blocked", "refusal"}:
         return ModelFinishReason.FILTERED
     return ModelFinishReason.OTHER
 

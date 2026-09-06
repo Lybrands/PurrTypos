@@ -10,11 +10,14 @@ export async function consumeAgentEventStream<T extends {
   onEvent(event: T): void | Promise<void>
   fetch?: typeof fetch
   wait?: (ms: number, signal: AbortSignal) => Promise<void>
+  yieldToMain?: (signal: AbortSignal) => Promise<void>
 }): Promise<void> {
   let cursor = Math.max(0, options.after ?? 0)
   let failures = 0
   const request = options.fetch ?? fetch
   const wait = options.wait ?? waitForAgentRetry
+  const yieldToMain = options.yieldToMain ?? (signal => waitForAgentRetry(0, signal))
+  let sliceStartedAt = performance.now()
   while (!options.signal.aborted) {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
@@ -52,6 +55,10 @@ export async function consumeAgentEventStream<T extends {
           if (event.nextCursor > cursor) failures = 0
           cursor = event.nextCursor
           if (event.done) return
+          if (performance.now() - sliceStartedAt >= 8) {
+            await yieldToMain(options.signal)
+            sliceStartedAt = performance.now()
+          }
         }
         if (done) throw new Error('对话连接中断，正在恢复')
       }

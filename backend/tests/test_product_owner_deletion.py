@@ -220,7 +220,6 @@ async def test_screenplay_project_delete_cleans_terminal_operation_and_receipts(
     assert replay == {
         "status": "canceled",
         "newlyRequested": False,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,

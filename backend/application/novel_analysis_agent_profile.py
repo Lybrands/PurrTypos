@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from uuid import uuid4
-from application.prepared_read_context import PreparedReadContextProvider
 
 from purra.context_budget import estimate_json_tokens
-from purra.json_values import thaw_json_mapping
 from purra.context_strategies import ContextStrategy
 from purra.contracts import (
     AgentRunRequest,
@@ -27,7 +25,6 @@ from purra.contracts import (
     StepExecutor,
     StepType,
     TaskContextRequest,
-    ToolExecutionLimits,
 )
 from purra.long_tasks import (
     DurableExecutorRegistry,
@@ -50,7 +47,7 @@ from application.novel_analysis_source import (
     analysis_source_token_budget,
 )
 from application.novel_analysis_artifacts import NovelAnalysisArtifactStore
-from application.novel_analysis_tools import build_novel_analysis_tool_catalog
+from application.novel_analysis_tools import build_novel_analysis_tool_catalog, analysis_unit_input_text
 from domains.novel_analysis_prompts import build_novel_analysis_method_guidance
 from domains.novel_analysis import (
     NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
@@ -117,27 +114,13 @@ class _NovelAnalysisExecutionStateFactory:
             "toolAccess": "source_read_only",
             "interactionKind": context.interaction_kind,
             "unitInput": context.unit_input,
+            "analysisInputProvided": context.interaction_kind == "unit",
         })
 
 
 class _NovelAnalysisContextProvider:
     def __init__(self, db=None) -> None:
         self._artifacts = NovelAnalysisArtifactStore(db) if db is not None else None
-
-    async def prepared_reads(self, request, signal=None):
-        from domains.read_materials import ReadMaterial
-        from purra.cancellation import raise_if_stopped
-        raise_if_stopped(signal)
-        context = NovelAnalysisDomainContext.from_core_context(request.domain_context)
-        if context.interaction_kind != "unit" or not request.tools_enabled:
-            return ()
-        payload = thaw_json_mapping(context.unit_input)
-        content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return (ReadMaterial(
-            f"novel-analysis:{context.source_revision_id}:{context.command_id}",
-            "readNovelAnalysisInput", {}, content,
-            {"sourceRevisionId": context.source_revision_id},
-        ),)
 
     async def build_context(
         self,
@@ -149,6 +132,18 @@ class _NovelAnalysisContextProvider:
         context = NovelAnalysisDomainContext.from_core_context(
             request.domain_context
         )
+        if context.interaction_kind == "unit":
+            text = analysis_unit_input_text(context.unit_input)
+            return ContextBundle(blocks=(ContextBlock(
+                name="novel_analysis_unit_input",
+                content=text,
+                token_count=estimate_json_tokens(text),
+                untrusted=True,
+                host_metadata={
+                    "sourceRevisionId": context.source_revision_id,
+                    "inputDigest": canonical_digest(json.loads(text)),
+                },
+            ),))
         analysis_method = build_novel_analysis_method_guidance()
         blocks = [
             ContextBlock(
@@ -158,8 +153,6 @@ class _NovelAnalysisContextProvider:
                 untrusted=False,
             ),
         ]
-        if context.interaction_kind == "unit":
-            return ContextBundle(blocks=tuple(blocks))
         policy = {
             "sectionCount": len(context.section_ids),
             "rules": [
@@ -229,9 +222,6 @@ class _NovelAnalysisContextProvider:
 
 @dataclass(frozen=True, slots=True)
 class NovelAnalysisDomainAdapter:
-    # Unit inputs are already token-bounded before submission. The generic
-    # 64K-character tool ceiling is too small for a valid 24K-token segment.
-    tool_execution_limits: ToolExecutionLimits = ToolExecutionLimits(max_result_chars=200_000)
     planning_policy: _NovelAnalysisPlanningPolicy = (
         _NovelAnalysisPlanningPolicy()
     )
@@ -251,8 +241,8 @@ class NovelAnalysisDomainAdapter:
         _NovelAnalysisContextProvider()
     )
     runtime_limits: RuntimeLimits = RuntimeLimits(
-        max_run_output_tokens=None,
-        max_model_rounds=4,
+        max_run_generation_tokens=None,
+        max_model_rounds=6,
         max_progress_rounds=8,
         provider_invocation_timeout_ms=600_000,
         root_run_timeout_ms=7_200_000,
@@ -292,7 +282,7 @@ class NovelAnalysisAgentProfile:
         self._source = NovelAnalysisSourceReader(db)
         context_provider = _NovelAnalysisContextProvider(db)
         self._adapter = NovelAnalysisDomainAdapter(
-            context_provider=PreparedReadContextProvider(context_provider, context_provider.prepared_reads),
+            context_provider=context_provider,
             tool_catalog=build_novel_analysis_tool_catalog(db),
         )
 
@@ -350,6 +340,12 @@ class NovelAnalysisAgentProfile:
         context = NovelAnalysisDomainContext.from_core_context(
             request.domain_context
         )
+        if context.interaction_kind == "unit":
+            tokens = estimate_json_tokens(analysis_unit_input_text(context.unit_input))
+            return (ContextBudgetClaim(
+                "novel_analysis_unit_input", desired_tokens=tokens,
+                minimum_tokens=tokens, maximum_tokens=tokens,
+            ),)
         if context.interaction_kind != "follow_up":
             return ()
         return (ContextBudgetClaim(
@@ -494,7 +490,9 @@ def _bounded_follow_up_projection(artifact, token_budget: int) -> dict:
         "facts": facts,
         "craftCards": cards,
         **({"storyOverview": story_overview} if story_overview else {}),
-        "scopeNotice": "这是当前分析快照，不是完整来源正文。",
+        "writingSkill": clipped((artifact.get("writingSkill") or {}).get("markdown", ""), min(8000, budget)),
+        "skillReviewStatus": artifact.get("skillReviewStatus"),
+        "scopeNotice": "这是当前分析及写作方法的只读快照，不是完整来源正文。追问不修改保存的方法。",
     }
     while estimate_json_tokens(result) > budget and (len(facts) > 1 or len(cards) > 1):
         if len(facts) >= len(cards) and len(facts) > 1:

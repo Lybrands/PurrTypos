@@ -18,11 +18,11 @@ def _validated_profiles(*profiles: ModelProfile) -> tuple[ModelProfile, ...]:
     invalid = [
         profile.profile_id
         for profile in profiles
-        if profile.actionable and profile.max_call_output_tokens is None
+        if profile.actionable and profile.max_generation_tokens is None
     ]
     if invalid:
         raise RuntimeError(
-            "actionable model profiles require max_call_output_tokens: "
+            "actionable model profiles require max_generation_tokens: "
             + ", ".join(invalid)
         )
     return tuple(profiles)
@@ -50,12 +50,10 @@ def resolve_model_profile(
             (profile for profile in BUILTIN_MODEL_PROFILES if profile.profile_id == normalized_id),
             None,
         )
-        if explicit is not None:
-            return explicit
-    return next(
-        (profile for profile in BUILTIN_MODEL_PROFILES if profile.matches(model, base_url)),
-        GENERIC_MODEL_PROFILE,
-    )
+        if explicit is None:
+            raise ValueError(f"unknown model profile: {normalized_id}")
+        return explicit
+    return GENERIC_MODEL_PROFILE
 
 
 __all__ = ["BUILTIN_MODEL_PROFILES", "GENERIC_MODEL_PROFILE", "resolve_model_profile"]

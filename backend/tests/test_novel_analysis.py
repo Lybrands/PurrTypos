@@ -25,7 +25,6 @@ from purra.contracts import (
 )
 from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
 from purra.errors import ModelGatewayError
-from purra.json_values import freeze_json_mapping
 from purra.plan_compiler import compile_work_plan
 from purra.recovery import (
     FailureCategory,
@@ -44,7 +43,6 @@ from application.novel_analysis_executor import (
     _combine_candidates,
     _normalize_card,
     _restore_evidence_scopes,
-    _thaw_analysis_strategy,
 )
 from application.novel_analysis_service import NovelAnalysisService
 from application.novel_analysis_source import NovelAnalysisSourceReader
@@ -111,7 +109,7 @@ def test_segmented_context_round_trips_and_recipe_freezes_ranges():
     extract = recipe.steps[0]
     assert extract.metadata["segmentId"] == segment.id
     assert extract.metadata["endCharacter"] == 120
-    assert recipe.metadata["recipeVersion"] == 3
+    assert recipe.metadata["recipeVersion"] == 5
 
 
 def test_hierarchical_recipe_bounds_fan_in_for_million_character_scope():
@@ -144,7 +142,8 @@ def test_hierarchical_recipe_bounds_fan_in_for_million_character_scope():
         for step in normalizers
     ) == len(segments) // 2
     assert len(validation.depends_on) == len(segments) + 1
-    assert novel_analysis_model_call_count(recipe) == 100
+    assert validation.depends_on[-1] == "aggregate:story"
+    assert novel_analysis_model_call_count(recipe) == 105
     assert recipe.max_parallelism == 4
 
 
@@ -256,17 +255,9 @@ def test_model_merge_does_not_trust_model_authored_segment_ranges():
         _restore_evidence_scopes(merged, dependency, required=True)
 
 
-def test_craft_description_is_structured_and_cannot_copy_evidence():
-    with pytest.raises(ValueError, match="must not copy source evidence"):
-        _normalize_card({
-            "cardKind": "pacing_and_tension",
-            "title": "延迟揭示",
-            "bodyMarkdown": (
-                "## 写作逻辑\n把逐字证据直接写进技法。"
-                "\n\n## 风格特征\n克制。"
-            ),
-            "evidence": [{"sectionId": "s1", "excerpt": "逐字证据"}],
-        }, default_section_id=None)
+def test_source_observations_can_describe_source_while_skill_is_separate():
+    item = _normalize_card({"cardKind": "信息释放", "title": "来源观察", "bodyMarkdown": "通过逐字证据观察人物行动", "evidence": [{"sectionId": "s1", "excerpt": "逐字证据"}]}, default_section_id="s1")
+    assert item["bodyMarkdown"].startswith("通过")
 
 
 @pytest.fixture
@@ -277,20 +268,6 @@ async def db(tmp_path):
         yield connection
     finally:
         await connection.close()
-
-
-def test_analysis_strategy_is_serializable_after_purra_freezes_task_metadata():
-    frozen = freeze_json_mapping({
-        "taskSpec": {"goal": "分析事实脉络"},
-        "steps": [{"id": "facts", "title": "提取事实"}],
-    })
-
-    thawed = _thaw_analysis_strategy(frozen)
-
-    assert json.loads(json.dumps(thawed, ensure_ascii=False)) == {
-        "taskSpec": {"goal": "分析事实脉络"},
-        "steps": [{"id": "facts", "title": "提取事实"}],
-    }
 
 
 def test_novel_analysis_runtime_allows_bounded_thinking_units_to_finish():
@@ -415,6 +392,14 @@ async def _candidate_artifact(db, revision, *, status="completed"):
         "conflicts": [],
         "reviewStatus": "pending",
     }
+    from tests.support.writing_distillation import report
+    validated = await NovelAnalysisTaskUnitExecutor(db)._validate_candidates(payload, revision_id=revision["id"], section_ids=payload["sectionIds"])
+    payload.update(validated)
+    payload["analysisSchemaVersion"] = 2
+    payload["distillation"] = report(payload["craftCards"])
+    from domains.writing_distillation import render_skill
+    payload["writingSkill"] = {**payload["distillation"]["writingSkill"], "markdown": render_skill(payload["distillation"]["writingSkill"])}
+    payload["skillReviewStatus"] = "pending_review"
     artifact = await NovelAnalysisArtifactStore(db).write(
         namespace=NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
         kind=NOVEL_ANALYSIS_ARTIFACT_KIND,
@@ -517,7 +502,7 @@ async def test_analysis_public_facts_use_committed_review_without_internal_ids(d
 
     assert "分析全局故事、事实脉络和写作技法" in public_input
     assert "甲看见红门后" in public_input
-    assert "限制视角信息差" in public_input
+    assert "行动驱动的信息释放" in public_input
     assert "novel-analysis-artifact://" not in public_input
     assert revision["id"] not in public_input
     assert '"sectionTitle":"null"' not in public_input
@@ -577,8 +562,8 @@ async def test_truncation_retry_uses_resolved_limit_and_private_recovery_guidanc
         apiKey="test-key",
         options={
             "model": "glm-5.3-flash",
-            "model_profile": "zai:glm-5.3-flash",
-            "max_tokens": 131_072,
+            "model_profile": "zai:glm-5.3-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 131_072,
             "thinking": {"type": "enabled"},
         },
         contextWindow="256k",
@@ -610,7 +595,8 @@ async def test_truncation_retry_uses_resolved_limit_and_private_recovery_guidanc
 
     assert caught.value.code == "model_output_truncated"
     assert caught.value.retryable is True
-    assert captured["options"].output_limit.max_tokens == 131_072
+    assert captured["request"].model.max_generation_tokens == 131_072
+    assert captured["request"].model.options["thinking"] == {"type": "enabled"}
     assert "上一次执行未能在输出限额内提交候选" in (
         captured["request"].messages[0].content
     )
@@ -833,7 +819,7 @@ async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):
     )
     assert artifact_block.untrusted is True
     assert "限制视角" in artifact_block.content
-    assert "这是当前分析快照" in artifact_block.content
+    assert "只读快照" in artifact_block.content
     assert revision["id"] not in artifact_block.content
     assert revision["sections"][0]["id"] not in artifact_block.content
 
@@ -1066,7 +1052,7 @@ async def test_source_analysis_surfaces_only_the_current_published_result(db):
     reference, payload = await _candidate_artifact(db, revision)
     service = NovelAnalysisService(db)
     first = await service.publish(reference)
-    payload["craftCards"][0]["title"] = "当前信息差"
+    payload["facts"][0]["value"] = "当前信息差"
     reviewed = await service.review(
         artifact_ref=reference,
         command_id="review-current",
@@ -1106,7 +1092,7 @@ async def test_review_correction_is_new_artifact_and_does_not_mutate_candidate(d
     revision = await _source(db)
     reference, payload = await _candidate_artifact(db, revision)
     service = NovelAnalysisService(db)
-    payload["craftCards"][0]["title"] = "修订后的信息差"
+    payload["facts"][0]["value"] = "修订后的事实"
 
     reviewed = await service.review(
         artifact_ref=reference,
@@ -1115,13 +1101,13 @@ async def test_review_correction_is_new_artifact_and_does_not_mutate_candidate(d
     )
     candidate = await service.get_artifact(reference)
     assert reviewed["artifactId"] != candidate["artifactId"]
-    assert reviewed["craftCards"][0]["title"] == "修订后的信息差"
+    assert reviewed["facts"][0]["value"] == "修订后的事实"
     assert candidate["craftCards"][0]["title"] == "限制视角信息差"
 
     published = await service.publish(
         NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + reviewed["artifactId"]
     )
-    assert published["craftCards"][0]["title"] == "修订后的信息差"
+    assert published["facts"][0]["value"] == "修订后的事实"
 
 
 async def test_analysis_long_task_pause_resume_cancel_retry_survive_restart(tmp_path):
@@ -1414,3 +1400,91 @@ async def test_run_view_exposes_latest_follow_up_answer(db):
     assert runs[0]["analysisArtifactRef"] == reference
     assert runs[0]["prompt"] == "为什么红门重要？"
     assert runs[0]["finalResponse"] == "因为它同时连接了人物认知与钥匙冲突。"
+
+
+@pytest.mark.parametrize('quote,section,accepted', [
+    ('穿过一层水幕', 's1', True),
+    ('穿过水幕', 's1', False),
+    ('穿过一层水幕', 's2', False),
+    ('像穿过……消失', 's1', False),
+])
+def test_merged_evidence_only_inherits_scope_from_verbatim_contiguous_quote(quote, section, accepted):
+    dependency = {'facts': [{'evidence': [{'sectionId': 's1', 'excerpt': '像穿过一层水幕一样，消失在墙壁中。',
+        'segmentId': 'seg-host', 'segmentStartCharacter': 20, 'segmentEndCharacter': 80}]}]}
+    merged = {'storyOverview': {'summaryMarkdown': '概览', 'evidence': [{'sectionId': section, 'excerpt': quote,
+        'segmentId': 'model-authored', 'segmentStartCharacter': 0, 'segmentEndCharacter': 999}]}}
+    if not accepted:
+        with pytest.raises(ValueError, match='lost its segment scope'):
+            _restore_evidence_scopes(merged, [dependency], required=True)
+    else:
+        result = _restore_evidence_scopes(merged, [dependency], required=True)
+        assert result['storyOverview']['evidence'] == [{'sectionId': 's1', 'excerpt': quote,
+            'segmentId': 'seg-host', 'segmentStartCharacter': 20, 'segmentEndCharacter': 80}]
+
+
+@pytest.mark.parametrize('length,model_units,total_units', [(2225, 6, 9), (4000, 6, 9), (4001, 8, 11)])
+def test_short_source_merges_analysis_without_removing_transfer_checks(length, model_units, total_units):
+    recipe = compile_novel_analysis_recipe(
+        section_ids=('s1',),
+        segments=(NovelAnalysisSegment(id=f's1:0:{length}', section_id='s1', section_ordinal=0,
+                                       start_character=0, end_character=length),),
+        plan_step_ids=('facts', 'method', 'check'),
+    )
+    assert novel_analysis_model_call_count(recipe) == model_units
+    assert len(recipe.steps) == total_units
+    assert recipe.max_parallelism == 1
+    assert recipe.steps[0].metadata.get('includeStoryOverview', False) is (length <= 4000)
+    steps = {step.id: step for step in recipe.steps}
+    assert steps['skill:trial'].depends_on == ('skill:draft',)
+    assert steps['skill:retrial'].depends_on == ('skill:revise',)
+    assert steps['skill:assess'].depends_on == ('validate:evidence', 'skill:revise', 'skill:retrial')
+    if length <= 4000:
+        assert steps['validate:evidence'].depends_on == (recipe.steps[0].id,)
+        assert 'normalize:root' not in steps and 'aggregate:story' not in steps
+
+
+@pytest.mark.parametrize('effort', [None, 'high', 'max'])
+async def test_analysis_retry_exhaustion_preserves_user_configuration(db, effort):
+    from copy import deepcopy
+    from application.model_runtime import runtime_from_settings
+
+    config = {
+        'name': 'glm-5.3-flash', 'presetId': 'zai:glm-5.3-flash', 'apiProvider': 'zai',
+        'apiKey': 'test-key', 'baseUrl': 'https://open.bigmodel.cn/api/paas/v4',
+        'contextWindow': '256k', 'maxGenerationTokens': 131072, 'temperature': 0.9,
+        'modelPreferences': {
+            'reasoning_mode': {'state': 'explicit', 'value': 'enabled'},
+            'reasoning_effort': {'state': 'provider_default'} if effort is None else {'state': 'explicit', 'value': effort},
+            'temperature': {'state': 'explicit', 'value': 0.9},
+        },
+    }
+    before = deepcopy(config)
+    runtime = runtime_from_settings(config)
+    from pydantic import SecretStr
+    runtime.apiKey = SecretStr('test-key')
+    before_options = deepcopy(runtime.options)
+    captured = []
+
+    class ExhaustedRuns:
+        async def run(self, *, request, **kwargs):
+            captured.append(request)
+            yield AgentRunResult(run_id='exhausted', status=RunStatus.FAILED,
+                                 error='upstream_stream_interrupted', model=request.model.model)
+
+    models = NovelAnalysisModelCalls(db, None, runtime)
+    models._runs = ExhaustedRuns()
+    context = SimpleNamespace(run_id='root', unit=SimpleNamespace(id='extract:1'), bind_run=None,
+        task=SimpleNamespace(id='task', metadata={'sourceRevisionId':'r', 'sectionIds':['s']}))
+    with pytest.raises(ModelGatewayError) as caught:
+        await models.run_json(context=context, instruction='分析本片段',
+                              payload={'sourceEvidence': {'text': '片段'}, 'analysisFocus': '关注角色认知'})
+    assert len(captured) == 1
+    assert captured[0].model.options.get('reasoning_effort') == effort
+    assert captured[0].model.options['thinking'] == {'type': 'enabled'}
+    assert captured[0].model.options['temperature'] == 0.9
+    assert captured[0].model.max_generation_tokens == 131072
+    assert runtime.options == before_options and config == before
+    assert not caught.value.retryable
+    failure = NovelAnalysisTaskUnitExecutor(db).classify_failure(caught.value)
+    assert not failure.retryable
+    assert decide_failure(failure, attempts_remaining=1).disposition is not FailureDisposition.RETRY_ATTEMPT

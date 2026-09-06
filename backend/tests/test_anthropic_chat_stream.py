@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from purra.errors import ContractViolationError
 
 from infrastructure.models import anthropic_chat
 
@@ -114,6 +115,95 @@ async def test_anthropic_stream_emits_finish_only_after_message_stop(monkeypatch
         "total_tokens": 157,
         "prompt_tokens_details": {"cached_tokens": 30},
     }
+    assert "completion_tokens_details" not in chunks[-1]["usage"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_extracts_reported_thinking_usage(monkeypatch):
+    chunks = await _collect_chunks(monkeypatch, (
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(usage=SimpleNamespace(input_tokens=100)),
+        ),
+        SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(
+                output_tokens=7,
+                output_tokens_details=SimpleNamespace(thinking_tokens=5),
+            ),
+        ),
+        SimpleNamespace(type="message_stop"),
+    ))
+
+    assert chunks[-1]["usage"]["completion_tokens_details"] == {
+        "reasoning_tokens": 5,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "finish_reason"),
+    [
+        ("model_context_window_exceeded", "length"),
+        ("refusal", "content_filter"),
+        ("pause_turn", "pause_turn"),
+        ("provider_specific_unknown", "provider_specific_unknown"),
+    ],
+)
+async def test_anthropic_non_success_stop_reasons_never_become_stop(
+    monkeypatch,
+    stop_reason,
+    finish_reason,
+):
+    chunks = await _collect_chunks(monkeypatch, (
+        SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason=stop_reason),
+        ),
+        SimpleNamespace(type="message_stop"),
+    ))
+
+    assert chunks[-1]["choices"][0]["finish_reason"] == finish_reason
+    assert finish_reason != "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "finish_reason"),
+    [
+        ("model_context_window_exceeded", "length"),
+        ("refusal", "content_filter"),
+        ("pause_turn", "pause_turn"),
+    ],
+)
+async def test_anthropic_non_stream_non_success_stop_reasons_fail_closed(
+    monkeypatch,
+    stop_reason,
+    finish_reason,
+):
+    async def create(**_params):
+        return SimpleNamespace(
+            content=[],
+            model="model",
+            stop_reason=stop_reason,
+            usage=None,
+        )
+
+    monkeypatch.setattr(
+        anthropic_chat,
+        "_create_client",
+        lambda *_: SimpleNamespace(messages=SimpleNamespace(create=create)),
+    )
+
+    result = await anthropic_chat.chat_no_stream_as_openai_format(
+        "key",
+        [{"role": "user", "content": "hello"}],
+        {"model": "model", "max_tokens": 64},
+    )
+
+    assert result["finish_reason"] == finish_reason
+    assert finish_reason != "stop"
 
 
 @pytest.mark.asyncio
@@ -140,6 +230,7 @@ async def test_minimax_native_thinking_is_parsed_without_anthropic_budget_param(
         [{"role": "user", "content": "hello"}],
         {
             "model": "MiniMax-M3",
+            "model_profile": "minimax:MiniMax-M3", "profile_binding": "compatible",
             "baseURL": "https://api.minimaxi.com/anthropic",
             "thinking": {"type": "enabled"},
             "max_tokens": 8192,
@@ -279,13 +370,10 @@ async def test_anthropic_cancellation_never_synthesizes_success(monkeypatch):
     signal = asyncio.Event()
     signal.set()
 
-    chunks = await _collect_chunks(
-        monkeypatch,
-        (SimpleNamespace(type="message_stop"),),
-        signal=signal,
-    )
+    from purra.cancellation import OperationCanceled
+    with pytest.raises(OperationCanceled):
+        await _collect_chunks(monkeypatch, (SimpleNamespace(type="message_stop"),), signal=signal)
 
-    assert chunks == []
 
 
 async def _collect_stream(stream):
@@ -294,14 +382,14 @@ async def _collect_stream(stream):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("requested,applied", [(64, 3072), (2048, 2048)])
-async def test_anthropic_receipt_reports_the_final_sdk_limit(
-    monkeypatch, streaming, requested, applied,
+@pytest.mark.parametrize("requested,budget", [(2048, 1024), (8192, 3072)])
+async def test_anthropic_preserves_the_explicit_budget_and_sdk_limit(
+    monkeypatch, streaming, requested, budget,
 ):
     from infrastructure.models.profiles.base import ModelProfile
 
     captured = {}
-    monkeypatch.setattr(anthropic_chat, "resolve_model_profile", lambda *_: ModelProfile())
+    monkeypatch.setattr(anthropic_chat, "profile_for_options", lambda *_: ModelProfile())
 
     async def create(**params):
         captured.update(params)
@@ -318,9 +406,51 @@ async def test_anthropic_receipt_reports_the_final_sdk_limit(
     chat = (anthropic_chat.chat_stream_as_openai_format if streaming
             else anthropic_chat.chat_no_stream_as_openai_format)
     result = await chat("test-key", [{"role": "user", "content": "hello"}], {
-        "model": "model", "thinking": {"type": "enabled"}, "max_tokens": requested,
+        "model": "model",
+        "thinking": {"type": "enabled", "budget_tokens": budget},
+        "max_tokens": requested,
     })
-    assert result["applied_output_limit"] == captured["max_tokens"] == applied
-    assert captured["thinking"]["budget_tokens"] < applied
+    assert result["applied_generation_limit"] == captured["max_tokens"] == requested
+    assert captured["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": budget,
+    }
     if streaming:
         await result["stream"].aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(
+    "reasoning_options",
+    [
+        {"thinking": {"type": "enabled"}},
+        {"thinking_enabled": True},
+    ],
+)
+async def test_anthropic_missing_explicit_thinking_budget_fails_before_connect(
+    monkeypatch,
+    streaming,
+    reasoning_options,
+):
+    from infrastructure.models.profiles.base import ModelProfile
+
+    connect_calls = []
+    monkeypatch.setattr(anthropic_chat, "profile_for_options", lambda *_: ModelProfile())
+    monkeypatch.setattr(
+        anthropic_chat,
+        "_create_client",
+        lambda *_: connect_calls.append(True),
+    )
+    chat = (anthropic_chat.chat_stream_as_openai_format if streaming
+            else anthropic_chat.chat_no_stream_as_openai_format)
+
+    with pytest.raises(ContractViolationError) as caught:
+        await chat("test-key", [{"role": "user", "content": "hello"}], {
+            "model": "model",
+            "max_tokens": 8192,
+            **reasoning_options,
+        })
+
+    assert caught.value.code == "anthropic_thinking_budget_required"
+    assert connect_calls == []

@@ -2,15 +2,10 @@ import React from 'react';
 import { services } from '../../services';
 import type { AiDiagnosticPreview, AiToolCallDiagnostic } from '../../types';
 import { mergeToolDiagnostics } from './toolDiagnostics';
+import DiagnosticText from './DiagnosticText';
 
 function Preview({ label, value }: { label: string; value: AiDiagnosticPreview }) {
-  return <>
-    <span>{label}</span>
-    <pre>{value.text}</pre>
-    {value.truncated ? <div className="ai-dev-inspector__notice">
-      预览已截断：显示 {value.text.length.toLocaleString()} / {value.characters.toLocaleString()} 字符；原始日志未修改。
-    </div> : null}
-  </>;
+  return <DiagnosticText label={label} text={value.text} characters={value.characters} truncated={value.truncated} />;
 }
 
 export default function ToolDiagnosticsCard({ runId, revision }: {
@@ -66,7 +61,7 @@ export default function ToolDiagnosticsCard({ runId, revision }: {
   >
     <summary>
       <span>
-        <strong>工具参数与返回</strong>
+        <strong>工具调用</strong>
         <small>开发环境私有日志；常见凭据字段脱敏，按调用 ID 关联</small>
       </span>
       <em data-status={error ? 'fail' : loaded ? 'pass' : 'captured'}>
@@ -84,12 +79,16 @@ export default function ToolDiagnosticsCard({ runId, revision }: {
       {calls.map((call, index) => <details className="ai-dev-inspector__tool" key={call.toolCallId}>
         <summary>
           <span className="ai-dev-inspector__tool-index">{index + 1}</span>
-          <strong>{call.name || '未知工具'}</strong>
+          <strong>{call.displayName || call.name || '未知工具'}</strong>
           {call.cached ? <span className="ai-dev-inspector__tag">缓存</span> : null}
           <span>{call.status === 'failed' ? '失败' : call.status === 'completed' ? '完成' : '尚无结束记录'}</span>
         </summary>
         <div className="ai-dev-inspector__tool-detail">
+          {call.displayName && call.name && call.displayName !== call.name
+            ? <><span>工具函数</span><pre>{call.name}</pre></>
+            : null}
           <span>调用 ID</span><pre>{call.toolCallId}</pre>
+          {call.operationId ? <><span>操作 ID</span><pre>{call.operationId}</pre></> : null}
           {call.outcome ? <><span>执行结果</span><pre>{call.outcome}</pre></> : null}
           {call.approvalStatus ? <><span>审批状态</span><pre>{call.approvalStatus}</pre></> : null}
           {call.error ? <Preview label="错误" value={call.error} /> : null}

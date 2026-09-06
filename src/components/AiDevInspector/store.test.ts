@@ -433,7 +433,7 @@ function persistedSnapshot(
   const status = options.status ?? 'running';
   const runId = options.runId ?? 'run-recovered';
   return {
-    version: 1,
+    version: 2,
     run: {
       runId,
       sessionId: 7,
@@ -451,8 +451,10 @@ function persistedSnapshot(
         modelAttemptCount: options.modelAttemptCount ?? 0,
         usage: {
           inputTokens: options.usage?.inputTokens ?? 0,
-          outputTokens: options.usage?.outputTokens ?? 0,
-          reasoningTokens: options.usage?.reasoningTokens ?? 0,
+          generationTokens: options.usage?.generationTokens ?? 0,
+          reasoningTokens: options.usage?.reasoningTokens ?? null,
+          unreportedReasoningAttempts:
+            options.usage?.unreportedReasoningAttempts ?? 0,
           totalTokens: options.usage?.totalTokens ?? 0,
           unreportedAttempts: options.usage?.unreportedAttempts ?? 0,
         },
@@ -495,9 +497,9 @@ test('diagnostics expose live reported usage and replace it with durable Run tot
       eventType: 'context.usage_recorded',
       data: {
         actualInputTokens: 1200,
-        actualOutputTokens: 80,
+        actualGenerationTokens: 80,
         actualTotalTokens: 1280,
-        reasoningOutputTokens: 25,
+        reasoningTokens: 25,
       },
     },
   }));
@@ -505,10 +507,11 @@ test('diagnostics expose live reported usage and replace it with durable Run tot
   let run = getAiDebugSnapshot().runs[0];
   assert.deepEqual(run.tokenUsage, {
     inputTokens: 1200,
-    outputTokens: 80,
+    generationTokens: 80,
     reasoningTokens: 25,
     totalTokens: 1280,
     unreportedAttempts: 0,
+    unreportedReasoningAttempts: 0,
     modelAttempts: 1,
     complete: false,
   });
@@ -525,24 +528,29 @@ test('diagnostics expose live reported usage and replace it with durable Run tot
     modelAttemptCount: 3,
     usage: {
       inputTokens: 3600,
-      outputTokens: 240,
+      generationTokens: 240,
       reasoningTokens: 75,
       totalTokens: 3840,
       unreportedAttempts: 1,
+      unreportedReasoningAttempts: 0,
     },
   }));
 
   run = getAiDebugSnapshot().runs[0];
   assert.deepEqual(run.tokenUsage, {
     inputTokens: 3600,
-    outputTokens: 240,
+    generationTokens: 240,
     reasoningTokens: 75,
     totalTokens: 3840,
     unreportedAttempts: 1,
+    unreportedReasoningAttempts: 0,
     modelAttempts: 3,
     complete: true,
   });
   assert.deepEqual(aiDebugTurnTokenUsage([run]), run.tokenUsage);
+  assert.equal(run.startedAt, Date.parse('2026-08-05T17:00:00Z'));
+  assert.equal(run.finishedAt, Date.parse('2026-08-05T17:00:10Z'));
+  assert.equal(run.finishedAt - run.startedAt, 10_000);
 });
 
 test('conversation events merge todo updates without discarding the full plan', () => {
@@ -671,7 +679,10 @@ test("debug store preserves a canonical tool failure code", () => {
         operationId: "operation-scope",
         kind: "tool",
         startedAt: "2026-08-12T08:00:01Z",
-        display: { labelParams: { toolName: "getSourceCharacters" } },
+        display: { labelParams: {
+          toolName: "getSourceCharacters",
+          displayNames: { "zh-CN": "为第 1 集读取林月的人物资料" },
+        } },
       },
     }));
     recordAiDebugChunk("screenplay-test", canonicalEvent(2, {
@@ -699,6 +710,8 @@ test("debug store preserves a canonical tool failure code", () => {
     }));
 
     const tool = getAiDebugSnapshot().runs[0].tools[0];
+    assert.equal(tool.name, "getSourceCharacters");
+    assert.equal(tool.displayName, "为第 1 集读取林月的人物资料");
     assert.equal(tool.status, "failed");
     assert.equal(tool.outcome, "failed");
     assert.equal(tool.errorCode, "tool_scope_violation");

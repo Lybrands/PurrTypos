@@ -24,8 +24,12 @@ _CHAPTER_ID = 'chapter-"one"'
 _DIGEST_ID = "source-analysis:reduction:1"
 
 
-@pytest.mark.parametrize("part_key", ("draft_scene", "episode_metadata"))
-def test_draft_recipe_step_skills_are_available(part_key):
+# final_response uses _compose_final_response -> run_public_text with its own
+# instruction; that execution entry does not call with_screenplay_step_skill.
+@pytest.mark.parametrize(
+    "part_key", tuple(key for key in PART_CONTRACTS if key != "final_response"),
+)
+def test_every_skill_backed_part_contract_has_a_loadable_method(part_key):
     assembled = with_screenplay_step_skill(PART_CONTRACTS[part_key], "执行约束")
     assert assembled.endswith("\n\n执行约束")
 
@@ -81,6 +85,42 @@ _ALL_PROMPTS = [(key, prompt) for key, prompt, _ in _CANDIDATE_PROMPTS] + [
     ("draft_scene", executor._scene_tool_instruction(3, _SCENE_IDS[0])),
     ("final_response", executor._final_response_instruction()),
 ]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "required_instruction"),
+    (
+        (
+            executor._scene_tool_instruction(3, _SCENE_IDS[0]),
+            "先调用 getScreenplaySceneContext",
+        ),
+        (
+            executor._review_dimension_tool_instruction(
+                3,
+                "continuity",
+                _SCENE_IDS,
+            ),
+            "先调用 getScreenplayEpisodeContext 读取当前集材料",
+        ),
+        (
+            executor._source_chapter_digest_tool_instruction(
+                chapter_id=_CHAPTER_ID,
+                chapter_title="第一章",
+                chapter_index=1,
+            ),
+            "先调用 readSourceChapters 读取本章正文",
+        ),
+        (
+            executor._scene_list_fragment_tool_instruction(3),
+            "先调用 readScreenplayDeliverable 读取当前集结构",
+        ),
+    ),
+)
+def test_body_dependent_parts_require_an_explicit_read(
+    prompt,
+    required_instruction,
+):
+    assert required_instruction in prompt
 
 
 @pytest.mark.parametrize(

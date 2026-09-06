@@ -201,3 +201,41 @@ test('failure is kept as an error notice rather than an assistant answer', () =>
   assert.equal(assistant.isError, true)
   assert.match(assistant.error, /超过当前时限/)
 })
+
+test('publishes each chunk while more analysis pages are still pending', () => {
+  const stream = new NovelAnalysisConversationStream()
+  const seen = []
+  const page = { kind: 'analysis_events', nextCursor: 2, hasMore: true,
+    projectionVersion: 'v1', runs: [run()], chunks: [1, 2].map(sequence => ({
+      cursor: sequence, runId: 'analysis-run', createdAt: '',
+      chunk: event(sequence, { payload: { delta: String(sequence) } }).chunk,
+    })) }
+  stream.apply(page, undefined, value => seen.push(value.message.streamingContent))
+  assert.deepEqual(seen, ['1', '12'])
+  stream.apply(page, undefined, value => seen.push(value.message.streamingContent))
+  assert.deepEqual(seen, ['1', '12'])
+})
+
+for (const status of ['running', 'completed']) {
+  test(`resumed analysis ${status} does not project previous unit failure as current failure`, () => {
+    const input = run({ taskStatus: status, runStatus: status === 'completed' ? 'done' : 'running',
+      units: [{ unitId:'trial', status:status === 'completed' ? 'completed' : 'running', errorCode:'task_failed_dependency' }],
+    })
+    const assistant = buildNovelAnalysisMessages(input, 'model', {
+      role:'assistant',agentRunId:input.runId,content:'正在重新检验方法',isError:true,error:'旧尝试失败',
+    }).at(-1)
+    assert.equal(assistant.isError, false)
+    assert.equal(assistant.error, undefined)
+    assert.equal(assistant.content, '正在重新检验方法')
+  })
+}
+
+test('completed analysis units do not hide a failed root public presentation', () => {
+  const input = run({ taskStatus: 'completed', runStatus: 'failed',
+    error: 'model_reasoning_mode_conflict',
+    units: [{ unitId: 'artifact:review', status: 'completed' }],
+  })
+  const assistant = buildNovelAnalysisMessages(input, 'model').at(-1)
+  assert.equal(assistant.isError, true)
+  assert.match(assistant.error, /推理配置发生冲突/)
+})

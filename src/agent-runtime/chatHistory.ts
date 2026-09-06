@@ -7,9 +7,13 @@ export function buildHistoryConverter(): (
   m: AgentConversationMessage | { role: 'user' | 'assistant'; content: string },
 ) => { role: string; content: string } | null {
   return (m) => {
-    if (('isError' in m && m.isError) || m.role === 'system') return null
-    const text = String(m.content ?? '').trim()
+    if (m.role !== 'user' && m.role !== 'assistant') return null
+    const publicFinal = m.role === 'assistant' && 'canonicalOutput' in m
+      ? m.canonicalOutput?.finalText
+      : undefined
+    const text = String(publicFinal || m.content || '').trim()
     if (!text) return null
+    if (!publicFinal && 'error' in m && text === m.error?.trim()) return null
     return { role: m.role, content: text }
   }
 }

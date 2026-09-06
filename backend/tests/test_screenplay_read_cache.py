@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
-from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,10 +13,6 @@ from infrastructure.screenplay.tools import read_cache
 from infrastructure.screenplay.tools.query import ScreenplayToolQuery
 from infrastructure.screenplay.tools.tool_catalog import build_screenplay_tool_catalog
 from purra.contracts import ExecutionState
-from purra.contracts import AgentRunRequest, ModelRequest
-from domains.screenplay_agent.adapter import ScreenplayExecutionStateFactory
-from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
-from infrastructure.screenplay.tools.prepared_reads import ScreenplayPreparedReads
 
 
 @pytest_asyncio.fixture
@@ -69,6 +65,60 @@ def _state(number=1, **scope):
 def _read(db):
     return next(item.handler for item in build_screenplay_tool_catalog(db=db).registrations()
                 if item.schema.name == "readSourceChapters")
+
+
+def test_scene_context_cache_identity_includes_host_bound_scene_and_dependencies():
+    scope = _state(
+        expectedPartType="scene",
+        expectedPartKey="scene-2",
+        boundEpisodeNumber=2,
+        dependencyPartKeys=["draft:2:scene-1"],
+        deliverableRevisionScope={
+            "sourceAnalysis": "analysis-1",
+            "creativeBrief": "brief-1",
+            "sceneList": "scene-list-1",
+        },
+    ).domain
+    original, _ = read_cache.screenplay_cache_identity(
+        "getScreenplaySceneContext",
+        scope,
+        {},
+    )
+    changed_scene, _ = read_cache.screenplay_cache_identity(
+        "getScreenplaySceneContext",
+        {**scope, "expectedPartKey": "scene-3"},
+        {},
+    )
+    changed_dependency, _ = read_cache.screenplay_cache_identity(
+        "getScreenplaySceneContext",
+        {**scope, "dependencyPartKeys": ["draft:2:scene-0"]},
+        {},
+    )
+
+    assert len({original, changed_scene, changed_dependency}) == 3
+
+
+@pytest.mark.parametrize("tool_name", ["getScreenplaySceneContext", "readScreenplayDeliverable"])
+async def test_enriched_read_contract_does_not_reuse_old_cached_shape(cache_db, tool_name):
+    scope = _state(expectedPartType="scene", expectedPartKey="scene-1", boundEpisodeNumber=1).domain
+    current_key, scope_key = read_cache.screenplay_cache_identity(tool_name, scope, {})
+    old_key = hashlib.sha256(json.dumps(
+        [3, tool_name, json.loads(scope_key), {}],
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()).hexdigest()
+    assert current_key != old_key
+    await cache_db.execute(
+        "INSERT INTO screenplay_tool_cache (cache_key, tool_name, content) VALUES (?, ?, ?)",
+        [old_key, tool_name, '{"oldShape":true}'],
+    )
+    method = AsyncMock(return_value={"currentShape": True})
+    value, hit = await read_cache.cached_screenplay_read(cache_db, tool_name, method, scope, {})
+    assert value == {"currentShape": True}
+    assert hit is False
+    repeated, hit = await read_cache.cached_screenplay_read(cache_db, tool_name, method, scope, {})
+    assert repeated == value
+    assert hit is True
+    method.assert_awaited_once()
 
 
 async def test_reads_reuse_complete_results_across_rounds_runs_and_catalogs(cache_db, monkeypatch):
@@ -144,36 +194,6 @@ async def test_cache_cannot_reuse_a_broader_scope_or_revoked_access(cache_db):
     await cache_db.execute("UPDATE screenplay_projects SET source_scope_json = '{}' WHERE id = 'project'")
     restored = await read(_state(), arguments)
     assert not restored.from_cache and restored.error_code is None
-
-
-@pytest.mark.parametrize("indexed", [True, False])
-@pytest.mark.parametrize("chapter_ids", [["chapter-1"], ["chapter-2", "chapter-1"]])
-async def test_prepared_sources_respect_permissions_scope_and_database_invalidation(cache_db, monkeypatch, indexed, chapter_ids):
-    context = ScreenplayAgentDomainContext(project_id="project", source_book_id="book",
-                                          task_id="task", unit_id="scene-1", target_role="creativeBrief",
-                                          expected_part_type="document", expected_part_key="main",
-                                          source_scope={"mode": "whole_book"})
-    request = AgentRunRequest(messages=(), model=ModelRequest(provider="fixture", model="model"),
-                              domain_context=context.to_core_context(), tools_enabled=True)
-    state = ScreenplayExecutionStateFactory().create(request)
-    state.run_id = "prepared-source-run"
-    await _read(cache_db)(state, {"chapterIds": chapter_ids})
-    if not indexed:
-        await cache_db.execute("UPDATE screenplay_tool_cache SET scope_key = NULL, arguments_json = NULL")
-    loader = ScreenplayPreparedReads(cache_db, build_screenplay_tool_catalog(db=cache_db))
-    monkeypatch.setattr(ScreenplayToolQuery, "read_source_chapters", AsyncMock(side_effect=AssertionError("unexpected read")))
-    supplied = await loader.load(request)
-    assert len(supplied) == 1
-    assert supplied[0].arguments == {"chapterIds": chapter_ids}
-    assert "完整原文1，关键线索在结尾。" in supplied[0].content
-    assert supplied[0].metadata["sourceRefs"]
-    restricted = replace(context, source_scope={"mode": "selected_chapters", "chapterIds": ["chapter-2"]})
-    assert await loader.load(replace(request, domain_context=restricted.to_core_context())) == ()
-    no_reads = replace(context, tool_access="candidate_write")
-    assert await loader.load(replace(request, domain_context=no_reads.to_core_context())) == ()
-    assert await loader.load(replace(request, tools_enabled=False)) == ()
-    await cache_db.execute("UPDATE articles SET content = ? WHERE chapter_id = 'chapter-1'", [_lexical("新版原文")])
-    assert await loader.load(request) == ()
 
 
 async def test_cache_rolls_back_failed_reads_and_bounds_storage(cache_db, monkeypatch):

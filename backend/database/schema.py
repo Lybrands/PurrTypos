@@ -195,7 +195,7 @@ async def _migrate_legacy_long_tasks(db: DatabaseConnection) -> None:
             failed_units INTEGER NOT NULL DEFAULT 0,
             max_parallelism INTEGER NOT NULL DEFAULT 1,
             cancel_requested_at_ms INTEGER DEFAULT NULL,
-            usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+            usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}',
             metadata_json TEXT NOT NULL DEFAULT '{}',
             create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -248,100 +248,6 @@ async def _migrate_legacy_artifact_claims(db: DatabaseConnection) -> None:
         await db.execute(
             "ALTER TABLE ai_agent_artifact_claims_migrating "
             "RENAME TO ai_agent_artifact_claims"
-        )
-
-
-async def _migrate_legacy_delegations(db: DatabaseConnection) -> None:
-    columns = await _table_columns(db, "ai_agent_delegations")
-    if not columns:
-        return
-    if "run_id" in columns:
-        if "agent_role" not in columns:
-            return
-        async with db.transaction():
-            await db.execute(
-                "UPDATE ai_agent_delegations SET agent_name = agent_role "
-                "WHERE TRIM(agent_name) = '' AND TRIM(agent_role) <> ''"
-            )
-            await db.execute(
-                "UPDATE ai_agent_delegations SET agent_title = agent_name "
-                "WHERE TRIM(agent_title) = ''"
-            )
-            await db.execute(
-                "UPDATE ai_agent_delegations SET agent_instruction = "
-                "'Execute the delegated objective.' "
-                "WHERE TRIM(agent_instruction) = ''"
-            )
-            await db.execute(
-                "ALTER TABLE ai_agent_delegations DROP COLUMN agent_role"
-            )
-        return
-    required = {"parent_run_id", "root_run_id", "child_run_id", "agent_role"}
-    if not required.issubset(columns):
-        missing = ", ".join(sorted(required - columns))
-        raise RuntimeError(
-            f"legacy Agent delegation schema is missing columns: {missing}"
-        )
-    unresolved = await db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_delegations "
-        "WHERE TRIM(parent_run_id) = '' OR TRIM(agent_role) = ''"
-    )
-    if int((unresolved or {}).get("count") or 0):
-        raise RuntimeError(
-            "legacy Agent delegations contain unresolved Run or Agent identities"
-        )
-
-    async with db.transaction():
-        await db.execute("DROP TABLE IF EXISTS ai_agent_delegations_migrating")
-        await db.execute("""CREATE TABLE ai_agent_delegations_migrating (
-            id TEXT PRIMARY KEY NOT NULL,
-            run_id TEXT NOT NULL,
-            batch_id TEXT NOT NULL,
-            agent_name TEXT NOT NULL,
-            agent_title TEXT NOT NULL,
-            agent_instruction TEXT NOT NULL,
-            objective TEXT NOT NULL,
-            input_json TEXT NOT NULL DEFAULT '{}',
-            context_mode TEXT NOT NULL DEFAULT 'isolated',
-            status TEXT NOT NULL DEFAULT 'queued',
-            required INTEGER NOT NULL DEFAULT 1,
-            priority INTEGER NOT NULL DEFAULT 0,
-            result_summary TEXT DEFAULT NULL,
-            error TEXT DEFAULT NULL,
-            create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-            update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-        )""")
-        await db.execute("""INSERT INTO ai_agent_delegations_migrating (
-            id, run_id, batch_id, agent_name, agent_title, agent_instruction,
-            objective, input_json, context_mode, status, required, priority,
-            result_summary, error, create_time, update_time
-        )
-        SELECT
-            id,
-            parent_run_id,
-            'legacy-delegation:' || id,
-            agent_role,
-            agent_role,
-            'Execute the delegated objective.',
-            objective,
-            json_set(
-                CASE WHEN json_valid(input_json) THEN input_json ELSE '{}' END,
-                '$._legacyChildRunId', child_run_id,
-                '$._legacyRootRunId', root_run_id
-            ),
-            'isolated',
-            status,
-            required,
-            priority,
-            result_summary,
-            error,
-            create_time,
-            update_time
-        FROM ai_agent_delegations""")
-        await db.execute("DROP TABLE ai_agent_delegations")
-        await db.execute(
-            "ALTER TABLE ai_agent_delegations_migrating "
-            "RENAME TO ai_agent_delegations"
         )
 
 
@@ -509,11 +415,12 @@ async def _migrate_run_cancellation_receipts(db: DatabaseConnection) -> None:
             "ALTER TABLE ai_agent_run_cancellations "
             "RENAME COLUMN root_run_id TO run_id"
         )
-    if "children_canceled" in columns:
-        await db.execute(
-            "ALTER TABLE ai_agent_run_cancellations "
-            "RENAME COLUMN children_canceled TO delegations_canceled"
-        )
+    for removed_column in ("children_canceled", "delegations_canceled"):
+        if removed_column in columns:
+            await db.execute(
+                "ALTER TABLE ai_agent_run_cancellations "
+                f"DROP COLUMN {removed_column}"
+            )
     if "final_status" not in columns:
         await db.execute(
             "ALTER TABLE ai_agent_run_cancellations "
@@ -895,6 +802,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         recovery_policy_id TEXT DEFAULT NULL,
         capability_snapshot_digest TEXT DEFAULT NULL,
         capability_snapshot_json TEXT DEFAULT NULL,
+        requested_user_max_generation_tokens INTEGER DEFAULT NULL,
+        result_capacity_target_tokens INTEGER DEFAULT NULL,
+        selected_context_window_tokens INTEGER DEFAULT NULL,
         binding_namespace TEXT DEFAULT NULL,
         binding_aggregate_id TEXT DEFAULT NULL,
         binding_command_id TEXT DEFAULT NULL,
@@ -921,6 +831,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         error TEXT DEFAULT NULL,
         model_attempt_count INTEGER NOT NULL DEFAULT 0,
         unreported_usage_attempts INTEGER NOT NULL DEFAULT 0,
+        unreported_reasoning_attempts INTEGER NOT NULL DEFAULT 0,
         input_tokens INTEGER NOT NULL DEFAULT 0,
         output_tokens INTEGER NOT NULL DEFAULT 0,
         reasoning_tokens INTEGER NOT NULL DEFAULT 0,
@@ -945,6 +856,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         "recovery_policy_id TEXT DEFAULT NULL",
         "capability_snapshot_digest TEXT DEFAULT NULL",
         "capability_snapshot_json TEXT DEFAULT NULL",
+        "requested_user_max_generation_tokens INTEGER DEFAULT NULL",
+        "result_capacity_target_tokens INTEGER DEFAULT NULL",
+        "selected_context_window_tokens INTEGER DEFAULT NULL",
         "binding_namespace TEXT DEFAULT NULL",
         "binding_aggregate_id TEXT DEFAULT NULL",
         "binding_command_id TEXT DEFAULT NULL",
@@ -971,6 +885,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         "error TEXT DEFAULT NULL",
         "model_attempt_count INTEGER NOT NULL DEFAULT 0",
         "unreported_usage_attempts INTEGER NOT NULL DEFAULT 0",
+        "unreported_reasoning_attempts INTEGER NOT NULL DEFAULT 0",
         "input_tokens INTEGER NOT NULL DEFAULT 0",
         "output_tokens INTEGER NOT NULL DEFAULT 0",
         "reasoning_tokens INTEGER NOT NULL DEFAULT 0",
@@ -992,6 +907,18 @@ async def init_schema(db: DatabaseConnection) -> None:
         ON ai_agent_runs(parent_run_id, id)
         WHERE parent_run_id IS NOT NULL
     """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_model_sdk_requests (
+        attempt_id TEXT PRIMARY KEY,
+        run_id TEXT REFERENCES ai_agent_runs(id) ON DELETE CASCADE,
+        record_json TEXT NOT NULL,
+        create_time INTEGER NOT NULL
+    )""")
+    await db.execute("""CREATE TRIGGER IF NOT EXISTS ai_agent_run_sdk_diagnostics_delete
+        AFTER DELETE ON ai_agent_runs BEGIN
+            DELETE FROM ai_model_sdk_requests WHERE run_id = OLD.id;
+        END
+    """)
+
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_run_model_attempts (
         run_id TEXT NOT NULL,
         invocation_id TEXT NOT NULL,
@@ -1016,7 +943,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         run_id TEXT PRIMARY KEY NOT NULL,
         cancellation_epoch INTEGER NOT NULL CHECK (cancellation_epoch >= 1),
         status TEXT NOT NULL CHECK (status IN ('draining', 'completed')),
-        delegations_canceled INTEGER NOT NULL DEFAULT 0,
         requested_at_ms INTEGER NOT NULL,
         completed_at_ms INTEGER DEFAULT NULL,
         final_status TEXT DEFAULT NULL,
@@ -1039,7 +965,10 @@ async def init_schema(db: DatabaseConnection) -> None:
             tool_protocol_contract,
             recovery_policy_id,
             capability_snapshot_digest,
-            capability_snapshot_json
+            capability_snapshot_json,
+            requested_user_max_generation_tokens,
+            result_capacity_target_tokens,
+            selected_context_window_tokens
         ON ai_agent_runs
         WHEN
             OLD.model_provider IS NOT NEW.model_provider
@@ -1053,6 +982,9 @@ async def init_schema(db: DatabaseConnection) -> None:
             OR OLD.recovery_policy_id IS NOT NEW.recovery_policy_id
             OR OLD.capability_snapshot_digest IS NOT NEW.capability_snapshot_digest
             OR OLD.capability_snapshot_json IS NOT NEW.capability_snapshot_json
+            OR OLD.requested_user_max_generation_tokens IS NOT NEW.requested_user_max_generation_tokens
+            OR OLD.result_capacity_target_tokens IS NOT NEW.result_capacity_target_tokens
+            OR OLD.selected_context_window_tokens IS NOT NEW.selected_context_window_tokens
         BEGIN
             SELECT RAISE(ABORT, 'agent run provenance is immutable');
         END
@@ -1287,6 +1219,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS idx_ai_agent_sdk_attempt
+        ON ai_agent_run_events(json_extract(payload_json, '$.callParameters[0].sdkAttemptId'))
+        WHERE event_type = 'stream.opened'
+    """)
     for column in (
         "output_protocol TEXT DEFAULT NULL",
         "planning_run_id TEXT DEFAULT NULL",
@@ -1416,7 +1352,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         deadline_at_ms INTEGER DEFAULT NULL,
         budget_limits_json TEXT NOT NULL DEFAULT '{}',
         cancel_requested_at_ms INTEGER DEFAULT NULL,
-        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"unreportedUsageAttempts":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}',
+        usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"unreportedUsageAttempts":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}',
         metadata_json TEXT NOT NULL DEFAULT '{}',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -1444,7 +1380,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         db,
         "ALTER TABLE ai_agent_long_tasks ADD COLUMN usage_json TEXT NOT NULL "
         "DEFAULT '{\"invocationCount\":0,\"unreportedUsageAttempts\":0,\"inputTokens\":0,"
-        "\"outputTokens\":0,\"reasoningTokens\":0}'",
+        "\"generationTokens\":0,\"reasoningTokens\":0}'",
     )
     await _try_exec(
         db,
@@ -1673,29 +1609,9 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_agent_artifact_projections_result
         ON ai_agent_artifact_projections(projector_namespace, result_ref)
     """)
-    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_delegations (
-        id TEXT PRIMARY KEY NOT NULL,
-        run_id TEXT NOT NULL,
-        batch_id TEXT NOT NULL,
-        agent_name TEXT NOT NULL,
-        agent_title TEXT NOT NULL,
-        agent_instruction TEXT NOT NULL,
-        objective TEXT NOT NULL,
-        input_json TEXT NOT NULL DEFAULT '{}',
-        context_mode TEXT NOT NULL DEFAULT 'isolated',
-        status TEXT NOT NULL DEFAULT 'queued',
-        required INTEGER NOT NULL DEFAULT 1,
-        priority INTEGER NOT NULL DEFAULT 0,
-        result_summary TEXT DEFAULT NULL,
-        error TEXT DEFAULT NULL,
-        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    await _migrate_legacy_delegations(db)
-    await db.execute("""CREATE INDEX IF NOT EXISTS
-        idx_ai_agent_delegations_run_batch_status
-        ON ai_agent_delegations(run_id, batch_id, status, priority DESC, create_time)
-    """)
+    # Obsolete same-Run records have no valid Agent Tree Run identity and
+    # therefore cannot participate in current execution or recovery.
+    await db.execute("DROP TABLE IF EXISTS ai_agent_delegations")
     # ── ai_favorites ─────────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

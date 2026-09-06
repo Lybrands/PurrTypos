@@ -9,10 +9,13 @@ export {
 } from './models/registry'
 export {
   AI_CONTEXT_WINDOW_LABELS,
+  AI_REASONING_EFFORT_LABELS,
   applyModelRuntimeConfigPatch,
   getDefaultModelContextWindow,
-  getModelMaxOutputTokens,
+  getModelProfileMaxGenerationTokens,
   getModelContextWindowOptions,
+  getModelReasoningEffort,
+  getModelReasoningEffortOptions,
   isModelThinkingEnabled,
   normalizeApiProvider,
 } from './models/runtime'

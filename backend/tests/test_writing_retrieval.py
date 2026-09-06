@@ -94,12 +94,12 @@ async def _run(db, *, recommend=False, session_id=None):
             chatAgentMode="agent",
             options={
                 "model": "model",
-                "model_profile": "deepseek:deepseek-v4-flash",
+                "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
             },
         )
         request = await composition.prepare_request(to_writing_agent_request(
             body,
-            {"model": "model", "model_profile": "deepseek:deepseek-v4-flash"},
+            {"model": "model", "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible"},
         ))
         options = composition.bind_run_profile(
             request,

@@ -64,7 +64,7 @@ class _Gateway:
         return ModelStream(
             chunks=_text_chunks(self.response),
             model="fixture-model",
-            applied_output_limit=invocation.output_limit.max_tokens,
+            applied_generation_limit=invocation.max_generation_tokens,
         )
 
     async def complete(self, messages, invocation, signal=None):
@@ -76,7 +76,7 @@ class _Gateway:
                 content=self.response,
             ),
             model="fixture-model",
-            applied_output_limit=invocation.output_limit.max_tokens,
+            applied_generation_limit=invocation.max_generation_tokens,
             finish_reason=ModelFinishReason.STOP,
         )
 
@@ -111,7 +111,7 @@ class _ScriptedToolGateway(_Gateway):
         return ModelStream(
             chunks=chunks(),
             model="fixture-model",
-            applied_output_limit=invocation.output_limit.max_tokens,
+            applied_generation_limit=invocation.max_generation_tokens,
         )
 
 
@@ -183,9 +183,9 @@ def _request() -> AgentRunRequest:
             capability_snapshot=replace(
                 generic_capability_snapshot(),
                 profile_id="fixture:model",
-                max_call_output_tokens=1_024,
+                max_generation_tokens=1_024,
             ),
-            options={"max_tokens": 512},
+            max_generation_tokens=512,
         ),
         domain_context=DomainContext(namespace="purrtypos.test"),
         context_window=32_768,
@@ -228,7 +228,7 @@ def _core(
             context_provider=_Context(),
             execution_profile=profile,
             runtime_limits=runtime_limits or RuntimeLimits(
-                max_run_output_tokens=None,
+                max_run_generation_tokens=None,
             ),
             component_bindings=bindings,
         ),
@@ -481,7 +481,7 @@ async def test_auto_activation_cannot_exceed_the_shared_model_round_budget():
         planner=planner,
         runtime_limits=RuntimeLimits(
             max_model_rounds=1,
-            max_run_output_tokens=None,
+            max_run_generation_tokens=None,
         ),
     )
     try:

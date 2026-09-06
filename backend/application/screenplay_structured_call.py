@@ -18,7 +18,6 @@ from purra.contracts import (
     RunStatus,
 )
 from purra.errors import ModelGatewayError
-from purra.model_protocol import InvocationOutputLimit
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
@@ -28,12 +27,10 @@ from purra.structured_output import parse_json_object
 
 from application.agent_run_service import AgentRunService
 from application.model_runtime import (
-    fit_output_limit_to_context,
     model_request_from_runtime,
+    runtime_context_window_tokens,
     reasoning_mode_from_options,
 )
-from application.request_mapping import context_window_tokens
-from application.screenplay_model_policy import screenplay_output_limit
 from application.screenplay_tool_calling import (
     BindRun,
     run_screenplay_child,
@@ -78,7 +75,6 @@ class ScreenplayStructuredCallService:
             runtime,
             json_object_output=True,
         )
-        output_limit = _output_limit(runtime, model_request)
         last_error: Exception | None = None
         for attempt in range(2):
             result = await self._runs.run_model_text(
@@ -87,8 +83,7 @@ class ScreenplayStructuredCallService:
                 api_key=runtime.apiKey.get_secret_value(),
                 messages=messages,
                 model_request=model_request,
-                output_limit=output_limit,
-                reasoning_mode=reasoning_mode_from_options(runtime.options),
+                reasoning_mode=reasoning_mode_from_options(model_request.options),
                 signal=signal,
             )
             try:
@@ -135,9 +130,7 @@ class ScreenplayStructuredCallService:
         signal=None,
     ) -> PublicModelResult:
         model_request = model_request_from_runtime(runtime)
-        window = context_window_tokens(
-            runtime.contextWindow or runtime.options.get("context_window")
-        )
+        window = model_request.capability_snapshot.context_window_tokens
         request = AgentRunRequest(
             messages=_messages(system_instruction, user_payload),
             model=model_request,
@@ -160,15 +153,11 @@ class ScreenplayStructuredCallService:
         )
         options = AgentCoreRunOptions(
             turn_id=conversation_turn_id,
-            output_limit=_output_limit(
-                runtime,
-                model_request,
-            ),
             default_context_window_tokens=window,
             model_supports_tools=False,
             force_planned_tool_choice=False,
             require_tool_call=False,
-            reasoning_mode=reasoning_mode_from_options(runtime.options),
+            reasoning_mode=reasoning_mode_from_options(model_request.options),
             provenance=screenplay_run_provenance(
                 runtime,
                 user_payload,
@@ -230,22 +219,6 @@ def _messages(
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-        ),
-    )
-
-
-def _output_limit(
-    runtime,
-    model_request,
-) -> InvocationOutputLimit:
-    limit = screenplay_output_limit(
-        model_request.capability_snapshot,
-        model_request.options.get("max_tokens"),
-    )
-    return fit_output_limit_to_context(
-        limit,
-        context_window_tokens(
-            runtime.contextWindow or runtime.options.get("context_window")
         ),
     )
 

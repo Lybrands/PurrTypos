@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from purra.contracts import RunStatus
 from purra.errors import RunCommitProjectionError
 from purra.ports import RunCommit
+from purra.structured_output import parse_json_object
 
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE,
@@ -18,7 +19,7 @@ from infrastructure.screenplay.tools.candidate_artifact import (
     ScreenplayCandidateArtifacts,
 )
 from infrastructure.screenplay.tools.read_evidence import (
-    consumed_task_part_keys, has_prepared_read, record_prepared_source_receipts,
+    consumed_task_part_keys,
 )
 
 
@@ -87,17 +88,23 @@ class ScreenplayCandidateCompletionProjector:
             ):
                 raise ValueError("candidate projection contract is invalid")
             await self._validate_started_event(run_id, turn_id)
-            await record_prepared_source_receipts(self._db, run_id, str(scope["projectId"]))
             await self._validate_dependency_read(run_id, scope)
-            if (
-                str(scope.get("toolAccess") or "") == "draft_scene"
-                and not await self._has_successful_tool_read(
+            if str(scope.get("toolAccess") or "") == "draft_scene":
+                episode_number = scope.get("boundEpisodeNumber")
+                has_scene_context = await self._has_successful_tool_read(
                     run_id,
-                    "getScreenplayEpisodeContext",
-                    episode_number=scope.get("boundEpisodeNumber"),
+                    "getScreenplaySceneContext",
+                    episode_number=episode_number,
                 )
-            ):
-                raise ValueError("draft scene episode context was not read")
+                has_legacy_episode_context = (
+                    await self._has_successful_tool_read(
+                        run_id,
+                        "getScreenplayEpisodeContext",
+                        episode_number=episode_number,
+                    )
+                )
+                if not (has_scene_context or has_legacy_episode_context):
+                    raise ValueError("draft scene context was not read")
             host_capture = projection.get("hostCapture")
             if isinstance(host_capture, Mapping):
                 candidate = _host_candidate(
@@ -175,8 +182,6 @@ class ScreenplayCandidateCompletionProjector:
         *,
         episode_number: int | None = None,
     ) -> bool:
-        if await has_prepared_read(self._db, run_id, {tool_name}, episode_number=episode_number):
-            return True
         row = await self._db.fetch_one(
             "SELECT 1 AS present FROM ai_agent_run_events AS started "
             "JOIN ai_agent_run_events AS finished "
@@ -213,6 +218,8 @@ def _host_candidate(
     capture: Mapping[str, object],
     validated_result: str | None,
 ) -> dict[str, object]:
+    if capture.get("format") == "json":
+        return dict(parse_json_object(str(validated_result or "")))
     template = capture.get("candidateTemplate")
     if not isinstance(template, Mapping):
         raise ValueError("host candidate template is missing")

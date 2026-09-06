@@ -12,8 +12,10 @@ const {
   getBuiltinProvider,
   getModelPreset,
   getDefaultModelContextWindow,
-  getModelMaxOutputTokens,
+  getModelProfileMaxGenerationTokens,
   getModelContextWindowOptions,
+  getModelReasoningEffort,
+  getModelReasoningEffortOptions,
   isModelThinkingEnabled,
   normalizeApiProvider,
 } = loadTypeScriptModule(path.join(__dirname, 'modelCatalog.ts'))
@@ -78,18 +80,20 @@ test('DeepSeek exposes only V4 Flash as its built-in default', () => {
       id: preset.id,
       name: preset.name,
       contextWindow: preset.contextWindow,
-      maxOutputTokens: preset.maxOutputTokens,
+      maxGenerationTokens: preset.maxGenerationTokens,
       supportsThinking: preset.supportsThinking,
       thinkingEnabled: preset.thinkingEnabled,
+      reasoningEffortOptions: preset.reasoningEffortOptions,
     })),
     [
       {
         id: 'deepseek:deepseek-v4-flash',
         name: 'deepseek-v4-flash',
         contextWindow: '1m',
-        maxOutputTokens: 393_216,
+        maxGenerationTokens: 393_216,
         supportsThinking: true,
         thinkingEnabled: true,
+        reasoningEffortOptions: ['low', 'high', 'max'],
       },
     ],
   )
@@ -99,7 +103,7 @@ test('API provider normalization preserves Z.ai and rejects unknown legacy value
   assert.equal(normalizeApiProvider('zai'), 'zai')
   assert.equal(normalizeApiProvider('anthropic'), 'anthropic')
   assert.equal(normalizeApiProvider('openai'), 'openai')
-  assert.equal(normalizeApiProvider('unknown-provider'), 'openai')
+  assert.throws(() => normalizeApiProvider('unknown-provider'), /不支持的模型协议/)
   assert.equal(normalizeApiProvider(undefined), 'openai')
 })
 
@@ -116,23 +120,23 @@ test('preset ids and provider/model pairs are unique', () => {
 
 test('model catalog exposes capability ceilings instead of task budgets', () => {
   assert.equal(
-    getModelMaxOutputTokens({
+    getModelProfileMaxGenerationTokens({
       presetId: 'mimo:mimo-v2.5-pro',
       contextWindow: '32k',
     }),
     131_072,
   )
   assert.equal(
-    getModelMaxOutputTokens({ presetId: 'deepseek:deepseek-v4-flash' }),
+    getModelProfileMaxGenerationTokens({ presetId: 'deepseek:deepseek-v4-flash' }),
     393_216,
   )
   assert.equal(
-    getModelMaxOutputTokens({ presetId: 'minimax:MiniMax-M3' }),
+    getModelProfileMaxGenerationTokens({ presetId: 'minimax:MiniMax-M3' }),
     524_288,
   )
-  assert.equal(getModelMaxOutputTokens({ presetId: 'moonshot:kimi-k3' }), 1_048_576)
-  assert.equal(getModelMaxOutputTokens({ presetId: 'moonshot:kimi-k2.6' }), 262_144)
-  assert.equal(getModelMaxOutputTokens({ contextWindow: '1m' }), undefined)
+  assert.equal(getModelProfileMaxGenerationTokens({ presetId: 'moonshot:kimi-k3' }), 1_048_576)
+  assert.equal(getModelProfileMaxGenerationTokens({ presetId: 'moonshot:kimi-k2.6' }), 262_144)
+  assert.equal(getModelProfileMaxGenerationTokens({ profileMaxGenerationTokens: 65_536 }), 65_536)
 })
 
 test('the catalog contains GLM-5.3-Flash and the existing models', () => {
@@ -248,4 +252,18 @@ test('runtime thinking selection changes only the user-owned mode', () => {
     isModelThinkingEnabled({ thinkingOnly: true, thinkingEnabled: false }),
     false,
   )
+
+  const lowEffort = applyModelRuntimeConfigPatch(
+    {
+      ...config,
+      presetId: 'deepseek:deepseek-v4-flash',
+    },
+    { reasoningEffort: 'low' },
+  )
+  assert.equal(getModelReasoningEffort(lowEffort), 'low')
+  assert.deepEqual(
+    [...getModelReasoningEffortOptions(lowEffort)],
+    ['low', 'high', 'max'],
+  )
+  assert.equal(getModelReasoningEffort(config), undefined)
 })

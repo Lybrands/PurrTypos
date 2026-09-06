@@ -27,6 +27,9 @@ from infrastructure.screenplay.agent_run_cancellation_projector import (
 from infrastructure.screenplay.candidate_completion_projector import (
     ScreenplayCandidateCompletionProjector,
 )
+from infrastructure.screenplay.long_task_claim_guard import (
+    ScreenplayCheckpointClaimGuard,
+)
 
 
 class _ChainedRunCommitProjector:
@@ -70,6 +73,7 @@ def create_agent_composition(
     return AgentComposition(
         db,
         run_begin_projector=ScreenplayContinuationBeginProjector(db),
+        long_task_claim_guard=ScreenplayCheckpointClaimGuard(db),
         run_commit_projector=run_commit_projector,
         run_cancellation_projectors=(
             ScreenplayRunCancellationProjector(db),

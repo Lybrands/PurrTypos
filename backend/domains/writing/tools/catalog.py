@@ -31,7 +31,10 @@ from domains.writing.tools.host_arguments import (
 from domains.writing.tools.context_contracts import (
     WRITING_TOOL_CONTEXT_CONTRACTS,
 )
-from domains.writing.tools.display_names import WRITING_TOOL_DISPLAY_NAMES
+from domains.writing.tools.display_names import (
+    WRITING_TOOL_DISPLAY_NAMES,
+    writing_tool_display_names,
+)
 
 
 WRITING_REPLANNING_EVIDENCE_TOOLS = frozenset({
@@ -143,7 +146,18 @@ def _decorate_registration(
             else None
         ),
         context_contract=WRITING_TOOL_CONTEXT_CONTRACTS[tool_name],
+        operation_display_params=_writing_operation_display_params,
     )
+
+
+def _writing_operation_display_params(state, arguments, tool_call):
+    return {
+        "displayNames": writing_tool_display_names(
+            tool_call.name,
+            state.domain,
+            arguments,
+        )
+    }
 
 
 def _with_replanning(tool_name: str, handler: CoreToolHandler) -> CoreToolHandler:

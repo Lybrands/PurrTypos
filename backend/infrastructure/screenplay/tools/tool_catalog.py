@@ -17,7 +17,7 @@ from infrastructure.screenplay.tools.candidate_artifact import (
 from infrastructure.screenplay.tools.query import ScreenplayToolQuery
 from infrastructure.screenplay.tools.read_cache import cached_screenplay_read
 from infrastructure.screenplay.tools.read_evidence import (
-    consumed_task_part_keys, has_prepared_read, record_prepared_source_receipts,
+    consumed_task_part_keys,
 )
 
 
@@ -68,11 +68,17 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
             if dependency_keys and not set(dependency_keys).issubset(
                 await consumed_task_part_keys(db, str(state.run_id or ""))
             ):
+                dependency_tool = (
+                    "getScreenplaySceneContext"
+                    if str(state.domain.get("toolAccess") or "")
+                    == "draft_scene"
+                    else "readScreenplayTaskDependencies"
+                )
                 raise ScreenplayToolInputError(
                     "The candidate cannot be written before its dependencies are read.",
                     guidance=(
-                        "Call readScreenplayTaskDependencies with the bound Part "
-                        "keys, wait for success, then retry the candidate write."
+                        f"Call {dependency_tool}, wait for success, then retry "
+                        "the candidate write."
                     ),
                 )
             if (
@@ -113,7 +119,6 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
                         "successful result, then retry writeScreenplayCandidatePart."
                     ),
                 )
-            await record_prepared_source_receipts(db, state.run_id, str(state.domain["projectId"]))
             result = await candidates.write(state, arguments)
         except ScreenplayToolInputError as error:
             return _input_error(error)
@@ -143,6 +148,7 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
         "readScreenplayDeliverable": query.read_deliverable,
         "searchScreenplayDeliverables": query.search_deliverables,
         "getScreenplayEpisodeContext": query.episode_context,
+        "getScreenplaySceneContext": query.scene_context,
         "inspectSourceStructure": query.inspect_source_structure,
         "readSourceChapters": query.read_source_chapters,
         "searchSourceText": query.search_source_text,
@@ -167,8 +173,6 @@ def build_screenplay_tool_catalog(*, db, candidate_normalizer=None):
 async def _has_successful_read_operation(db, run_id: str, read_operations) -> bool:
     if not run_id:
         return False
-    if await has_prepared_read(db, run_id, read_operations):
-        return True
     placeholders = ",".join("?" for _ in read_operations)
     row = await db.fetch_one(
         "SELECT 1 AS present FROM ai_agent_run_events AS started "

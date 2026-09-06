@@ -25,7 +25,6 @@ class ScreenplayPartContract:
     key: str
     validation_kind: str | None
     tool_profile: str
-    output_token_cap: int
 
 
 def _contract(
@@ -33,13 +32,11 @@ def _contract(
     *,
     validation_kind: str | None,
     tool_profile: str,
-    output_token_cap: int,
 ) -> ScreenplayPartContract:
     return ScreenplayPartContract(
         key=key,
         validation_kind=validation_kind,
         tool_profile=tool_profile,
-        output_token_cap=output_token_cap,
     )
 
 
@@ -48,79 +45,66 @@ _CONTRACTS = {
         "draft_scene",
         validation_kind="scene",
         tool_profile="draft_scene",
-        output_token_cap=16_384,
     ),
     "episode_metadata": _contract(
         "episode_metadata",
         validation_kind="episode_metadata",
         tool_profile="episode_metadata",
-        output_token_cap=4_096,
     ),
     "review_dimension": _contract(
         "review_dimension",
         validation_kind="review_dimension",
         tool_profile="review_dimension",
-        output_token_cap=8_192,
     ),
     "structure.episode_plan_index": _contract(
         "structure.episode_plan_index",
         validation_kind="structure_episode_plan_index",
         tool_profile="episode_plan_index",
-        output_token_cap=4_096,
     ),
     "structure.episode_plan_fragment": _contract(
         "structure.episode_plan_fragment",
         validation_kind="structure_episode_plan_fragment",
         tool_profile="episode_plan_fragment",
-        output_token_cap=16_384,
     ),
     "structure.series_arc_index": _contract(
         "structure.series_arc_index",
         validation_kind="structure_series_arc_index",
         tool_profile="series_arc_index",
-        output_token_cap=8_192,
     ),
     "structure.series_arc_phase": _contract(
         "structure.series_arc_phase",
         validation_kind="structure_series_arc_phase",
         tool_profile="series_arc_phase",
-        output_token_cap=8_192,
     ),
     "structure.character_arcs_index": _contract(
         "structure.character_arcs_index",
         validation_kind="structure_character_arcs_index",
         tool_profile="character_arcs_index",
-        output_token_cap=4_096,
     ),
     "structure.character_arc_fragment": _contract(
         "structure.character_arc_fragment",
         validation_kind="structure_character_arc_fragment",
         tool_profile="character_arc_fragment",
-        output_token_cap=8_192,
     ),
     "scene_list_episode": _contract(
         "scene_list_episode",
         validation_kind="scene_list_fragment",
         tool_profile="scene_list_episode",
-        output_token_cap=16_384,
     ),
     "final_response": _contract(
         "final_response",
         validation_kind=None,
         tool_profile="final_response",
-        output_token_cap=1_024,
     ),
     "source_analysis.chapter_digest": _contract(
         "source_analysis.chapter_digest",
         validation_kind="source_chapter_digest",
         tool_profile="source_chapter_digest",
-        output_token_cap=8_192,
     ),
     "source_analysis.digest_reduction": _contract(
         "source_analysis.digest_reduction",
         validation_kind="source_digest_reduction",
         tool_profile="source_digest_reduction",
-        output_token_cap=8_192,
     ),
 }
 
@@ -136,7 +120,6 @@ for _section in (
         _key,
         validation_kind="source_analysis_section",
         tool_profile="source_analysis_section",
-        output_token_cap=16_384,
     )
 
 for _section in (
@@ -151,7 +134,6 @@ for _section in (
         _key,
         validation_kind="creative_brief_section",
         tool_profile="creative_brief_section",
-        output_token_cap=8_192,
     )
 
 PART_CONTRACTS: Mapping[str, ScreenplayPartContract] = MappingProxyType(
@@ -240,15 +222,11 @@ def screenplay_task_budget_limits(
             )
             for contract in contracts
         ),
-        max_run_output_tokens=sum(
-            contract.output_token_cap * _MAX_INVOCATIONS_PER_PART
-            for contract in contracts
-        ),
-        max_reasoning_tokens=max(1, sum(
-            contract.output_token_cap * _MAX_INVOCATIONS_PER_PART
-            for contract in contracts
-            if reasoning_mode is not ReasoningMode.DISABLED
-        )),
+        # Provider generation and reasoning usage are resource guardrails, not
+        # screenplay Part sizes. The product has no user-owned aggregate token
+        # quota yet, so only invocation/input guards are enforced here.
+        max_run_generation_tokens=None,
+        max_reasoning_tokens=None,
     )
 
 
