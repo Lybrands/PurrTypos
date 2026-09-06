@@ -45,9 +45,9 @@ def test_explicit_writing_capability_maps_are_closed_and_immutable():
     registrations = tuple(catalog.registrations())
 
     assert set(WRITING_TOOL_OPERATIONS) == set(WRITING_TOOL_POLICIES) - {
-        "searchMemories", "searchWritingMethods",
+        "searchMemories", "searchWritingMethods", "searchNovelKnowledge", "readNovelKnowledge",
     }
-    assert len(registrations) == 37
+    assert len(registrations) == 39
     assert len(WRITING_READ_CACHE_KEY_BUILDERS) == 11
     assert len(WRITING_CACHE_PROBES) == 13
     assert {item.schema.name for item in registrations} == set(WRITING_TOOL_POLICIES)

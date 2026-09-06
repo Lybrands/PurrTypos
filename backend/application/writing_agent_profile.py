@@ -41,6 +41,8 @@ class WritingAgentProfile:
     domain_namespace = WRITING_DOMAIN_NAMESPACE
 
     def __init__(self, db, *, skills_dir: Path, memory_resource=None) -> None:
+        from application.novel_knowledge_service import get_novel_knowledge_service
+        self._knowledge = get_novel_knowledge_service(db)
         self._catalog_repository = SqliteWritingCatalogRepository(db)
         memory_operations = MemoryApplicationService(db, memory_resource)
         self._memory_operations = memory_operations
@@ -50,6 +52,7 @@ class WritingAgentProfile:
             memory_operations,
             source_repository,
             SqliteStoryMemoryRecallRepository(db),
+            knowledge=self._knowledge,
         )
         self._writing_methods = WritingMethodService(db)
         self._continuations = ContinuationContextService(db)
@@ -60,6 +63,7 @@ class WritingAgentProfile:
                     db,
                     source_repository,
                     memory_operations,
+                    knowledge=self._knowledge,
                 ),
                 skill_items=tuple(skill_catalog.skill_items()),
             ),
@@ -102,6 +106,7 @@ class WritingAgentProfile:
         )
         hydrated = replace(
             context,
+            knowledge_scope=(await self._knowledge.scope_snapshot(book_id, context.chapter_id) if book_id else {}),
             writing_chapters=(
                 await self._catalog_repository.load_writing_chapters(book_id)
                 if book_id else ()
@@ -128,6 +133,8 @@ class WritingAgentProfile:
                if context.writing_method_recommendation_requested else {}),
             **({"writingMethodBindingSnapshot": snapshot} if snapshot else {}),
         }
+        if context.knowledge_scope:
+            attributes["novelKnowledgeScope"] = dict(context.knowledge_scope)
         if context.creation_mode == "continuation" and context.continuation_binding:
             attributes["creationMode"] = "continuation"
             attributes["continuationBinding"] = dict(context.continuation_binding)
@@ -146,11 +153,11 @@ class WritingAgentProfile:
     def model_input_evidence_validator(self, request: AgentRunRequest):
         context = WritingDomainContext.from_core_context(request.domain_context)
         book_id = str(context.book_id or "").strip()
-        return (
-            BookMemoryEvidenceValidator(self._memory_operations, book_id)
-            if book_id
-            else None
-        )
+        from application.novel_knowledge_evidence import NovelKnowledgeEvidenceValidator
+        return (NovelKnowledgeEvidenceValidator(
+            self._knowledge, BookMemoryEvidenceValidator(self._memory_operations, book_id), book_id,
+            scope=context.knowledge_scope,
+        ) if book_id else None)
 
     def response_judge_policies(
         self,

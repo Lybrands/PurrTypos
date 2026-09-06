@@ -1729,6 +1729,7 @@ export interface AiAgentRunPlannerDiagnostics {
 }
 
 export interface AiModelInputDiagnostic {
+  novelKnowledge?: Array<{ evidenceId: string; metadata: { bookId: string; documentId: string; revision: string; title: string; scope: Record<string, unknown>; reasons: string[] } }>;
   sdkRequest?: Record<string, unknown> | null;
   eventRowId: number;
   phase: string;

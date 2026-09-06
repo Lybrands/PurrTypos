@@ -42,6 +42,7 @@ class WritingToolDependencies:
     db: "DatabaseConnection"
     sources: "WritingSourceRepository"
     memories: "MemoryApplicationService"
+    knowledge: object | None = None
 
 
 def bind_writing_tool_handlers(

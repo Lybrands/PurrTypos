@@ -180,11 +180,12 @@ async def test_analysis_candidate_requires_host_provided_input_and_bound_scope(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_mode", [None, "disabled", "enabled"])
 @pytest.mark.parametrize(("cancel", "single_source", "stream_failure"), [
     (False, False, False), (False, True, False), (True, False, False), (False, True, True),
 ])
 async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
-    tmp_path, monkeypatch, cancel, single_source, stream_failure,
+    tmp_path, monkeypatch, cancel, single_source, stream_failure, reasoning_mode,
 ):
     db = DatabaseConnection(tmp_path)
     await db.init()
@@ -287,33 +288,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
         available_tools = {
             item["function"]["name"] for item in options.get("tools", [])
         }
-        if "request_plan" in available_tools:
-            async def auto_decision_chunks():
-                yield {
-                    "choices": [{
-                        "delta": {"content": "先确认分析范围与证据边界"},
-                        "finish_reason": None,
-                    }],
-                }
-                yield {
-                    "choices": [{
-                        "delta": {"tool_calls": [{
-                            "index": 0,
-                            "id": "request-plan",
-                            "type": "function",
-                            "function": {
-                                "name": "request_plan",
-                                "arguments": "{}",
-                            },
-                        }]},
-                        "finish_reason": "tool_calls",
-                    }],
-                }
-            return {
-                "applied_generation_limit": options.get("max_tokens"),
-                "stream": auto_decision_chunks(),
-                "model": "model",
-            }
+        assert "request_plan" not in available_tools
         history = [message for message in messages if message["role"] == "tool"]
         if not history:
             source = json.loads(next(m["content"].split("\n", 1)[1] for m in messages
@@ -377,6 +352,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
             prompt="核对事实脉络", failed_resume_attempts=0,
             runtime=ScreenplayAgentRuntimeRequest(apiKey="test-key", options={
                 "model": "model", "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible", "max_generation_tokens": 2048,
+                **({"thinking": {"type": reasoning_mode}} if reasoning_mode else {}),
             }, contextWindow="128k"),
         )
         await asyncio.wait_for(started.wait(), 5)
@@ -415,6 +391,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
             )
         )
         recorded_messages = recorded_payload["parameters"]["inputMessages"]
+        assert json.loads(recorded_calls[0]["payload_json"]) == recorded_payload
         recorded_planner_payload = json.loads(recorded_messages[-1]["content"])
         assert "核对事实脉络" in json.dumps(
             recorded_planner_payload,
@@ -448,15 +425,6 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
         assert [row["payload"]["text"] for row in planning_progress] == [
             "正在核对原文范围。",
         ]
-        initial_intent = [
-            row["chunk"] for row in restored["chunks"]
-            if row["chunk"].get("channel") == "commentary"
-            and "先确认分析范围与证据边界" in json.dumps(
-                row["chunk"], ensure_ascii=False
-            )
-        ]
-        assert initial_intent
-        assert initial_intent[0]["sequence"] < planning_events[0]["sequence"]
         assert "needsTodos" not in json.dumps(restored["chunks"])
         assert "novel-analysis-artifact://" not in json.dumps(
             restored["chunks"], ensure_ascii=False,
@@ -481,7 +449,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
             if single_source:
                 assert view["totalUnits"] == 9
                 counts = await db.fetch_all("SELECT model_attempt_count FROM ai_agent_runs")
-                assert sum(row["model_attempt_count"] for row in counts) == 15
+                assert sum(row["model_attempt_count"] for row in counts) == 14
             assert view["artifactRef"]
             assert view["providerOutputEvents"] > 0
             artifact = await service.get_artifact(view["artifactRef"])
