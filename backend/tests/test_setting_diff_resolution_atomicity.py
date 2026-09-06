@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
 from fastapi import HTTPException
 
 from database.connection import DatabaseConnection
-from dependencies import set_db
+from dependencies import clear_db, set_db
+from application.agent_composition import (
+    clear_agent_composition,
+    set_agent_composition,
+)
 from infrastructure.persistence.run_store import create_run
 from application.book_conversation_product_projection import (
-    BookSettingResolutionConflictError,
     persist_setting_diff_resolution,
 )
 from routers.setting_diff import (
@@ -35,6 +39,8 @@ async def resolution_db(tmp_path: Path):
     db = DatabaseConnection(tmp_path)
     await db.init()
     set_db(db)
+    composition = SimpleNamespace(memory_resource=None)
+    set_agent_composition(composition)
     await db.execute(
         "INSERT INTO ai_sessions (id, book_id, chapter_id) "
         "VALUES (7, 'book-1', 'chapter-1')"
@@ -53,6 +59,8 @@ async def resolution_db(tmp_path: Path):
     try:
         yield db
     finally:
+        clear_agent_composition(composition)
+        clear_db(db)
         await db.close()
 
 

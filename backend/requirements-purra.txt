@@ -1,1 +1,4 @@
-purra @ https://github.com/Lybrands/purra/archive/cdee52008cc8a8835ce1be9b3bb088cdd5b34b09.zip
+purra==0.5.0
+purra-openai==0.5.0
+purra-anthropic==0.5.0
+purra-mem0[managed]==0.5.0

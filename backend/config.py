@@ -34,6 +34,11 @@ def _env_optional_non_negative_float(key: str) -> float | None:
     return value
 
 
+def _env_flag(key: str, default: bool = False) -> bool:
+    raw = _env(key, "1" if default else "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 # Paths
 DATA_DIR: Path = Path(_env("PURRTYPOS_DATA_DIR", ""))
 SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
@@ -41,6 +46,7 @@ SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
 # Server
 HOST: str = _env("PURRTYPOS_HOST", "127.0.0.1")
 PORT: int = int(_env("PURRTYPOS_PORT", "18321"))
+DEV_DIAGNOSTICS_ENABLED: bool = _env_flag("PURRTYPOS_DEV_DIAGNOSTICS")
 
 # Protected calls fail closed after this many seconds without a human decision.
 # Keep the default deliberately short so abandoned confirmations fail closed.
@@ -63,5 +69,5 @@ AGENT_ARTIFACT_TERMINAL_RETENTION_SECONDS: float | None = (
 )
 
 # 注：曾有 Ollama / mem0 / 工具路由意图模型相关配置（OLLAMA_HOST、MEM0_*、
-# TOOL_ROUTER_INTENT_MODEL 等）。记忆栈已迁 SQLite FTS、工具路由已废弃
+# TOOL_ROUTER_INTENT_MODEL 等）。记忆栈已迁到本地 PurrA 组件、工具路由已废弃
 # （由主模型基于全部工具 schema 自行选择），本应用不再依赖任何本地模型。

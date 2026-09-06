@@ -24,7 +24,8 @@ class ModelProfile:
     model_names: frozenset[str] = frozenset()
     base_urls: frozenset[str] = frozenset()
     native_anthropic_thinking = False
-    max_output_tokens: int | None = None
+    openai_output_token_parameter = "max_tokens"
+    max_generation_tokens: int | None = None
     thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
     supports_json_object_output = False
     reasoning_control = ReasoningControl.SELECTABLE
@@ -32,6 +33,16 @@ class ModelProfile:
     tool_calling = FeatureSupport.SUPPORTED
     required_tool_choice = FeatureSupport.SUPPORTED
     parallel_tool_calls = FeatureSupport.SUPPORTED
+    public_progress = FeatureSupport.UNAVAILABLE
+    context_window_options = ("32k", "256k", "1m")
+    default_context_window = "1m"
+    reasoning_effort_options: tuple[str, ...] = ()
+    task_reasoning_preferences: Mapping[str, str] = {}
+    stream_usage = True
+    default_thinking_enabled = True
+    customize_temperature = False
+    default_temperature_thinking = 1
+    default_temperature_non_thinking = 1
 
     def matches(self, model: str, base_url: str | None) -> bool:
         return (
@@ -39,14 +50,28 @@ class ModelProfile:
             and _normalize_base_url(base_url) in self.base_urls
         )
 
-    def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
-        if self.reasoning_control is ReasoningControl.UNAVAILABLE:
+    def build_openai_extra_body(
+        self,
+        thinking_enabled: bool | None,
+    ) -> dict[str, Any]:
+        if (
+            self.reasoning_control is ReasoningControl.UNAVAILABLE
+            or thinking_enabled is None
+        ):
             return {}
         return {
             "thinking": {
                 "type": "enabled" if thinking_enabled else "disabled",
             },
         }
+
+    def apply_openai_output_limit(
+        self,
+        params: dict[str, Any],
+        max_tokens: int | None,
+    ) -> None:
+        if max_tokens is not None and max_tokens > 0:
+            params[self.openai_output_token_parameter] = max_tokens
 
     def protocol_capabilities(self) -> ModelProtocolCapabilities:
         return ModelProtocolCapabilities(
@@ -55,6 +80,7 @@ class ModelProfile:
             tool_calling=self.tool_calling,
             required_tool_choice=self.required_tool_choice,
             parallel_tool_calls=self.parallel_tool_calls,
+            public_progress=self.public_progress,
             json_schema_level=(
                 "json_object" if self.supports_json_object_output else "unknown"
             ),
@@ -62,7 +88,7 @@ class ModelProfile:
 
     def output_capabilities(self) -> ModelOutputCapabilities:
         return ModelOutputCapabilities(
-            max_output_tokens=self.max_output_tokens,
+            max_generation_tokens=self.max_generation_tokens,
             thinking_token_accounting=self.thinking_token_accounting,
         )
 
@@ -72,11 +98,11 @@ class ModelProfile:
         context_window_tokens: int,
     ) -> ModelCapabilitySnapshot:
         return ModelCapabilitySnapshot(
-            schema_version=1,
+            schema_version=2,
             profile_id=self.profile_id,
             provider_protocol=self.provider_protocol,
             context_window_tokens=context_window_tokens,
-            max_output_tokens=self.max_output_tokens,
+            max_generation_tokens=self.max_generation_tokens,
             thinking_token_accounting=self.thinking_token_accounting,
             protocol=self.protocol_capabilities(),
             actionable=self.actionable,
@@ -111,6 +137,7 @@ class ModelProfile:
 class GenericModelProfile(ModelProfile):
     provider_protocol = "custom"
     actionable = True
+    default_thinking_enabled = None
     reasoning_control = ReasoningControl.UNAVAILABLE
     reasoning_replay = ReasoningReplayPolicy.FORBIDDEN
     tool_calling = FeatureSupport.SUPPORTED

@@ -173,7 +173,7 @@ async def _request_cancellation(
 
 
 async def _fence_run_cancellation(db, run_id: str) -> dict[str, Any]:
-    """Atomically fence one Run and cancel its active delegated executions."""
+    """Atomically fence one Run before canonical terminal settlement."""
 
     normalized_run = _required_text(run_id, "run id")
     requested_at = now_ms()
@@ -217,24 +217,6 @@ async def _fence_run_cancellation(db, run_id: str) -> dict[str, Any]:
         "COALESCE(cancel_requested_at_ms, ?), update_time = CURRENT_TIMESTAMP "
         "WHERE id = ? AND status = 'running'",
         [requested_at, normalized_run],
-    )
-    active_delegations = await db.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_delegations "
-        "WHERE run_id = ? AND status IN ('queued', 'running')",
-        [normalized_run],
-    )
-    await db.execute(
-        "UPDATE ai_agent_delegations SET status = 'canceled', "
-        "error = 'run_canceled', update_time = CURRENT_TIMESTAMP "
-        "WHERE run_id = ? AND status IN ('queued', 'running')",
-        [normalized_run],
-    )
-    delegated_canceled = int((active_delegations or {}).get("count") or 0)
-    await db.execute(
-        "UPDATE ai_agent_run_cancellations SET delegations_canceled = MAX("
-        "delegations_canceled, ?), update_time = CURRENT_TIMESTAMP "
-        "WHERE run_id = ? AND cancellation_epoch = ?",
-        [delegated_canceled, normalized_run, epoch],
     )
     receipt = await db.fetch_one(
         "SELECT * FROM ai_agent_run_cancellations WHERE run_id = ?",
@@ -460,9 +442,6 @@ class SqliteRunControlStore:
                 status=str(run["status"]),  # type: ignore[arg-type]
                 cancellation_epoch=epoch,
                 newly_requested=False,
-                delegations_canceled=int(
-                    persisted.get("delegations_canceled") or 0
-                ),
                 draining=not completed,
             )
         epoch = int(run.get("cancellation_epoch") or 0)
@@ -501,7 +480,6 @@ class SqliteRunControlStore:
                 status=str(state["status"]),  # type: ignore[arg-type]
                 cancellation_epoch=int(raw["cancellation_epoch"]),
                 newly_requested=prior is None,
-                delegations_canceled=int(raw.get("delegations_canceled") or 0),
                 draining=True,
             )
             for projector in self._cancellation_projectors:
@@ -544,7 +522,6 @@ class SqliteRunControlStore:
                 status=str(run["status"]),  # type: ignore[arg-type]
                 cancellation_epoch=int(raw["cancellation_epoch"]),
                 newly_requested=False,
-                delegations_canceled=int(raw.get("delegations_canceled") or 0),
                 terminalized=terminalized,
                 draining=not completed,
             )
@@ -639,7 +616,6 @@ class SqliteRunControlStore:
         requested_runs = unique_text_tuple(run_ids)
         requested_tasks = unique_text_tuple(task_ids)
         active_runs: tuple[str, ...] = ()
-        active_delegations: tuple[str, ...] = ()
         draining: tuple[str, ...] = ()
         active_tasks: tuple[str, ...] = ()
         if requested_runs:
@@ -653,13 +629,6 @@ class SqliteRunControlStore:
                 params,
             )
             active_runs = tuple(str(row["id"]) for row in rows)
-            rows = await self._db.fetch_all(
-                "SELECT DISTINCT run_id FROM ai_agent_delegations WHERE "
-                f"run_id IN ({marks}) AND status IN ('queued', 'running') "
-                "ORDER BY run_id",
-                params,
-            )
-            active_delegations = tuple(str(row["run_id"]) for row in rows)
             rows = await self._db.fetch_all(
                 "SELECT run_id FROM ai_agent_run_cancellations WHERE "
                 f"run_id IN ({marks}) AND status <> 'completed' ORDER BY run_id",
@@ -679,7 +648,6 @@ class SqliteRunControlStore:
             requested_run_ids=requested_runs,
             requested_task_ids=requested_tasks,
             active_run_ids=active_runs,
-            active_delegation_run_ids=active_delegations,
             active_task_ids=active_tasks,
             draining_cancellation_run_ids=draining,
         )

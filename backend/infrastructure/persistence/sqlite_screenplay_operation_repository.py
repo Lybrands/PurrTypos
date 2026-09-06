@@ -154,7 +154,7 @@ class SqliteScreenplayOperationRepository:
                     normalized_run_id,
                     usage.invocation_count,
                     usage.input_tokens,
-                    usage.output_tokens,
+                    usage.generation_tokens,
                     usage.reasoning_tokens,
                 ],
             )
@@ -649,13 +649,27 @@ class SqliteScreenplayOperationRepository:
                     "AND cancel_requested_at_ms IS NOT NULL",
                     [normalized_receipt, operation.id],
                 )
+                operation_row = await self._db.fetch_one(
+                    "SELECT * FROM screenplay_agent_operations WHERE id = ?",
+                    [operation.id],
+                )
+                assert operation_row is not None
+                operation = _operation(operation_row)
+            if operation is not None and operation.status.terminal:
+                await self._reconcile_terminal_turn_projection(
+                    operation,
+                    turn,
+                )
+                return await self._current_cancel_receipt(
+                    normalized_turn_id,
+                    receipt_id=normalized_receipt,
+                )
             current = await self._current_cancel_receipt(
                 normalized_turn_id,
                 receipt_id=normalized_receipt,
             )
             if current.terminal_status in {"succeeded", "failed"}:
                 return current
-            changed = False
             if str(turn.get("status") or "") in {
                 "queued",
                 "planning",
@@ -671,14 +685,106 @@ class SqliteScreenplayOperationRepository:
                     "('queued', 'planning', 'running', 'paused')",
                     [normalized_turn_id],
                 )
-                changed_row = await self._db.fetch_one(
-                    "SELECT changes() AS count"
-                )
-                changed = int((changed_row or {}).get("count") or 0) == 1
             return await self._current_cancel_receipt(
                 normalized_turn_id,
                 receipt_id=normalized_receipt,
             )
+
+    async def reconcile_terminal_turn(self, turn_id: str) -> bool:
+        """Project an authoritative terminal Operation onto its active Turn."""
+
+        normalized_turn_id = _required(turn_id, "screenplay Turn id")
+        async with self._mutation_transaction():
+            turn = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_turns WHERE id = ?",
+                [normalized_turn_id],
+            )
+            if turn is None:
+                raise LookupError("screenplay Agent Turn does not exist")
+            operation_row = await self._db.fetch_one(
+                "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
+                [normalized_turn_id],
+            )
+            if operation_row is None:
+                return False
+            operation = _operation(operation_row)
+            if not operation.status.terminal:
+                return False
+            return await self._reconcile_terminal_turn_projection(
+                operation,
+                turn,
+            )
+
+    async def reconcile_terminal_turns(self) -> tuple[str, ...]:
+        """Repair losslessly projectable legacy Operation/Turn split states."""
+
+        async with self._mutation_transaction():
+            rows = await self._db.fetch_all(
+                "SELECT t.id AS turn_id FROM screenplay_agent_turns AS t "
+                "JOIN screenplay_agent_operations AS o ON o.turn_id = t.id "
+                "WHERE t.status IN ('queued', 'planning', 'running', 'paused') "
+                "AND o.status IN ('succeeded', 'failed', 'canceled') "
+                "ORDER BY t.rowid"
+            )
+            reconciled: list[str] = []
+            for row in rows:
+                turn_id = str(row["turn_id"])
+                if await self.reconcile_terminal_turn(turn_id):
+                    reconciled.append(turn_id)
+            return tuple(reconciled)
+
+    async def _reconcile_terminal_turn_projection(
+        self,
+        operation: ScreenplayOperationRecord,
+        turn: Mapping[str, Any],
+    ) -> bool:
+        target_status = {
+            ScreenplayOperationStatus.SUCCEEDED: "completed",
+            ScreenplayOperationStatus.FAILED: "failed",
+            ScreenplayOperationStatus.CANCELED: "canceled",
+        }.get(operation.status)
+        if target_status is None:
+            return False
+        current_status = str(turn.get("status") or "")
+        if current_status not in {
+            "queued",
+            "planning",
+            "running",
+            "paused",
+            target_status,
+        }:
+            raise ValueError(
+                "screenplay Operation terminal state conflicts with its Turn"
+            )
+        assignments = [
+            "status = ?",
+            "execution_owner_id = NULL",
+            "lease_expires_at_ms = NULL",
+            "heartbeat_at_ms = NULL",
+        ]
+        params: list[Any] = [target_status]
+        if operation.status is ScreenplayOperationStatus.SUCCEEDED:
+            assignments.append("error_json = NULL")
+        elif operation.status is ScreenplayOperationStatus.FAILED:
+            assignments.extend(("assistant_content = ''", "error_json = ?"))
+            params.append(_dump(operation.error or {}))
+        else:
+            assignments.append("assistant_content = ''")
+        params.append(operation.turn_id)
+        await self._db.execute(
+            "UPDATE screenplay_agent_turns SET "
+            + ", ".join(assignments)
+            + ", update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            params,
+        )
+        return current_status != target_status or any(
+            turn.get(name) is not None
+            for name in (
+                "execution_owner_id",
+                "lease_expires_at_ms",
+                "heartbeat_at_ms",
+            )
+        )
 
     async def _current_cancel_receipt(
         self,
@@ -734,7 +840,16 @@ class SqliteScreenplayOperationRepository:
     ) -> ScreenplayOperationRecord:
         normalized_id = _required(operation_id, "screenplay Operation id")
         normalized_command = _required(command_id, "screenplay Operation command id")
-        request = {"target": target.value, **dict(values)}
+        # A command id is the idempotency boundary.  The same transition may be
+        # valid again after an intervening resume (for example pause -> resume
+        # -> pause with the same error).  Include the command identity in the
+        # persisted digest so the table's semantic uniqueness constraint does
+        # not collapse two distinct lifecycle occurrences.
+        request = {
+            "commandId": normalized_command,
+            "target": target.value,
+            **dict(values),
+        }
         digest = _digest(request)
         async with self._mutation_transaction():
             receipt = await self._db.fetch_one(
@@ -895,7 +1010,7 @@ def _usage_mapping(value: Mapping[str, Any]) -> OperationUsage:
     return OperationUsage(
         invocation_count=int(value.get("invocationCount") or 0),
         input_tokens=int(value.get("inputTokens") or 0),
-        output_tokens=int(value.get("outputTokens") or 0),
+        generation_tokens=int(value.get("generationTokens") or 0),
         reasoning_tokens=(
             None
             if value.get("reasoningTokens") is None
@@ -909,7 +1024,7 @@ def _usage_row(row: Mapping[str, Any]) -> OperationUsage:
     return OperationUsage(
         invocation_count=int(row.get("invocation_count") or 0),
         input_tokens=int(row.get("input_tokens") or 0),
-        output_tokens=int(row.get("output_tokens") or 0),
+        generation_tokens=int(row.get("output_tokens") or 0),
         reasoning_tokens=(
             None
             if row.get("reasoning_tokens") is None
@@ -923,7 +1038,7 @@ def _aggregate_usage(row: Mapping[str, Any] | None) -> OperationUsage:
     return OperationUsage(
         invocation_count=int(value.get("invocation_count") or 0),
         input_tokens=int(value.get("input_tokens") or 0),
-        output_tokens=int(value.get("output_tokens") or 0),
+        generation_tokens=int(value.get("output_tokens") or 0),
         reasoning_tokens=(
             None
             if int(value.get("unknown_reasoning") or 0) > 0

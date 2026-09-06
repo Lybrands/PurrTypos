@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from io import BytesIO
+import json
+from zipfile import ZipFile
 
 import pytest
 import pytest_asyncio
-from fastapi import HTTPException
 from exceptions import AppError
 
 from database.connection import DatabaseConnection
@@ -30,12 +33,20 @@ pytestmark = pytest.mark.asyncio
 
 @pytest_asyncio.fixture
 async def temp_db(tmp_path: Path):
+    from application.agent_composition import (
+        clear_agent_composition,
+        set_agent_composition,
+    )
+
     db = DatabaseConnection(tmp_path)
     await db.init()
     set_db(db)
+    composition = SimpleNamespace(memory_resource=None)
+    set_agent_composition(composition)
     try:
         yield db
     finally:
+        clear_agent_composition(composition)
         await db.close()
 
 
@@ -44,7 +55,9 @@ async def _count(db: DatabaseConnection, table: str) -> int:
     return int(row["c"])
 
 
-async def test_database_export_returns_sqlite_bytes(temp_db: DatabaseConnection):
+async def test_database_export_returns_complete_archive_without_component(
+    temp_db: DatabaseConnection,
+):
     await temp_db.execute(
         "INSERT INTO books (id, title) VALUES (?, ?)",
         ["book1", "Book One"],
@@ -52,9 +65,18 @@ async def test_database_export_returns_sqlite_bytes(temp_db: DatabaseConnection)
 
     res = await export_database()
 
-    assert res.media_type == "application/octet-stream"
-    assert res.body.startswith(b"SQLite format 3\x00")
-    assert int(res.headers["X-PurrTypos-Db-Size"]) == len(res.body)
+    assert res.media_type == "application/zip"
+    with ZipFile(BytesIO(res.body)) as archive:
+        assert set(archive.namelist()) == {
+            "backup-manifest.json",
+            "purrtypos.db",
+        }
+        manifest = json.loads(archive.read("backup-manifest.json"))
+        assert manifest["format"] == "purrtypos.full-backup/v1"
+        assert manifest["componentPresent"] is False
+        assert manifest["credentialsIncluded"] is False
+        assert archive.read("purrtypos.db").startswith(b"SQLite format 3\x00")
+    assert int(res.headers["X-PurrTypos-Backup-Size"]) == len(res.body)
 
 
 async def test_story_background_attachment_registers_and_deletes_file(
@@ -156,18 +178,6 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         ["book1", "chapter1", "foreshadowing"],
     )
     await temp_db.execute(
-        "INSERT INTO memory_items (book_id, kind, content, fingerprint) VALUES (?, ?, ?, ?)",
-        ["book1", "plot", "memory item", "book1|plot|memory item"],
-    )
-    await temp_db.execute(
-        "INSERT INTO memory_items (book_id, kind, content, fingerprint) VALUES (?, ?, ?, ?)",
-        ["book1", "plot", "linked memory item", "book1|plot|linked memory item"],
-    )
-    await temp_db.execute(
-        "INSERT INTO memory_links (book_id, from_memory_id, to_memory_id, relation) VALUES (?, ?, ?, ?)",
-        ["book1", 1, 2, "relates_to"],
-    )
-    await temp_db.execute(
         "INSERT INTO story_memory_deltas "
         "(id, book_id, chapter_id, source_revision, status) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -261,10 +271,6 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         ["book1", "Hero"],
     )
     await temp_db.execute(
-        "INSERT INTO book_style (book_id, pov) VALUES (?, ?)",
-        ["book1", "third"],
-    )
-    await temp_db.execute(
         "INSERT INTO chapter_canvas (chapter_id, content) VALUES (?, ?)",
         ["chapter1", "draft"],
     )
@@ -295,8 +301,6 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "ai_favorites",
         "ai_memories",
         "ai_foreshadowing",
-        "memory_items",
-        "memory_links",
         "story_memory_records",
         "story_memory_deltas",
         "story_memory_analysis_runs",
@@ -307,7 +311,6 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "story_background",
         "story_background_attachments",
         "characters",
-        "book_style",
         "chapter_canvas",
         "outline_history",
         "chapter_diff_history",

@@ -27,9 +27,24 @@
 # 1. 安装前端依赖
 npm install
 
-# 2. 安装后端依赖（包含固定版本的 PurrA）
+# 2. 从本仓库根目录安装后端依赖
 pip install -r backend/requirements.txt
 ```
+
+PurrA Core、OpenAI、Anthropic 和 Mem0 集成通过
+`backend/requirements-purra.txt` 固定引用 PyPI 正式发布的 0.5.0 包，
+Mem0 保留 `managed` 扩展依赖。开发、CI 和分发打包使用同一份依赖清单，
+无需同级 PurrA 源码目录。
+
+如果已有环境安装过同版本的本地 wheel 或可编辑包，先替换这四个包，再检查完整依赖：
+
+```bash
+python -m pip install --force-reinstall --no-deps -r backend/requirements-purra.txt
+python -m pip install -r backend/requirements.txt
+python -m pip check
+```
+
+更新后重启后端进程，使其加载正式发布包。
 
 如 Electron 二进制下载失败（"Electron failed to install correctly"），可尝试：
 
@@ -126,7 +141,7 @@ PurrTypos/
 │   ├── application/             # 唯一 Composition Root、请求/SSE 映射和应用用例
 │   ├── domains/writing/         # Writing 业务规则、Planning Policy、上下文与工具契约
 │   ├── infrastructure/          # Provider、SQLite Repository、技能目录和 Writing Handler
-│   ├── services/                # 非 Agent 架构的长期记忆应用服务
+│   ├── services/                # 业务源策略与组件投递服务
 │   ├── database/
 │   │   ├── connection.py        # aiosqlite 单连接 + WAL + 事务管理
 │   │   ├── schema.py            # 建表 / 增量迁移
@@ -134,8 +149,6 @@ PurrTypos/
 │   ├── utils/                   # 通用纯函数与异步流辅助
 │   ├── schemas/                 # Pydantic 请求体
 │   └── skills/                  # 工具定义（每个工具一个目录 + SKILL.md）
-├── packages/
-│   └── purra/              # 可独立构建的业务无关 Agent 框架包
 ├── src/                         # 渲染进程（React + TypeScript）
 │   ├── App.tsx                  # 路由：首页 / 书架 / 工作台
 │   ├── HomePage/ BookshelfPage/ SettingsPage/
@@ -152,14 +165,20 @@ PurrTypos/
 
 - **位置**：用户数据目录下的 `purrtypos.db`（Windows：`%APPDATA%\purrtypos\purrtypos.db`，macOS：`~/Library/Application Support/purrtypos/purrtypos.db`，由 Electron `app.getPath('userData')` 决定，并通过 `PURRTYPOS_DATA_DIR` 环境变量传给 Python 后端）。
 - **驱动**：`aiosqlite`（异步 SQLite）+ WAL 日志模式，单连接复用，写锁 `busy_timeout=5000ms`。多步写操作通过 `db.transaction()` 上下文管理器原子化（如 `delete_book`）。
-- **主要表**：`books`、`outlines`、`outline_chapters`、`articles`、`characters`、`story_background` / `story_background_attachments`、`ai_sessions` / `ai_conversations`、`ai_favorites`、`ai_memories` / `ai_foreshadowing`、`memory_items` / `memory_links`、`book_style`、`outline_history`、`chapter_diff`、`prompt_templates`、`settings`。建表与迁移在 `backend/database/schema.py`。
-- **导入 / 导出**：设置面板 → 数据 → 数据库导出/导入，覆盖式导入会替换当前所有数据，请先备份。
+- **主要表**：`books`、`outlines`、`outline_chapters`、`articles`、`characters`、`story_background` / `story_background_attachments`、`ai_sessions` / `ai_conversations`、`ai_favorites`、`ai_memories` / `ai_foreshadowing`、`story_memory_records` / `story_memory_deltas`、`memory_source_heads` / `memory_source_deliveries`、`book_style`、`outline_history`、`chapter_diff`、`prompt_templates`、`settings`。建表与迁移在 `backend/database/schema.py`。
+- **备份 / 恢复**：设置面板 → 数据 → 完整备份/恢复。`.purrbackup` 同时包含业务数据库与 `memory-component-v1`，恢复会成套替换两者；API 密钥不写入备份。
 
 ## 长期记忆
 
-- `memory_items` 是统一长期记忆池，覆盖设定、剧情事实、人物状态、世界观、伏笔、风格和阶段总结；`memory_links` 保存冲突、替代、支持、相关等关系。
-- 默认使用 SQLite FTS5 本地召回与规则沉淀，不依赖外部服务；AI 接受的 diff / inline edit 会生成 `pending` 候选，用户明确“记住”的内容和手动保存的设定会写入 `active`。
-- 记忆中心里的“高级智能记忆”开关默认关闭。开启后，AI 来源改动会使用已配置的第一个可用模型提炼更精细的 `pending` 候选，并尝试生成冲突/替代/伏笔等关系；模型不可用或输出无效时自动回退到本地规则候选。
+- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由 PurrA 0.5.0 发布包 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不再维护平行的长期记忆表或召回实现。
+- PurrTypos 只保留业务源到组件的投递策略与持久化 outbox（`memory_source_heads` / `memory_source_deliveries`）。用户保存与业务提交先在 SQLite 中完成，组件投递失败会如实返回并由恢复流程重试。
+- Story Memory 仍是独立的章节证据状态账本，用于版本、来源失效和审阅；它与可编辑的通用长期记忆具有不同生命周期。模型输入由两者共同组装，并在调用 Provider 前校验版本化 evidence receipt。
+
+## Agent 规范
+
+小说写作、小说分析和剧本 Agent 的公共输入、流式输出与恢复遵循[共享对话与执行规范](docs/design/shared-agent-conversation-contract.md)。各领域保留材料选择、工具、审批和交付物规则。
+
+模型配置解析、Provider 参数核验与后台调用已使用公共边界，契约和验收记录见[模型请求公共入口与适配规范](docs/design/2026-09-06-model-request-boundary-refactor.md)。蒸馏质量验证单独进行。
 
 ## 健康检查
 
@@ -174,4 +193,4 @@ GET http://127.0.0.1:18321/health
 - **XMind 解析失败**：界面提示原因。
 - **AI 请求失败**：对话区域展示错误信息；SSE 中断不会污染历史。
 - **Python 后端崩溃**：Electron 主进程会在控制台打印日志；窗口仍可见，但调用任何 `/api/*` 都会失败 — 重启应用即可。
-- **数据库**：初始化或读写失败时主进程控制台会有日志；导入数据库前请确认备份。
+- **数据存储**：初始化或读写失败时主进程控制台会有日志；恢复完整备份前请确认已保留当前副本。

@@ -28,6 +28,7 @@ class _Gateway:
         del signal
         self.invocations.append((messages, invocation))
         return ModelCompletion(
+            applied_generation_limit=invocation.max_generation_tokens,
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
                 content=json.dumps({
@@ -68,22 +69,29 @@ def _model_request() -> ModelRequest:
         capability_snapshot=replace(
             generic_capability_snapshot(),
             profile_id="test:test-model",
-            max_output_tokens=4_096,
+            max_generation_tokens=4_096,
         ),
     )
 
 
-def _model_tasks(gateway) -> AgentModelTaskRunner:
+def _model_tasks(
+    gateway,
+    model_request: ModelRequest,
+) -> AgentModelTaskRunner:
     return AgentModelTaskRunner(
         AgentModelInvocationManager(gateway),
         ModelInvocationContext(run_id="reranker-test-run"),
+        model_request,
     )
 
 
 @pytest.mark.asyncio
 async def test_model_reranker_selects_only_host_candidates():
     gateway = _Gateway("record-2")
-    reranker = ModelBackedMemoryReranker(_model_tasks(gateway))
+    model_request = _model_request()
+    reranker = ModelBackedMemoryReranker(
+        _model_tasks(gateway, model_request)
+    )
 
     result = await reranker.rerank(
         query="续写两人决裂后的对话",
@@ -96,7 +104,7 @@ async def test_model_reranker_selects_only_host_candidates():
         entity_refs=("character-1", "character-2"),
         chapter_ids=("chapter-1",),
         max_selected=1,
-        model_request=_model_request(),
+        model_request=model_request,
     )
 
     assert [item.record_id for item in result.decisions] == ["record-2"]
@@ -105,13 +113,16 @@ async def test_model_reranker_selects_only_host_candidates():
     assert len(gateway.invocations) == 1
     _, invocation = gateway.invocations[0]
     assert invocation.tools == ()
-    assert invocation.request.options["temperature"] == 0
+    assert dict(invocation.request.options) == {}
 
 
 @pytest.mark.asyncio
 async def test_model_reranker_rejects_unknown_candidate_ids():
     gateway = _Gateway("invented-record")
-    reranker = ModelBackedMemoryReranker(_model_tasks(gateway))
+    model_request = _model_request()
+    reranker = ModelBackedMemoryReranker(
+        _model_tasks(gateway, model_request)
+    )
 
     with pytest.raises(ValueError, match="unknown candidate"):
         await reranker.rerank(
@@ -122,5 +133,5 @@ async def test_model_reranker_rejects_unknown_candidate_ids():
             entity_refs=(),
             chapter_ids=(),
             max_selected=1,
-            model_request=_model_request(),
+            model_request=model_request,
         )

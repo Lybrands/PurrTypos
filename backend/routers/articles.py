@@ -22,13 +22,14 @@ async def get_article(chapterId: str):
 async def save_article(chapterId: str, body: SaveArticleRequest):
     """统一走 crud.save_article：写正文 + 维护当日字数快照。"""
     db = get_db()
-    await crud_save_article(db, chapterId, body.content)
-    book_id = None
-    try:
-        from services.memory_deposition_service import resolve_book_id_for_chapter
-        from services.story_memory_analysis_service import invalidate_saved_chapter
+    from services import memory_deposition_service
+    from services.story_memory_analysis_service import invalidate_saved_chapter
 
-        book_id = await resolve_book_id_for_chapter(db, chapterId)
+    async with db.transaction(cancellation_linearizable=True):
+        await crud_save_article(db, chapterId, body.content)
+        book_id = await memory_deposition_service.resolve_book_id_for_chapter(
+            db, chapterId
+        )
         if book_id:
             await invalidate_saved_chapter(
                 db,
@@ -36,18 +37,13 @@ async def save_article(chapterId: str, body: SaveArticleRequest):
                 chapter_id=chapterId,
                 content=body.content,
             )
-    except Exception:
-        pass
-    try:
-        from services import memory_deposition_service
-        await memory_deposition_service.deposit_inline_article_candidate(
+        delivery_keys = await memory_deposition_service.record_inline_article_candidate(
             db,
             chapter_id=chapterId,
             content=body.content,
             source=body.source or "",
         )
-    except Exception:
-        pass
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
     story_memory_analysis = None
     if str(body.source or "") == "inline_edit":
         try:
@@ -70,5 +66,8 @@ async def save_article(chapterId: str, body: SaveArticleRequest):
             pass
     return {
         "success": True,
-        "data": {"storyMemoryAnalysis": story_memory_analysis},
+        "data": {
+            "storyMemoryAnalysis": story_memory_analysis,
+            "memoryDelivery": [item.to_dict() for item in deliveries],
+        },
     }

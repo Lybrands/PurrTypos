@@ -46,6 +46,7 @@ test('starts the development backend once with the expected environment', () => 
   assert.deepEqual(spawnCalls[0][1], ['-u', 'main.py', '18321'])
   assert.equal(spawnCalls[0][2].env.PURRTYPOS_DATA_DIR, 'C:\\user-data')
   assert.equal(spawnCalls[0][2].env.PURRTYPOS_PORT, '18321')
+  assert.equal(spawnCalls[0][2].env.PURRTYPOS_DEV_DIAGNOSTICS, '1')
   assert.match(spawnCalls[0][2].env.PURRTYPOS_SKILLS_DIR, /backend[\\/]skills$/)
 })
 
@@ -88,6 +89,7 @@ test('uses a packaged executable when one exists', () => {
 
   assert.equal(spawnCalls[0][0], executable)
   assert.deepEqual(spawnCalls[0][1], ['18321'])
+  assert.equal(spawnCalls[0][2].env.PURRTYPOS_DEV_DIAGNOSTICS, '0')
 })
 
 test('waitUntilReady retries until the health endpoint succeeds', async () => {

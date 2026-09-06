@@ -220,7 +220,7 @@ class AssociatedContextBuilder:
         outline_source_records: list[tuple[str, str]] = []
 
         lines = [
-            "【关联上下文 — 用户在本轮勾选的章节/大纲，内容已由宿主注入】",
+            "【本轮选中的关联章节与大纲】",
             "以下内容是用户明确要求你参考的素材，直接依据它们回答；"
             "除标注「已截断」或「未注入」的条目外，无需再调工具重复读取。",
         ]
@@ -236,9 +236,9 @@ class AssociatedContextBuilder:
         omitted_chapters = len(all_chapters) - len(chapter_ids)
         omitted_outlines = len(all_outlines) - len(outline_ids)
         if omitted_chapters:
-            deferred.append(f"- 另有 {omitted_chapters} 个关联章节超过宿主预取数量上限")
+            deferred.append(f"- 另有 {omitted_chapters} 个关联章节超过预载数量上限")
         if omitted_outlines:
-            deferred.append(f"- 另有 {omitted_outlines} 个关联大纲超过宿主预取数量上限")
+            deferred.append(f"- 另有 {omitted_outlines} 个关联大纲超过预载数量上限")
 
         for index, chapter_id in enumerate(chapter_ids):
             item = chapters.get(chapter_id)

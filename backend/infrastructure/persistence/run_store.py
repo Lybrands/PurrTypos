@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -24,9 +25,23 @@ def new_run_id() -> str:
     return f"run_{uuid4().hex[:16]}"
 
 
+def runtime_limits_from_mapping(value):
+    from purra.contracts import RuntimeLimits
+    from purra.errors import ContractViolationError
+
+    try:
+        return RuntimeLimits(**value)
+    except (TypeError, ValueError) as error:
+        raise ContractViolationError(
+            "Run runtime limits do not match the current PurrA contract",
+            code="runtime_limits_invalid",
+        ) from error
+
+
 async def create_run(
     db: "DatabaseConnection",
     *,
+    run_id: str | None = None,
     session_id: int | None,
     prompt: str,
     mode: str | None,
@@ -35,8 +50,38 @@ async def create_run(
     execution_owner_id: str | None = None,
     lease_expires_at_ms: int | None = None,
     heartbeat_at_ms: int | None = None,
+    deadline_at_ms: int | None = None,
+    runtime_limits=None,
+    agent_preset_snapshot=None,
+    root_run_id: str | None = None,
+    agent_id: str | None = None,
+    parent_run_id: str | None = None,
+    agent_tree_lease_owner_id: str | None = None,
+    agent_tree_lease_epoch: int | None = None,
+    requested_user_max_generation_tokens: int | None = None,
+    result_capacity_target_tokens: int | None = None,
+    selected_context_window_tokens: int | None = None,
 ) -> str:
-    run_id = new_run_id()
+    if runtime_limits is None:
+        from purra.contracts import RuntimeLimits
+
+        runtime_limits = RuntimeLimits(max_run_generation_tokens=None)
+    runtime_limits_json = json.dumps(
+        {
+            item.name: getattr(runtime_limits, item.name)
+            for item in fields(runtime_limits)
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    preset_snapshot_json = json.dumps(
+        _thaw_mapping(agent_preset_snapshot or {}),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    run_id = str(run_id or "").strip() or new_run_id()
     execution_intent = (
         provenance.execution_intent if provenance is not None else None
     )
@@ -94,23 +139,38 @@ async def create_run(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
-        "capability_snapshot_json, "
+        "capability_snapshot_json, requested_user_max_generation_tokens, "
+        "result_capacity_target_tokens, selected_context_window_tokens, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, "
+        "root_run_id, agent_id, parent_run_id, "
+        "agent_tree_lease_owner_id, agent_tree_lease_epoch, "
         "execution_owner_id, lease_expires_at_ms, "
-        "heartbeat_at_ms, execution_attempt) "
-        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "heartbeat_at_ms, execution_attempt, deadline_at_ms, "
+        "runtime_limits_json, agent_preset_snapshot_json) "
+        "VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 run_id,
                 session_id,
                 mode,
                 prompt,
                 *provenance_values,
+                requested_user_max_generation_tokens,
+                result_capacity_target_tokens,
+                selected_context_window_tokens,
                 *binding_values,
+                root_run_id or run_id,
+                agent_id or run_id,
+                parent_run_id,
+                agent_tree_lease_owner_id,
+                agent_tree_lease_epoch,
                 execution_owner_id,
                 lease_expires_at_ms,
                 heartbeat_at_ms,
                 1 if execution_owner_id else 0,
+                deadline_at_ms,
+                runtime_limits_json,
+                preset_snapshot_json,
         ],
     )
     return run_id
@@ -217,12 +277,19 @@ async def get_run(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
-        "capability_snapshot_json, "
+        "capability_snapshot_json, requested_user_max_generation_tokens, "
+        "result_capacity_target_tokens, selected_context_window_tokens, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, "
         "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "cancellation_epoch, "
+        "model_attempt_count, unreported_usage_attempts, "
+        "unreported_reasoning_attempts, input_tokens, "
+        "output_tokens, reasoning_tokens, provider_output_events, "
+        "provider_output_bytes, "
+        "plan_title, plan_goal, task_spec_json, work_step_ids_json, "
+        "execution_checkpoint_json, error, agent_preset_snapshot_json, "
         "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE id = ?",
         [run_id],
@@ -238,7 +305,8 @@ async def get_latest_run_for_session(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
-        "capability_snapshot_json, "
+        "capability_snapshot_json, requested_user_max_generation_tokens, "
+        "result_capacity_target_tokens, selected_context_window_tokens, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, "
         "execution_owner_id, lease_expires_at_ms, "
@@ -260,7 +328,8 @@ async def get_run_for_session_request(
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
-        "capability_snapshot_json, "
+        "capability_snapshot_json, requested_user_max_generation_tokens, "
+        "result_capacity_target_tokens, selected_context_window_tokens, "
         "binding_namespace, binding_aggregate_id, "
         "binding_command_id, binding_attributes_json, "
         "execution_owner_id, lease_expires_at_ms, "
@@ -361,13 +430,15 @@ async def update_run_status(
     status: str,
     *,
     final_response: str | None = None,
+    error: str | None = None,
 ) -> None:
     await db.execute(
         "UPDATE ai_agent_runs SET status = ?, "
         "final_response = COALESCE(?, final_response), "
+        "error = COALESCE(?, error), "
         "execution_owner_id = NULL, lease_expires_at_ms = NULL, "
         "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-        [status, final_response, run_id],
+        [status, final_response, error, run_id],
     )
 
 
@@ -386,7 +457,13 @@ async def fail_run(
     *,
     error: str,
 ) -> None:
-    await update_run_status(db, run_id, "failed", final_response=error)
+    await update_run_status(
+        db,
+        run_id,
+        "failed",
+        final_response=error,
+        error=error,
+    )
 
 
 async def block_run(

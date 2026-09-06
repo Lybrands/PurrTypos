@@ -1,20 +1,19 @@
 import JSZip from 'jszip'
-import type { ApiResult, ElectronAPI, StoryBackgroundAttachment, XmindSheet } from '../types'
+import type { ApiResult, StoryBackgroundAttachment } from '../types'
 import { backendBaseUrl } from '../services/httpClient'
 import type { PlatformApi } from './types'
-
-const selectedFiles = new Map<string, File>()
 
 function failure<T>(error: string): ApiResult<T> {
   return { success: false, data: undefined as T, error }
 }
 
-function chooseFiles(accept = '', multiple = false): Promise<File[]> {
+function chooseFiles(accept = '', multiple = false, directory = false): Promise<File[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = accept
     input.multiple = multiple
+    if (directory) input.setAttribute('webkitdirectory', '')
     input.style.display = 'none'
     document.body.appendChild(input)
     let settled = false
@@ -32,6 +31,67 @@ function chooseFiles(accept = '', multiple = false): Promise<File[]> {
     }, { once: true })
     input.click()
   })
+}
+
+const NOVEL_SOURCE_EXTENSIONS = new Set(['.txt', '.md', '.markdown'])
+const MAX_NOVEL_SOURCE_BYTES = 30 * 1024 * 1024
+const MAX_NOVEL_SOURCE_DOCUMENTS = 2_000
+
+function sourceExtension(fileName: string) {
+  const match = fileName.toLowerCase().match(/\.[^.]+$/)
+  return match?.[0] ?? ''
+}
+
+function sourceDocumentTitle(fileName: string) {
+  const parts = fileName.replace(/\\/g, '/').split('/')
+  const leaf = parts.pop()?.replace(/\.(?:txt|md|markdown)$/i, '') || '未命名章节'
+  return [...parts, leaf].join(' · ').replace(/^#+\s*/, '').trim()
+}
+
+function isIgnoredArchivePath(fileName: string) {
+  const normalized = fileName.replace(/\\/g, '/')
+  const parts = normalized.split('/')
+  return normalized.startsWith('/') || parts.some((part) => !part || part === '..' || part === '__MACOSX' || part.startsWith('.'))
+}
+
+async function decodeSourceBytes(bytes: Uint8Array, fileName: string) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    throw new Error(`${fileName} 不是有效的 UTF-8 文本`)
+  }
+}
+
+async function composeSourceDocuments(
+  sourceName: string,
+  importKind: 'file' | 'folder' | 'archive',
+  documents: Array<{ name: string; bytes: Uint8Array }>,
+  skippedFileCount: number,
+) {
+  if (!documents.length) throw new Error('没有找到可导入的 TXT 或 Markdown 文稿')
+  if (documents.length > MAX_NOVEL_SOURCE_DOCUMENTS) throw new Error(`文稿数量不能超过 ${MAX_NOVEL_SOURCE_DOCUMENTS} 个`)
+  const sorted = [...documents].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' }))
+  const byteCount = sorted.reduce((total, document) => total + document.bytes.byteLength, 0)
+  if (byteCount > MAX_NOVEL_SOURCE_BYTES) throw new Error('来源内容超过 30 MB 容量限制')
+  const decoded = await Promise.all(sorted.map(async (document) => ({
+    name: document.name,
+    content: (await decodeSourceBytes(document.bytes, document.name)).trim(),
+  })))
+  const content = importKind === 'file'
+    ? decoded[0].content
+    : decoded.filter((document) => document.content).map((document) => (
+        `# ${sourceDocumentTitle(document.name)}\n\n${document.content}`
+      )).join('\n\n')
+  if (!content.trim()) throw new Error('来源正文不能为空')
+  return {
+    fileName: sourceName,
+    extension: (importKind === 'file' ? sourceExtension(sourceName) : '.md') as '.txt' | '.md' | '.markdown',
+    byteCount,
+    content,
+    importKind,
+    documentCount: sorted.length,
+    skippedFileCount,
+  }
 }
 
 function safeName(name: string) {
@@ -69,34 +129,6 @@ async function downloadBackendFile(
 }
 
 export const browserPlatformApi: PlatformApi = {
-  openXmindFile: async () => {
-    const [file] = await chooseFiles('.xmind')
-    if (!file) return null
-    const token = `browser-file://${crypto.randomUUID()}/${file.name}`
-    selectedFiles.set(token, file)
-    return token
-  },
-
-  parseXmind: async (filePath) => {
-    const file = selectedFiles.get(filePath)
-    if (!file) return failure<XmindSheet[]>('浏览器文件授权已失效，请重新选择文件')
-    try {
-      const zip = await JSZip.loadAsync(await file.arrayBuffer())
-      const contentEntry = zip.file('content.json')
-      if (!contentEntry) return failure<XmindSheet[]>('XMind 文件中不存在 content.json')
-      const content = JSON.parse(await contentEntry.async('text')) as XmindSheet[]
-      return { success: true, data: content }
-    } catch (error) {
-      return failure(error instanceof Error ? error.message : String(error))
-    }
-  },
-
-  readFileBuffer: async (filePath) => {
-    const file = selectedFiles.get(filePath)
-    if (!file) return failure<Uint8Array>('浏览器文件授权已失效，请重新选择文件')
-    return { success: true, data: new Uint8Array(await file.arrayBuffer()) }
-  },
-
   openFilePath: async () => failure<void>('浏览器不能直接打开本地路径，请使用下载或上传功能'),
 
   writeExportFiles: async ({ entries, exportAsZip }) => {
@@ -127,7 +159,7 @@ export const browserPlatformApi: PlatformApi = {
 
   exportScreenplayPdf: ({ projectId, defaultName }) =>
     downloadBackendFile(
-      `/api/screenplay-projects/${encodeURIComponent(projectId)}/export/pdf`,
+      `/api/screenplay/v2/projects/${encodeURIComponent(projectId)}/export/pdf`,
       { method: 'POST' },
       `${defaultName.replace(/\.pdf$/i, '')}.pdf`,
     ),
@@ -147,7 +179,7 @@ export const browserPlatformApi: PlatformApi = {
     const result = await downloadBackendFile(
       '/api/database/export',
       { method: 'POST' },
-      `purrtypos-backup-${new Date().toISOString().slice(0, 10)}.db`,
+      `purrtypos-backup-${new Date().toISOString().slice(0, 10)}.purrbackup`,
     )
     return result.success
       ? { success: true, data: undefined }
@@ -155,7 +187,7 @@ export const browserPlatformApi: PlatformApi = {
   },
 
   importDatabase: async () => {
-    const [file] = await chooseFiles('.db,application/x-sqlite3')
+    const [file] = await chooseFiles('.purrbackup,application/zip')
     if (!file) return failure('canceled')
     try {
       const response = await fetch(
@@ -173,13 +205,79 @@ export const browserPlatformApi: PlatformApi = {
   },
 
   openDatabaseDirectory: async () =>
-    failure<void>('浏览器无法打开数据库目录，可以使用“导出数据库”下载备份'),
+    failure<void>('浏览器无法打开数据目录，可以使用“导出完整备份”下载数据'),
 
   openAndReadTextFile: async () => {
     const [file] = await chooseFiles('.txt,.md,.markdown,text/plain,text/markdown')
     if (!file) return failure<string>('canceled')
     try {
       return { success: true, data: await file.text() }
+    } catch (error) {
+      return failure(error instanceof Error ? error.message : String(error))
+    }
+  },
+
+  pickNovelSourceTextFile: async ({ mode = 'file' } = {}) => {
+    try {
+      if (mode === 'folder') {
+        const files = await chooseFiles('.txt,.md,.markdown,text/plain,text/markdown', true, true)
+        if (!files.length) return failure('canceled')
+        const sourceName = files[0].webkitRelativePath.split('/')[0] || '来源文件夹'
+        const supported = files.filter((file) => NOVEL_SOURCE_EXTENSIONS.has(sourceExtension(file.name)))
+        return {
+          success: true,
+          data: await composeSourceDocuments(
+            sourceName,
+            'folder',
+            await Promise.all(supported.map(async (file) => ({
+              name: file.webkitRelativePath || file.name,
+              bytes: new Uint8Array(await file.arrayBuffer()),
+            }))),
+            files.length - supported.length,
+          ),
+        }
+      }
+
+      const [file] = await chooseFiles('.txt,.md,.markdown,.zip,text/plain,text/markdown,application/zip')
+      if (!file) return failure('canceled')
+      const extension = sourceExtension(file.name)
+      if (extension !== '.zip' && !NOVEL_SOURCE_EXTENSIONS.has(extension)) {
+        return failure('只支持 TXT、Markdown 文件、文件夹或 ZIP 压缩包')
+      }
+      if (extension !== '.zip') {
+        return {
+          success: true,
+          data: await composeSourceDocuments(file.name, 'file', [{
+            name: file.name,
+            bytes: new Uint8Array(await file.arrayBuffer()),
+          }], 0),
+        }
+      }
+
+      if (file.size > MAX_NOVEL_SOURCE_BYTES) throw new Error('ZIP 压缩包不能超过 30 MB')
+      const zip = await JSZip.loadAsync(await file.arrayBuffer())
+      const entries = Object.values(zip.files).filter((entry) => {
+        const originalName = (entry as typeof entry & { unsafeOriginalName?: string }).unsafeOriginalName || entry.name
+        return !entry.dir && !isIgnoredArchivePath(originalName) && NOVEL_SOURCE_EXTENSIONS.has(sourceExtension(entry.name))
+      })
+      if (entries.length > MAX_NOVEL_SOURCE_DOCUMENTS) throw new Error(`文稿数量不能超过 ${MAX_NOVEL_SOURCE_DOCUMENTS} 个`)
+      const declaredBytes = entries.reduce((total, entry) => (
+        total + Number((entry as typeof entry & { _data?: { uncompressedSize?: number } })._data?.uncompressedSize || 0)
+      ), 0)
+      if (declaredBytes > MAX_NOVEL_SOURCE_BYTES) throw new Error('压缩包解压后的来源内容超过 30 MB 容量限制')
+      const visibleFiles = Object.values(zip.files).filter((entry) => !entry.dir && !isIgnoredArchivePath(entry.name))
+      return {
+        success: true,
+        data: await composeSourceDocuments(
+          file.name,
+          'archive',
+          await Promise.all(entries.map(async (entry) => ({
+            name: entry.name,
+            bytes: await entry.async('uint8array'),
+          }))),
+          visibleFiles.length - entries.length,
+        ),
+      }
     } catch (error) {
       return failure(error instanceof Error ? error.message : String(error))
     }
@@ -217,5 +315,3 @@ export const browserPlatformApi: PlatformApi = {
     return ''
   },
 }
-
-export type BrowserPlatformApi = Pick<ElectronAPI, keyof PlatformApi>

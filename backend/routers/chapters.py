@@ -9,6 +9,7 @@ from schemas.chapters import (
     SaveChaptersRequest,
     UpdateChapterProgressRequest,
 )
+from services import memory_deposition_service
 from utils.id_utils import short_id8
 
 router = APIRouter(tags=["chapters"])
@@ -27,14 +28,73 @@ async def get_chapters(outlineId: str):
 @router.post("/chapters/{outlineId}")
 async def save_chapters(outlineId: str, body: SaveChaptersRequest):
     db = get_db()
-    await db.execute("DELETE FROM outline_chapters WHERE outline_id = ?", [outlineId])
-    for i, ch in enumerate(body.chapters):
-        ch_id = ch.id or short_id8()
-        await db.execute(
-            "INSERT INTO outline_chapters (id, outline_id, title, level, sort, parent_id) VALUES (?, ?, ?, ?, ?, ?)",
-            [ch_id, outlineId, ch.title, 1, i, ch.parent_id],
+    owner = await db.fetch_one(
+        "SELECT book_id FROM outlines WHERE id = ?",
+        [outlineId],
+    )
+    previous = await db.fetch_all(
+        "SELECT id FROM outline_chapters WHERE outline_id = ?",
+        [outlineId],
+    )
+    incoming_ids = {
+        str(chapter.id)
+        for chapter in body.chapters
+        if chapter.id is not None
+    }
+    removed_ids = tuple(
+        str(row["id"])
+        for row in previous
+        if str(row["id"]) not in incoming_ids
+    )
+    book_id = str((owner or {}).get("book_id") or "").strip()
+    if book_id:
+        from domains.writing.story_memory_ledger import StoryMemoryLedger
+        from infrastructure.persistence.writing.sqlite_story_memory_repository import (
+            SqliteStoryMemoryRepository,
         )
-    return {"success": True}
+
+        ledger = StoryMemoryLedger(SqliteStoryMemoryRepository(db))
+        for chapter_id in removed_ids:
+            await ledger.chapter_changed(book_id, chapter_id)
+
+    delivery_keys: list[str] = []
+    async with db.transaction(cancellation_linearizable=True):
+        if book_id:
+            for chapter_id in removed_ids:
+                delivery_keys.extend(
+                    await memory_deposition_service.record_deleted_chapter_sources(
+                        db,
+                        book_id=book_id,
+                        chapter_id=chapter_id,
+                    )
+                )
+        await db.execute(
+            "DELETE FROM outline_chapters WHERE outline_id = ?",
+            [outlineId],
+        )
+        for index, chapter in enumerate(body.chapters):
+            chapter_id = chapter.id or short_id8()
+            await db.execute(
+                "INSERT INTO outline_chapters "
+                "(id, outline_id, title, level, sort, parent_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    chapter_id,
+                    outlineId,
+                    chapter.title,
+                    1,
+                    index,
+                    chapter.parent_id,
+                ],
+            )
+    deliveries = await memory_deposition_service.deliver_recorded(
+        db,
+        tuple(delivery_keys),
+    )
+    return {
+        "success": True,
+        "memoryDelivery": [item.to_dict() for item in deliveries],
+    }
 
 
 @router.post("/chapters/{outlineId}/add")
@@ -66,20 +126,34 @@ async def delete_chapter(chapterId: str):
         "JOIN outlines AS o ON o.id = c.outline_id WHERE c.id = ?",
         [chapterId],
     )
+    delivery_keys = ()
     if owner and owner.get("book_id"):
-        try:
-            from domains.writing.story_memory_ledger import StoryMemoryLedger
-            from infrastructure.persistence.writing.sqlite_story_memory_repository import (
-                SqliteStoryMemoryRepository,
-            )
+        from domains.writing.story_memory_ledger import StoryMemoryLedger
+        from infrastructure.persistence.writing.sqlite_story_memory_repository import (
+            SqliteStoryMemoryRepository,
+        )
 
-            await StoryMemoryLedger(
-                SqliteStoryMemoryRepository(db)
-            ).chapter_changed(str(owner["book_id"]), chapterId)
-        except Exception:
-            pass
-    await db.execute("DELETE FROM outline_chapters WHERE id = ?", [chapterId])
-    return {"success": True}
+        await StoryMemoryLedger(
+            SqliteStoryMemoryRepository(db)
+        ).chapter_changed(str(owner["book_id"]), chapterId)
+
+        async with db.transaction(cancellation_linearizable=True):
+            delivery_keys = await memory_deposition_service.record_deleted_chapter_sources(
+                db,
+                book_id=str(owner["book_id"]),
+                chapter_id=chapterId,
+            )
+            await db.execute(
+                "DELETE FROM outline_chapters WHERE id = ?",
+                [chapterId],
+            )
+    else:
+        await db.execute("DELETE FROM outline_chapters WHERE id = ?", [chapterId])
+    deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
+    return {
+        "success": True,
+        "memoryDelivery": [item.to_dict() for item in deliveries],
+    }
 
 
 @router.put("/chapters/{chapterId}/rename")

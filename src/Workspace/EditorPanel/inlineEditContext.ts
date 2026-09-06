@@ -21,6 +21,7 @@ export interface BuildInjectedContextParams {
   associatedOutlineIds: EntityId[]
   availableOutlines: Outline[]
   chapterSelectOptions: { value: EntityId; label: string }[]
+  selectedLongTermMemoryIds: string[]
   selectedMemoryIds: (number | string)[]
   selectedForeshadowingIds: (number | string)[]
 }
@@ -34,6 +35,7 @@ export async function buildInjectedContext({
   associatedOutlineIds,
   availableOutlines,
   chapterSelectOptions,
+  selectedLongTermMemoryIds,
   selectedMemoryIds,
   selectedForeshadowingIds,
 }: BuildInjectedContextParams): Promise<string> {
@@ -85,20 +87,21 @@ export async function buildInjectedContext({
 
   // 记忆 / 伏笔：统一交给后端长期记忆编排器生成；未手动选择时也允许按 prompt 自动召回。
   if (bookId != null) {
-    try {
-      const res = await services.memories.buildMemoryContext({
-        bookId,
-        userPrompt,
-        mode: 'inline',
-        selectedMemoryIds,
-        selectedForeshadowingIds,
-        contextWindow,
-      })
-      if (res.success && res.data?.text) {
-        blocks.push(res.data.text)
-      }
-    } catch {
-      // ignore
+    const res = await services.memories.buildMemoryContext({
+      bookId,
+      operationKey: crypto.randomUUID(),
+      userPrompt,
+      mode: 'inline',
+      selectedLongTermMemoryIds,
+      selectedMemoryIds,
+      selectedForeshadowingIds,
+      contextWindow,
+    })
+    if (!res.success) {
+      throw new Error(res.error || '记忆上下文不可用')
+    }
+    if (res.data?.text) {
+      blocks.push(res.data.text)
     }
   }
 

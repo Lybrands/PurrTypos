@@ -26,6 +26,7 @@ class ResolvedScreenplayTask:
     source_revision_refs: tuple[str, ...] = ()
     reviewed_draft_id: str | None = None
     document_sections: tuple[str, ...] = ()
+    source_chapters: tuple[Mapping[str, Any], ...] = ()
 
 
 class SqliteScreenplayTaskResolver:
@@ -67,10 +68,27 @@ class SqliteScreenplayTaskResolver:
             if target == "screenplayDraft"
             else ()
         )
-        source_revision_refs = await self._context.head_revision_refs(project_id)
+        source_revision_refs = (
+            self._creative_brief_revision_refs(
+                workspace,
+                intent,
+                base_revision_id=base_revision_id,
+            )
+            if target == "creativeBrief"
+            else (
+                self._late_stage_revision_refs(
+                    workspace,
+                    target,
+                    base_revision_id=base_revision_id,
+                )
+                if target in {"sceneList", "screenplayDraft", "review"}
+                else await self._context.head_revision_refs(project_id)
+            )
+        )
         episode_scene_ids: dict[int, tuple[str, ...]] = {}
         reviewed_draft_id = None
         document_sections: tuple[str, ...] = ()
+        source_chapters: tuple[Mapping[str, Any], ...] = ()
         if target == "screenplayDraft":
             for number in episodes:
                 manifest = await self._context.episode_manifest(project_id, number)
@@ -94,6 +112,10 @@ class SqliteScreenplayTaskResolver:
             document_sections = tuple(
                 f"episode-{number}" for number in structure_numbers
             )
+        elif target == "sourceAnalysis":
+            source_chapters = await self._context.source_chapter_identities(
+                project_id
+            )
         return ResolvedScreenplayTask(
             target_role=target,
             episode_numbers=episodes,
@@ -102,6 +124,7 @@ class SqliteScreenplayTaskResolver:
             source_revision_refs=source_revision_refs,
             reviewed_draft_id=reviewed_draft_id,
             document_sections=document_sections,
+            source_chapters=source_chapters,
         )
 
     @staticmethod
@@ -129,6 +152,59 @@ class SqliteScreenplayTaskResolver:
             if candidate is not None:
                 return str(candidate.get("id") or "") or None
         return None
+
+    @staticmethod
+    def _creative_brief_revision_refs(
+        workspace: Mapping[str, Any],
+        intent: ScreenplayIntent,
+        *,
+        base_revision_id: str | None,
+    ) -> tuple[str, ...]:
+        heads = (workspace.get("workflow") or {}).get("heads") or {}
+        source_analysis = heads.get("sourceAnalysis")
+        source_analysis_id = (
+            str(source_analysis.get("id") or "").strip()
+            if isinstance(source_analysis, Mapping)
+            else ""
+        )
+        refs = [source_analysis_id] if source_analysis_id else []
+        if (
+            intent.action is ScreenplayIntentAction.REVISE
+            and base_revision_id
+            and base_revision_id not in refs
+        ):
+            refs.append(base_revision_id)
+        return tuple(refs)
+
+    @staticmethod
+    def _late_stage_revision_refs(
+        workspace: Mapping[str, Any],
+        target: str,
+        *,
+        base_revision_id: str | None,
+    ) -> tuple[str, ...]:
+        heads = (workspace.get("workflow") or {}).get("heads") or {}
+
+        def head_id(role: str) -> str:
+            value = heads.get(role)
+            return (
+                str(value.get("id") or "").strip()
+                if isinstance(value, Mapping)
+                else ""
+            )
+
+        refs = {
+            "sceneList": (head_id("structure"),),
+            "screenplayDraft": (
+                head_id("sourceAnalysis"),
+                head_id("creativeBrief"),
+                head_id("structure"),
+                head_id("sceneList"),
+                base_revision_id or "",
+            ),
+            "review": (head_id("sceneList"), head_id("screenplayDraft")),
+        }.get(target, ())
+        return tuple(dict.fromkeys(value for value in refs if value))
 
     @staticmethod
     def _default_target(stage: str, intent: ScreenplayIntent) -> str:

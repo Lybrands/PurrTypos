@@ -93,6 +93,7 @@ class _Gateway:
         if isinstance(response, Exception):
             raise response
         return ModelCompletion(
+            applied_generation_limit=invocation.max_generation_tokens,
             message=AgentMessage(
                 role=MessageRole.ASSISTANT,
                 content=response,
@@ -125,6 +126,17 @@ def _turns(count: int) -> tuple[ConversationTurn, ...]:
     )
 
 
+_COMPACTION_MODEL_REQUEST = ModelRequest(
+    provider="test",
+    model="model",
+    capability_snapshot=replace(
+        generic_capability_snapshot(),
+        profile_id="test:model",
+        max_generation_tokens=4_096,
+    ),
+)
+
+
 def _request(
     turns: tuple[ConversationTurn, ...],
     *,
@@ -144,15 +156,7 @@ def _request(
             *history,
             AgentMessage(role=MessageRole.USER, content="current"),
         ),
-        model=ModelRequest(
-            provider="test",
-            model="model",
-            capability_snapshot=replace(
-                generic_capability_snapshot(),
-                profile_id="test:model",
-                max_output_tokens=4_096,
-            ),
-        ),
+        model=_COMPACTION_MODEL_REQUEST,
         domain_context=DomainContext(namespace="test"),
         session_id=7,
         tools_enabled=tools_enabled,
@@ -194,6 +198,7 @@ def _model_tasks(gateway) -> AgentModelTaskRunner:
     return AgentModelTaskRunner(
         AgentModelInvocationManager(gateway),
         ModelInvocationContext(run_id="compaction-test-run"),
+        _COMPACTION_MODEL_REQUEST,
     )
 
 
@@ -762,7 +767,7 @@ async def test_generation_failure_advances_with_host_fallback_without_blocking()
     assert repository.summary.version == 2
     assert repository.summary.covered_turn_count == 6
     assert result.retained_raw_turn_count == 6
-    assert "主机按回合保留的原文摘录" in repository.summary.summary
+    assert "按回合保留的原文摘录" in repository.summary.summary
     assert result.diagnostics["failureStage"] == "generation"
     assert result.diagnostics["failureType"] == "RuntimeError"
     assert result.diagnostics["fallback"] == "host_extractive"

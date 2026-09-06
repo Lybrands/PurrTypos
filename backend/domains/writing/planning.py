@@ -1,4 +1,4 @@
-"""Writing-domain eligibility policy for Agent planning."""
+"""Writing-domain constraints for explicitly planned Agent runs."""
 
 from __future__ import annotations
 
@@ -59,22 +59,6 @@ class WritingPlanningPolicy:
             base,
             satisfied_tool_dependency_edges=frozenset(satisfied_edges),
         )
-
-    def should_plan(
-        self,
-        request: AgentRunRequest,
-        capabilities: PlanningCapabilities,
-    ) -> bool:
-        context = WritingDomainContext.from_core_context(request.domain_context)
-        text = request.latest_user_text().strip()
-        if not text or not context.book_id:
-            return False
-        mode = (request.mode or "").strip().lower()
-        del capabilities
-        if mode == "agent":
-            return True
-        return bool(request.tools_enabled)
-
 
 def _bound_current_chapter_satisfies_catalog_dependency(
     context: WritingDomainContext,

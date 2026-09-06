@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "incident": {
+    "incidentClass": "screenplay_structure_series_arc_deadline",
+    "unitSemanticKey": "section:structure:series_arc",
+    "errorCode": "model_invocation_deadline_exceeded",
+    "initialUnitCount": 8,
+    "completedPartSemanticKeys": [
+      "document:evidence"
+    ],
+    "episodeIndexStarted": false,
+    "modelAttemptCount": 4,
+    "reportedUsageAttempts": 3,
+    "inputTokens": 92285,
+    "generationTokens": 878,
+    "reasoningTokens": 443,
+    "providerOutputEvents": 469,
+    "failedInvocationDeltaBatchEvents": 442,
+    "failedInvocationPayloadChars": 1513586,
+    "providerOutputBytes": 1628472,
+    "providerInvocationTimeoutMs": 120000,
+    "elapsedMs": 129000,
+    "delegationCount": 0,
+    "containsPrivateReasoning": false
+  },
+  "invalidSeriesArcCandidate": {
+    "sectionKey": "series_arc",
+    "title": "全剧主线",
+    "contentText": "合成的越界候选，仅用于合同测试。",
+    "contentJson": {
+      "seriesArc": {
+        "phases": [
+          {
+            "key": "phase-1",
+            "title": "第一阶段",
+            "episodes": [
+              {
+                "number": 1,
+                "id": "ep01"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "expectedValidation": {
+    "outcome": "reject",
+    "reasonCode": "series_arc_contains_episode_expansion"
+  }
+}

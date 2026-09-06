@@ -14,7 +14,7 @@ from purra.run_control import RunCancellationReceipt
 
 
 class AgentCancellationService:
-    """Request cancellation for one Run and its delegated executions."""
+    """Request durable cancellation for one Run."""
 
     def __init__(
         self,
@@ -134,7 +134,6 @@ def _receipt_payload(
             if newly_requested is None
             else bool(newly_requested)
         ),
-        "delegationsCanceled": receipt.delegations_canceled,
         "terminalized": receipt.terminalized,
         "cancellationStatus": "draining" if receipt.draining else "completed",
         "cancellationEpoch": receipt.cancellation_epoch,

@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Mapping, Sequence
 
-from domains.screenplay_agent.contracts import (
-    ScreenplayIntent,
-    ScreenplayPlanBinding,
-    ScreenplayPlanPhase,
-)
+from domains.screenplay_agent.contracts import ScreenplayIntent
 from domains.screenplay_agent.manifest import (
     ScreenplayArtifactManifest,
     ScreenplayPartKind,
@@ -19,6 +15,12 @@ from domains.screenplay_agent.manifest import (
 )
 from purra.contracts import ExecutionRecipe, ExecutionRecipeStep, TaskStep
 from purra.json_values import thaw_json_mapping
+from application.screenplay_part_contracts import (
+    resolve_screenplay_part_contract,
+)
+
+
+SCREENPLAY_RECIPE_VERSION = 10
 
 
 REVIEW_DIMENSIONS = (
@@ -91,8 +93,8 @@ def compile_screenplay_manifest(
     reviewed_draft_id: str | None = None,
     base_revision_id: str | None = None,
     document_sections: Sequence[str] = (),
+    source_chapters: Sequence[Mapping[str, object]] = (),
     original_request: str | None = None,
-    plan_bindings: Sequence[ScreenplayPlanBinding] = (),
     plan_steps: Sequence[TaskStep],
 ) -> CompiledScreenplayManifest:
     scenes = {
@@ -113,6 +115,13 @@ def compile_screenplay_manifest(
             common,
             reviewed_draft_id=reviewed_draft_id,
         )
+    elif target_role == "structure":
+        parts, strategy, parallelism = _structure_parts(common)
+    elif target_role == "sourceAnalysis":
+        parts, strategy, parallelism = _source_analysis_parts(
+            source_chapters,
+            common,
+        )
     else:
         parts, strategy, parallelism = _document_parts(
             target_role,
@@ -125,19 +134,9 @@ def compile_screenplay_manifest(
         common=common,
         original_request=original_request,
     )
-    bindings = _order_bindings_by_root_plan(
-        tuple(plan_bindings) or intent.plan_bindings,
+    part_step_ids, mapping_digest = _bind_parts_to_plan(
+        parts,
         plan_steps,
-    )
-    part_step_ids, binding_digest = _bind_parts_to_plan(
-        parts,
-        bindings,
-        target_role=target_role,
-    )
-    parts = _apply_public_step_barriers(
-        parts,
-        part_step_ids,
-        bindings,
     )
     canonical = {
         "artifactKind": target_role,
@@ -168,17 +167,21 @@ def compile_screenplay_manifest(
         recipe=ExecutionRecipe(
             kind=f"screenplay.{target_role}",
             steps=tuple(
-                _recipe_step(part, plan_step_id=part_step_ids[part.id])
+                _recipe_step(
+                    part,
+                    target_role=target_role,
+                    plan_step_id=part_step_ids[part.id],
+                )
                 for part in parts
             ),
             max_parallelism=parallelism,
             metadata={
                 "targetRole": target_role,
-                "recipeVersion": 5,
+                "recipeVersion": SCREENPLAY_RECIPE_VERSION,
                 "manifestId": manifest.id,
                 "manifestDigest": manifest.digest,
                 "assemblyStrategy": strategy,
-                "planBindingDigest": binding_digest,
+                "planMappingDigest": mapping_digest,
             },
         ),
     )
@@ -206,8 +209,10 @@ def _draft_parts(scenes, common):
             },
         ))
         previous_scene = evidence_id
+        episode_scene_parts: list[str] = []
         for scene_id in scenes[episode_number]:
             part_id = f"draft:{episode_number}:{scene_id}"
+            episode_scene_parts.append(part_id)
             parts.append(_part(
                 part_id,
                 ScreenplayPartKind.DRAFT_SCENE,
@@ -226,7 +231,7 @@ def _draft_parts(scenes, common):
             metadata_id,
             ScreenplayPartKind.EPISODE_METADATA,
             len(parts),
-            (previous_scene,),
+            tuple(episode_scene_parts),
             metadata={
                 "episodeNumber": episode_number,
                 "sceneIds": list(scenes[episode_number]),
@@ -312,15 +317,73 @@ def _document_parts(target_role, sections, common):
         metadata={"targetRole": target_role, **common},
     )]
     section_ids = []
+    structure_episode_expansion_id = "section:structure:episode_plan"
     for section in normalized:
         part_id = f"section:{target_role}:{section}"
+        if target_role == "structure" and section == "episode_plan":
+            index_id = f"{part_id}:index"
+            index_dependencies = ["document:evidence"]
+            series_arc_id = "section:structure:series_arc"
+            if "series_arc" in normalized:
+                index_dependencies.append(series_arc_id)
+            parts.append(_part(
+                index_id,
+                ScreenplayPartKind.DOCUMENT_SECTION,
+                len(parts),
+                tuple(index_dependencies),
+                metadata={
+                    "targetRole": target_role,
+                    "sectionKey": "episode_plan:index",
+                    "documentSectionKey": section,
+                    "episodePlanIndex": True,
+                    **common,
+                },
+            ))
+            section_ids.append(part_id)
+            parts.append(_part(
+                part_id,
+                ScreenplayPartKind.EXPANSION,
+                len(parts),
+                (index_id,),
+                metadata={
+                    "targetRole": target_role,
+                    "sectionKey": section,
+                    "splitStrategy": "structure_episode_plan",
+                    **common,
+                },
+            ))
+            continue
         section_ids.append(part_id)
+        dependencies = ["document:evidence"]
+        if (
+            target_role == "structure"
+            and section in {"character_arcs", "hooks"}
+            and "episode_plan" in normalized
+        ):
+            dependencies.append(structure_episode_expansion_id)
+        metadata = {"targetRole": target_role, "sectionKey": section, **common}
+        if target_role == "sceneList":
+            try:
+                episode_number = int(section.removeprefix("episode-"))
+            except ValueError as error:
+                raise ValueError(
+                    "sceneList Manifest section must identify one episode"
+                ) from error
+            if (
+                not section.startswith("episode-")
+                or episode_number < 1
+                or section != f"episode-{episode_number}"
+            ):
+                raise ValueError(
+                    "sceneList Manifest section must identify one episode"
+                )
+            metadata["episodeNumber"] = episode_number
         parts.append(_part(
             part_id,
             ScreenplayPartKind.DOCUMENT_SECTION,
             len(parts),
-            ("document:evidence",),
-            metadata={"targetRole": target_role, "sectionKey": section, **common},
+            tuple(dependencies),
+            metadata=metadata,
         ))
     parts.append(_part(
         "document:validation",
@@ -332,13 +395,227 @@ def _document_parts(target_role, sections, common):
     return parts, "document_by_section", min(4, len(section_ids))
 
 
+def _source_analysis_parts(source_chapters, common):
+    chapters = tuple(_source_chapter_identity(value) for value in source_chapters)
+    if not chapters:
+        raise ValueError("sourceAnalysis Manifest requires authorized leaf chapters")
+    chapter_ids = tuple(chapter["id"] for chapter in chapters)
+    if len(chapter_ids) != len(set(chapter_ids)):
+        raise ValueError("sourceAnalysis chapter ids must be unique")
+    if tuple(chapter["index"] for chapter in chapters) != tuple(sorted(
+        chapter["index"] for chapter in chapters
+    )):
+        raise ValueError("sourceAnalysis chapters must preserve source order")
+
+    parts = [_part(
+        "document:evidence",
+        ScreenplayPartKind.EVIDENCE,
+        0,
+        metadata={"targetRole": "sourceAnalysis", **common},
+    )]
+    frontier = []
+    for chapter in chapters:
+        part_id = f'source-analysis:chapter:{chapter["id"]}'
+        frontier.append(part_id)
+        parts.append(_part(
+            part_id,
+            ScreenplayPartKind.DOCUMENT_SECTION,
+            len(parts),
+            ("document:evidence",),
+            metadata={
+                "targetRole": "sourceAnalysis",
+                "sectionKey": f'source_digest:chapter:{chapter["id"]}',
+                "sourceChapterDigest": True,
+                "chapterId": chapter["id"],
+                "chapterTitle": chapter["title"],
+                "chapterIndex": chapter["index"],
+                **common,
+            },
+        ))
+
+    level = 1
+    while len(frontier) > 12:
+        next_frontier = []
+        for offset in range(0, len(frontier), 12):
+            reduction_index = offset // 12 + 1
+            part_id = f"source-analysis:reduce:{level}:{reduction_index}"
+            next_frontier.append(part_id)
+            parts.append(_part(
+                part_id,
+                ScreenplayPartKind.DOCUMENT_SECTION,
+                len(parts),
+                tuple(frontier[offset:offset + 12]),
+                metadata={
+                    "targetRole": "sourceAnalysis",
+                    "sectionKey": f"source_digest:reduce:{level}:{reduction_index}",
+                    "sourceDigestReduction": True,
+                    "digestId": part_id,
+                    "reductionLevel": level,
+                    "reductionIndex": reduction_index,
+                    **common,
+                },
+            ))
+        frontier = next_frontier
+        level += 1
+
+    section_ids = []
+    for section in DOCUMENT_SECTIONS["sourceAnalysis"]:
+        part_id = f"section:sourceAnalysis:{section}"
+        section_ids.append(part_id)
+        parts.append(_part(
+            part_id,
+            ScreenplayPartKind.DOCUMENT_SECTION,
+            len(parts),
+            tuple(frontier),
+            metadata={
+                "targetRole": "sourceAnalysis",
+                "sectionKey": section,
+                **common,
+            },
+        ))
+    parts.append(_part(
+        "document:validation",
+        ScreenplayPartKind.VALIDATION,
+        len(parts),
+        tuple(section_ids),
+        metadata={
+            "validationKind": "document",
+            "targetRole": "sourceAnalysis",
+            **common,
+        },
+    ))
+    return parts, "source_analysis_by_chapter_digest", 12
+
+
+def _source_chapter_identity(value):
+    if not isinstance(value, Mapping):
+        raise ValueError("sourceAnalysis chapter identity must be an object")
+    chapter_id = str(value.get("id") or "").strip()
+    title = str(value.get("title") or "").strip()
+    index = int(value.get("index") or 0)
+    if not chapter_id or len(chapter_id) > 120 or not title or index <= 0:
+        raise ValueError("sourceAnalysis chapter identity is invalid")
+    return {"id": chapter_id, "title": title, "index": index}
+
+
+def _structure_parts(common):
+    specs = (
+        (
+            "document:evidence",
+            ScreenplayPartKind.EVIDENCE,
+            (),
+            {"targetRole": "structure", **common},
+        ),
+        (
+            "section:structure:series_arc:index",
+            ScreenplayPartKind.DOCUMENT_SECTION,
+            ("document:evidence",),
+            {
+                "targetRole": "structure",
+                "sectionKey": "series_arc:index",
+                "documentSectionKey": "series_arc",
+                "seriesArcIndex": True,
+                **common,
+            },
+        ),
+        (
+            "section:structure:series_arc",
+            ScreenplayPartKind.EXPANSION,
+            ("section:structure:series_arc:index",),
+            {
+                "targetRole": "structure",
+                "sectionKey": "series_arc",
+                "splitStrategy": "structure_series_arc",
+                **common,
+            },
+        ),
+        (
+            "section:structure:episode_plan:index",
+            ScreenplayPartKind.DOCUMENT_SECTION,
+            ("section:structure:series_arc",),
+            {
+                "targetRole": "structure",
+                "sectionKey": "episode_plan:index",
+                "documentSectionKey": "episode_plan",
+                "episodePlanIndex": True,
+                **common,
+            },
+        ),
+        (
+            "section:structure:episode_plan",
+            ScreenplayPartKind.EXPANSION,
+            ("section:structure:episode_plan:index",),
+            {
+                "targetRole": "structure",
+                "sectionKey": "episode_plan",
+                "splitStrategy": "structure_episode_plan",
+                **common,
+            },
+        ),
+        (
+            "section:structure:character_arcs:index",
+            ScreenplayPartKind.DOCUMENT_SECTION,
+            ("section:structure:episode_plan",),
+            {
+                "targetRole": "structure",
+                "sectionKey": "character_arcs:index",
+                "documentSectionKey": "character_arcs",
+                "characterArcsIndex": True,
+                **common,
+            },
+        ),
+        (
+            "section:structure:character_arcs",
+            ScreenplayPartKind.EXPANSION,
+            ("section:structure:character_arcs:index",),
+            {
+                "targetRole": "structure",
+                "sectionKey": "character_arcs",
+                "splitStrategy": "structure_character_arcs",
+                **common,
+            },
+        ),
+        (
+            "section:structure:hooks",
+            ScreenplayPartKind.HOST_PROJECTION,
+            (
+                "section:structure:episode_plan",
+                "section:structure:character_arcs",
+            ),
+            {
+                "targetRole": "structure",
+                "sectionKey": "hooks",
+                **common,
+            },
+        ),
+        (
+            "document:validation",
+            ScreenplayPartKind.VALIDATION,
+            (
+                "section:structure:series_arc",
+                "section:structure:episode_plan",
+                "section:structure:character_arcs",
+                "section:structure:hooks",
+            ),
+            {
+                "validationKind": "document",
+                "targetRole": "structure",
+                **common,
+            },
+        ),
+    )
+    return [
+        _part(part_id, kind, position, dependencies, metadata=metadata)
+        for position, (part_id, kind, dependencies, metadata) in enumerate(specs)
+    ], "structure_by_bounded_parts", 12
+
+
 def _append_terminal_parts(parts, *, target_role, common, original_request):
     terminal_dependencies = tuple(
         part.id for part in parts if part.kind is ScreenplayPartKind.VALIDATION
     )
-    final_id = "compose-final-response"
     parts.append(_part(
-        final_id,
+        "compose-final-response",
         ScreenplayPartKind.FINAL_RESPONSE,
         len(parts),
         terminal_dependencies,
@@ -376,17 +653,41 @@ def _part_mapping(part):
     }
 
 
-def _recipe_step(part, *, plan_step_id):
+def _recipe_step(part, *, target_role, plan_step_id):
+    expansion_kind = {
+        "structure_series_arc": "expand_structure_series_arc",
+        "structure_episode_plan": "expand_structure_episode_plan",
+        "structure_character_arcs": "expand_structure_character_arcs",
+    }.get(str(thaw_json_mapping(part.metadata).get("splitStrategy") or ""))
     execution_kind = {
         ScreenplayPartKind.EVIDENCE: "collect_evidence",
         ScreenplayPartKind.DRAFT_SCENE: "generate_draft_scene",
         ScreenplayPartKind.EPISODE_METADATA: "generate_episode_metadata",
         ScreenplayPartKind.REVIEW_DIMENSION: "generate_review_dimension",
         ScreenplayPartKind.DOCUMENT_SECTION: "generate_document_section",
+        ScreenplayPartKind.EXPANSION: expansion_kind,
+        ScreenplayPartKind.HOST_PROJECTION: "project_structure_hooks",
         ScreenplayPartKind.VALIDATION: "validate_manifest_part",
         ScreenplayPartKind.FINAL_RESPONSE: "compose_final_response",
     }[part.kind]
+    if not execution_kind:
+        raise ValueError("screenplay expansion strategy is unsupported")
     metadata = thaw_json_mapping(part.metadata)
+    contract = (
+        resolve_screenplay_part_contract(
+            target_role,
+            execution_kind,
+            metadata,
+        )
+        if execution_kind in {
+            "generate_draft_scene",
+            "generate_episode_metadata",
+            "generate_review_dimension",
+            "generate_document_section",
+            "compose_final_response",
+        }
+        else None
+    )
     return ExecutionRecipeStep(
         id=part.id,
         kind=execution_kind,
@@ -410,46 +711,42 @@ def _recipe_step(part, *, plan_step_id):
                     ScreenplayPartKind.DRAFT_SCENE,
                     ScreenplayPartKind.REVIEW_DIMENSION,
                     ScreenplayPartKind.DOCUMENT_SECTION,
+                    ScreenplayPartKind.EXPANSION,
+                    ScreenplayPartKind.HOST_PROJECTION,
                 }
                 else "read_only"
             ),
-            "completionEvidence": "artifact_ref",
+            "completionEvidence": (
+                "expanded_parts"
+                if part.kind is ScreenplayPartKind.EXPANSION
+                else "artifact_ref"
+            ),
             "checkpointPolicy": "reuse_completed",
             "retryPolicy": "bounded_attempts",
+            **(
+                {"partContractKey": contract.key}
+                if contract is not None
+                else {}
+            ),
         },
     )
 
 
-def _bind_parts_to_plan(parts, bindings, *, target_role):
-    if not bindings or any(
-        not isinstance(binding, ScreenplayPlanBinding)
-        for binding in bindings
-    ):
-        raise ValueError("screenplay Manifest requires plan bindings")
-    by_phase = {
-        phase: tuple(
-            binding.step_id for binding in bindings if binding.phase is phase
+def _bind_parts_to_plan(parts, plan_steps):
+    steps = tuple(plan_steps)
+    if not steps or any(not isinstance(step, TaskStep) for step in steps):
+        raise ValueError("screenplay Manifest requires validated Root plan steps")
+    if len({step.id for step in steps}) != len(steps):
+        raise ValueError("screenplay Root plan step ids must be unique")
+    if len(steps) > len(parts):
+        raise ValueError(
+            "screenplay Root plan contains more semantic steps than executable work"
         )
-        for phase in ScreenplayPlanPhase
+    mapped = {
+        part.id: steps[index * len(steps) // len(parts)].id
+        for index, part in enumerate(parts)
     }
-    parts_by_phase = {
-        phase: tuple(
-            part for part in parts
-            if _part_phase(part, target_role=target_role) is phase
-        )
-        for phase in ScreenplayPlanPhase
-    }
-    mapped: dict[str, str] = {}
-    for phase in ScreenplayPlanPhase:
-        step_ids = by_phase[phase]
-        phase_parts = parts_by_phase[phase]
-        if bool(step_ids) != bool(phase_parts) or len(step_ids) > len(phase_parts):
-            raise ValueError(
-                f"screenplay plan phase {phase.value} cannot cover Manifest Parts"
-            )
-        for index, part in enumerate(phase_parts):
-            mapped[part.id] = step_ids[index * len(step_ids) // len(phase_parts)]
-    digest_source = [binding.to_mapping() for binding in bindings]
+    digest_source = [step.id for step in steps]
     digest = "sha256:" + hashlib.sha256(json.dumps(
         digest_source,
         ensure_ascii=False,
@@ -460,85 +757,12 @@ def _bind_parts_to_plan(parts, bindings, *, target_role):
     return mapped, digest
 
 
-def _order_bindings_by_root_plan(bindings, plan_steps):
-    steps = tuple(plan_steps)
-    if not steps or any(not isinstance(step, TaskStep) for step in steps):
-        raise ValueError("screenplay Manifest requires validated Root plan steps")
-    by_id = {binding.step_id: binding for binding in bindings}
-    step_ids = tuple(step.id for step in steps)
-    if len(by_id) != len(bindings) or set(by_id) != set(step_ids):
-        raise ValueError("screenplay bindings must match validated Root plan steps")
-    return tuple(by_id[step_id] for step_id in step_ids)
-
-
-def _apply_public_step_barriers(parts, part_step_ids, bindings):
-    """Make private recipe progress obey the model-authored Root step order."""
-
-    ordered_step_ids = tuple(dict.fromkeys(
-        binding.step_id for binding in bindings
-    ))
-    parts_by_id = {part.id: part for part in parts}
-    groups = {
-        step_id: tuple(
-            part for part in parts
-            if part_step_ids[part.id] == step_id
-        )
-        for step_id in ordered_step_ids
-    }
-    rewritten: dict[str, ScreenplayPartSpec] = {}
-    previous_terminals: tuple[str, ...] = ()
-    for step_id in ordered_step_ids:
-        group = groups[step_id]
-        group_ids = {part.id for part in group}
-        depended_on_within_group = {
-            dependency
-            for part in group
-            for dependency in part.dependencies
-            if dependency in group_ids
-        }
-        for part in group:
-            internal = tuple(
-                dependency
-                for dependency in part.dependencies
-                if dependency in group_ids
-            )
-            dependencies = (
-                tuple(dict.fromkeys((*internal, *previous_terminals)))
-                if not internal
-                else internal
-            )
-            rewritten[part.id] = replace(part, dependencies=dependencies)
-        previous_terminals = tuple(
-            part.id for part in group
-            if part.id not in depended_on_within_group
-        )
-    if set(rewritten) != set(parts_by_id):
-        raise ValueError("screenplay public plan barriers left Parts unbound")
-    return tuple(
-        rewritten[part.id]
-        for step_id in ordered_step_ids
-        for part in groups[step_id]
-    )
-
-
-def _part_phase(part, *, target_role):
-    if part.kind is ScreenplayPartKind.EVIDENCE:
-        return ScreenplayPlanPhase.EVIDENCE
-    if part.kind is ScreenplayPartKind.REVIEW_DIMENSION:
-        return ScreenplayPlanPhase.REVIEW
-    if part.kind is ScreenplayPartKind.FINAL_RESPONSE:
-        return ScreenplayPlanPhase.DELIVERY
-    if part.kind is ScreenplayPartKind.VALIDATION and target_role == "review":
-        return ScreenplayPlanPhase.REVIEW
-    return ScreenplayPlanPhase.CREATION
-
-
 def _display_title(part, metadata):
     episode_number = metadata.get("episodeNumber")
     target_role = str(metadata.get("targetRole") or "")
     if part.kind is ScreenplayPartKind.EVIDENCE:
         if target_role == "sourceAnalysis":
-            return "读取原作内容"
+            return "准备原作范围"
         if episode_number is not None:
             noun = (
                 "剧本"
@@ -556,10 +780,28 @@ def _display_title(part, metadata):
         return REVIEW_DIMENSION_TITLES.get(dimension, "审阅剧本")
     if part.kind is ScreenplayPartKind.DOCUMENT_SECTION:
         section = str(metadata.get("sectionKey") or "")
+        if metadata.get("sourceChapterDigest") is True:
+            return f'分析第 {int(metadata.get("chapterIndex") or 0)} 章'
+        if metadata.get("sourceDigestReduction") is True:
+            return "归并原作摘要"
+        if metadata.get("seriesArcIndex") is True:
+            return "确定全剧阶段"
+        if metadata.get("episodePlanIndex") is True:
+            return "确定分集索引"
+        if metadata.get("characterArcsIndex") is True:
+            return "确定核心人物"
         return DOCUMENT_SECTION_TITLES.get(target_role, {}).get(
             section,
             "生成交付内容",
         )
+    if part.kind is ScreenplayPartKind.EXPANSION:
+        return {
+            "structure_series_arc": "展开全剧阶段",
+            "structure_episode_plan": "展开分集任务",
+            "structure_character_arcs": "展开人物弧任务",
+        }.get(str(metadata.get("splitStrategy") or ""), "展开结构任务")
+    if part.kind is ScreenplayPartKind.HOST_PROJECTION:
+        return "整理剧情钩子"
     if part.kind is ScreenplayPartKind.VALIDATION:
         if target_role == "sourceAnalysis":
             return "检查分析结果"
@@ -573,5 +815,6 @@ __all__ = [
     "CompiledScreenplayManifest",
     "DOCUMENT_SECTIONS",
     "REVIEW_DIMENSIONS",
+    "SCREENPLAY_RECIPE_VERSION",
     "compile_screenplay_manifest",
 ]

@@ -8,7 +8,7 @@ import logging
 from typing import Any, AsyncIterator
 
 import anyio
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from purra.contracts import (
@@ -21,6 +21,7 @@ from application.request_mapping import (
     build_chat_provider_options,
     validate_writing_request_contract,
 )
+from dependencies import get_db
 from schemas.ai import (
     CaptureAiErrorReportRequest,
     ChatStreamRequest,
@@ -460,6 +461,78 @@ async def get_agent_run_diagnostics(run_id: str):
     return {"success": True, "data": report}
 
 
+@router.get("/ai/agent-runs/{run_id}/planner-diagnostics")
+async def get_agent_run_planner_diagnostics(run_id: str):
+    """Return persisted Planner model content to the developer inspector."""
+
+    from dependencies import get_db
+    from infrastructure.persistence.planner_diagnostics import (
+        read_planner_model_outputs,
+    )
+    from infrastructure.persistence.run_store import get_run
+
+    db = get_db()
+    if await get_run(db, run_id) is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    return {
+        "success": True,
+        "data": {
+            "runId": run_id,
+            "outputs": await read_planner_model_outputs(db, run_id),
+        },
+    }
+
+
+@router.get("/ai/agent-runs/{run_id}/model-input-diagnostics")
+async def get_agent_run_model_input_diagnostics(run_id: str):
+    """Return exact Provider input messages captured in development."""
+
+    from config import DEV_DIAGNOSTICS_ENABLED
+    from dependencies import get_db
+    from infrastructure.persistence.model_input_diagnostics import (
+        read_model_input_diagnostics,
+    )
+    from infrastructure.persistence.run_store import get_run
+
+    if not DEV_DIAGNOSTICS_ENABLED:
+        return {"success": False, "error": "模型输入诊断只在开发环境启用"}
+    db = get_db()
+    if await get_run(db, run_id) is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    return {
+        "success": True,
+        "data": {
+            "runId": run_id,
+            "calls": await read_model_input_diagnostics(db, run_id),
+        },
+    }
+
+
+@router.get("/ai/agent-runs/{run_id}/tool-diagnostics")
+async def get_agent_run_tool_diagnostics(run_id: str, after: int = 0):
+    """Read private tool IO only through the development diagnostics gate."""
+    from config import DEV_DIAGNOSTICS_ENABLED
+    from dependencies import get_db
+    from application.screenplay_tool_presentation import (
+        reproject_screenplay_tool_diagnostics,
+    )
+    from infrastructure.persistence.run_store import get_run
+    from infrastructure.persistence.tool_diagnostics import read_tool_diagnostics
+
+    if not DEV_DIAGNOSTICS_ENABLED:
+        return {"success": False, "error": "工具调用诊断只在开发环境启用"}
+    if after < 0:
+        return {"success": False, "error": "诊断游标不能为负数"}
+    db = get_db()
+    if await get_run(db, run_id) is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    page = await read_tool_diagnostics(db, run_id, after=after)
+    return {
+        "success": True,
+        "data": await reproject_screenplay_tool_diagnostics(db, page),
+    }
+
+
 @router.post("/ai/artifacts/maintenance")
 async def maintain_agent_artifacts():
     """Safely reap invalid leases without enabling content retention GC."""
@@ -657,6 +730,45 @@ async def get_agent_run_snapshot(
     return {"success": True, "data": snapshot}
 
 
+@router.get("/ai/agent-runs/{run_id}/events")
+async def stream_agent_run_events(
+    request: Request, run_id: str,
+    session_id: int = Query(alias="sessionId", ge=1),
+    after: int = Query(default=0, ge=0),
+):
+    from application.agent_composition import get_agent_composition
+    from application.agent_run_queries import AgentRunQueryService
+    from application.agent_event_stream import stream_agent_pages, projection_version
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
+
+    composition = get_agent_composition()
+    run = await get_run(get_db(), run_id)
+    if run is None or run.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Agent Run 不存在于当前会话")
+    query = AgentRunQueryService(composition.run_snapshot_reader, composition.output_repository)
+
+    async def read_page(cursor):
+        snapshot = await query.get_snapshot(run_id, after_event_id=cursor, limit=500)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Agent Run 不存在")
+        # Product bodies stay on their scoped query, not the public stream.
+        snapshot.pop("productEvents", None)
+        return {
+            **snapshot,
+            "projectionVersion": projection_version([
+                snapshot["run"]["status"], snapshot["run"]["execution"]["cancellationRequested"],
+                snapshot["todos"], snapshot["delegations"],
+            ]),
+            "done": snapshot["run"]["status"] != "running" and not snapshot["hasMore"],
+        }
+
+    return EventSourceResponse(stream_agent_pages(
+        request=request, read_page=read_page,
+        notifications=composition.output_notifications, after=after,
+    ))
+
+
 @router.get("/ai/agent-runtime-regressions")
 async def get_agent_runtime_regressions():
     """Run content-free operational incidents against the current evaluator."""
@@ -756,6 +868,12 @@ def _fallback_session_title_from_prompt(prompt: str | None) -> str:
     return normalize_session_title(t)
 
 
+@router.get("/ai/model-descriptors")
+async def get_model_descriptors():
+    from infrastructure.models.profiles.descriptors import model_descriptors
+    return {"success": True, "data": model_descriptors()}
+
+
 @router.post("/ai/title")
 async def generate_title(body: GenerateTitleRequest):
     key = (body.apiKey or "").strip()
@@ -767,55 +885,20 @@ async def generate_title(body: GenerateTitleRequest):
         return {"success": False, "error": "缺少模型参数"}
 
     base_url = normalize_base_url(body.baseURL)
+    title_options = dict(body.options or {})
+    title_options.update({"model": model, "baseURL": base_url})
+    for option_key in ("tools", "tool_choice", "response_format"):
+        title_options.pop(option_key, None)
 
     try:
-        if body.apiProvider == "anthropic":
-            from infrastructure.models.anthropic_chat import (
-                generate_title as anth_title,
-            )
-
-            title = await anth_title(key, body.prompt, {"model": model, "baseURL": base_url})
-            title = (title or "").strip()
-            if not title:
-                title = _fallback_session_title_from_prompt(body.prompt)
-                if title:
-                    logger.info("[ai-generate-title] anthropic used prompt fallback")
-                else:
-                    logger.warning("[ai-generate-title] anthropic empty title model=%s", model)
-            if not title:
-                return {"success": False, "error": "标题生成结果为空"}
-            logger.info("[ai-generate-title] 生成标题: %s", title)
-            return {"success": True, "data": title}
-
-        if body.apiProvider == "zai":
-            from infrastructure.models.zai_chat import generate_title as zai_title
-
-            title = await zai_title(
-                key,
-                body.prompt,
-                {"model": model, "baseURL": base_url},
-            )
-            title = (title or "").strip()
-            if not title:
-                title = _fallback_session_title_from_prompt(body.prompt)
-                if title:
-                    logger.info("[ai-generate-title] zai used prompt fallback")
-            if not title:
-                return {"success": False, "error": "标题生成结果为空"}
-            logger.info("[ai-generate-title] 生成标题: %s", title)
-            return {"success": True, "data": title}
-
-        from infrastructure.models.openai_chat import generate_title as openai_title
-
-        title = await openai_title(key, body.prompt, {"model": model, "baseURL": base_url})
-        title = (title or "").strip()
-        if not title:
-            title = _fallback_session_title_from_prompt(body.prompt)
-            if title:
-                logger.info("[ai-generate-title] openai used prompt fallback")
+        from application.session_title_service import generate_session_title
+        title = await generate_session_title(
+            api_key=key, provider=body.apiProvider, options=title_options,
+            prompt=body.prompt, db=get_db(),
+        )
+        title = title or _fallback_session_title_from_prompt(body.prompt)
         if not title:
             return {"success": False, "error": "标题生成结果为空"}
-        logger.info("[ai-generate-title] 生成标题: %s", title)
         return {"success": True, "data": title}
     except Exception as e:
         return {"success": False, "error": str(e)}

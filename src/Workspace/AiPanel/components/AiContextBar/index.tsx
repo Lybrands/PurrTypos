@@ -1,4 +1,3 @@
-import React from "react";
 import { PurrButton, PurrPopover, PurrTooltip } from '@/purr-components';
 import "./index.scss";
 import { LinkIcon, StoryContextIcon } from '@/purr-components';
@@ -23,6 +22,7 @@ export interface AiContextBarBindings {
   onQuickAssociateChapter: () => void;
   onQuickAssociateOutline: () => void;
   selectedMemoryIds: (number | string)[];
+  selectedLongTermMemoryIds: string[];
   selectedForeshadowingIds: (number | string)[];
   onOpenMemoryModal: () => void;
   contextPopoverOpen: boolean;
@@ -51,6 +51,7 @@ export default function AiContextBar({
   onQuickAssociateChapter,
   onQuickAssociateOutline,
   selectedMemoryIds,
+  selectedLongTermMemoryIds,
   selectedForeshadowingIds,
   onOpenMemoryModal,
   contextPopoverOpen,
@@ -114,7 +115,7 @@ export default function AiContextBar({
           icon={<StoryContextIcon />}
           aria-label="注入设定"
           onClick={onOpenMemoryModal}
-          className={`ai-context-icon-btn ${selectedMemoryIds.length || selectedForeshadowingIds.length ? "ai-memory-btn--has-selection" : ""}`}
+          className={`ai-context-icon-btn ${selectedLongTermMemoryIds.length || selectedMemoryIds.length || selectedForeshadowingIds.length ? "ai-memory-btn--has-selection" : ""}`}
         />
       </PurrTooltip>
       {onInsertPrompt ? (

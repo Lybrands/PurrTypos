@@ -37,21 +37,16 @@ class ScreenplayScopeKind(StrEnum):
     ALL_REMAINING = "all_remaining"
 
 
-class ScreenplayPlanPhase(StrEnum):
-    EVIDENCE = "evidence"
-    CREATION = "creation"
-    REVIEW = "review"
-    DELIVERY = "delivery"
+SCREENPLAY_DELIVERABLE_LABELS = {
+    "sourceAnalysis": "原作分析",
+    "creativeBrief": "创作简报",
+    "structure": "分集结构",
+    "sceneList": "场景表",
+    "screenplayDraft": "剧本正文",
+    "review": "审阅报告",
+}
 
-
-SCREENPLAY_DELIVERABLE_ROLES = frozenset({
-    "sourceAnalysis",
-    "creativeBrief",
-    "structure",
-    "sceneList",
-    "screenplayDraft",
-    "review",
-})
+SCREENPLAY_DELIVERABLE_ROLES = frozenset(SCREENPLAY_DELIVERABLE_LABELS)
 
 
 def _text(value: object) -> str:
@@ -74,47 +69,6 @@ def _require_exact_fields(
 ) -> None:
     if frozenset(value) != expected:
         raise ValueError(f"screenplay {label} fields are invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class ScreenplayPlanBinding:
-    step_id: str
-    phase: ScreenplayPlanPhase
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.step_id, str):
-            raise ValueError("screenplay plan binding step id must be a string")
-        step_id = self.step_id.strip()
-        if not step_id:
-            raise ValueError("screenplay plan binding step id is required")
-        object.__setattr__(self, "step_id", step_id)
-        if not isinstance(self.phase, str):
-            raise ValueError("screenplay plan binding phase must be a string")
-        try:
-            phase = ScreenplayPlanPhase(self.phase.strip())
-        except ValueError as error:
-            raise ValueError("screenplay plan binding phase is invalid") from error
-        object.__setattr__(self, "phase", phase)
-
-    @classmethod
-    def from_mapping(cls, value: object) -> "ScreenplayPlanBinding":
-        if not isinstance(value, Mapping):
-            raise ValueError("screenplay plan binding must be an object")
-        _require_exact_fields(
-            value,
-            frozenset({"stepId", "phase"}),
-            "plan binding",
-        )
-        step_id = value.get("stepId")
-        phase = value.get("phase")
-        if not isinstance(step_id, str):
-            raise ValueError("screenplay plan binding step id must be a string")
-        if not isinstance(phase, str):
-            raise ValueError("screenplay plan binding phase must be a string")
-        return cls(step_id=step_id, phase=phase)
-
-    def to_mapping(self) -> dict[str, str]:
-        return {"stepId": self.step_id, "phase": self.phase.value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +165,6 @@ class ScreenplayIntent:
     constraints: tuple[str, ...] = ()
     preserve: tuple[str, ...] = ()
     requested_deliverable: str | None = None
-    plan_bindings: tuple[ScreenplayPlanBinding, ...] = ()
 
     def __post_init__(self) -> None:
         action = ScreenplayIntentAction(self.action)
@@ -234,12 +187,6 @@ class ScreenplayIntent:
             and self.requested_deliverable not in SCREENPLAY_DELIVERABLE_ROLES
         ):
             raise ValueError("requested deliverable is invalid")
-        bindings = tuple(self.plan_bindings)
-        if any(not isinstance(value, ScreenplayPlanBinding) for value in bindings):
-            raise TypeError("screenplay plan bindings are invalid")
-        if len({value.step_id for value in bindings}) != len(bindings):
-            raise ValueError("screenplay plan steps must be bound exactly once")
-        object.__setattr__(self, "plan_bindings", bindings)
 
     @classmethod
     def from_task_spec(
@@ -265,28 +212,13 @@ class ScreenplayIntent:
             raise ValueError("TaskSpec target screenplay must be an object")
         _require_exact_fields(
             raw,
-            frozenset({"version", "scope", "stepBindings"}),
+            frozenset({"version", "scope"}),
             "TaskSpec target",
         )
         version = raw.get("version")
         if type(version) is not int or version != 1:
             raise ValueError("screenplay TaskSpec version must be 1")
         scope = ScreenplayIntentScope.from_task_spec_mapping(raw.get("scope"))
-        raw_bindings = raw.get("stepBindings")
-        if isinstance(raw_bindings, (str, bytes, bytearray)) or not isinstance(
-            raw_bindings,
-            Sequence,
-        ):
-            raise ValueError("screenplay stepBindings must be a list")
-        bindings = tuple(
-            ScreenplayPlanBinding.from_mapping(value)
-            for value in raw_bindings
-        )
-        binding_ids = tuple(binding.step_id for binding in bindings)
-        if len(binding_ids) != len(set(binding_ids)):
-            raise ValueError("screenplay plan steps must be bound exactly once")
-        if set(binding_ids) != set(step_ids):
-            raise ValueError("screenplay bindings must match all plan steps")
 
         action = ScreenplayIntentAction(_text(task_spec.operation))
         deliverable = _text(task_spec.deliverable) or None
@@ -307,11 +239,22 @@ class ScreenplayIntent:
             constraints=task_spec.constraints,
             preserve=task_spec.preserve,
             requested_deliverable=deliverable,
-            plan_bindings=bindings,
         )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ScreenplayIntent":
+        _require_exact_fields(
+            value,
+            frozenset({
+                "action",
+                "instruction",
+                "scope",
+                "constraints",
+                "preserve",
+                "requestedDeliverable",
+            }),
+            "intent",
+        )
         return cls(
             action=ScreenplayIntentAction(_text(value.get("action"))),
             instruction=_text(value.get("instruction")),
@@ -319,10 +262,6 @@ class ScreenplayIntent:
             constraints=tuple(value.get("constraints") or ()),
             preserve=tuple(value.get("preserve") or ()),
             requested_deliverable=_text(value.get("requestedDeliverable")) or None,
-            plan_bindings=tuple(
-                ScreenplayPlanBinding.from_mapping(item)
-                for item in value.get("stepBindings") or ()
-            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -335,15 +274,6 @@ class ScreenplayIntent:
             **(
                 {"requestedDeliverable": self.requested_deliverable}
                 if self.requested_deliverable
-                else {}
-            ),
-            **(
-                {
-                    "stepBindings": [
-                        binding.to_mapping() for binding in self.plan_bindings
-                    ]
-                }
-                if self.plan_bindings
                 else {}
             ),
         }
@@ -568,11 +498,10 @@ __all__ = [
     "ScreenplayIntentAction",
     "ScreenplayIntentCommandMismatchError",
     "ScreenplayIntentScope",
-    "ScreenplayPlanBinding",
-    "ScreenplayPlanPhase",
     "ScreenplayStageCommand",
     "ScreenplayScopeKind",
     "SCREENPLAY_DELIVERABLE_ROLES",
+    "SCREENPLAY_DELIVERABLE_LABELS",
     "ReviewEpisodeInputRef",
     "ReviewEpisodeResult",
 ]

@@ -8,7 +8,6 @@ from typing import Any
 
 from domains.screenplay.source_scope import scoped_chapters
 from exceptions import AppError, NotFoundError
-from utils.book_structure import load_chapter_texts
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -162,6 +161,64 @@ class ScreenplayAgentContextQuery:
             result.append(revision)
         return result
 
+    async def revision_identities(
+        self,
+        project_id: str,
+        revision_ids: Sequence[str],
+    ) -> dict[str, str]:
+        """Resolve immutable role/id control facts without loading any body."""
+
+        normalized = tuple(dict.fromkeys(
+            str(value).strip() for value in revision_ids if str(value).strip()
+        ))
+        if not normalized:
+            return {}
+        marks = ",".join("?" for _ in normalized)
+        rows = await self._db.fetch_all(
+            "SELECT r.id, d.role FROM screenplay_revisions AS r "
+            "JOIN screenplay_deliverables AS d ON d.id = r.deliverable_id "
+            f"WHERE r.project_id = ? AND r.id IN ({marks})",
+            [project_id, *normalized],
+        )
+        by_id = {str(row["id"]): str(row["role"]) for row in rows}
+        missing = set(normalized) - set(by_id)
+        if missing:
+            raise AppError(
+                "项目文档版本不存在或不属于当前剧本项目",
+                409,
+            )
+        result: dict[str, str] = {}
+        for revision_id in normalized:
+            role = by_id[revision_id]
+            if role in result:
+                raise AppError(f"剧本任务包含多个 {role} 输入版本", 409)
+            result[role] = revision_id
+        return result
+
+    async def revision_episode_numbers(
+        self,
+        revision_id: str,
+    ) -> tuple[int, ...]:
+        return await self._revision_episode_numbers(revision_id)
+
+    async def revision_episode_digest(
+        self,
+        revision_id: str,
+        episode_number: int,
+    ) -> str:
+        row = await self._db.fetch_one(
+            "SELECT content_digest FROM screenplay_revision_parts "
+            "WHERE revision_id = ? AND part_type = 'episode' AND part_key = ?",
+            [revision_id, str(int(episode_number))],
+        )
+        digest = str((row or {}).get("content_digest") or "").strip()
+        if not digest:
+            raise AppError(
+                f"剧本正文版本缺少第 {episode_number} 集内容摘要",
+                409,
+            )
+        return digest.removeprefix("sha256:")
+
     async def episode_context(
         self,
         project_id: str,
@@ -262,122 +319,6 @@ class ScreenplayAgentContextQuery:
     ) -> tuple[int, ...]:
         return await self._head_episode_numbers(project_id, "structure")
 
-    async def episode_writing_context(
-        self,
-        project_id: str,
-        episode_number: int,
-        *,
-        draft_revision_id: str | None = None,
-        source_revision_refs: Sequence[str] = (),
-    ) -> dict[str, Any]:
-        """Resolve exact, bounded evidence before any scene model Run."""
-
-        accepted = (
-            await self.revisions(source_revision_refs, text_limit=0)
-            if source_revision_refs else []
-        )
-        accepted_by_role = {
-            str(item["role"]): item for item in accepted
-        }
-        scene_list_revision_id = str(
-            (accepted_by_role.get("sceneList") or {}).get("revisionId") or ""
-        ) or None
-        episode = await self.episode_context(
-            project_id,
-            episode_number,
-            draft_revision_id=draft_revision_id,
-            scene_list_revision_id=scene_list_revision_id,
-        )
-        scene_plan = episode.get("episode")
-        scenes = (
-            scene_plan.get("scenes")
-            if isinstance(scene_plan, Mapping)
-            else None
-        )
-        if not isinstance(scenes, list) or not scenes:
-            raise AppError(f"第 {episode_number} 集场景数据不完整", 409)
-        normalized_scenes = {
-            str(scene.get("id") or "").strip(): dict(scene)
-            for scene in scenes
-            if isinstance(scene, Mapping)
-            and str(scene.get("id") or "").strip()
-        }
-        if len(normalized_scenes) != len(scenes):
-            raise AppError(f"第 {episode_number} 集场景数据不完整", 409)
-
-        heads = (
-            [
-                item for item in accepted
-                if item["role"] in {"creativeBrief", "structure", "review"}
-            ]
-            if accepted else await self.heads(
-                project_id,
-                roles=("creativeBrief", "structure", "review"),
-                text_limit=0,
-            )
-        )
-        by_role = {str(head["role"]): head for head in heads}
-        review = by_role.get("review")
-        review_content = (
-            review.get("content")
-            if isinstance(review, Mapping)
-            else {}
-        )
-        review_matches_base = bool(
-            draft_revision_id
-            and isinstance(review_content, Mapping)
-            and str(review_content.get("reviewedDraftId") or "")
-            == draft_revision_id
-        )
-        planned_issue_ids: frozenset[str] = frozenset()
-        if review_matches_base and isinstance(review, Mapping):
-            decision_rows = await self._db.fetch_all(
-                "SELECT issue_id FROM screenplay_review_decisions "
-                "WHERE project_id = ? AND review_revision_id = ? "
-                "AND status = 'planned' ORDER BY issue_id ASC",
-                [project_id, str(review.get("revisionId") or "")],
-            )
-            planned_issue_ids = frozenset(
-                str(row.get("issue_id") or "").strip()
-                for row in decision_rows
-                if str(row.get("issue_id") or "").strip()
-            )
-        review_issues = (
-            _episode_review_issues(
-                review_content,
-                frozenset(normalized_scenes),
-                allowed_issue_ids=planned_issue_ids,
-            )
-            if review_matches_base
-            else []
-        )
-        return {
-            "sceneListId": str(episode["sceneListId"]),
-            "scenePlans": normalized_scenes,
-            "currentDraftScenes": _draft_scene_texts(
-                episode.get("currentDraft")
-            ),
-            "previousEpisodeContinuity": _episode_continuity(
-                episode.get("previousEpisode")
-            ),
-            "reviewRevisionId": (
-                str(review.get("revisionId") or "")
-                if review_matches_base and isinstance(review, Mapping)
-                else None
-            ),
-            "reviewIssues": review_issues,
-            "acceptedGuidance": {
-                "creativeBrief": _creative_brief_episode_guidance(
-                    (by_role.get("creativeBrief") or {}).get("content"),
-                    episode_number,
-                ),
-                "structureEpisode": _structure_episode_guidance(
-                    (by_role.get("structure") or {}).get("content"),
-                    episode_number,
-                ),
-            },
-        }
-
     async def available_episode_numbers(
         self,
         project_id: str,
@@ -396,40 +337,29 @@ class ScreenplayAgentContextQuery:
             "remaining": tuple(number for number in scene_numbers if number not in draft_numbers),
         }
 
-    async def source_context(self, project_id: str, *, limit: int = 60_000) -> dict[str, Any]:
+    async def source_chapter_identities(
+        self,
+        project_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Enumerate authorized leaf identities without loading source prose."""
+
         project = await self._db.fetch_one(
-            "SELECT * FROM screenplay_projects WHERE id = ?",
+            "SELECT source_kind, source_book_id, source_scope_json "
+            "FROM screenplay_projects WHERE id = ?",
             [project_id],
         )
         if project is None:
             raise NotFoundError("剧本项目不存在")
         if str(project.get("source_kind") or "original") != "book":
-            return {"type": "original", "premise": str(project.get("premise") or "")}
+            raise AppError("原作分析只适用于已绑定来源作品的项目", 409)
         chapters = await scoped_chapters(self._db, project)
-        texts = await load_chapter_texts(
-            self._db,
-            [str(chapter["id"]) for chapter in chapters],
-        )
-        remaining = max(1, int(limit))
-        selected: list[dict[str, Any]] = []
-        for chapter in chapters:
-            text = texts.get(str(chapter["id"]), "")
-            if remaining <= 0:
-                break
-            excerpt = _clip(text, remaining)
-            selected.append({
-                "id": str(chapter["id"]),
-                "index": int(chapter.get("index") or 0),
-                "title": str(chapter.get("title") or ""),
-                "content": excerpt,
-            })
-            remaining -= len(excerpt)
-        return {
-            "type": "book",
-            "bookId": str(project.get("source_book_id") or ""),
-            "chapters": selected,
-            "truncated": len(selected) < len(chapters),
-        }
+        if not chapters:
+            raise AppError("当前授权原作范围没有可分析的正文章节", 409)
+        return tuple({
+            "id": str(chapter["id"]),
+            "title": str(chapter.get("title") or ""),
+            "index": int(chapter.get("index") or 0),
+        } for chapter in chapters)
 
     async def _head_episode(
         self,
@@ -533,112 +463,6 @@ def _draft_episode_scene_ids(value: object) -> tuple[str, ...]:
     else:
         result = tuple(_draft_scene_texts(draft))
     return result if result and all(result) and len(result) == len(set(result)) else ()
-
-
-def _episode_continuity(value: object) -> dict[str, Any] | None:
-    episode = value if isinstance(value, Mapping) else {}
-    if not episode:
-        return None
-    scene_texts = _draft_scene_texts(episode)
-    final_scene = next(reversed(scene_texts.values()), "")
-    return {
-        "episodeNumber": _positive_int(episode.get("episodeNumber")),
-        "title": str(episode.get("title") or ""),
-        "continuitySummary": _clip(
-            str(episode.get("continuitySummary") or ""),
-            2_000,
-        ),
-        "finalSceneTail": final_scene[-1_200:],
-    }
-
-
-def _episode_review_issues(
-    value: object,
-    episode_scene_ids: frozenset[str],
-    *,
-    allowed_issue_ids: frozenset[str] | None = None,
-) -> list[dict[str, Any]]:
-    review = value if isinstance(value, Mapping) else {}
-    raw_issues = review.get("issues")
-    if not isinstance(raw_issues, list):
-        return []
-    result = []
-    for raw in raw_issues:
-        if not isinstance(raw, Mapping):
-            continue
-        issue_id = str(raw.get("id") or "").strip()
-        if allowed_issue_ids is not None and issue_id not in allowed_issue_ids:
-            continue
-        issue_scene_ids = tuple(
-            str(scene_id or "").strip()
-            for scene_id in (raw.get("sceneIds") or ())
-            if str(scene_id or "").strip()
-        )
-        related = tuple(
-            scene_id for scene_id in issue_scene_ids
-            if scene_id in episode_scene_ids
-        )
-        if issue_scene_ids and not related:
-            continue
-        result.append({
-            "id": issue_id,
-            "severity": str(raw.get("severity") or ""),
-            "description": _clip(str(raw.get("description") or ""), 2_000),
-            "relatedSceneIds": list(related),
-            "crossEpisodeSceneIds": [
-                scene_id for scene_id in issue_scene_ids
-                if scene_id not in episode_scene_ids
-            ],
-        })
-    return result
-
-
-def _creative_brief_episode_guidance(
-    value: object,
-    episode_number: int,
-) -> dict[str, Any]:
-    content = value if isinstance(value, Mapping) else {}
-    raw_brief = content.get("brief")
-    brief = raw_brief if isinstance(raw_brief, Mapping) else content
-    episode_id = f"ep{episode_number:02d}"
-    raw_decisions = brief.get("adaptationDecisions")
-    decisions = []
-    if isinstance(raw_decisions, list):
-        for raw in raw_decisions:
-            if not isinstance(raw, Mapping):
-                continue
-            unit_ids = tuple(
-                str(item) for item in (raw.get("structureUnitIds") or ())
-            )
-            if unit_ids and episode_id not in unit_ids:
-                continue
-            decisions.append({
-                key: raw[key]
-                for key in ("id", "subject", "screenIntent", "rationale")
-                if raw.get(key) not in (None, "")
-            })
-    fields = brief.get("fields")
-    return {
-        "fields": dict(fields) if isinstance(fields, Mapping) else {},
-        "adaptationDecisions": decisions,
-    }
-
-
-def _structure_episode_guidance(
-    value: object,
-    episode_number: int,
-) -> dict[str, Any] | None:
-    content = value if isinstance(value, Mapping) else {}
-    episodes = content.get("episodes")
-    if not isinstance(episodes, list):
-        return None
-    for raw in episodes:
-        if (
-            isinstance(raw, Mapping)
-            and _positive_int(raw.get("number")) == episode_number
-        ):
-            return dict(raw)
-    return None
 
 
 def _planning_source(value: object) -> dict[str, Any]:

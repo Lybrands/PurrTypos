@@ -24,7 +24,7 @@ interface InlineEditPopoverProps {
   capture: InlineCapture
   initialPrompt: string
   modelConfigs: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   selectedModelId: string
   onSelectedModelChange: (id: string) => void
   bookId: EntityId | null
@@ -43,6 +43,7 @@ interface InlineEditPopoverProps {
   handleQuickAssociateChapter: () => void
   handleQuickAssociateOutline: () => void
   // 上下文：记忆/伏笔
+  selectedLongTermMemoryIds: string[]
   selectedMemoryIds: (number | string)[]
   selectedForeshadowingIds: (number | string)[]
   onOpenMemoryModal: () => void
@@ -69,6 +70,7 @@ export default function InlineEditPopover({
   outlineSelectOptions,
   handleQuickAssociateChapter,
   handleQuickAssociateOutline,
+  selectedLongTermMemoryIds,
   selectedMemoryIds,
   selectedForeshadowingIds,
   onOpenMemoryModal,
@@ -190,6 +192,7 @@ export default function InlineEditPopover({
         selectedModel: model.id,
       })
       const contextWindow = streamOptions.context_window
+      if (!contextWindow) throw new Error('请先配置模型上下文窗口')
 
       const systemPrompt = [
         '你是一位专业中文写作助手，负责对用户选中的文段进行改写。',
@@ -210,6 +213,7 @@ export default function InlineEditPopover({
         associatedOutlineIds,
         availableOutlines,
         chapterSelectOptions,
+        selectedLongTermMemoryIds,
         selectedMemoryIds,
         selectedForeshadowingIds,
       })
@@ -258,6 +262,7 @@ export default function InlineEditPopover({
       chapterSelectOptions,
       cleanupStream,
       model,
+      selectedLongTermMemoryIds,
       selectedForeshadowingIds,
       selectedMemoryIds,
     ]
@@ -335,6 +340,7 @@ export default function InlineEditPopover({
             outlineSelectOptions={outlineSelectOptions}
             onQuickAssociateChapter={handleQuickAssociateChapter}
             onQuickAssociateOutline={handleQuickAssociateOutline}
+            selectedLongTermMemoryIds={selectedLongTermMemoryIds}
             selectedMemoryIds={selectedMemoryIds}
             selectedForeshadowingIds={selectedForeshadowingIds}
             onOpenMemoryModal={onOpenMemoryModal}

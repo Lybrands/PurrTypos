@@ -157,13 +157,12 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
       createSession: () => undefined,
       closeSession: () => undefined,
       renameSession: () => undefined,
-      send: () => lifecycle.runIfCurrent(token, () => { sends += 1 }),
+      send: () => { if (lifecycle.canAct(token)) sends += 1 },
       abort: () => undefined,
       resume: () => undefined,
-      editMessage: (index, content) => lifecycle.runIfCurrent(
-        token,
-        () => { edits.push({ index, content }) },
-      ),
+      editMessage: (index, content) => {
+        if (lifecycle.canAct(token)) edits.push({ index, content })
+      },
       resolveToolApproval: async () => ({ success: true }),
       onSubmitErrorReport: async () => ({ success: true }),
       },
@@ -250,6 +249,105 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
         { key: 'Enter', shiftKey: false, isComposing: false },
       ))
     assert.equal(sends, 1)
+    for (const state of ['initializing', 'stopping', 'paused', 'resuming', 'missing-model', 'missing-session', 'read-only']) {
+      const blocked = controller(b, false, bMessages)
+      blocked.composer.submitDisabled = false
+      if (state === 'missing-model') blocked.composer.selectedModel = null
+      else if (state === 'missing-session') blocked.conversation.activeSessionId = null
+      else if (state === 'read-only') blocked.capabilities.inputDisabled = true
+      else blocked.conversation[state] = true
+      if (state === 'initializing') blocked.conversation.running = true
+      await act(async () => root.render(React.createElement(AgentConversationPanel, {
+        indexOpen: false, controller: blocked,
+      })))
+      await act(async () => {
+        keydown(window.document.querySelector('textarea.agent-composer__input'),
+          { key: 'Enter', shiftKey: false, isComposing: false })
+        window.document.querySelector('button[aria-label="发送"]')
+          .dispatchEvent(new window.Event('click', { bubbles: true }))
+      })
+      assert.equal(sends, 1, `${state}: Enter and click must use the same admission`)
+      if (state === 'initializing') assert.equal(
+        window.document.querySelector('button[aria-label="停止生成"]').disabled, true,
+        'loading the next scope must not allow stopping a stale run',
+      )
+    }
+    await act(async () => root.render(React.createElement(AgentConversationPanel, {
+      indexOpen: false, controller: controller(b, false, bMessages),
+    })))
+    await act(async () => {
+      const input = window.document.querySelector('textarea.agent-composer__input')
+      keydown(input, { key: 'Enter', shiftKey: true, isComposing: false })
+      keydown(input, { key: 'Enter', shiftKey: false, isComposing: true })
+    })
+    assert.equal(sends, 1, 'newline and IME confirmation must not submit')
+    const held = controller(b, false, bMessages)
+    let retries = 0
+    let clears = 0
+    held.conversation.queuePaused = true
+    held.conversation.queuedSubmissions = [{ id: 'q', sessionId: 2, content: '待重试' }]
+    held.actions.retryQueued = () => { retries += 1 }
+    held.actions.clearQueued = () => { clears += 1 }
+    await act(async () => root.render(React.createElement(AgentConversationPanel, {
+      indexOpen: false, controller: held,
+    })))
+    assert.match(window.document.querySelector('[aria-label="待发送消息"]').textContent, /队列已暂停/)
+    await act(async () => {
+      const buttons = [...window.document.querySelectorAll('[aria-label="待发送消息"] button')]
+      buttons.find(button => button.textContent === '重试发送').click()
+      buttons.find(button => button.textContent === '清空队列').click()
+    })
+    assert.equal(retries, 1)
+    assert.equal(clears, 1)
+    const { changeQueuedSubmission } = await vite.ssrLoadModule('/src/agent-runtime/queuedSubmission.ts')
+    let queue = ['one', 'two', 'three', 'four'].map(id => ({ id, sessionId: 2, content: id }))
+    let queueVisible = true
+    const drawQueue = () => {
+      const current = controller(b, false, bMessages)
+      current.conversation.queuedSubmissions = queue
+      current.actions.updateQueuedSubmission = (id, patch) => {
+        const next = changeQueuedSubmission(queue, id, patch, item => item.sessionId === 2)
+        if (next === queue) return false
+        queue = next
+        if (queueVisible) drawQueue()
+        return true
+      }
+      root.render(React.createElement(AgentConversationPanel, { indexOpen: false, controller: current }))
+    }
+    await act(async () => drawQueue())
+    assert.equal(window.document.querySelectorAll('[data-queue-id]').length, 4)
+    await act(async () => window.document.querySelector('button[aria-label="编辑待发送消息 4"]').click())
+    assert.equal(queue[3].editing, true)
+    const queueInput = window.document.querySelector('textarea[aria-label="编辑待发送消息 4"]')
+    const changeInput = value => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(queueInput, value)
+      queueInput.dispatchEvent(new window.Event('input', { bubbles: true }))
+    }
+    await act(async () => changeInput(''))
+    assert.equal([...window.document.querySelectorAll('[data-queue-id="four"] button')]
+      .find(button => button.textContent === '保存').disabled, true)
+    await act(async () => changeInput('edited four'))
+    await act(async () => keydown(queueInput, { key: 'Enter', isComposing: true }))
+    assert.equal(queue[3].content, 'four')
+    await act(async () => keydown(queueInput, { key: 'Enter', isComposing: false, shiftKey: false }))
+    assert.equal(queue[3].content, 'edited four')
+    assert.equal(queue[3].editing, false)
+    await act(async () => window.document.querySelector('button[aria-label="删除待发送消息 1"]').click())
+    assert.deepEqual(queue.map(item => item.id), ['two', 'three', 'four'])
+    await act(async () => window.document.querySelector('button[aria-label="编辑待发送消息 1"]').click())
+    await act(async () => keydown(window.document.querySelector('textarea[aria-label="编辑待发送消息 1"]'), { key: 'Escape' }))
+    assert.equal(queue[0].content, 'two')
+    assert.equal(queue[0].editing, false)
+    await act(async () => window.document.querySelector('button[aria-label="编辑待发送消息 1"]').click())
+    // Switching the conversation releases the old queue edit without copying its draft.
+    queueVisible = false
+    await act(async () => root.render(React.createElement(AgentConversationPanel, {
+      indexOpen: false, controller: controller(a, false, aMessages),
+    })))
+    assert.equal(queue[0].editing, false)
+    await act(async () => root.render(React.createElement(AgentConversationPanel, {
+      indexOpen: false, controller: controller(b, false, bMessages),
+    })))
     const bEditButton = window.document.querySelector('button[aria-label="编辑提问"]')
     await act(async () => bEditButton.dispatchEvent(
       new window.Event('click', { bubbles: true }),
@@ -260,6 +358,39 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
       { key: 'Enter', shiftKey: false, isComposing: false },
     ))
     assert.deepEqual(edits, [{ index: 0, content: 'B question' }])
+    const { default: AssistantOutput } = await vite.ssrLoadModule('/src/components/AgentConversation/AssistantOutput/index.tsx')
+    const { initialCanonicalOutputState } = await vite.ssrLoadModule('/src/agent-runtime/canonicalOutput.ts')
+    const description = '已读取指定材料，现提交分析候选。'
+    const standbyMessage = { role: 'assistant', content: '', canonicalOutput: {
+      ...initialCanonicalOutputState(),
+      commentaryBlocks: [{ outputStreamId: 'description', invocationId: 'current', text: description,
+        firstSequence: 2, lastSequence: 3, startedAt: '2026-09-06T09:00:00Z', committed: false, aborted: false }],
+      operationOrder: ['model'], operations: { model: { operationId: 'model', runId: 'child', invocationId: 'current',
+        kind: 'model', firstSequence: 1, status: 'running', startedAt: '2026-09-06T09:00:00Z',
+        display: { labelParams: {} } } },
+    } }
+    const renderStandby = message => root.render(React.createElement(AssistantOutput, {
+      index: 0, message, loading: true, isLastAssistant: true, showPlaceholder: false,
+      setScrolledUpByReason() {}, onResolveToolApproval: async () => ({ success: true }),
+    }))
+    await act(async () => renderStandby(standbyMessage))
+    assert.equal(window.document.querySelector('.work-log__commentary').textContent, description)
+    await act(async () => new Promise(resolve => window.setTimeout(resolve, 1100)))
+    assert.equal(window.document.querySelector('.bubble-processing-standby').textContent, '正在思考')
+    assert.equal(window.document.body.textContent.split(description).length - 1, 1)
+    const continued = description + '继续补充公开说明。'
+    const next = { ...standbyMessage, canonicalOutput: { ...standbyMessage.canonicalOutput,
+      commentaryBlocks: [{ ...standbyMessage.canonicalOutput.commentaryBlocks[0], text: continued, lastSequence: 4 }],
+    } }
+    await act(async () => renderStandby(next))
+    assert.equal(window.document.querySelector('.work-log__commentary').textContent, continued,
+      'real public text updates immediately, independently of the standby timer')
+    await act(async () => new Promise(resolve => window.setTimeout(resolve, 1100)))
+    assert.equal(window.document.querySelector('.bubble-processing-standby').textContent, '正在思考')
+    assert.equal(window.document.body.textContent.split(continued).length - 1, 1)
+    await act(async () => renderStandby({ ...next, canonicalOutput: { ...next.canonicalOutput, runTerminal: true } }))
+    assert.equal(window.document.querySelector('.bubble-processing-standby'), null,
+      'a terminal run must not keep a standby label even if the host loading flag lags')
   } finally {
     await act(async () => root.unmount())
     await vite.close()

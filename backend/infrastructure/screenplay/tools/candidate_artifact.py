@@ -156,7 +156,10 @@ class ScreenplayCandidateArtifacts:
             self._repository,
             validator=_CandidateValidator(),
         )
-        self._claims = SqliteArtifactClaimRepository(db)
+        self._claims = SqliteArtifactClaimRepository(
+            db,
+            join_ambient_transaction=join_ambient_transaction,
+        )
         self._candidate_normalizer = candidate_normalizer
 
     async def write(
@@ -628,9 +631,58 @@ def _require_validation_scope(
             expected_type == "document_section"
             and expected_key == str(contract.get("sectionKey") or "")
         ),
+        "creative_brief_section": (
+            expected_type == "document_section"
+            and expected_key == str(contract.get("sectionKey") or "")
+        ),
+        "source_analysis_section": (
+            expected_type == "document_section"
+            and expected_key == str(contract.get("sectionKey") or "")
+        ),
+        "source_chapter_digest": (
+            expected_type == "document_section"
+            and expected_key
+            == f"source_digest:chapter:{contract.get('chapterId')}"
+        ),
+        "source_digest_reduction": (
+            expected_type == "document_section"
+            and expected_key
+            == str(contract.get("digestId") or "").replace(
+                "source-analysis:",
+                "source_digest:",
+                1,
+            )
+        ),
         "scene_list_fragment": (
             expected_type == "document_section"
             and expected_key == f"episode-{contract.get('episodeNumber')}"
+        ),
+        "structure_episode_plan_index": (
+            expected_type == "document_section"
+            and expected_key == "episode_plan:index"
+        ),
+        "structure_series_arc_index": (
+            expected_type == "document_section"
+            and expected_key == "series_arc:index"
+        ),
+        "structure_series_arc_phase": (
+            expected_type == "document_section"
+            and expected_key
+            == f"series_arc:phase:{contract.get('phaseKey')}"
+        ),
+        "structure_episode_plan_fragment": (
+            expected_type == "document_section"
+            and expected_key
+            == f"episode_plan:episode-{contract.get('episodeNumber')}"
+        ),
+        "structure_character_arcs_index": (
+            expected_type == "document_section"
+            and expected_key == "character_arcs:index"
+        ),
+        "structure_character_arc_fragment": (
+            expected_type == "document_section"
+            and expected_key
+            == f"character_arcs:character:{contract.get('characterKey')}"
         ),
     }.get(kind, False)
     if not compatible:

@@ -6,10 +6,11 @@ import {
 } from '@/purr-components';
 import type { AgentConversationMessage } from "../../../agent-runtime";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
+import { getAgentProcessingLabel } from "../../../agent-runtime/outputPresentation.ts";
 import Markdown from "../../Markdown";
 import ToolCallStatus from "../ToolCallStatus";
 import ToolApproval from "../ToolApproval";
-import ExecutionLog from "../ExecutionLog";
+import ExecutionLog, { ExecutionLogStepGroup } from "../ExecutionLog";
 import DelegationStatus from "../DelegationStatus";
 import StructuredQuestion from "../StructuredQuestion";
 import ErrorReportNotice from "../ErrorReportNotice";
@@ -19,8 +20,11 @@ import {
   buildAssistantTimeline,
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
-  getAssistantProcessingLabel,
+  getCanonicalOperationStatusText,
+  getActiveOperationLabel,
+  getOperationGroupProgress,
   groupConsecutiveWorkSteps,
+  executionPanelHasTerminalError,
   type AssistantTimelinePart,
   type TimelineOperationPart,
   type TimelineStepPart,
@@ -122,12 +126,48 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   });
 }
 
+function operationPartIsActive(part: TimelineOperationPart): boolean {
+  if (part.type === "operation") return part.operation.status === "running";
+  if (part.type === "tools") return Boolean(part.isLive);
+  if (part.type === "contextCompaction") {
+    return part.state.status === "running";
+  }
+  return part.items.some((item) =>
+    ["queued", "claimed", "running"].includes(item.status)
+  );
+}
+
+function operationPartCompletedDuration(part: TimelineOperationPart): number {
+  if (part.type === "operation") {
+    return part.operation.status === "running"
+      ? 0
+      : Math.max(0, part.operation.durationMs ?? 0);
+  }
+  if (part.type !== "tools") return 0;
+  if (part.segment.itemDurationsMs) {
+    return part.segment.itemDurationsMs.reduce<number>(
+      (total, duration) => total + Math.max(0, duration ?? 0),
+      0,
+    );
+  }
+  return part.isLive ? 0 : Math.max(0, part.segment.durationMs ?? 0);
+}
+
+function operationPartActiveStartedAt(
+  part: TimelineOperationPart,
+): number | undefined {
+  if (part.type !== "tools" || !part.isLive) return undefined;
+  return part.segment.activeItemStartedAt ?? part.segment.startedAt;
+}
+
 function CanonicalOperationRow({
   operation,
   label,
+  isRetry,
 }: {
   operation: CanonicalOperation;
   label: string;
+  isRetry: boolean;
 }) {
   const running = operation.status === "running";
   const failed = operation.status === "failed";
@@ -144,16 +184,11 @@ function CanonicalOperationRow({
       ? Math.max(0, now - startedAt)
       : undefined
   );
-  const text = running
-    ? `正在执行 ${label}`
-    : failed
-      ? `执行失败 ${label}`
-      : operation.status === "canceled"
-        ? `已取消 ${label}`
-        : `已完成 ${label}`;
+  const text = getCanonicalOperationStatusText(operation, label, isRetry);
+  const statusClass = running ? "running" : failed ? "error" : "done";
   return (
     <div
-      className={`bubble-tool-call-line ${running ? "a-flicker-opacity" : ""} bubble-tool-call-line--${running ? "running" : "done"}`}
+      className={`bubble-tool-call-line ${running ? "a-flicker-opacity" : ""} bubble-tool-call-line--${statusClass}`}
     >
       {running ? (
         <LoadingIcon spin className="bubble-tool-call-icon" />
@@ -212,6 +247,8 @@ function AssistantOutputInner({
   const executionPanel = getExecutionPanelPresentation(executionLogParts, {
     isStreaming,
     durationMs: message.durationMs,
+    status: message.canonicalOutput?.runStatus ?? message.taskPlan?.status,
+    hasError: executionPanelHasTerminalError(message),
   });
   const executionPanelLogKey = getExecutionPanelLogKey(message)
     ?? `message-${index}-execution-log`;
@@ -222,7 +259,7 @@ function AssistantOutputInner({
     ),
     [executionLogParts, executionPanelLogKey],
   );
-  const processingLabel = getAssistantProcessingLabel(message);
+  const processingLabel = getAgentProcessingLabel(message);
   const activityKey = React.useMemo(
     () => getTimelineActivityKey(timeline, processingLabel),
     [timeline, processingLabel],
@@ -278,6 +315,7 @@ function AssistantOutputInner({
           <CanonicalOperationRow
             operation={part.operation}
             label={part.label}
+            isRetry={part.isRetry}
           />
         </div>
       );
@@ -327,6 +365,31 @@ function AssistantOutputInner({
     part: ReturnType<typeof groupConsecutiveWorkSteps>[number],
     partIndex: number,
   ) => {
+    if (part.type === "stepGroup") {
+      const progress = getOperationGroupProgress(part.parts);
+      return (
+        <ExecutionLogStepGroup
+          key={part.groupKey}
+          groupKey={part.groupKey}
+          stepCount={progress.total}
+          completedDurationMs={part.parts.reduce(
+            (total, item) => total + operationPartCompletedDuration(item),
+            0,
+          )}
+          activeStartedAt={part.parts
+            .map(operationPartActiveStartedAt)
+            .find((startedAt) => startedAt != null)}
+          active={part.parts.some(operationPartIsActive)}
+          activeLabel={getActiveOperationLabel(part.parts)}
+          hasError={workLogHasError(part.parts)}
+        >
+          {part.parts.map((item, itemIndex) => renderOperationPart(
+            item,
+            `${part.groupKey}-${item.type}-${itemIndex}`,
+          ))}
+        </ExecutionLogStepGroup>
+      );
+    }
     if (part.type === "commentary") return renderStepPart(part);
     if (
       part.type === "tools" ||
@@ -353,7 +416,7 @@ function AssistantOutputInner({
           autoOpen={executionPanel.autoOpen}
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
-          hasError={workLogHasError(executionLogParts)}
+          hasError={executionPanelHasTerminalError(message)}
         >
           {executionLogItems.map(renderExecutionLogItem)}
         </ExecutionLog>

@@ -19,6 +19,8 @@ import type { AgentConversationController } from './controller'
 import type { AgentConversationExtensions } from './extensions'
 import { buildAgentModelLabels } from './messageMetadata'
 import { buildAgentConversationPanelView } from './panelView'
+import { isComposerSubmitDisabled } from './composerPolicy'
+import QueuedSubmissions from './QueuedSubmissions'
 import './Panel.scss'
 
 export interface AgentConversationPanelProps {
@@ -27,30 +29,6 @@ export interface AgentConversationPanelProps {
   indexOpen?: boolean
   onIndexOpenChange?(open: boolean): void
   className?: string
-}
-
-function QueuedSubmissions({
-  controller,
-}: {
-  controller: AgentConversationController
-}) {
-  const queued = controller.conversation.queuedSubmissions
-  if (queued.length === 0) return null
-  return (
-    <div className="agent-conversation-panel__queue" aria-label="待发送消息">
-      {queued.slice(0, 3).map((submission, index) => (
-        <div className="agent-conversation-panel__queue-item" key={submission.id}>
-          <span>待发送 {index + 1}</span>
-          <span title={submission.content}>{submission.content}</span>
-        </div>
-      ))}
-      {queued.length > 3 ? (
-        <div className="agent-conversation-panel__queue-more">
-          另有 {queued.length - 3} 条消息排队
-        </div>
-      ) : null}
-    </div>
-  )
 }
 
 function ComposerFooter({
@@ -71,10 +49,7 @@ function ComposerFooter({
     || conversation.stopping
     || conversation.paused
     || conversation.resuming
-  const submitDisabled = capabilities.inputDisabled
-    || composer.submitDisabled
-    || conversation.paused
-    || conversation.resuming
+  const submitDisabled = isComposerSubmitDisabled(controller)
 
   return (
     <div className="agent-conversation-panel__footer">
@@ -125,7 +100,8 @@ function ComposerFooter({
               className="agent-composer__stop"
               icon={<StopCircleIcon size={18} />}
               onClick={() => void actions.abort()}
-              disabled={conversation.stopping || conversation.resuming}
+              disabled={conversation.initializing || conversation.activeSessionId == null
+                || conversation.abortDisabled || conversation.stopping || conversation.resuming}
               aria-label="停止生成"
             />
           </PurrTooltip>
@@ -137,7 +113,7 @@ function ComposerFooter({
             className="agent-composer__send"
             icon={<ArrowUpIcon style={{ fontSize: 16 }} />}
             disabled={submitDisabled}
-            onClick={() => void actions.send()}
+            onClick={() => { if (!isComposerSubmitDisabled(controller)) void actions.send() }}
             aria-label={submitLabel}
           />
         </PurrTooltip>
@@ -238,7 +214,9 @@ export default function AgentConversationPanel({
           initializing={controller.conversation.initializing}
           messageAttachmentsVersion={controller.conversation.attachmentsVersion}
           onEditMessage={controller.actions.editMessage}
-          onStructuredAnswer={(answer) => void controller.actions.send(answer)}
+          onStructuredAnswer={(answer) => {
+            if (!isComposerSubmitDisabled(controller, answer)) void controller.actions.send(answer)
+          }}
           onResolveToolApproval={controller.actions.resolveToolApproval}
           onSubmitErrorReport={controller.actions.onSubmitErrorReport}
           afterAssistantMessage={extensions?.renderAssistantAttachment}
@@ -248,19 +226,18 @@ export default function AgentConversationPanel({
         <Composer
           value={controller.composer.value}
           onChange={controller.composer.setValue}
-          onSubmit={() => void controller.actions.send()}
+          onSubmit={() => {
+            if (!isComposerSubmitDisabled(controller)) void controller.actions.send()
+          }}
           placeholder={controller.composer.placeholder}
           ariaLabel={controller.composer.ariaLabel}
           disabled={controller.capabilities.inputDisabled}
-          submitDisabled={Boolean(
-            controller.composer.submitDisabled
-            || controller.conversation.paused
-            || controller.conversation.resuming
-          )}
+          submitDisabled={isComposerSubmitDisabled(controller)}
           floatingContent={view.showTaskProgress && controller.composer.taskPlan ? (
             <TaskProgress plan={controller.composer.taskPlan} placement="topLeft" />
           ) : null}
           supplementaryContent={<QueuedSubmissions controller={controller} />}
+          commands={extensions?.composerCommands}
           footer={(
             <ComposerFooter
               controller={controller}

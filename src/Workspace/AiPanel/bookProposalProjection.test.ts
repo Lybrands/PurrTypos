@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { AiAgentRunSnapshot } from '../../types.ts'
-import { createBookProposalProjectionReconciler } from './bookProposalProjection.ts'
+import { createBookProposalProjectionReconciler, shouldRefreshBookProposalProjection } from './bookProposalProjection.ts'
+
+test('read-only tools and model operations do not query writing proposals', () => {
+  assert.equal(shouldRefreshBookProposalProjection({ kind: 'operation.finished', payload: { status: 'succeeded' } }), false)
+  assert.equal(shouldRefreshBookProposalProjection({ kind: 'tool.event', payload: { status: 'completed', toolName: 'getChapterContent' } }), false)
+  assert.equal(shouldRefreshBookProposalProjection({ kind: 'tool.event', payload: { status: 'completed', toolName: 'updateCharacter' } }), true)
+})
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -10,7 +16,7 @@ function deferred<T>() {
 }
 
 const productSnapshot = (proposalId: string): AiAgentRunSnapshot => ({
-  version: 1,
+  version: 2,
   run: {
     runId: 'run-1',
     sessionId: 7,

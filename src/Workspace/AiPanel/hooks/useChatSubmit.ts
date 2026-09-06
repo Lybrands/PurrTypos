@@ -35,6 +35,7 @@ import {
   setChatRuntimeStreamId,
   subscribeChatRuntime,
   updateChatRuntimeMessages,
+  updateChatQueuedSubmission,
 } from "./chatRuntimeStore";
 import { createAiStreamId } from "../../../utils/aiStream";
 import { createBookChunkHost } from './bookChunkHost'
@@ -43,6 +44,7 @@ import type {
   AiSession,
   EntityId,
   SettingDiffCardState,
+  WritingMethodOverrides,
 } from '../../../types'
 import {
   createDurableBookRunControl,
@@ -73,8 +75,10 @@ export interface UseChatSubmitParams {
   currentChapterTitle?: string
   selectedModel: string
   agentEnabled: boolean
+  selectedLongTermMemoryIds?: string[]
   selectedMemoryIds?: (number | string)[]
   selectedForeshadowingIds?: (number | string)[]
+  writingMethodOverrides?: WritingMethodOverrides
   /**
    * 会话作用域：setting = 全局会话（不绑章节），不要求选中章节即可发送；
    * 默认 chapter（必须先选章节）。
@@ -133,8 +137,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     currentChapterTitle,
     selectedModel,
     agentEnabled,
+    selectedLongTermMemoryIds,
     selectedMemoryIds,
     selectedForeshadowingIds,
+    writingMethodOverrides,
     sessionScope = "chapter",
     onAssistantAttachment,
     associateAssistantIdentities,
@@ -367,10 +373,12 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       const sessionId = targetSessionId;
-      if (sessionLoading && !submitOverride?.truncationCommitted) {
+      if ((sessionLoading || getChatRuntimeQueue().some(item => item.sessionId === sessionId && item.editing))
+        && !submitOverride?.truncationCommitted) {
         const currentSessionTitle =
           sessions.find((session) => session.id === sessionId)?.title ?? ''
         const queuedItem: QueuedChatSubmission = {
+          id: createAiStreamId('queued-turn'),
           content: userText,
           sessionId,
           bookId: requestBookId,
@@ -388,12 +396,29 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           associatedOutlineIds: [
             ...(queuedContext?.associatedOutlineIds ?? associatedOutlineIds),
           ],
+          selectedLongTermMemoryIds: [
+            ...(queuedContext?.selectedLongTermMemoryIds
+              ?? selectedLongTermMemoryIds
+              ?? []),
+          ],
           selectedMemoryIds: [
             ...(queuedContext?.selectedMemoryIds ?? selectedMemoryIds ?? []),
           ],
           selectedForeshadowingIds: [
             ...(queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds ?? []),
           ],
+          writingMethodOverrides: {
+            forceRevisionIds: [
+              ...(queuedContext?.writingMethodOverrides?.forceRevisionIds
+                ?? writingMethodOverrides?.forceRevisionIds
+                ?? []),
+            ],
+            excludeRevisionIds: [
+              ...(queuedContext?.writingMethodOverrides?.excludeRevisionIds
+                ?? writingMethodOverrides?.excludeRevisionIds
+                ?? []),
+            ],
+          },
         };
         const nextQueue = [...getChatRuntimeQueue(), queuedItem];
         const queuedCount = countQueuedForSession(nextQueue, sessionId);
@@ -413,8 +438,15 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.associatedOutlineIds ?? associatedOutlineIds;
       const requestSelectedMemoryIds =
         queuedContext?.selectedMemoryIds ?? selectedMemoryIds;
+      const requestSelectedLongTermMemoryIds =
+        queuedContext?.selectedLongTermMemoryIds ?? selectedLongTermMemoryIds;
       const requestSelectedForeshadowingIds =
         queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds;
+      const requestWritingMethodOverrides =
+        queuedContext?.writingMethodOverrides ?? writingMethodOverrides ?? {
+          forceRevisionIds: [],
+          excludeRevisionIds: [],
+        };
 
     const baseConversations = submitOverride?.resendBaseMessages
       ?? getChatSessionRuntime(sessionId)?.messages
@@ -427,6 +459,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         sessions.find((s) => s.id === sessionId)?.title ?? "";
       const prefixHasHistory = editIndex > 0;
       const frozenContext: QueuedChatSubmission = {
+        id: createAiStreamId('edited-turn'),
         content: userText,
         sessionId,
         bookId: requestBookId,
@@ -443,10 +476,17 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         agentEnabled: requestAgentEnabled,
         associatedChapterIds: [...requestAssociatedChapterIds],
         associatedOutlineIds: [...requestAssociatedOutlineIds],
+        selectedLongTermMemoryIds: [
+          ...(requestSelectedLongTermMemoryIds ?? []),
+        ],
         selectedMemoryIds: [...(requestSelectedMemoryIds ?? [])],
         selectedForeshadowingIds: [
           ...(requestSelectedForeshadowingIds ?? []),
         ],
+        writingMethodOverrides: {
+          forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
+          excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
+        },
       };
       replaceChatRuntimeMessages(sessionId, baseConversations);
       setChatRuntimeLoading(sessionId, true);
@@ -739,6 +779,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     })
     unsubscribe = services.ai.onAiChunk(
       (chunk) => {
+        if (chunk.transportError) {
+          if (host.isVisible()) appMessage.error(chunk.transportError)
+          return
+        }
         const receiptBinding = resolveRootRunBinding(
           acc.conversationRunId,
           chunk.requestReceipt?.runId,
@@ -795,7 +839,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         if (
           requestAgentEnabled
           && runId
-          && shouldRefreshBookProposalProjection(chunk)
+          && shouldRefreshBookProposalProjection(chunk,
+            ctx.acc.canonicalOutput?.operations[String(chunk.payload?.operationId || '')])
         ) {
           void proposalProjection.refresh(runId)
         }
@@ -835,11 +880,20 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         requestSelectedMemoryIds && requestSelectedMemoryIds.length > 0
           ? requestSelectedMemoryIds
           : undefined,
+      selectedLongTermMemoryIds:
+        requestSelectedLongTermMemoryIds
+        && requestSelectedLongTermMemoryIds.length > 0
+          ? requestSelectedLongTermMemoryIds
+          : undefined,
       selectedForeshadowingIds:
         requestSelectedForeshadowingIds &&
         requestSelectedForeshadowingIds.length > 0
           ? requestSelectedForeshadowingIds
           : undefined,
+      writingMethodOverrides: {
+        forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
+        excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
+      },
       chatAgentMode: requestAgentEnabled ? "agent" : "ask",
       contextWindow: streamOptions.context_window,
       expectedConversationIds: requestAgentEnabled
@@ -867,7 +921,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     setConversations,
     setSessions,
     selectedMemoryIds,
+    selectedLongTermMemoryIds,
     selectedForeshadowingIds,
+    writingMethodOverrides,
     sessionScope,
     appMessage,
     replaceQueuedSubmissions,
@@ -882,14 +938,16 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   React.useEffect(() => {
     if (dequeueInProgressRef.current || queuedSubmissions.length === 0) return;
 
-    const readyIndex = queuedSubmissions.findIndex(
+    const currentQueue = getChatRuntimeQueue();
+    const readyIndex = currentQueue.findIndex(
       (submission) =>
-        !getChatSessionRuntime(submission.sessionId)?.loading,
+        !getChatSessionRuntime(submission.sessionId)?.loading
+        && !currentQueue.some(item => item.sessionId === submission.sessionId && item.editing),
     );
     if (readyIndex < 0) return;
 
-    const nextSubmission = queuedSubmissions[readyIndex];
-    const remainingQueue = queuedSubmissions.filter(
+    const nextSubmission = currentQueue[readyIndex];
+    const remainingQueue = currentQueue.filter(
       (_submission, index) => index !== readyIndex,
     );
     dequeueInProgressRef.current = true;
@@ -930,6 +988,10 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     handleAbort,
     queuedCount: activeQueuedSubmissions.length,
     queuedMessages: activeQueuedSubmissions.map((item) => item.content),
+    queuedSubmissions: activeQueuedSubmissions.map(({ id, sessionId, content }) => ({ id, sessionId, content })),
+    updateQueuedSubmission: (id: string, patch: Parameters<typeof updateChatQueuedSubmission>[3]) =>
+      activeSessionId != null && bookId != null
+        ? updateChatQueuedSubmission(activeSessionId, bookId, id, patch) : false,
     sessionActivities,
     stopping: getChatSessionRuntime(activeSessionId)?.stopping ?? false,
   };

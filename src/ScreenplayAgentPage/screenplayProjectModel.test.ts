@@ -2,8 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  findWorkspaceRevision,
-  deliverableRoleForProposal,
   projectFromWorkspace,
   revisionLibraryTarget,
   screenplayFormatToV2,
@@ -133,11 +131,6 @@ test('maps project creation values to v2 wire enums', () => {
   )
 })
 
-test('maps proposal kinds to stable deliverable roles', () => {
-  assert.equal(deliverableRoleForProposal('episode_outline'), 'structure')
-  assert.equal(deliverableRoleForProposal('scene_draft'), 'screenplayDraft')
-})
-
 test('project-document navigation keeps the clicked artifact role and Revision together', () => {
   assert.deepEqual(revisionLibraryTarget({
     role: 'sceneList',
@@ -147,98 +140,4 @@ test('project-document navigation keeps the clicked artifact role and Revision t
     revisionId: 'revision-scenes-turn-3',
   })
   assert.equal(revisionLibraryTarget(null), null)
-})
-
-test('reconciles a proposal to its Agent Task revision across candidate and head views', () => {
-  const revision = {
-    id: 'revision-1',
-    deliverableId: 'deliverable-1',
-    role: 'creativeBrief' as const,
-    revisionNo: 1,
-    parentRevisionId: null,
-    contentDigest: 'digest',
-    summary: {},
-    agentTaskId: 'task-1',
-    rootRunId: 'run-1',
-    finalizingRunId: 'run-1',
-  }
-  const workspace = {
-    candidates: [revision],
-    workflow: { heads: {} },
-  } as ScreenplayV2Workspace
-  assert.equal(findWorkspaceRevision({
-    workspace,
-    role: 'creativeBrief',
-    taskId: 'task-1',
-  })?.id, 'revision-1')
-
-  workspace.candidates = []
-  workspace.workflow.heads.creativeBrief = revision
-  assert.equal(findWorkspaceRevision({
-    workspace,
-    role: 'creativeBrief',
-    finalizingRunId: 'run-1',
-  })?.id, 'revision-1')
-})
-
-test('resolves a native result by its canonical Revision reference first', () => {
-  const referenced = {
-    id: 'revision-ref',
-    deliverableId: 'deliverable-scenes',
-    role: 'sceneList' as const,
-    revisionNo: 2,
-    parentRevisionId: null,
-    contentDigest: 'digest-ref',
-    summary: {},
-    agentTaskId: 'task-ref',
-    finalizingRunId: 'run-ref',
-  }
-  const revision = findWorkspaceRevision({
-    workspace: {
-      candidates: [referenced],
-      workflow: { heads: {} },
-    } as ScreenplayV2Workspace,
-    role: 'sceneList',
-    revisionId: 'revision-ref',
-    taskId: 'stale-task',
-  })
-
-  assert.equal(revision?.id, 'revision-ref')
-})
-
-test('prefers finalizing run provenance over stale Task state', () => {
-  const workspace = {
-    candidates: [
-      {
-        id: 'stale-revision',
-        deliverableId: 'deliverable-1',
-        role: 'creativeBrief',
-        revisionNo: 1,
-        parentRevisionId: null,
-        contentDigest: 'stale',
-        summary: {},
-        agentTaskId: 'stale-task',
-        finalizingRunId: 'stale-run',
-      },
-      {
-        id: 'current-revision',
-        deliverableId: 'deliverable-1',
-        role: 'creativeBrief',
-        revisionNo: 2,
-        parentRevisionId: 'stale-revision',
-        contentDigest: 'current',
-        summary: {},
-        agentTaskId: 'current-task',
-        finalizingRunId: 'current-run',
-      },
-    ],
-    workflow: { heads: {} },
-  } as ScreenplayV2Workspace
-
-  assert.equal(findWorkspaceRevision({
-    workspace,
-    role: 'creativeBrief',
-    taskId: 'stale-task',
-    finalizingRunId: 'current-run',
-  })?.id, 'current-revision')
 })

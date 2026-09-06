@@ -11,6 +11,19 @@ from typing import Any
 from domains.screenplay_agent import ScreenplayIntent
 from exceptions import AppError, NotFoundError
 from infrastructure.persistence.run_execution_store import now_ms
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
+from infrastructure.persistence.sqlite_screenplay_operation_repository import (
+    SqliteScreenplayOperationRepository,
+)
+from purra.recovery import (
+    FailureCategory,
+    FailureDecision,
+    FailureDisposition,
+    FailureScope,
+    RecoveryEffectState,
+)
 
 
 LEASE_MS = 30_000
@@ -107,6 +120,8 @@ class SqliteScreenplayAgentRepository:
             "message": "应用重启中断了本轮执行，请编辑消息后重新发送。",
         }
         async with self._db.transaction(cancellation_linearizable=True):
+            operations = SqliteScreenplayOperationRepository(self._db)
+            reconciled_turn_ids = await operations.reconcile_terminal_turns()
             turns = await self._db.fetch_all(
                 "SELECT * FROM screenplay_agent_turns "
                 "WHERE status IN ('queued', 'planning', 'running')"
@@ -176,28 +191,49 @@ class SqliteScreenplayAgentRepository:
                         [turn["id"]],
                     )
                     continue
-                turn_status = "failed"
-                assistant_content = ""
                 if operation is not None and str(operation["status"]) in {
                     "queued", "running", "paused",
                 }:
-                    turn_status = "paused"
-                    assistant_content = ""
-                    await self._db.execute(
-                        "UPDATE screenplay_agent_operations SET status = 'paused', "
-                        "error_json = ?, revision = revision + 1, "
-                        "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                        [_dump(error), operation["id"]],
+                    task_id = str(operation.get("long_task_id") or "").strip()
+                    if task_id:
+                        long_tasks = SqliteLongTaskRepository(self._db)
+                        task = await long_tasks.load(task_id)
+                        if task is not None and not task.status.terminal:
+                            await long_tasks.fail(
+                                task_id,
+                                decision=FailureDecision(
+                                    category=FailureCategory.PERMANENT_EXTERNAL,
+                                    code="screenplay_agent_restarted",
+                                    disposition=(
+                                        FailureDisposition.FAIL_PERMANENT
+                                    ),
+                                    attempts_remaining=0,
+                                    effect_state=RecoveryEffectState.UNKNOWN,
+                                    checkpoint_available=False,
+                                    scope=FailureScope.SYSTEMIC,
+                                ),
+                            )
+                    await operations.fail(
+                        str(operation["id"]),
+                        code="screenplay_agent_restarted",
+                        message=str(error["message"]),
+                        command_id=(
+                            "operation:startup-interrupted:"
+                            f"{operation['id']}:{turn['id']}"
+                        ),
                     )
                 await self._db.execute(
-                    "UPDATE screenplay_agent_turns SET status = ?, "
-                    "assistant_content = ?, error_json = ?, "
+                    "UPDATE screenplay_agent_turns SET status = 'failed', "
+                    "assistant_content = '', error_json = ?, "
                     "execution_owner_id = NULL, "
                     "lease_expires_at_ms = NULL, heartbeat_at_ms = NULL, "
                     "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                    [turn_status, assistant_content, _dump(error), turn["id"]],
+                    [_dump(error), turn["id"]],
                 )
-            return tuple(str(turn["id"]) for turn in turns)
+            return tuple(dict.fromkeys((
+                *reconciled_turn_ids,
+                *(str(turn["id"]) for turn in turns),
+            )))
 
     async def claim_turn(self, turn_id: str) -> bool:
         current = now_ms()
@@ -571,14 +607,7 @@ class SqliteScreenplayAgentRepository:
                 "lease_expires_at_ms IS NOT NULL)",
                 list(root_ids),
             )
-            active_delegations = await self._db.fetch_one(
-                "SELECT COUNT(*) AS count FROM ai_agent_delegations WHERE "
-                f"run_id IN ({marks}) AND status IN ('queued', 'running')",
-                list(root_ids),
-            )
-            if int((active_runs or {}).get("count") or 0) or int(
-                (active_delegations or {}).get("count") or 0
-            ):
+            if int((active_runs or {}).get("count") or 0):
                 raise AppError("screenplay truncate runtime is still active", 409)
         if turn_ids:
             active_turns = await self._db.fetch_one(
@@ -811,15 +840,6 @@ class SqliteScreenplayAgentRepository:
         if row is None:
             raise NotFoundError("剧本 Agent Turn 不存在")
         return row
-
-    async def _operation_for_turn(
-        self,
-        turn_id: str,
-    ) -> Mapping[str, Any] | None:
-        return await self._db.fetch_one(
-            "SELECT * FROM screenplay_agent_operations WHERE turn_id = ?",
-            [turn_id],
-        )
 
     async def _require_owned_turn(self, turn_id: str) -> Mapping[str, Any]:
         turn = await self._require_turn(turn_id)

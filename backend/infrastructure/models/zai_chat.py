@@ -7,14 +7,21 @@ import inspect
 from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
-from infrastructure.models.capabilities import normalize_thinking_enabled
-from infrastructure.models.profiles import resolve_model_profile
+from infrastructure.models.capabilities import (
+    require_supported_reasoning_mode,
+)
+from infrastructure.models.profiles.descriptors import profile_for_options
+from infrastructure.models.profiles.base import ModelProfile
+from purra.contracts import ReasoningMode
+from purra.cancellation import await_with_cancellation, raise_if_stopped
+from infrastructure.models.request_boundary import prepare_sdk_request, record_provider_response
+from purra.model_protocol import ReasoningControl
 from purra.stream_ownership import OwnedAsyncIterator, openai_chunk_is_terminal
-from utils.session_title import SESSION_TITLE_SYSTEM_PROMPT, normalize_session_title
 from utils.url import normalize_base_url
 
 
 _END = object()
+_REAPERS: set[asyncio.Task] = set()
 
 
 def _create_client(api_key: str, base_url: str | None):
@@ -27,7 +34,25 @@ def _create_client(api_key: str, base_url: str | None):
 
     from zai import ZhipuAiClient
 
-    return ZhipuAiClient(api_key=key, base_url=url)
+    return ZhipuAiClient(api_key=key, base_url=url, max_retries=0, timeout=60)
+
+
+async def _thread_call(fn, *args, signal=None, **kwargs):
+    raise_if_stopped(signal)
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    try:
+        return await await_with_cancellation(asyncio.shield(task), signal)
+    except BaseException:
+        async def reap():
+            try:
+                resource = await task
+                await _close_in_thread(resource)
+            except BaseException:
+                pass
+        reaper = asyncio.create_task(reap())
+        _REAPERS.add(reaper)
+        reaper.add_done_callback(_REAPERS.discard)
+        raise
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -44,23 +69,26 @@ def _as_mapping(value: Any) -> dict[str, Any]:
 def _build_chat_params(
     messages: list[dict],
     options: dict[str, Any],
+    profile: ModelProfile,
     *,
     stream: bool,
 ) -> dict[str, Any]:
+    mode = require_supported_reasoning_mode(
+        options,
+        profile.protocol_capabilities(),
+    )
     params: dict[str, Any] = {
         "model": str(options.get("model") or ""),
         "messages": messages,
         "stream": stream,
-        "thinking": {
-            "type": (
-                "enabled"
-                if normalize_thinking_enabled(options)
-                else "disabled"
-            ),
-        },
     }
+    if profile.reasoning_control is ReasoningControl.ALWAYS_ENABLED:
+        params["thinking"] = {"type": "enabled"}
+    elif mode is not ReasoningMode.DEFAULT:
+        params["thinking"] = {"type": mode.value}
     for key in (
         "temperature",
+        "reasoning_effort",
         "max_tokens",
         "response_format",
         "tools",
@@ -112,13 +140,18 @@ async def chat_no_stream(
     opts = options or {}
     model = str(opts.get("model") or "")
     base_url = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    profile = profile_for_options(opts)
     client = _create_client(api_key, base_url)
     try:
-        response = await asyncio.to_thread(
+        params = _build_chat_params(messages, opts, profile, stream=False)
+        raise_if_stopped(signal)
+        params = await prepare_sdk_request(params, opts, protocol="zai")
+        response = await _thread_call(
             client.chat.completions.create,
-            **_build_chat_params(messages, opts, stream=False),
+            signal=signal,
+            **params,
         )
+        await record_provider_response()
         payload = _as_mapping(response)
         choices = payload.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -140,6 +173,7 @@ async def chat_no_stream(
                 else None
             ),
             "usage": dict(usage) if isinstance(usage, Mapping) else None,
+            "applied_generation_limit": params.get("max_tokens"),
         }
     finally:
         await _close_in_thread(client)
@@ -154,13 +188,18 @@ async def chat_stream(
     opts = options or {}
     model = str(opts.get("model") or "")
     base_url = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    profile = profile_for_options(opts)
     client = _create_client(api_key, base_url)
     try:
-        raw_stream = await asyncio.to_thread(
+        params = _build_chat_params(messages, opts, profile, stream=True)
+        raise_if_stopped(signal)
+        params = await prepare_sdk_request(params, opts, protocol="zai")
+        raw_stream = await _thread_call(
             client.chat.completions.create,
-            **_build_chat_params(messages, opts, stream=True),
+            signal=signal,
+            **params,
         )
+        await record_provider_response()
     except BaseException:
         await _close_in_thread(client)
         raise
@@ -169,7 +208,7 @@ async def chat_stream(
         while True:
             if signal is not None and signal.is_set():
                 return
-            raw = await asyncio.to_thread(_next_or_end, raw_stream)
+            raw = await _thread_call(_next_or_end, raw_stream, signal=signal)
             if raw is _END:
                 return
             chunk = profile.normalize_openai_chunk(_as_mapping(raw))
@@ -183,37 +222,9 @@ async def chat_stream(
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
+        "applied_generation_limit": params.get("max_tokens"),
     }
 
-
-async def generate_title(
-    api_key: str,
-    text: str,
-    options: dict[str, Any] | None = None,
-) -> str:
-    opts = options or {}
-    model = str(opts.get("model") or "")
-    client = _create_client(api_key, opts.get("baseURL"))
-    try:
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model=model,
-            messages=[
-                {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
-                {"role": "user", "content": str(text or "").strip()},
-            ],
-            thinking={"type": "disabled"},
-            max_tokens=32,
-            stream=False,
-        )
-        payload = _as_mapping(response)
-        choices = payload.get("choices")
-        choice = choices[0] if isinstance(choices, list) and choices else {}
-        message = choice.get("message") if isinstance(choice, Mapping) else {}
-        content = message.get("content") if isinstance(message, Mapping) else ""
-        return normalize_session_title(str(content or ""))
-    finally:
-        await _close_in_thread(client)
 
 
 async def list_models(api_key: str, base_url: str | None) -> list[str]:
@@ -222,9 +233,9 @@ async def list_models(api_key: str, base_url: str | None) -> list[str]:
         # zai-sdk 0.2.3 does not expose a models collection. Return the
         # application's supported built-in catalog without falling back to a
         # different provider SDK.
-        return ["glm-5.2"]
+        return ["glm-5.3-flash"]
     finally:
         await _close_in_thread(client)
 
 
-__all__ = ["chat_no_stream", "chat_stream", "generate_title", "list_models"]
+__all__ = ["chat_no_stream", "chat_stream", "list_models"]

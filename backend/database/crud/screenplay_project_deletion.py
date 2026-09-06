@@ -324,16 +324,6 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
             "conversation_id = NULL WHERE " + " OR ".join(report_clauses),
             report_params,
         )
-    if conversation_ids:
-        marks = ",".join("?" for _ in conversation_ids)
-        await db.execute(
-            "UPDATE memory_items SET status = 'archived', "
-            "source_type = 'conversation_truncated', "
-            "update_time = CURRENT_TIMESTAMP "
-            "WHERE source_type = 'conversation' "
-            f"AND source_id IN ({marks}) AND status <> 'archived'",
-            [str(value) for value in conversation_ids],
-        )
     if session_ids:
         marks = ",".join("?" for _ in session_ids)
         await db.execute(

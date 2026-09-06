@@ -5,8 +5,14 @@ from __future__ import annotations
 from functools import partial
 
 from application.agent_composition import AgentComposition
+from application.novel_analysis_agent_profile import (
+    build_novel_analysis_agent_profile,
+)
 from application.screenplay_agent_profile import (
     build_screenplay_agent_profile,
+)
+from application.screenplay_agent_task_executor import (
+    normalize_screenplay_candidate,
 )
 from application.writing_agent_profile import build_writing_agent_profile
 from infrastructure.screenplay.agent_root_completion_projector import (
@@ -17,6 +23,12 @@ from infrastructure.screenplay.agent_continuation_begin_projector import (
 )
 from infrastructure.screenplay.agent_run_cancellation_projector import (
     ScreenplayRunCancellationProjector,
+)
+from infrastructure.screenplay.candidate_completion_projector import (
+    ScreenplayCandidateCompletionProjector,
+)
+from infrastructure.screenplay.long_task_claim_guard import (
+    ScreenplayCheckpointClaimGuard,
 )
 
 
@@ -40,12 +52,17 @@ def create_agent_composition(
     writing_profile_factory = partial(
         build_writing_agent_profile,
         skills_dir=kwargs.pop("skills_dir", None),
+        memory_resource=kwargs.get("memory_resource"),
     )
     supplied_projector = kwargs.pop("run_commit_projector", None)
     supplied_cancellation_projectors = tuple(
         kwargs.pop("run_cancellation_projectors", ())
     )
     screenplay_projectors = (
+        ScreenplayCandidateCompletionProjector(
+            db,
+            candidate_normalizer=normalize_screenplay_candidate,
+        ),
         ScreenplayAgentRootCompletionProjector(db),
     )
     run_commit_projector = (
@@ -56,6 +73,7 @@ def create_agent_composition(
     return AgentComposition(
         db,
         run_begin_projector=ScreenplayContinuationBeginProjector(db),
+        long_task_claim_guard=ScreenplayCheckpointClaimGuard(db),
         run_commit_projector=run_commit_projector,
         run_cancellation_projectors=(
             ScreenplayRunCancellationProjector(db),
@@ -63,8 +81,10 @@ def create_agent_composition(
         ),
         profile_factories=(
             writing_profile_factory,
+            build_novel_analysis_agent_profile,
             partial(
                 build_screenplay_agent_profile,
+                candidate_normalizer=normalize_screenplay_candidate,
             ),
         ),
         **kwargs,

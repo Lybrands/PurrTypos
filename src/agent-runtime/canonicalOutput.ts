@@ -53,12 +53,36 @@ export type CanonicalOperation = {
 
 export type CanonicalCommentaryBlock = {
   outputStreamId: string
+  invocationId?: string | null
   text: string
   firstSequence: number
   lastSequence: number
   startedAt: string
   committed: boolean
   aborted: boolean
+}
+
+export type CanonicalPlanningProgress = {
+  eventId: string
+  outputStreamId: string
+  invocationId: string
+  operationId: string
+  revision: number
+  attempt: number
+  recordIndex: number
+  text: string
+  sequence: number
+  occurredAt: string
+}
+
+export type CanonicalAgentProgress = {
+  eventId: string
+  outputStreamId: string
+  invocationId: string
+  sourceChunkIndex: number
+  text: string
+  sequence: number
+  occurredAt: string
 }
 
 export type CanonicalDelegation = {
@@ -93,9 +117,12 @@ export type CanonicalApproval = {
 export type CanonicalOutputState = {
   lastSequence: number
   lastSequenceByRun: Record<string, number>
+  seenEventIds: Record<string, true>
   finalText: string
   commentaryText: string
   commentaryBlocks: CanonicalCommentaryBlock[]
+  planningProgress: CanonicalPlanningProgress[]
+  agentProgress: CanonicalAgentProgress[]
   operations: Record<string, CanonicalOperation>
   operationOrder: string[]
   delegations: Record<string, CanonicalDelegation>
@@ -121,9 +148,12 @@ export function initialCanonicalOutputState(
   return {
     lastSequence: afterSequence,
     lastSequenceByRun: {},
+    seenEventIds: {},
     finalText: '',
     commentaryText: '',
     commentaryBlocks: [],
+    planningProgress: [],
+    agentProgress: [],
     operations: {},
     operationOrder: [],
     delegations: {},
@@ -161,25 +191,41 @@ export function reduceCanonicalOutput(
   state: CanonicalOutputState,
   event: CanonicalOutputEvent,
 ): CanonicalOutputState {
+  if (state.seenEventIds[event.eventId]) return state
   const runSequence = state.lastSequenceByRun[event.runId] ?? 0
   if (event.sequence <= runSequence) return state
+  const presentationSequence = Math.max(state.lastSequence + 1, event.sequence)
+  const lateRootEvent = Boolean(
+    state.runTerminal && state.runId === event.runId,
+  )
 
   let next: CanonicalOutputState = {
     ...state,
-    lastSequence: Math.max(state.lastSequence, event.sequence),
+    lastSequence: presentationSequence,
     lastSequenceByRun: {
       ...state.lastSequenceByRun,
       [event.runId]: event.sequence,
     },
+    seenEventIds: {
+      ...state.seenEventIds,
+      [event.eventId]: true,
+    },
     runId: state.runId ?? event.runId,
   }
+  // Display ordering spans related Runs; authoritative deduplication above
+  // remains based on each original Run sequence, not this presentation index.
+  event = { ...event, sequence: presentationSequence }
+  if (lateRootEvent) return next
   if (event.visibility !== 'public') return next
 
   if (
     event.source === 'provider'
-    && event.kind === 'provider.content_delta'
+    && (
+      event.kind === 'provider.content_delta'
+      || event.kind === 'provider.delta_batch'
+    )
   ) {
-    const delta = stringValue(event.payload.delta)
+    const delta = canonicalProviderTextDelta(event)
     if (!delta) return next
     if (event.channel === 'final') {
       return {
@@ -193,6 +239,14 @@ export function reduceCanonicalOutput(
       return appendCommentary(next, event, delta)
     }
     return next
+  }
+
+  if (event.kind === 'planning.progress') {
+    return appendPlanningProgress(next, event)
+  }
+
+  if (event.kind === 'agent.progress') {
+    return appendAgentProgress(next, event)
   }
 
   if (event.kind === 'stream.committed' || event.kind === 'stream.aborted') {
@@ -214,14 +268,112 @@ export function reduceCanonicalOutput(
   return next
 }
 
-export function replayCanonicalOutput(
-  events: readonly CanonicalOutputEvent[],
-  afterSequence = 0,
+function appendPlanningProgress(
+  state: CanonicalOutputState,
+  event: CanonicalOutputEvent,
 ): CanonicalOutputState {
-  return events.reduce(
-    reduceCanonicalOutput,
-    initialCanonicalOutputState(afterSequence),
-  )
+  if (
+    event.source !== 'provider'
+    || event.channel !== 'commentary'
+    || event.payload.schemaVersion !== 'purra.planning-stream/v1'
+  ) return state
+  const text = stringValue(event.payload.text)
+  const outputStreamId = event.outputStreamId ?? ''
+  const invocationId = event.invocationId ?? ''
+  const operationId = stringValue(event.payload.operationId)
+  const revision = numberValue(event.payload.revision)
+  const attempt = numberValue(event.payload.attempt)
+  const recordIndex = numberValue(event.payload.recordIndex)
+  if (
+    !text
+    || !outputStreamId
+    || !invocationId
+    || !operationId
+    || revision == null
+    || attempt == null
+    || recordIndex == null
+    || !Number.isSafeInteger(revision)
+    || !Number.isSafeInteger(attempt)
+    || !Number.isSafeInteger(recordIndex)
+    || revision < 0
+    || attempt < 0
+    || recordIndex < 1
+  ) return state
+  return {
+    ...state,
+    planningProgress: [
+      ...state.planningProgress,
+      {
+        eventId: event.eventId,
+        outputStreamId,
+        invocationId,
+        operationId,
+        revision,
+        attempt,
+        recordIndex,
+        text,
+        sequence: event.sequence,
+        occurredAt: event.occurredAt,
+      },
+    ],
+  }
+}
+
+function appendAgentProgress(
+  state: CanonicalOutputState,
+  event: CanonicalOutputEvent,
+): CanonicalOutputState {
+  if (
+    event.source !== 'provider'
+    || event.channel !== 'commentary'
+    || event.payload.schemaVersion !== 'purra.agent-progress/v1'
+  ) return state
+  const text = stringValue(event.payload.text)
+  const outputStreamId = event.outputStreamId ?? ''
+  const invocationId = event.invocationId ?? ''
+  const sourceChunkIndex = numberValue(event.payload.sourceChunkIndex)
+  if (
+    !text
+    || !outputStreamId
+    || !invocationId
+    || sourceChunkIndex == null
+    || !Number.isSafeInteger(sourceChunkIndex)
+    || sourceChunkIndex < 1
+  ) return state
+  const progress = {
+    eventId: event.eventId,
+    outputStreamId,
+    invocationId,
+    sourceChunkIndex,
+    text,
+    sequence: event.sequence,
+    occurredAt: event.occurredAt,
+  }
+  return {
+    ...state,
+    agentProgress: [
+      ...state.agentProgress.filter(
+        (item) => item.outputStreamId !== outputStreamId,
+      ),
+      progress,
+    ],
+  }
+}
+
+export function canonicalProviderTextDelta(event: CanonicalOutputEvent): string {
+  if (event.kind === 'provider.content_delta') {
+    return stringValue(event.payload.delta)
+  }
+  if (event.kind !== 'provider.delta_batch') return ''
+  const entries = event.payload.entries
+  if (!Array.isArray(entries)) return ''
+  return entries
+    .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+    .filter((entry) => entry.kind === 'provider.content_delta')
+    .map((entry) => isRecord(entry.payload)
+      ? stringValue(entry.payload.delta)
+      : '')
+    .join('')
 }
 
 function appendCommentary(
@@ -237,6 +389,7 @@ function appendCommentary(
   if (index < 0) {
     commentaryBlocks.push({
       outputStreamId: streamId,
+      invocationId: event.invocationId,
       text: delta,
       firstSequence: event.sequence,
       lastSequence: event.sequence,
@@ -248,6 +401,7 @@ function appendCommentary(
     const current = commentaryBlocks[index]
     commentaryBlocks[index] = {
       ...current,
+      invocationId: current.invocationId ?? event.invocationId,
       text: current.text + delta,
       lastSequence: event.sequence,
     }

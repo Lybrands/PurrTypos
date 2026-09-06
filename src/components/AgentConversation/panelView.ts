@@ -32,6 +32,7 @@ export function buildAgentConversationPanelView({
 }: AgentConversationPanelViewInput): AgentConversationPanelView {
   const showTaskProgress = Boolean(
     taskPlan
+    && taskPlan.steps.length > 0
     && ['planned', 'running', 'paused'].includes(taskPlan.status),
   )
   return {

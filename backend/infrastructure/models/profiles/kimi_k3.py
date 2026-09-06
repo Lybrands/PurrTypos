@@ -15,12 +15,17 @@ class KimiK3Profile(ModelProfile):
     })
     reasoning_control = ReasoningControl.ALWAYS_ENABLED
     reasoning_replay = ReasoningReplayPolicy.REQUIRED
-    actionable = False
+    max_generation_tokens = 1_048_576
+    capability_source = "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart"
+    supports_json_object_output = True
+    openai_output_token_parameter = "max_completion_tokens"
 
-    def build_openai_extra_body(self, thinking_enabled: bool) -> dict[str, Any]:
-        # K3 currently exposes max reasoning only.  Unknown or lower efforts
-        # are rejected by the provider, so this profile deliberately ignores
-        # callers that try to disable reasoning in narrow internal requests.
+    def build_openai_extra_body(
+        self,
+        thinking_enabled: bool | None,
+    ) -> dict[str, Any]:
+        if thinking_enabled is False:
+            raise ValueError("Kimi K3 does not support disabling reasoning")
         return {"reasoning_effort": "max"}
 
 KIMI_K3_PROFILE = KimiK3Profile()

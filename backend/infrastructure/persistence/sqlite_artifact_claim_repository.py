@@ -36,18 +36,29 @@ class SqliteArtifactClaimRepository:
         *,
         clock: Callable[[], int] | None = None,
         token_factory: Callable[[], str] | None = None,
+        join_ambient_transaction: bool = False,
     ) -> None:
         self._db = db
         self._clock = clock or _now_ms
         self._token_factory = token_factory or (
             lambda: f"artifact_claim_{uuid4().hex}"
         )
+        self._join_ambient_transaction = bool(join_ambient_transaction)
+
+    def _mutation_transaction(self):
+        if self._join_ambient_transaction:
+            if not self._db.current_task_owns_transaction():
+                raise RuntimeError(
+                    "ambient artifact claim repository requires an owning transaction"
+                )
+            return self._db.transaction()
+        return self._db.transaction(cancellation_linearizable=True)
 
     async def acquire(
         self,
         command: ArtifactWriteClaimCommand,
     ) -> ArtifactWriteClaim:
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             now = int(self._clock())
             artifact = await self._require_open_artifact(command.artifact_id)
             revision = int(artifact.get("revision") or 0)
@@ -120,7 +131,7 @@ class SqliteArtifactClaimRepository:
     ) -> ArtifactWriteClaim:
         if command.lease_duration_ms is None:
             raise ValueError("renew requires lease_duration_ms")
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             now = int(self._clock())
             current = await self._db.fetch_one(
                 "SELECT * FROM ai_agent_artifact_claims WHERE artifact_id = ?",
@@ -165,7 +176,7 @@ class SqliteArtifactClaimRepository:
     async def release(self, command: ArtifactClaimLeaseCommand) -> bool:
         if command.lease_duration_ms is not None:
             raise ValueError("release cannot include lease_duration_ms")
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             await self._db.execute(
                 "DELETE FROM ai_agent_artifact_claims WHERE artifact_id = ? "
                 "AND run_id = ? AND claim_token = ?",
@@ -176,7 +187,7 @@ class SqliteArtifactClaimRepository:
 
     async def release_for_run(self, run_id: str) -> int:
         normalized_run = _required_text(run_id, "run id")
-        async with self._db.transaction(cancellation_linearizable=True):
+        async with self._mutation_transaction():
             await self._db.execute(
                 "DELETE FROM ai_agent_artifact_claims WHERE run_id = ?",
                 [normalized_run],

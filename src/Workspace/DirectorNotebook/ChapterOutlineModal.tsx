@@ -174,7 +174,7 @@ export default function ChapterOutlinePanel({
               {mode === 'global' ? '暂无总纲' : mode === 'volume' ? '该卷暂无大纲' : '该章节暂无大纲'}
             </p>
             <p className="chapter-outline-modal-empty-desc">
-              新建后即可在此编辑文本大纲；如需 XMind 思维导图大纲，可上传 .xmind 文件。
+              新建后即可在此编辑文本大纲。
             </p>
             <PurrButton
               type="primary"

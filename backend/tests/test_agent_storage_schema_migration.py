@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 
@@ -55,7 +54,7 @@ def _seed_legacy_storage(
                 create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 cancel_requested_at_ms INTEGER DEFAULT NULL,
-                usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"outputTokens":0,"reasoningTokens":0}'
+                usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}'
             );
             CREATE TABLE ai_agent_artifacts (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -104,6 +103,16 @@ def _seed_legacy_storage(
                 claim_attempt INTEGER NOT NULL DEFAULT 0,
                 result_summary TEXT DEFAULT NULL,
                 error TEXT DEFAULT NULL,
+                create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE ai_agent_run_cancellations (
+                root_run_id TEXT PRIMARY KEY NOT NULL,
+                cancellation_epoch INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                children_canceled INTEGER NOT NULL DEFAULT 0,
+                requested_at_ms INTEGER NOT NULL,
+                completed_at_ms INTEGER DEFAULT NULL,
                 create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                 update_time DATETIME DEFAULT CURRENT_TIMESTAMP
             );
@@ -222,19 +231,16 @@ async def test_startup_migrates_legacy_agent_storage_and_reopens_idempotently(
         "run_id": "run-task",
         "claim_token": "claim-1",
     }
-    delegation = await first.fetch_one(
-        "SELECT * FROM ai_agent_delegations WHERE id = 'delegation-1'"
-    )
-    assert delegation is not None
-    assert delegation["run_id"] == "run-parent"
-    assert delegation["batch_id"] == "legacy-delegation:delegation-1"
-    assert delegation["agent_name"] == "screenplay_writer"
-    assert delegation["status"] == "done"
-    assert json.loads(delegation["input_json"]) == {
-        "episode": 1,
-        "_legacyChildRunId": "run-child",
-        "_legacyRootRunId": "run-root",
-    }
+    assert await first.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'ai_agent_delegations'"
+    ) == []
+    cancellation_columns = await _columns(first, "ai_agent_run_cancellations")
+    assert "run_id" in cancellation_columns
+    assert "final_status" in cancellation_columns
+    assert "root_run_id" not in cancellation_columns
+    assert "children_canceled" not in cancellation_columns
+    assert "delegations_canceled" not in cancellation_columns
     assert await first.fetch_one("PRAGMA integrity_check") == {
         "integrity_check": "ok"
     }
@@ -248,9 +254,10 @@ async def test_startup_migrates_legacy_agent_storage_and_reopens_idempotently(
     assert await reopened.fetch_one(
         "SELECT COUNT(*) AS count FROM ai_agent_long_tasks"
     ) == {"count": 1}
-    assert await reopened.fetch_one(
-        "SELECT COUNT(*) AS count FROM ai_agent_delegations"
-    ) == {"count": 1}
+    assert await reopened.fetch_all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'ai_agent_delegations'"
+    ) == []
     await reopened.close()
 
 

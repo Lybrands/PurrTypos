@@ -9,11 +9,20 @@ import config
 import dependencies
 import main
 from application.agent_composition import get_agent_composition
-from application.run_execution_control import RunExecutionSession
 from database import connection as database_connection
 from exceptions import DatabaseNotReadyError
 from infrastructure.persistence import run_store
-from purra.contracts import RunBinding, RunCreateParams
+from purra.contracts import (
+    AgentRunRequest,
+    AgentRunResult,
+    DomainContext,
+    ModelRequest,
+    RunBinding,
+    RunCreateParams,
+    RunStatus,
+)
+from purra.events import AgentEvent, CoreEventType
+from purra.execution import AgentRunSupervisor
 from purra.long_tasks import LongTaskCreateCommand, LongTaskStatus, LongTaskUnitSpec
 from infrastructure.persistence.sqlite_long_task_repository import (
     SqliteLongTaskRepository,
@@ -51,6 +60,28 @@ def _capture_database(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_lifespan_initializes_schema_only_on_primary_connection(
+    monkeypatch,
+    tmp_path,
+):
+    connection_type = database_connection.DatabaseConnection
+    original_init = connection_type.init
+    initialize_schema_calls = []
+
+    async def _recording_init(self, *, initialize_schema=True):
+        initialize_schema_calls.append(initialize_schema)
+        await original_init(self, initialize_schema=initialize_schema)
+
+    monkeypatch.setattr(connection_type, "init", _recording_init)
+    _capture_database(monkeypatch, tmp_path)
+
+    async with main.lifespan(_RecordingApplication()):
+        pass
+
+    assert initialize_schema_calls == [True, False]
+
+
+@pytest.mark.asyncio
 async def test_lifespan_shutdown_clears_composition_and_global_db(
     monkeypatch,
     tmp_path,
@@ -59,10 +90,11 @@ async def test_lifespan_shutdown_clears_composition_and_global_db(
     application = _RecordingApplication()
 
     async with main.lifespan(application):
-        assert application.router_count == 21
+        assert application.router_count == 23
         assert dependencies.get_db() is created[0]
         assert get_agent_composition().agent_profile_ids == (
             "writing",
+            "novel_analysis",
             "screenplay",
         )
 
@@ -93,25 +125,43 @@ async def test_lifespan_execution_heartbeat_is_not_blocked_by_primary_connection
         initial = await run_store.get_run(created[0], run_id)
         assert initial is not None
 
-        session = RunExecutionSession(
-            composition.execution_lease_store,
+        canceled = asyncio.Event()
+
+        async def execute(_request, _options, signal):
+            yield AgentEvent(type=CoreEventType.RUN_STARTED, run_id=run_id)
+            await signal.wait()
+            canceled.set()
+            yield AgentRunResult(run_id=run_id, status=RunStatus.CANCELED)
+
+        supervisor = AgentRunSupervisor(
+            output_repository=composition.output_repository,
+            output_publisher=composition.output_notifications,
+            execution_factory=execute,
+            lease_store=composition.execution_lease_store,
             owner_id=repository.owner_id,
             lease_duration_ms=repository.lease_duration_ms,
-            external_signal=asyncio.Event(),
             poll_interval_seconds=0.01,
         )
-        await session.bind(run_id)
-        await created[0]._connection_lock.acquire()
         try:
-            await asyncio.sleep(1.2)
-        finally:
-            created[0]._connection_lock.release()
+            handle = await supervisor.submit(AgentRunRequest(
+                messages=(),
+                model=ModelRequest(provider="openai", model="test-model"),
+                domain_context=DomainContext(namespace="test.lease"),
+            ))
+            await created[0]._connection_lock.acquire()
+            try:
+                await asyncio.sleep(1.2)
+            finally:
+                created[0]._connection_lock.release()
 
-        current = await run_store.get_run(created[0], run_id)
-        assert current is not None
-        assert current["heartbeat_at_ms"] > initial["heartbeat_at_ms"]
-        assert not session.signal.is_set()
-        await session.close()
+            current = await run_store.get_run(created[0], run_id)
+            assert current is not None
+            assert current["heartbeat_at_ms"] > initial["heartbeat_at_ms"]
+            assert not canceled.is_set()
+            await handle.cancel("test finished")
+            assert (await asyncio.wait_for(handle.wait(), 0.5)).status is RunStatus.CANCELED
+        finally:
+            await supervisor.close()
 
 
 @pytest.mark.asyncio

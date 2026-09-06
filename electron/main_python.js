@@ -9,6 +9,7 @@ const {
 } = require('./backend_process')
 const { createAppProtocolHandler } = require('./app_protocol')
 const { registerDatabaseIpcHandlers } = require('./database_ipc')
+const { registerNovelSourceFileIpc } = require('./source_file_ipc')
 const { configureAppIcon } = require('./app_icon')
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
@@ -48,7 +49,7 @@ function createWindow() {
   })
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173')
+    mainWindow.loadURL('http://localhost:5174')
   } else {
     mainWindow.loadURL('app://./dist/index.html').catch((err) => {
       console.error('loadURL app:// failed:', err)
@@ -105,38 +106,6 @@ app.on('before-quit', () => {
 })
 
 // ─── IPC: native file operations ─────────────────────────────────
-
-ipcMain.handle('open-xmind-file', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择 XMind 文件',
-    filters: [{ name: 'XMind 文件', extensions: ['xmind'] }],
-    properties: ['openFile'],
-  })
-  if (result.canceled || result.filePaths.length === 0) return null
-  return result.filePaths[0]
-})
-
-ipcMain.handle('parse-xmind', async (_, filePath) => {
-  try {
-    const AdmZip = require('adm-zip')
-    const zip = new AdmZip(filePath)
-    const contentEntry = zip.getEntry('content.json')
-    if (!contentEntry) throw new Error('content.json 不存在于 XMind 文件中')
-    const content = JSON.parse(contentEntry.getData().toString('utf8'))
-    return { success: true, data: content }
-  } catch (err) {
-    return { success: false, error: err.message }
-  }
-})
-
-ipcMain.handle('read-file-buffer', async (_, filePath) => {
-  try {
-    const buffer = fs.readFileSync(filePath)
-    return { success: true, data: buffer }
-  } catch (err) {
-    return { success: false, error: err.message }
-  }
-})
 
 ipcMain.handle('open-and-read-text-file', async () => {
   try {
@@ -285,7 +254,7 @@ ipcMain.handle('write-screenplay-file', async (_, { defaultName, content, format
 ipcMain.handle('export-screenplay-pdf', async (_, { projectId, defaultName }) => {
   try {
     const res = await fetch(
-      `${BACKEND_URL}/api/screenplay-projects/${encodeURIComponent(String(projectId))}/export/pdf`,
+      `${BACKEND_URL}/api/screenplay/v2/projects/${encodeURIComponent(String(projectId))}/export/pdf`,
       { method: 'POST' },
     )
     if (!res.ok) {
@@ -348,6 +317,12 @@ registerDatabaseIpcHandlers({
   shell,
   app,
   backendProcess,
+  getMainWindow: () => mainWindow,
+})
+
+registerNovelSourceFileIpc({
+  ipcMain,
+  dialog,
   getMainWindow: () => mainWindow,
 })
 

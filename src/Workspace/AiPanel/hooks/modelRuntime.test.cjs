@@ -22,7 +22,6 @@ const {
 )
 const {
   countQueuedForSession,
-  getSessionActivityLabel,
   getSettledSessionActivity,
 } = loadTypeScriptModule(
   path.join(__dirname, 'chatQueue.ts'),
@@ -133,15 +132,20 @@ test('built-in selection sends its model profile while custom models stay generi
       supportsThinking: false,
       thinkingOnly: false,
       thinkingEnabled: false,
+      profileMaxGenerationTokens: 120_000,
+      reasoningEffort: 'low',
       customizeTemperature: false,
     },
     selectedModel: 'custom',
   })
   assert.equal(Object.hasOwn(custom.options, 'model_profile'), false)
+  assert.equal(custom.options.profile_max_generation_tokens, 120_000)
+  assert.equal(Object.hasOwn(custom.options, 'max_generation_tokens'), false)
   assert.equal(Object.hasOwn(custom.options, 'max_tokens'), false)
+  assert.equal(custom.options.reasoning_effort, 'low')
 })
 
-test('renderer never sends its legacy output budget to PurrA', () => {
+test('renderer sends only the explicit user generation ceiling', () => {
   const configured = buildStreamOptions({
     cfg: {
       id: 'mimo',
@@ -151,12 +155,68 @@ test('renderer never sends its legacy output budget to PurrA', () => {
       baseUrl: 'https://api.xiaomimimo.com/v1',
       supportsThinking: true,
       thinkingOnly: false,
-      outputTokenBudget: 999_999,
+      maxGenerationTokens: 99_999,
     },
     selectedModel: 'mimo',
   })
 
-  assert.equal(Object.hasOwn(configured.options, 'max_tokens'), false)
+  assert.equal(configured.options.max_generation_tokens, 99_999)
+  assert.equal(Object.hasOwn(configured.options, 'thinking'), false)
+  assert.equal(Object.hasOwn(configured.options, 'temperature'), false)
+})
+
+test('custom model capability and user ceiling stay independent on the wire', () => {
+  const configured = buildStreamOptions({
+    cfg: {
+      id: 'custom-budget-contract',
+      name: 'custom-model',
+      apiKey: 'secret',
+      baseUrl: 'https://proxy.example/v1',
+      supportsThinking: true,
+      thinkingOnly: false,
+      profileMaxGenerationTokens: 200_000,
+      maxGenerationTokens: 80_000,
+    },
+    selectedModel: 'custom-model',
+  })
+
+  assert.equal(configured.options.profile_max_generation_tokens, 200_000)
+  assert.equal(configured.options.max_generation_tokens, 80_000)
+})
+
+test('renderer sends reasoning effort only after an explicit supported choice', () => {
+  const explicit = buildStreamOptions({
+    cfg: {
+      id: 'deepseek',
+      presetId: 'deepseek:deepseek-v4-flash',
+      name: 'deepseek-v4-flash',
+      apiKey: 'secret',
+      baseUrl: 'https://api.deepseek.com',
+      supportsThinking: true,
+      thinkingOnly: false,
+      thinkingEnabled: true,
+      reasoningEffort: 'low',
+      customizeTemperature: false,
+    },
+    selectedModel: 'deepseek',
+  })
+  const providerDefault = buildStreamOptions({
+    cfg: {
+      id: 'deepseek-default',
+      presetId: 'deepseek:deepseek-v4-flash',
+      name: 'deepseek-v4-flash',
+      apiKey: 'secret',
+      baseUrl: 'https://api.deepseek.com',
+      supportsThinking: true,
+      thinkingOnly: false,
+      thinkingEnabled: true,
+      customizeTemperature: false,
+    },
+    selectedModel: 'deepseek-default',
+  })
+
+  assert.equal(explicit.options.reasoning_effort, 'low')
+  assert.equal(Object.hasOwn(providerDefault.options, 'reasoning_effort'), false)
 })
 
 test('durable task progress stays out of the work log', () => {
@@ -219,7 +279,7 @@ test('a newly prepared request clears the previous provider usage snapshot', () 
   })
   budget = projectContextBudget(budget, {
       actualInputTokens: 12500,
-      actualOutputTokens: 500,
+      actualGenerationTokens: 500,
       actualTotalTokens: 13000,
       actualUsageRound: 1,
       usageSource: 'provider',
@@ -412,17 +472,9 @@ test('queued chat activity stays pending until the final queued turn completes',
     getSettledSessionActivity('completed', queuedCount),
     { state: 'queued', queuedCount: 2 },
   )
-  assert.equal(
-    getSessionActivityLabel({ state: 'running', queuedCount }),
-    '生成中 · 2 条排队',
-  )
   assert.deepEqual(
     getSettledSessionActivity('completed', 0),
     { state: 'completed', queuedCount: 0 },
-  )
-  assert.equal(
-    getSessionActivityLabel({ state: 'completed', queuedCount: 0 }),
-    '已完成',
   )
 })
 
@@ -549,4 +601,36 @@ test('session runtime revision advances even when wall clock does not', () => {
     Date.now = originalNow
     clearChatRuntime(sessionId)
   }
+})
+
+test('GLM preset forwards an explicit reasoning effort while keeping thinking enabled', () => {
+  const result = buildStreamOptions({
+    cfg: { id: 'glm', presetId: 'zai:glm-5.3-flash', name: 'glm-5.3-flash',
+      apiKey: 'test', baseUrl: 'https://open.bigmodel.cn/api/paas/v4/',
+      supportsThinking: true, thinkingOnly: true, thinkingEnabled: true,
+      reasoningEffort: 'low', customizeTemperature: false },
+    selectedModel: 'glm',
+  })
+  assert.equal(result.options.reasoning_effort, 'low')
+  assert.equal(result.options.thinking.type, 'enabled')
+})
+
+test('model request preserves preference states and sends the generated descriptor digest', () => {
+  for (const choice of [{ state: 'inherit' }, { state: 'provider_default' }, { state: 'explicit', value: 'high' }]) {
+    const { options } = buildStreamOptions({ cfg: {
+      id: 'glm', name: 'glm-5.3-flash', presetId: 'zai:glm-5.3-flash', apiKey: 'key',
+      thinkingEnabled: true, reasoningEffort: 'low',
+      modelPreferences: { reasoning_effort: choice, reasoning_mode: { state: 'provider_default' } },
+    }, selectedModel: 'glm' })
+    assert.deepEqual(options.model_preferences.reasoning_effort, choice)
+    assert.equal(options.reasoning_effort, choice.state === 'explicit' ? 'high' : undefined)
+    assert.equal(options.thinking, undefined)
+    assert.match(options.model_descriptor_digest, /^[a-f0-9]{64}$/)
+  }
+})
+
+test('custom model requests do not invent an undeclared context limit', () => {
+  const { options } = buildStreamOptions({ cfg: { id: 'custom', name: 'custom', apiKey: 'key' }, selectedModel: 'custom' })
+  assert.equal(options.context_window, undefined)
+  assert.equal(options.model_descriptor_digest, undefined)
 })

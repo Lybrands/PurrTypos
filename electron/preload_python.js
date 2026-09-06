@@ -4,10 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 // AI streaming, and all other application services are called through the
 // renderer's standard HTTP/SSE service layer.
 contextBridge.exposeInMainWorld('purrDesktop', {
-  openXmindFile: () => ipcRenderer.invoke('open-xmind-file'),
-  parseXmind: (filePath) => ipcRenderer.invoke('parse-xmind', filePath),
   openFilePath: (filePath) => ipcRenderer.invoke('open-file-path', filePath),
-  readFileBuffer: (filePath) => ipcRenderer.invoke('read-file-buffer', filePath),
   writeExportFiles: (data) => ipcRenderer.invoke('write-export-files', data),
   writeSingleTextFile: (data) => ipcRenderer.invoke('write-single-text-file', data),
   writeScreenplayFile: (data) => ipcRenderer.invoke('write-screenplay-file', data),
@@ -17,6 +14,7 @@ contextBridge.exposeInMainWorld('purrDesktop', {
   importDatabase: () => ipcRenderer.invoke('import-database'),
   openDatabaseDirectory: () => ipcRenderer.invoke('open-database-directory'),
   openAndReadTextFile: () => ipcRenderer.invoke('open-and-read-text-file'),
+  pickNovelSourceTextFile: (options) => ipcRenderer.invoke('pick-novel-source-text-file', options),
   pickStoryBackgroundAttachments: (data) =>
     ipcRenderer.invoke('story-background-pick-attachments', data),
   openStoryBackgroundAttachment: (data) =>

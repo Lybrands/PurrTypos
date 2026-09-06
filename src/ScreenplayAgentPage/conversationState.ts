@@ -27,6 +27,7 @@ export interface ScreenplayConversationMessage {
   model: string | null
   error: { code?: string; message?: string } | null
   createdAt: string | null
+  updatedAt: string | null
 }
 
 export interface ScreenplayConversationState {
@@ -249,6 +250,7 @@ function messagesFromTurn(
     model: turn.runtimeProfile.model || null,
     error,
     createdAt: turn.createdAt || null,
+    updatedAt: operation?.updatedAt || task?.updatedAt || turn.updatedAt || null,
   }
   return [
     {

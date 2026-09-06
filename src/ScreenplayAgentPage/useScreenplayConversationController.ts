@@ -18,6 +18,7 @@ import type {
 } from '../types.ts'
 
 export interface ScreenplayQueuedSubmission {
+  editing?: boolean
   id: string
   projectId: string
   sessionId: number
@@ -29,6 +30,10 @@ export interface ScreenplayQueuedSubmission {
 export interface ScreenplayConversationBindings {
   project: ScreenplayProject
   sessions: AiSession[]
+  historySessions?: AiSession[]
+  historyLoading?: boolean
+  historyError?: string
+  deletingHistorySessionIds?: number[]
   activeSessionId: number | null
   conversationIdentity?: string
   messages: AgentConversationMessage[]
@@ -54,7 +59,11 @@ export interface ScreenplayConversationBindings {
     | 'createSession'
     | 'closeSession'
     | 'renameSession'
+    | 'loadSessionHistory'
+    | 'openHistorySession'
+    | 'deleteSession'
     | 'send'
+    | 'updateQueuedSubmission'
     | 'abort'
     | 'resume'
     | 'editMessage'
@@ -95,13 +104,22 @@ export function createScreenplayConversationController(
       paused: bindings.paused,
       resuming: bindings.resuming,
       attachmentsVersion: bindings.attachmentsVersion,
+      history: {
+        sessions: (bindings.historySessions ?? []).map((session) => (
+          toAgentConversationSession(session, session.create_time)
+        )),
+        loading: bindings.historyLoading ?? false,
+        error: bindings.historyError,
+        deletingSessionIds: bindings.deletingHistorySessionIds,
+      },
     },
     composer: {
       value: bindings.prompt,
       setValue: bindings.setPrompt,
       placeholder: '输入希望 Agent 完成的任务',
       ariaLabel: '输入希望剧本 Agent 完成的任务',
-      submitDisabled: bindings.initializing || !bindings.prompt.trim() || !selectedModel,
+      ready: !bindings.initializing && bindings.activeSessionId != null,
+      submitDisabled: bindings.initializing || bindings.activeSessionId == null || !bindings.prompt.trim() || !selectedModel,
       selectedModel,
       modelConfigs: bindings.modelConfigs,
       selectModel: bindings.setSelectedModelId,

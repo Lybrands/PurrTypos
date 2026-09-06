@@ -12,6 +12,7 @@ import { services } from '@/services'
 import React from 'react'
 import type { AiModelConfig, EntityId } from '../../types'
 import { normalizeApiProvider } from '../../modelCatalog'
+import { buildStreamOptions } from '../../agent-runtime/streamOptions'
 import { createAiStreamId } from '../../utils/aiStream'
 import './GhostCompletion.scss'
 
@@ -124,6 +125,10 @@ export default function GhostCompletion({
 
     const userPrompt = `【上文】\n${trigger.prefix}\n\n【续写紧接上文】：`
 
+    const runtimeOptions = buildStreamOptions({
+      cfg: model,
+      selectedModel: model.name,
+    }).options
     services.ai.aiChatStream({
       streamId,
       apiKey: model.apiKey,
@@ -134,11 +139,7 @@ export default function GhostCompletion({
         { role: 'user', content: userPrompt },
       ],
       options: {
-        model: model.name,
-        ...(model.presetId ? { model_profile: model.presetId } : {}),
-        temperature: 0.5,
-        thinking: { type: 'disabled' },
-        max_tokens: 120,
+        ...runtimeOptions,
       },
       enableAgentTools: false,
       bookId: bookId ?? undefined,

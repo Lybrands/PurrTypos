@@ -1,4 +1,3 @@
-import React from 'react'
 import { PurrCheckbox } from '@/purr-components'
 import { PurrEmpty, PurrSpin } from '@/purr-components'
 import type { MemoryModalController } from './useMemoryModal'
@@ -12,13 +11,16 @@ export default function SelectionTab({ controller }: SelectionTabProps) {
   const {
     loading,
     sparkIdeas,
+    longTermMemories,
     sparkIdeasByLayer,
     foreshadowing,
     checkedIds,
+    checkedLongTermMemoryIds,
     checkedForeshadowingIds,
     chapterTitleById,
     characterNameById,
     handleToggle,
+    handleToggleLongTermMemory,
     handleToggleForeshadowing,
   } = controller
 
@@ -30,7 +32,7 @@ export default function SelectionTab({ controller }: SelectionTabProps) {
     )
   }
 
-  if (sparkIdeas.length === 0 && foreshadowing.length === 0) {
+  if (longTermMemories.length === 0 && sparkIdeas.length === 0 && foreshadowing.length === 0) {
     return (
       <PurrEmpty
         image={false}
@@ -41,6 +43,35 @@ export default function SelectionTab({ controller }: SelectionTabProps) {
 
   return (
     <div className="memory-select-list">
+      {longTermMemories.length > 0 && (
+        <div className="memory-layer-block">
+          <div className="memory-layer-title">长期记忆</div>
+          {longTermMemories.map((memory) => {
+            const checked = checkedLongTermMemoryIds.includes(memory.id)
+            return (
+              <div key={`long-term-${memory.id}`} className="memory-select-item">
+                <PurrCheckbox
+                  checked={checked}
+                  onChange={(event) =>
+                    handleToggleLongTermMemory(memory.id, event.target.checked)
+                  }
+                />
+                <span
+                  className="memory-select-content"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleToggleLongTermMemory(memory.id, !checked)}
+                  onKeyDown={(event) =>
+                    event.key === 'Enter' && handleToggleLongTermMemory(memory.id, !checked)
+                  }
+                >
+                  {memory.content || memory.summary || '（无内容）'}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
       {sparkIdeasByLayer.map(({ layer, list }) =>
         list.length === 0 ? null : (
           <div key={layer} className="memory-layer-block">

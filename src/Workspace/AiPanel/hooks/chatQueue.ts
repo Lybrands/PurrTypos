@@ -1,8 +1,10 @@
-import type { AiModelConfig, EntityId } from "../../../types";
+import type { AiModelConfig, EntityId, WritingMethodOverrides } from "../../../types";
 
 export type ChatRunOutcome = "completed" | "paused" | "failed" | "canceled";
 
 export interface QueuedChatSubmission {
+  id: string;
+  editing?: boolean;
   content: string;
   sessionId: number;
   bookId: EntityId;
@@ -16,8 +18,10 @@ export interface QueuedChatSubmission {
   agentEnabled: boolean;
   associatedChapterIds: EntityId[];
   associatedOutlineIds: EntityId[];
+  selectedLongTermMemoryIds: string[];
   selectedMemoryIds: (number | string)[];
   selectedForeshadowingIds: (number | string)[];
+  writingMethodOverrides: WritingMethodOverrides;
 }
 
 export type ChatSessionActivityState =
@@ -46,21 +50,4 @@ export function getSettledSessionActivity(
     return { state: "queued", queuedCount };
   }
   return { state: outcome, queuedCount: 0 };
-}
-
-export function getSessionActivityLabel(
-  activity: ChatSessionActivity,
-): string {
-  if (activity.state === "running") {
-    return activity.queuedCount > 0
-      ? `生成中 · ${activity.queuedCount} 条排队`
-      : "生成中";
-  }
-  if (activity.state === "queued") {
-    return `等待发送 · ${activity.queuedCount} 条`;
-  }
-  if (activity.state === "paused") return "已暂停";
-  if (activity.state === "completed") return "已完成";
-  if (activity.state === "failed") return "生成失败";
-  return "已终止";
 }

@@ -7,6 +7,21 @@ from pydantic import BaseModel, Field, field_validator
 from schemas.common import normalize_locale_tag
 
 
+class WritingMethodOverrides(BaseModel):
+    forceRevisionIds: List[str] = Field(default_factory=list, max_length=64)
+    excludeRevisionIds: List[str] = Field(default_factory=list, max_length=64)
+
+    @field_validator("forceRevisionIds", "excludeRevisionIds")
+    @classmethod
+    def normalize_revision_ids(cls, values: List[str]) -> List[str]:
+        normalized = [str(value or "").strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("writing method revision id must not be empty")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("writing method revision ids must be unique")
+        return normalized
+
+
 class ChatStreamRequest(BaseModel):
     # Renderer request identity; Writing binds it opaquely for recovery.
     streamId: Optional[str] = Field(default=None, max_length=200)
@@ -31,11 +46,16 @@ class ChatStreamRequest(BaseModel):
     # 章节与大纲目录由后端根据 bookId 加载，不接受渲染进程快照。
     associatedChapterIds: Optional[List[str]] = None
     associatedOutlineIds: Optional[List[str]] = None
-    # 用户在 AiContextBar 勾选的设定/伏笔 id：后端前置 fetch 后注入 system，
-    # 前端不再自行拼接记忆文案。
+    # 用户在 AiContextBar 勾选的组件记忆、设定与伏笔 id。
+    selectedLongTermMemoryIds: Optional[List[str]] = Field(
+        default=None,
+        max_length=32,
+    )
     selectedMemoryIds: Optional[List[Any]] = None
     selectedForeshadowingIds: Optional[List[Any]] = None
+    writingMethodOverrides: Optional[WritingMethodOverrides] = None
     chatAgentMode: Optional[str] = None
+    planningMode: Optional[Literal["reactive", "planned"]] = None
     contextWindow: Optional[str] = None
     # Enhanced renderer history fence. These immutable IDs are part of the
     # request digest and are rechecked both when reserving and claiming.
@@ -72,6 +92,7 @@ class GenerateTitleRequest(BaseModel):
     prompt: str
     apiProvider: str = "openai"
     model: Optional[str] = None
+    options: Optional[Dict[str, Any]] = None
 
 
 class ResolveToolApprovalRequest(BaseModel):

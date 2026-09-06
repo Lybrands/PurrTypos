@@ -63,7 +63,7 @@ class DatabaseConnection:
         self._tx_owner: asyncio.Task[Any] | None = None
         self._tx_depth = 0
 
-    async def init(self) -> None:
+    async def init(self, *, initialize_schema: bool = True) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
         self._conn.row_factory = aiosqlite.Row
@@ -75,8 +75,9 @@ class DatabaseConnection:
         # 待 schema 整体清理后再开。
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.commit()
-        from database.schema import init_schema
-        await init_schema(self)
+        if initialize_schema:
+            from database.schema import init_schema
+            await init_schema(self)
 
     def _ensure_conn(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -224,7 +225,12 @@ class DatabaseConnection:
 
     async def execute(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> None:
         async with self._connection_access() as (conn, in_transaction):
-            await conn.execute(sql, params)
+            try:
+                await conn.execute(sql, params)
+            except BaseException:
+                if not in_transaction:
+                    await _rollback_uninterruptibly(conn)
+                raise
             if not in_transaction:
                 await conn.commit()
 
@@ -244,7 +250,12 @@ class DatabaseConnection:
 
     async def execute_and_get_id(self, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> int | None:
         async with self._connection_access() as (conn, in_transaction):
-            cursor = await conn.execute(sql, params)
+            try:
+                cursor = await conn.execute(sql, params)
+            except BaseException:
+                if not in_transaction:
+                    await _rollback_uninterruptibly(conn)
+                raise
             if not in_transaction:
                 await conn.commit()
             return cursor.lastrowid

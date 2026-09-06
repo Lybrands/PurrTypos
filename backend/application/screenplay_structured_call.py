@@ -1,26 +1,43 @@
-"""Run screenplay-private model tasks inside an existing Agent Run."""
+"""Run screenplay structured calls and public final-response child Runs."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from purra.contracts import AgentMessage, MessageOrigin, MessageRole
+from purra.api import AgentCoreRunOptions, PlanningMode
+from purra.contracts import (
+    AgentMessage,
+    AgentRunRequest,
+    MessageOrigin,
+    MessageRole,
+    RunBinding,
+    RunStatus,
+)
 from purra.errors import ModelGatewayError
-from purra.model_protocol import InvocationOutputLimit
+from purra.output import (
+    PublicPresentationMode,
+    ResponseTransactionMode,
+    ResponseTransactionPolicy,
+)
 from purra.structured_output import parse_json_object
 
 from application.agent_run_service import AgentRunService
 from application.model_runtime import (
     model_request_from_runtime,
+    runtime_context_window_tokens,
     reasoning_mode_from_options,
 )
-from application.request_mapping import context_window_tokens
-from application.screenplay_model_policy import screenplay_output_limit
+from application.screenplay_tool_calling import (
+    BindRun,
+    run_screenplay_child,
+    screenplay_run_provenance,
+)
 from domains.screenplay_agent import ScreenplayIntentCommandMismatchError
+from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +54,7 @@ class PublicModelResult:
 
 class ScreenplayStructuredCallService:
     def __init__(self, db, *, composition) -> None:
-        del db
+        self._db = db
         self._runs = AgentRunService(composition)
 
     async def run_json(
@@ -58,7 +75,6 @@ class ScreenplayStructuredCallService:
             runtime,
             json_object_output=True,
         )
-        output_limit = _output_limit(runtime, model_request)
         last_error: Exception | None = None
         for attempt in range(2):
             result = await self._runs.run_model_text(
@@ -67,8 +83,7 @@ class ScreenplayStructuredCallService:
                 api_key=runtime.apiKey.get_secret_value(),
                 messages=messages,
                 model_request=model_request,
-                output_limit=output_limit,
-                reasoning_mode=reasoning_mode_from_options(runtime.options),
+                reasoning_mode=reasoning_mode_from_options(model_request.options),
                 signal=signal,
             )
             try:
@@ -101,32 +116,90 @@ class ScreenplayStructuredCallService:
         self,
         *,
         runtime,
-        run_id: str,
-        turn_id: str,
+        session_id: int,
         system_instruction: str,
         user_payload: Mapping[str, Any],
-        phase: str,
+        binding_namespace: str,
+        binding_aggregate_id: str,
+        binding_command_id: str,
+        task_id: str,
+        unit_id: str,
+        expected_part_key: str,
+        conversation_turn_id: str,
+        bind_run: BindRun | None = None,
         signal=None,
     ) -> PublicModelResult:
         model_request = model_request_from_runtime(runtime)
-        result = await self._runs.run_model_text(
-            run_id=run_id,
-            turn_id=f"{turn_id}:{phase}",
-            api_key=runtime.apiKey.get_secret_value(),
+        window = model_request.capability_snapshot.context_window_tokens
+        request = AgentRunRequest(
             messages=_messages(system_instruction, user_payload),
-            model_request=model_request,
-            output_limit=_output_limit(runtime, model_request),
-            reasoning_mode=reasoning_mode_from_options(runtime.options),
-            signal=signal,
+            model=model_request,
+            domain_context=ScreenplayAgentDomainContext(
+                project_id=binding_aggregate_id,
+                task_id=task_id,
+                unit_id=unit_id,
+                target_role="final_response",
+                expected_part_type="public_response",
+                expected_part_key=expected_part_key,
+                tool_access="final_response",
+                locale=str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
+            ).to_core_context(),
+            session_id=session_id,
+            mode="screenplay_final_response",
+            context_window=window,
+            tools_enabled=False,
+            planning_mode=PlanningMode.REACTIVE,
+            metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
         )
-        text = str(result.content or "")
+        options = AgentCoreRunOptions(
+            turn_id=conversation_turn_id,
+            default_context_window_tokens=window,
+            model_supports_tools=False,
+            force_planned_tool_choice=False,
+            require_tool_call=False,
+            reasoning_mode=reasoning_mode_from_options(model_request.options),
+            provenance=screenplay_run_provenance(
+                runtime,
+                user_payload,
+                model_request=model_request,
+                output_contract="assistant_text",
+                tool_protocol_contract="none",
+            ),
+            binding=RunBinding(
+                namespace=binding_namespace,
+                aggregate_id=binding_aggregate_id,
+                command_id=binding_command_id,
+            ),
+            response_transaction_policy=ResponseTransactionPolicy(
+                mode=ResponseTransactionMode.DIRECT_LIVE,
+                public_presentation=PublicPresentationMode.NONE,
+            ),
+        )
+        result = await run_screenplay_child(
+            db=self._db,
+            runs=self._runs,
+            request=request,
+            options=options,
+            api_key=runtime.apiKey.get_secret_value(),
+            signal=signal,
+            bind_run=bind_run,
+        )
+        if result.status is RunStatus.CANCELED:
+            raise asyncio.CancelledError
+        if result.status is not RunStatus.DONE:
+            raise ModelGatewayError(
+                str(result.error or "screenplay public response failed"),
+                code=str(result.error or "screenplay_public_response_failed"),
+                retryable=False,
+            )
+        text = str(result.final_response or "")
         if not text.strip():
             raise ModelGatewayError(
                 "screenplay public response was empty",
                 code="empty_model_response",
                 retryable=False,
             )
-        return PublicModelResult(text=text, run_id=run_id)
+        return PublicModelResult(text=text, run_id=result.run_id)
 
 
 def _messages(
@@ -147,23 +220,6 @@ def _messages(
                 separators=(",", ":"),
             ),
         ),
-    )
-
-
-def _output_limit(runtime, model_request) -> InvocationOutputLimit:
-    window = context_window_tokens(
-        runtime.contextWindow or runtime.options.get("context_window")
-    )
-    limit = screenplay_output_limit(
-        model_request.capability_snapshot,
-        model_request.options.get("max_tokens"),
-    )
-    if limit.max_tokens < window:
-        return limit
-    return InvocationOutputLimit(
-        max_tokens=max(1_024, window // 4),
-        source=limit.source,
-        profile_max_tokens=limit.profile_max_tokens,
     )
 
 

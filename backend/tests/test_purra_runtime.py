@@ -52,13 +52,12 @@ from purra.errors import ModelGatewayError, UnsupportedModelFeatureError
 from purra.events import AgentEvent, CoreEventType
 from purra.host_planned_tool_gateway import HostPlannedToolGateway
 from purra.model_protocol import (
-    InvocationOutputLimit,
-    InvocationOutputLimitSource,
+    InvocationOutputBudget,
+    GenerationBudgetSource,
     generic_capability_snapshot,
 )
 from purra.ports import (
     ModelGateway,
-    RuntimeObserver,
     ToolExecutionGateway,
     ToolRegistration,
 )
@@ -88,10 +87,11 @@ class ScriptedModelGateway:
                     raise chunk
                 yield chunk
 
-        return ModelStream(chunks=_chunks(), model="resolved-model")
+        return ModelStream(applied_generation_limit=invocation.max_generation_tokens, chunks=_chunks(), model="resolved-model")
 
     async def complete(self, messages, invocation, signal=None):
         return ModelCompletion(
+            applied_generation_limit=invocation.max_generation_tokens,
             message=AgentMessage(role="assistant", content="unused"),
             model="resolved-model",
         )
@@ -162,18 +162,24 @@ class RecordingObserver:
 class RecordingOutputObserver:
     def __init__(self):
         self.commentary_streams: list[str] = []
+        self.receipts = []
+        self.chunks: list[ModelStreamChunk] = []
+        self.finished_streams: list[tuple[str, ModelFinishReason]] = []
+        self.aborted_streams: list[tuple[str, str]] = []
 
     async def open_model_stream(self, receipt, spec):
-        del receipt, spec
+        del spec
+        self.receipts.append(receipt)
 
     async def accept_provider_chunk(self, output_stream_id, chunk):
-        del output_stream_id, chunk
+        del output_stream_id
+        self.chunks.append(chunk)
 
     async def finish_model_stream(self, output_stream_id, finish_reason):
-        del output_stream_id, finish_reason
+        self.finished_streams.append((output_stream_id, finish_reason))
 
     async def abort_model_stream(self, output_stream_id, error_code):
-        del output_stream_id, error_code
+        self.aborted_streams.append((output_stream_id, error_code))
 
     async def publish_model_stream_commentary(self, output_stream_id):
         self.commentary_streams.append(output_stream_id)
@@ -238,16 +244,18 @@ def _request(
     user_text: str = "work",
     tools_enabled: bool = True,
     context_window: int | None = None,
+    max_generation_tokens: int | None = None,
 ) -> AgentRunRequest:
     return AgentRunRequest(
         messages=(AgentMessage(role="user", content=user_text),),
         model=ModelRequest(
             provider="openai",
             model="model",
+            max_generation_tokens=max_generation_tokens,
             capability_snapshot=replace(
                 generic_capability_snapshot(),
                 profile_id="test:model",
-                max_output_tokens=32_000,
+                max_generation_tokens=32_000,
             ),
         ),
         domain_context=DomainContext(namespace="test"),
@@ -290,11 +298,12 @@ def _matching_budget(
     )
 
 
-def _output_limit(max_tokens: int = 4_000) -> InvocationOutputLimit:
-    return InvocationOutputLimit(
-        max_tokens=max_tokens,
-        source=InvocationOutputLimitSource.USER_OVERRIDE,
-        profile_max_tokens=32_000,
+def _output_budget(max_tokens: int = 4_000) -> InvocationOutputBudget:
+    return InvocationOutputBudget(
+        max_generation_tokens=max_tokens,
+        generation_source=GenerationBudgetSource.USER,
+        profile_max_generation_tokens=32_000,
+        requested_user_max_generation_tokens=max_tokens,
     )
 
 
@@ -423,6 +432,38 @@ def _result(updates) -> AgentRuntimeResult:
     return result
 
 
+def _assert_truncated_attempt(updates, observer, output, *, error_code):
+    result = _result(updates)
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code == error_code
+    assert not result.final_response
+    assert len(output.receipts) == 1
+    assert output.aborted_streams == [
+        (output.receipts[0].output_stream_id, error_code),
+    ]
+    assert output.finished_streams == []
+    assert output.chunks[-1].finish_reason is ModelFinishReason.LENGTH
+    calls = [
+        update for update in updates
+        if isinstance(update, AgentEvent)
+        and update.type == CoreEventType.MODEL_CALL_RECORDED
+    ]
+    assert len(calls) == 1
+    assert calls[0].payload["attempt"] == 1
+    assert str(calls[0].payload["requestFingerprint"]).startswith("sha256:")
+    failures = [
+        trace for trace in observer.traces
+        if trace.stage == "model_round"
+        and trace.outcome == "stream_exception"
+    ]
+    assert len(failures) == 1
+    assert failures[0].details["attempt"] == 1
+    assert failures[0].details["providerAttemptTerminal"] is True
+    assert failures[0].details["retryScheduled"] is False
+    assert failures[0].details["batchExecuted"] is False
+    return calls[0]
+
+
 @pytest.mark.asyncio
 async def test_runtime_does_not_publish_provider_text_and_completes_without_tools():
     model = ScriptedModelGateway([[
@@ -497,7 +538,7 @@ async def test_runtime_rejects_repeated_reasoning_only_responses():
     ])
     runtime = AgentRuntime(
         model_gateway=model,
-        limits=RuntimeLimits(max_model_rounds=4),
+        limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=4),
     )
 
     updates = await _collect(runtime)
@@ -584,7 +625,7 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
             finish_reason=ModelFinishReason.STOP,
             usage=ModelTokenUsage(
                 input_tokens=1_234,
-                output_tokens=56,
+                generation_tokens=56,
                 cached_input_tokens=200,
             ),
         ),
@@ -592,7 +633,8 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
     observer = RecordingObserver()
     updates = await _collect(
         AgentRuntime(model_gateway=model, observer=observer),
-        output_limit=_output_limit(),
+        request=_request(max_generation_tokens=4_000),
+        output_budget=_output_budget(),
     )
 
     usage_events = [
@@ -603,12 +645,12 @@ async def test_runtime_emits_first_round_provider_usage_as_context_anchor():
     ]
     assert len(usage_events) == 1
     assert usage_events[0].payload["actualInputTokens"] == 1_234
-    assert usage_events[0].payload["actualOutputTokens"] == 56
+    assert usage_events[0].payload["actualGenerationTokens"] == 56
     assert usage_events[0].payload["cachedInputTokens"] == 200
     assert usage_events[0].payload["usageSource"] == "provider"
-    assert usage_events[0].payload["requestedOutputTokens"] == 4_000
+    assert usage_events[0].payload["requestedGenerationTokens"] == 4_000
     assert usage_events[0].payload["finishReason"] == "stop"
-    assert usage_events[0].payload["outputLimit"]["maxTokens"] == 4_000
+    assert usage_events[0].payload["outputBudget"]["maxGenerationTokens"] == 4_000
     usage_trace = next(
         trace for trace in observer.traces
         if trace.stage == "model_usage"
@@ -624,12 +666,12 @@ async def test_runtime_does_not_replace_ui_anchor_with_transient_tool_round_usag
         [ModelStreamChunk(
             tool_call_deltas=first_call.tool_call_deltas,
             finish_reason=first_call.finish_reason,
-            usage=ModelTokenUsage(input_tokens=1_000, output_tokens=20),
+            usage=ModelTokenUsage(input_tokens=1_000, generation_tokens=20),
         )],
         [ModelStreamChunk(
             content_delta="final",
             finish_reason=ModelFinishReason.STOP,
-            usage=ModelTokenUsage(input_tokens=9_000, output_tokens=30),
+            usage=ModelTokenUsage(input_tokens=9_000, generation_tokens=30),
         )],
         _answer("final"),
     ])
@@ -932,7 +974,7 @@ async def test_exact_item_constraint_rejects_an_extra_column_zero_item():
     updates = await _collect(
         AgentRuntime(
             model_gateway=model,
-            limits=RuntimeLimits(max_model_rounds=1),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
         ),
         response_constraints=ResponseConstraints(
             exact_top_level_item_count=2,
@@ -1031,6 +1073,7 @@ async def test_runtime_allows_dynamic_planner_to_recover_from_tool_failure():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_generation_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=0,
             ),
@@ -1198,6 +1241,7 @@ async def test_partial_progress_unlocks_bounded_rounds_for_completion():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_generation_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=1,
             ),
@@ -1254,6 +1298,7 @@ async def test_partial_progress_cannot_exceed_progress_round_cap():
             tool_execution_gateway=tools,
             observer=observer,
             limits=RuntimeLimits(
+                max_run_generation_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=0,
             ),
@@ -1305,7 +1350,7 @@ async def test_runtime_replaces_unstructured_output_after_failed_tool_recovery(
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=2),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=2),
         ),
         request=_request(user_text="分析原作并生成正式提案"),
         tools=(_schema("proposeSourceAnalysis"),),
@@ -1421,6 +1466,10 @@ async def test_runtime_retries_correctable_tool_input_without_replanning():
     assert result.outcome is RuntimeOutcome.COMPLETED
     assert result.final_response == "Recovered after correcting the tool input."
     assert len(tools.requests) == 2
+    assert dict(tools.requests[0].retry_of_tool_call_ids) == {}
+    assert dict(tools.requests[1].retry_of_tool_call_ids) == {
+        "call-corrected": "call-invalid",
+    }
     assert observer.completed_tool_rounds == 1
     assert [
         trace.outcome
@@ -1799,7 +1848,7 @@ async def test_runtime_stops_consuming_model_stream_after_terminal_chunk():
                 finally:
                     stream_closed.set()
 
-            return ModelStream(chunks=_chunks(), model="resolved-model")
+            return ModelStream(applied_generation_limit=invocation.max_generation_tokens, chunks=_chunks(), model="resolved-model")
 
     model = FinishThenHangModelGateway()
     updates = await asyncio.wait_for(
@@ -1987,7 +2036,7 @@ async def test_runtime_never_reexecutes_completed_tool_during_repair_retry():
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=4),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=4),
         ),
         tools=(_schema("writeA"),),
         scope_tools_to_observer=True,
@@ -2070,7 +2119,7 @@ async def test_runtime_does_not_retry_interruption_without_an_outer_round_slot()
     updates = await _collect(AgentRuntime(
         model_gateway=model,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
     ))
 
     assert len(model.invocations) == 1
@@ -2092,7 +2141,7 @@ async def test_runtime_required_fallback_consumes_outer_slot_with_same_input():
         AgentRuntime(
             model_gateway=model,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=2),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=2),
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -2107,7 +2156,7 @@ async def test_runtime_required_fallback_consumes_outer_slot_with_same_input():
     assert second.tool_choice is ToolChoiceMode.AUTO
     assert first.request == second.request
     assert first.tools == second.tools
-    assert first.max_output_tokens == second.max_output_tokens
+    assert first.max_generation_tokens == second.max_generation_tokens
     terminal_traces = [
         trace for trace in observer.traces if trace.stage == "model_round"
     ]
@@ -2130,7 +2179,7 @@ async def test_runtime_treats_eof_without_finish_as_interruption_not_completion(
         AgentRuntime(
             model_gateway=model,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=2),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=2),
         ),
         response_constraints=ResponseConstraints(
             exact_top_level_item_count=1,
@@ -2167,7 +2216,7 @@ async def test_runtime_prefers_cancellation_when_signal_is_set_at_stream_eof():
                 if False:  # pragma: no cover - makes this an async generator
                     yield ModelStreamChunk()
 
-            return ModelStream(chunks=_chunks(), model="resolved-model")
+            return ModelStream(applied_generation_limit=invocation.max_generation_tokens, chunks=_chunks(), model="resolved-model")
 
     updates = await _collect(
         AgentRuntime(
@@ -2332,7 +2381,7 @@ async def test_runtime_does_not_schedule_missing_call_retry_without_round_budget
         AgentRuntime(
             model_gateway=ScriptedModelGateway([_answer("fake")]),
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=1),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -2880,7 +2929,7 @@ async def test_runtime_rejects_partial_raw_tool_batch_before_executing_valid_cal
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -3002,7 +3051,7 @@ async def test_runtime_rejects_conflicting_or_duplicate_call_ids(malformed_round
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -3054,10 +3103,11 @@ async def test_length_never_replays_the_same_request_fingerprint(
         )]
     model = ScriptedModelGateway([chunks, _answer("must not run")])
     observer = RecordingObserver([{"readA"}])
+    output = RecordingOutputObserver()
     tools = (_schema("readA"),) if truncation_kind == "tool_arguments" else ()
 
     updates = await _collect(
-        AgentRuntime(model_gateway=model, observer=observer),
+        AgentRuntime(model_gateway=model, observer=observer, output_observer=output),
         tools=tools,
         scope_tools_to_observer=False,
         force_tool_choice=bool(tools),
@@ -3068,23 +3118,11 @@ async def test_length_never_replays_the_same_request_fingerprint(
         if truncation_kind == "tool_arguments"
         else "model_output_truncated"
     )
-    assert _result(updates).error_code == expected_error
-    assert len(model.invocations) == 1
-    call_events = [
-        update
-        for update in updates
-        if isinstance(update, AgentEvent)
-        and update.type == CoreEventType.MODEL_CALL_RECORDED
-    ]
-    assert len(call_events) == 1
-    fingerprint = call_events[0].payload["requestFingerprint"]
-    assert str(fingerprint).startswith("sha256:")
-    trace = next(
-        item for item in observer.traces
-        if item.stage == "model_output"
+    _assert_truncated_attempt(
+        updates, observer, output, error_code=expected_error,
     )
-    assert trace.details["requestFingerprint"] == fingerprint
-    assert trace.details["attempt"] == 1
+    assert len(model.invocations) == 1
+    assert len(model.message_rounds) == 1
 
 
 @pytest.mark.asyncio
@@ -3102,31 +3140,27 @@ async def test_runtime_discards_truncated_tool_call_without_replaying_request():
     model = ScriptedModelGateway([truncated, _answer("must not run")])
     tools = ScriptedToolGateway([])
     observer = RecordingObserver([{"readA"}])
+    output = RecordingOutputObserver()
 
     updates = await _collect(
         AgentRuntime(
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
+            output_observer=output,
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
         force_tool_choice=True,
     )
 
-    assert _result(updates).outcome is RuntimeOutcome.FAILED
-    assert _result(updates).error_code == "tool_call_truncated"
+    _assert_truncated_attempt(
+        updates, observer, output, error_code="tool_call_truncated",
+    )
     assert tools.requests == []
     assert len(model.invocations) == 1
-    trace = next(
-        item
-        for item in observer.traces
-        if item.stage == "model_output"
-        and item.outcome == "truncated"
-    )
-    assert trace.details["errorCode"] == "tool_call_truncated"
-    assert trace.details["batchExecuted"] is False
-    assert trace.details["toolArgumentCharacters"] == len(
+    assert observer.started_tools == []
+    assert output.chunks[0].tool_call_deltas[0].arguments_fragment == (
         '{"query":"unfinished'
     )
 
@@ -3145,23 +3179,21 @@ async def test_resolved_task_budget_never_retries_the_same_truncated_allowance()
     )]
     model = ScriptedModelGateway([truncated])
     observer = RecordingObserver([{"readA"}])
+    output = RecordingOutputObserver()
     updates = await _collect(
-        AgentRuntime(model_gateway=model, observer=observer),
-        output_limit=_output_limit(),
+        AgentRuntime(model_gateway=model, observer=observer, output_observer=output),
+        request=_request(max_generation_tokens=4_000),
+        output_budget=_output_budget(),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
         force_tool_choice=True,
     )
 
     assert len(model.invocations) == 1
-    assert _result(updates).error_code == "tool_call_truncated"
-    trace = next(
-        item
-        for item in observer.traces
-        if item.stage == "model_output"
+    call = _assert_truncated_attempt(
+        updates, observer, output, error_code="tool_call_truncated",
     )
-    assert trace.outcome == "truncated"
-    assert trace.details["outputLimit"]["maxTokens"] == 4_000
+    assert call.payload["parameters"]["outputBudget"]["maxGenerationTokens"] == 4_000
 
 
 @pytest.mark.asyncio
@@ -3173,11 +3205,14 @@ async def test_reasoning_only_truncation_fails_without_replaying_request():
     model = ScriptedModelGateway([reasoning_only, _answer("must not run")])
     tools = ScriptedToolGateway([])
     observer = RecordingObserver()
+    output = RecordingOutputObserver()
     request = AgentRunRequest(
         messages=(AgentMessage(role="user", content="write the candidate"),),
         model=ModelRequest(
             provider="openai",
             model="reasoning-model",
+            max_generation_tokens=4_000,
+            capability_snapshot=_request().model.capability_snapshot,
             options={"thinking": {"type": "enabled"}},
         ),
         domain_context=DomainContext(namespace="test"),
@@ -3189,31 +3224,31 @@ async def test_reasoning_only_truncation_fails_without_replaying_request():
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
+            output_observer=output,
             limits=RuntimeLimits(
+                max_run_generation_tokens=None,
                 max_model_rounds=2,
                 max_progress_rounds=0,
             ),
         ),
         request=request,
-        output_limit=_output_limit(),
+        output_budget=_output_budget(),
         tools=(_schema("writeCandidate"),),
         scope_tools_to_observer=False,
     )
 
-    assert _result(updates).outcome is RuntimeOutcome.FAILED
-    assert _result(updates).error_code == "model_output_truncated"
+    call = _assert_truncated_attempt(
+        updates, observer, output, error_code="model_output_truncated",
+    )
     assert [item.reasoning_mode for item in model.invocations] == [
         ReasoningMode.DEFAULT,
     ]
+    assert model.invocations[0].request.options == request.model.options
+    assert model.invocations[0].max_generation_tokens == 4_000
     assert tools.requests == []
-    trace = next(
-        item
-        for item in observer.traces
-        if item.stage == "model_output"
-        and item.outcome == "truncated"
-    )
-    assert trace.details["reasoningOnly"] is True
-    assert trace.details["outputLimit"]["maxTokens"] == 4_000
+    assert any(chunk.reasoning_delta for chunk in output.chunks)
+    assert not any(chunk.content_delta for chunk in output.chunks)
+    assert call.payload["parameters"]["outputBudget"]["maxGenerationTokens"] == 4_000
 
 
 @pytest.mark.asyncio
@@ -3264,6 +3299,8 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
         model=ModelRequest(
             provider="openai",
             model="reasoning-replay-model",
+            max_generation_tokens=4_000,
+            capability_snapshot=_request().model.capability_snapshot,
             options={"thinking": {"type": "enabled"}},
         ),
         domain_context=DomainContext(namespace="test"),
@@ -3275,10 +3312,10 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=3, max_progress_rounds=0),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=3, max_progress_rounds=0),
         ),
         request=request,
-        output_limit=_output_limit(),
+        output_budget=_output_budget(),
         tools=(_schema("readA"), _schema("writeCandidate")),
         scope_tools_to_observer=False,
     )
@@ -3293,6 +3330,11 @@ async def test_reasoning_replay_keeps_requested_mode_across_tool_rounds():
         ReasoningMode.DEFAULT,
         ReasoningMode.DEFAULT,
     ]
+    assert all(
+        invocation.request.options == request.model.options
+        and invocation.max_generation_tokens == 4_000
+        for invocation in model.attempted_invocations
+    )
     assert [request.calls[0].name for request in tools.requests] == [
         "readA",
         "writeCandidate",
@@ -3320,7 +3362,7 @@ async def test_runtime_never_executes_complete_looking_call_finished_by_length()
             model_gateway=ScriptedModelGateway([length_finished]),
             tool_execution_gateway=tools,
             observer=observer,
-            limits=RuntimeLimits(max_model_rounds=1),
+            limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -3357,6 +3399,7 @@ async def test_truncation_keeps_primary_error_and_skips_replanning():
     model = ScriptedModelGateway([truncated, _answer("must not run")])
     tools = ScriptedToolGateway([])
     observer = RecordingObserver([{"readA"}])
+    output = RecordingOutputObserver()
     hook = RecoveryPlanningHook(observer)
 
     updates = await _collect(
@@ -3364,6 +3407,7 @@ async def test_truncation_keeps_primary_error_and_skips_replanning():
             model_gateway=model,
             tool_execution_gateway=tools,
             observer=observer,
+            output_observer=output,
         ),
         tools=(_schema("readA"),),
         scope_tools_to_observer=True,
@@ -3373,14 +3417,9 @@ async def test_truncation_keeps_primary_error_and_skips_replanning():
 
     assert tools.requests == []
     assert hook.calls == []
-    assert _result(updates).error_code == "tool_call_truncated"
-    truncation_traces = [
-        item
-        for item in observer.traces
-        if item.stage == "model_output"
-        and item.outcome in {"truncated_retry", "truncated"}
-    ]
-    assert [item.outcome for item in truncation_traces] == ["truncated"]
+    _assert_truncated_attempt(
+        updates, observer, output, error_code="tool_call_truncated",
+    )
     assert len(model.invocations) == 1
 
 
@@ -3689,7 +3728,7 @@ async def test_runtime_does_not_execute_tools_on_the_last_model_round():
         model_gateway=model,
         tool_execution_gateway=tools,
         observer=observer,
-        limits=RuntimeLimits(max_model_rounds=1),
+        limits=RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=1),
     )
 
     updates = await _collect(
@@ -3829,29 +3868,29 @@ async def test_runtime_rejects_actual_tool_schema_cost_mismatch_before_model_cal
 
 
 @pytest.mark.asyncio
-async def test_runtime_passes_the_exact_output_limit_to_normal_invocation():
+async def test_runtime_passes_the_exact_user_generation_limit_to_normal_invocation():
     schema = _schema("readA")
     budget = _matching_budget(window=4_096, tools=(schema,), output=321)
     model = ScriptedModelGateway([_answer("done"), _answer("done")])
 
     updates = await _collect(
         AgentRuntime(model_gateway=model),
-        request=_request(context_window=4_096),
+        request=_request(context_window=4_096, max_generation_tokens=321),
         context_budget=budget,
-        output_limit=_output_limit(321),
+        output_budget=_output_budget(321),
         tools=(schema,),
         scope_tools_to_observer=False,
     )
 
     assert _result(updates).outcome is RuntimeOutcome.COMPLETED
-    assert model.invocations[0].max_output_tokens == 321
+    assert model.invocations[0].max_generation_tokens == 321
     assert model.invocations[0].tools == (schema,)
-    assert model.invocations[1].max_output_tokens == 321
+    assert model.invocations[1].max_generation_tokens == 321
     assert model.invocations[1].tools == ()
 
 
 @pytest.mark.asyncio
-async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
+async def test_runtime_preserves_exact_user_generation_limit_on_tool_choice_fallback():
     schema = _schema("readA")
     budget = _matching_budget(window=4_096, tools=(schema,), output=257)
     model = ScriptedModelGateway([
@@ -3867,9 +3906,9 @@ async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
             model_gateway=model,
             tool_execution_gateway=tools,
         ),
-        request=_request(context_window=4_096),
+        request=_request(context_window=4_096, max_generation_tokens=257),
         context_budget=budget,
-        output_limit=_output_limit(257),
+        output_budget=_output_budget(257),
         tools=(schema,),
         scope_tools_to_observer=False,
         force_tool_choice=True,
@@ -3882,7 +3921,7 @@ async def test_runtime_preserves_exact_output_limit_on_tool_choice_fallback():
         ToolChoiceMode.AUTO,
         ToolChoiceMode.NONE,
     ]
-    assert [item.max_output_tokens for item in model.invocations] == [
+    assert [item.max_generation_tokens for item in model.invocations] == [
         257,
         257,
         257,
@@ -4144,7 +4183,7 @@ async def test_runtime_cancels_while_waiting_for_the_next_model_chunk():
                 finally:
                     finalized.set()
 
-            return ModelStream(chunks=_chunks(), model="resolved-model")
+            return ModelStream(applied_generation_limit=invocation.max_generation_tokens, chunks=_chunks(), model="resolved-model")
 
     model = BlockingChunkGateway()
     observer = RecordingObserver()

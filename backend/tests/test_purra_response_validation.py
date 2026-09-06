@@ -31,7 +31,7 @@ from purra.contracts import (
 )
 from purra.api import AgentCoreRunOptions
 from purra.errors import ResponseJudgeContractError
-from purra.events import AgentEvent, CoreEventType
+from purra.events import AgentEvent
 from purra.model_protocol import generic_capability_snapshot
 from purra.operations import (
     AgentOperationController,
@@ -62,10 +62,11 @@ class _ScriptedModelGateway:
                 finish_reason=ModelFinishReason.STOP,
             )
 
-        return ModelStream(chunks=_chunks(), model="validator-model")
+        return ModelStream(applied_generation_limit=invocation.max_generation_tokens, chunks=_chunks(), model="validator-model")
 
     async def complete(self, messages, invocation, signal=None):
         return ModelCompletion(
+            applied_generation_limit=invocation.max_generation_tokens,
             message=AgentMessage(role="assistant", content="unused"),
             model="validator-model",
         )
@@ -170,7 +171,7 @@ def _request(*, tools_enabled: bool = False) -> AgentRunRequest:
             capability_snapshot=replace(
                 generic_capability_snapshot(),
                 profile_id="test:model",
-                max_output_tokens=32_000,
+                max_generation_tokens=32_000,
             ),
         ),
         domain_context=DomainContext(namespace="fixture"),

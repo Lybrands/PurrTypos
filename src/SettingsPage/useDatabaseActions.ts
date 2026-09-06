@@ -36,7 +36,7 @@ export function useDatabaseActions(active: boolean) {
     try {
       const res = await services.database.exportDatabase()
       if (res.success) {
-        message.success('数据库已导出')
+        message.success('完整项目备份已导出（不包含 API 密钥）')
       } else if (res.error !== 'canceled') {
         message.error(res.error || '导出失败')
       }
@@ -47,7 +47,7 @@ export function useDatabaseActions(active: boolean) {
 
   const handleImportDatabase = React.useCallback(async () => {
     const confirmed = window.confirm(
-      '导入将使用所选备份文件覆盖当前全部数据，完成后将自动刷新页面。是否继续？'
+      '恢复将使用所选完整备份覆盖当前作品、运行记录和记忆组件数据；本机 API 密钥不会从备份导入。是否继续？'
     )
     if (!confirmed) return
     setImportingDb(true)
@@ -56,14 +56,16 @@ export function useDatabaseActions(active: boolean) {
       if (res.success) {
         const before = res.data?.beforeStats
         const after = res.data?.afterStats
-        if (before && after) {
+        if (runtimeCapabilities.runtime === 'browser' && res.data?.restartRequired) {
+          message.success('完整备份已恢复。请重启后端服务后再继续使用记忆功能。')
+        } else if (before && after) {
           message.success(
             `数据库已导入：章节 ${before.outlineChapters} -> ${after.outlineChapters}，正文 ${before.articles} -> ${after.articles}。正在刷新...`
           )
         } else {
           message.success('数据库已导入，正在刷新...')
         }
-        if (runtimeCapabilities.runtime === 'browser') {
+        if (runtimeCapabilities.runtime === 'browser' && !res.data?.restartRequired) {
           window.setTimeout(() => window.location.reload(), 500)
         }
       } else if (res.error !== 'canceled') {

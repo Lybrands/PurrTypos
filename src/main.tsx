@@ -5,7 +5,6 @@ import {
   HashRouter,
 } from 'react-router-dom'
 import { ThemeProvider } from './contexts/ThemeContext'
-import { FontSizeProvider } from './contexts/FontSizeContext'
 import App from './App'
 import { runtimeCapabilities } from './platform'
 import { PurrConfirmProvider, PurrToastProvider, PurrTooltipProvider } from '@/purr-components'
@@ -37,9 +36,7 @@ try {
   ReactDOM.createRoot(rootEl!).render(
     <React.StrictMode>
       <ThemeProvider>
-        <FontSizeProvider>
-          <ThemedApp />
-        </FontSizeProvider>
+        <ThemedApp />
       </ThemeProvider>
     </React.StrictMode>
   )

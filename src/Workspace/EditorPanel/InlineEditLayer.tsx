@@ -34,7 +34,7 @@ interface InlineEditLayerProps {
   /** 外部清空选区状态（点击关闭后） */
   onClearSelection: () => void
   modelConfigs: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   selectedModelId: string
   /** 用户在 popover 内切换模型时回调，让外层持久化（与 ai-floating 共享一份选择） */
   onSelectedModelChange?: (id: string) => void
@@ -93,6 +93,8 @@ export default function InlineEditLayer({
 
   // 记忆 / 伏笔（同样跨入口共享）
   const {
+    selectedLongTermMemoryIds,
+    setSelectedLongTermMemoryIds,
     selectedMemoryIds,
     setSelectedMemoryIds,
     selectedForeshadowingIds,
@@ -149,6 +151,7 @@ export default function InlineEditLayer({
           outlineSelectOptions={outlineSelectOptions}
           handleQuickAssociateChapter={handleQuickAssociateChapter}
           handleQuickAssociateOutline={handleQuickAssociateOutline}
+          selectedLongTermMemoryIds={selectedLongTermMemoryIds}
           selectedMemoryIds={selectedMemoryIds}
           selectedForeshadowingIds={selectedForeshadowingIds}
           onOpenMemoryModal={() => setMemoryModalOpen(true)}
@@ -159,9 +162,11 @@ export default function InlineEditLayer({
         onCancel={() => setMemoryModalOpen(false)}
         bookId={bookId}
         writingChapters={writingChapters}
+        selectedLongTermMemoryIds={selectedLongTermMemoryIds}
         selectedIds={selectedMemoryIds}
         selectedForeshadowingIds={selectedForeshadowingIds}
-        onSelectConfirm={(memoryIds, foreshadowingIds) => {
+        onSelectConfirm={(longTermMemoryIds, memoryIds, foreshadowingIds) => {
+          setSelectedLongTermMemoryIds(longTermMemoryIds)
           setSelectedMemoryIds(memoryIds)
           setSelectedForeshadowingIds(foreshadowingIds)
         }}
