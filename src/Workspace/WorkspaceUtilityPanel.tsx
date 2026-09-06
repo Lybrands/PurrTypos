@@ -24,6 +24,7 @@ import './WorkspaceUtilityPanel.scss'
 const ChapterOutlinePanel = lazy(() => import('./DirectorNotebook/ChapterOutlineModal'))
 const MemoryCenter = lazy(() => import('./AiPanel/components/MemoryCenter'))
 const WritingMethodBindingsPanel = lazy(() => import('./WritingMethodBindingsPanel'))
+const KnowledgePanel = lazy(() => import('./KnowledgePanel'))
 const ContinuationCanonPanel = lazy(() => import('./ContinuationCanonPanel'))
 const SettingPanel = lazy(() => import('./SettingPanel'))
 const DashboardPanel = lazy(() => import('./DashboardPanel'))
@@ -33,6 +34,7 @@ const TAB_ICONS: Record<WorkspaceUtilityTabKind, React.ReactNode> = {
   memory: <StoryMemoryIcon />,
   writingMethods: <HighlightIcon />,
   canon: <StoryMemoryIcon />,
+  knowledge: <StoryMemoryIcon />,
   setting: <StorySettingIcon />,
   dashboard: <DashboardIcon />,
 }
@@ -123,6 +125,7 @@ export default function WorkspaceUtilityPanel({
             <WritingMethodBindingsPanel bookId={bookId} />
           </div>
         ) : null}
+        {tab.kind === 'knowledge' ? <KnowledgePanel key={String(bookId)} bookId={bookId} /> : null}
         {tab.kind === 'canon' ? (
           <div className="workspace-utility-content workspace-utility-content--canon">
             <ContinuationCanonPanel bookId={bookId} />

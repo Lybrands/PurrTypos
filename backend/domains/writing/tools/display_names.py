@@ -11,6 +11,8 @@ def _names(zh_cn: str, en_us: str) -> Mapping[str, str]:
 
 
 WRITING_TOOL_DISPLAY_NAMES: Mapping[str, Mapping[str, str]] = {
+    "searchNovelKnowledge": _names("检索创作资料", "Search Novel Knowledge"),
+    "readNovelKnowledge": _names("读取创作资料来源", "Read Novel Knowledge"),
     "addForeshadowing": _names("添加伏笔", "Add Foreshadowing"),
     "addSparkIdea": _names("添加设定", "Add Story Note"),
     "archiveMemory": _names("归档长期记忆", "Archive Long-term Memory"),
@@ -129,6 +131,7 @@ def _writing_tool_label(
         "editChapterContent": "编辑{target}正文",
         "batchGetChapterContents": "查看{target}正文",
         "createWritingChapter": "在{target}下创建章节",
+        "searchNovelKnowledge": "检索与{target}相关的创作资料",
         "addForeshadowing": "在{target}中添加伏笔",
         "resolveForeshadowing": "回收{target}中的伏笔",
         "addSparkIdea": "在{target}中添加设定",
@@ -249,7 +252,7 @@ def _writing_tool_detail(
             return targets
         renamed = _clean_text(arguments.get("title"))
         return f"重命名为《{renamed}》" if renamed else None
-    if tool_name in {"searchMemories", "searchWritingMethods"}:
+    if tool_name in {"searchMemories", "searchWritingMethods", "searchNovelKnowledge"}:
         query = _clean_text(arguments.get("query"))
         return f"“{query}”" if query else None
     if tool_name in {"createMemory", "updateMemory"}:

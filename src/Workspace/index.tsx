@@ -30,6 +30,7 @@ import type { OpenSettingPanelDetail } from './SettingPanel'
 import {
   DASHBOARD_TAB,
   CANON_TAB,
+  KNOWLEDGE_TAB,
   EDITOR_TAB_KEY,
   SETTING_TAB,
   type WorkspaceUtilityTab,
@@ -142,6 +143,8 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       if (detail?.panel === 'setting') {
         if (detail.setting) setSettingOpenRequest(detail.setting)
         openUtilityTab(SETTING_TAB)
+      } else if (detail?.panel === 'knowledge') {
+        openUtilityTab(KNOWLEDGE_TAB)
       } else if (detail?.panel === 'dashboard') {
         openUtilityTab(DASHBOARD_TAB)
       }
@@ -326,6 +329,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       active: panelState.right.open && activeUtilityTabKey === CANON_TAB.key,
       onClick: () => toggleUtilityTab(CANON_TAB),
     }] : []),
+    { key: 'knowledge', icon: <StoryMemoryIcon style={{ fontSize: 16 }} />, tooltip: '创作资料库', active: activeUtilityTabKey === KNOWLEDGE_TAB.key, onClick: () => toggleUtilityTab(KNOWLEDGE_TAB) },
     {
       key: 'setting',
       icon: <StorySettingIcon style={{ fontSize: 16 }} />,

@@ -14,6 +14,7 @@ from purra.contracts import (
     ModelRequest,
     PlanningCapabilities,
     PlanningKind,
+    PlanningMode,
     PlanningResult,
     RunStatus,
     StepExecutor,
@@ -654,6 +655,7 @@ async def test_profile_hydrates_scope_and_accepts_model_authored_plan(db):
     assert hydrated.section_ids == tuple(
         item["id"] for item in revision["sections"]
     )
+    assert prepared.planning_mode is PlanningMode.PLANNED
 
     assert profile.adapter.planner is None
     assert profile.adapter.planner_limits.max_steps is None
@@ -751,6 +753,96 @@ async def test_source_analysis_plan_validator_rejects_non_analysis_interactions(
         request,
         _model_authored_analysis_plan(),
     ) == "novel analysis Planner only accepts analysis runs"
+
+
+@pytest.mark.parametrize("interaction_kind", ["follow_up", "unit"])
+async def test_profile_preserves_reactive_analysis_interactions(db, interaction_kind):
+    revision = await _source(db)
+    request = AgentRunRequest(
+        messages=(AgentMessage(role="user", content="复核来源证据"),),
+        model=ModelRequest(provider="openai", model="test"),
+        domain_context=NovelAnalysisDomainContext(
+            source_revision_id=revision["id"],
+            command_id="reactive-command",
+            interaction_kind=interaction_kind,
+            analysis_artifact_ref="novel-analysis:artifact",
+            unit_input={"text": "来源证据"} if interaction_kind == "unit" else None,
+        ).to_core_context(),
+        planning_mode=PlanningMode.REACTIVE,
+    )
+
+    prepared = await NovelAnalysisAgentProfile(db).prepare_request(request)
+
+    assert prepared.planning_mode is PlanningMode.REACTIVE
+
+
+async def test_formal_analysis_enters_planner_and_persists_task_before_execution(db, monkeypatch):
+    from application.composition_factory import create_agent_composition
+    from application.novel_analysis_agent_profile import _NovelAnalysisDispatcher
+    from purra.api import AgentPlanner
+    from purra.task_admission import LongTaskExecutionResult, LongTaskExecutionStatus
+
+    revision = await _source(db)
+    planned_requests = []
+    executed_tasks = []
+
+    async def plan(_planner, request, *args, **kwargs):
+        planned_requests.append(request)
+        return _model_authored_analysis_plan()
+
+    async def stop_execution(_dispatcher, task_id, **kwargs):
+        executed_tasks.append(task_id)
+        return LongTaskExecutionResult(
+            task_id=task_id,
+            status=LongTaskExecutionStatus.CANCELED,
+        )
+
+    async def unexpected_provider_call(*args, **kwargs):
+        pytest.fail("formal analysis must reach durable execution before an ordinary reply")
+
+    monkeypatch.setattr(AgentPlanner, "create_plan", plan)
+    monkeypatch.setattr(_NovelAnalysisDispatcher, "execute", stop_execution)
+    monkeypatch.setattr(
+        "infrastructure.models.provider_router.create_chat_stream",
+        unexpected_provider_call,
+    )
+    composition = create_agent_composition(db)
+    try:
+        await NovelAnalysisService(db, composition)._execute(
+            source_revision_id=revision["id"],
+            section_ids=tuple(section["id"] for section in revision["sections"]),
+            task_idempotency_key="formal-analysis",
+            run_command_id="formal-analysis",
+            prompt="保留故事概览与事实脉络，蒸馏可执行的写作方法并检验迁移效果。",
+            runtime=ScreenplayAgentRuntimeRequest(
+                apiKey="test-key",
+                contextWindow="128k",
+                options={
+                    "model": "deepseek-v4-flash",
+                    "model_profile": "deepseek:deepseek-v4-flash",
+                    "profile_binding": "compatible",
+                },
+            ),
+            failed_resume_attempts=0,
+            segments=(),
+            input_token_budget=0,
+            durable_continuation=None,
+            run_binding_lifecycle=None,
+        )
+
+        assert len(planned_requests) == 1
+        assert len(executed_tasks) == 1
+        run = await db.fetch_one(
+            "SELECT r.status, r.error, relation.task_id FROM ai_agent_runs r "
+            "JOIN ai_agent_long_task_runs relation ON relation.run_id = r.id "
+            "WHERE r.binding_command_id = 'formal-analysis'",
+        )
+        assert run == {"status": "canceled", "error": None, "task_id": executed_tasks[0]}
+        units = await SqliteLongTaskRepository(db).list_units(executed_tasks[0])
+        assert units
+        assert units[-1].id == "artifact:review"
+    finally:
+        await composition.shutdown()
 
 
 async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):

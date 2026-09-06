@@ -41,7 +41,9 @@ class RepositoryWritingContextSource:
         story_memory_repository: StoryMemoryRecallRepository,
         memory_reranker: MemoryCandidateReranker | None = None,
         run_id: str | None = None,
+        knowledge=None,
     ):
+        self._knowledge = knowledge
         self._associated_repository = associated_repository
         self._memory_operations = memory_operations
         self._source_repository = source_repository
@@ -65,6 +67,7 @@ class RepositoryWritingContextSource:
             self._story_memory_repository,
             memory_reranker=reranker,
             run_id=run_id,
+            knowledge=self._knowledge,
         )
 
     async def build_memory(
@@ -80,6 +83,10 @@ class RepositoryWritingContextSource:
         """Recall with the explicit host query and optional task evidence policy."""
 
         raise_if_stopped(signal)
+        if context.knowledge_scope and context.knowledge_scope.get('purpose') != 'discussion':
+            return unavailable_memory_context_pack(MemoryContextRequest(
+                book_id=context.book_id, user_prompt=query, token_budget=token_budget,
+            ))
         recall_limit, candidate_limit = _memory_recall_limits(request.context_window)
         memory_request = memory_context_request_from_task(
             MemoryContextRequest(
@@ -126,6 +133,19 @@ class RepositoryWritingContextSource:
             raise_if_stopped(signal)
             return unavailable_memory_context_pack(memory_request)
 
+    async def build_knowledge(self, context, query, token_budget, *, signal=None):
+        if not self._knowledge or not context.knowledge_scope:
+            return {'items': [], 'receipts': [], 'tokens': 0}
+        from domains.writing.knowledge import KnowledgeError
+        try:
+            return await self._knowledge.search(
+                context.book_id, query or '资料', scope=dict(context.knowledge_scope),
+                token_budget=token_budget, signal=signal,
+            )
+        except KnowledgeError as error:
+            raise_if_stopped(signal)
+            return {'items': [], 'receipts': [], 'tokens': 0, 'state': error.code}
+
     async def build_associated(
         self,
         context: WritingDomainContext,
@@ -133,6 +153,9 @@ class RepositoryWritingContextSource:
         token_budget: int,
     ) -> AssociatedContextResult:
         del request
+        if context.knowledge_scope and context.knowledge_scope.get('purpose') != 'discussion':
+            # An explicit associated selection does not establish a historical/POV snapshot.
+            return AssociatedContextResult()
         try:
             return await self._associated.build(context, token_budget)
         except Exception:

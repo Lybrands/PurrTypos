@@ -73,11 +73,15 @@ async def lifespan(application: FastAPI):
     artifact_monitor: asyncio.Task[None] | None = None
     orphan_monitor_stop: asyncio.Event | None = None
     artifact_monitor_stop: asyncio.Event | None = None
+    knowledge_resource = None
     try:
         data_dir = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else None
         db = DatabaseConnection(data_dir)
         await db.init()
         set_db(db)
+        from application.novel_knowledge_service import get_novel_knowledge_service
+        knowledge_resource = get_novel_knowledge_service(db)
+        await knowledge_resource.initialize(db._data_dir)
         execution_db = DatabaseConnection(data_dir)
         await execution_db.init(initialize_schema=False)
 
@@ -276,6 +280,7 @@ async def lifespan(application: FastAPI):
             story_memory,
             writing_methods,
             novel_sources,
+            novel_knowledge,
             story_background,
         )
 
@@ -299,6 +304,7 @@ async def lifespan(application: FastAPI):
         application.include_router(story_memory.router, prefix="/api")
         application.include_router(writing_methods.router, prefix="/api")
         application.include_router(novel_sources.router, prefix="/api")
+        application.include_router(novel_knowledge.router, prefix="/api")
         application.include_router(continuations.router, prefix="/api")
         application.include_router(dashboard.router, prefix="/api")
         application.include_router(export.router, prefix="/api")
@@ -321,6 +327,8 @@ async def lifespan(application: FastAPI):
                     clear_agent_composition(composition)
             finally:
                 try:
+                    if knowledge_resource is not None:
+                        await knowledge_resource.close()
                     if db is not None:
                         clear_db(db)
                         await db.close()

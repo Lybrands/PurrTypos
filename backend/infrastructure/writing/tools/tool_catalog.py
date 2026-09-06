@@ -69,6 +69,13 @@ def build_writing_tool_catalog(
             WritingMethodRetriever(dependencies.db), METHOD_RETRIEVAL_LIMIT,
         ),
     }
+    from application.novel_knowledge_service import get_novel_knowledge_service
+    from infrastructure.writing.knowledge_retrieval import NovelKnowledgeRetriever
+    knowledge = dependencies.knowledge or get_novel_knowledge_service(dependencies.db)
+    retrievers.update({
+        "searchNovelKnowledge": (NovelKnowledgeRetriever(dependencies.db, knowledge), 12),
+        "readNovelKnowledge": (NovelKnowledgeRetriever(dependencies.db, knowledge, read=True), 12),
+    })
     native_registrations = {
         name: RetrieverTool(
             retriever=retriever,
@@ -81,7 +88,11 @@ def build_writing_tool_catalog(
         ).registration
         for name, (retriever, limit) in retrievers.items()
     }
-    return build_domain_catalog(
+    from infrastructure.writing.knowledge_retrieval import read_knowledge_registration
+    native_registrations['readNovelKnowledge'] = read_knowledge_registration(
+        native_registrations['readNovelKnowledge'], skills_by_name['readNovelKnowledge']['parameters'],
+    )
+    catalog = build_domain_catalog(
         skill_items=skill_items,
         handlers=bound_handlers,
         cache_predictors=probes,
@@ -90,6 +101,14 @@ def build_writing_tool_catalog(
             atomic_operation_names - resolved_handler_overrides.keys()
         ),
     )
+    from purra.tools import InMemoryToolCatalog
+    from domains.writing.tools.catalog import enabled_writing_tools
+    from infrastructure.writing.knowledge_retrieval import guard_legacy_registration
+    return InMemoryToolCatalog(tuple(
+        guard_legacy_registration(registration, dependencies.db, knowledge)
+        for registration in catalog.registrations()
+    ), enabled_writing_tools)
+
 
 
 __all__ = ["WritingToolDependencies", "build_writing_tool_catalog"]

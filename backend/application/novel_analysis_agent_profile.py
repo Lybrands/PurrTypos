@@ -17,6 +17,7 @@ from purra.contracts import (
     ExecutionPlan,
     ExecutionState,
     PlanningKind,
+    PlanningMode,
     PlanningResult,
     PlanningCapabilities,
     PlanningConstraints,
@@ -315,7 +316,15 @@ class NovelAnalysisAgentProfile:
             segments=segments,
             input_token_budget=input_token_budget,
         )
-        return replace(request, domain_context=hydrated.to_core_context())
+        return replace(
+            request,
+            domain_context=hydrated.to_core_context(),
+            planning_mode=(
+                PlanningMode.PLANNED
+                if hydrated.interaction_kind == "analysis"
+                else request.planning_mode
+            ),
+        )
 
     def run_binding_attributes(self, request: AgentRunRequest):
         context = NovelAnalysisDomainContext.from_core_context(

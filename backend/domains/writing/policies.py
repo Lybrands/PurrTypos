@@ -19,6 +19,8 @@ from purra.contracts import (
 
 WRITING_TOOL_POLICIES: dict[str, ToolPolicy] = {
     # Read-only tools.
+    "searchNovelKnowledge": ToolPolicy(ToolExecutionMode.READ, "检索创作资料"),
+    "readNovelKnowledge": ToolPolicy(ToolExecutionMode.READ, "读取创作资料来源"),
     "getChapterContent": ToolPolicy(ToolExecutionMode.READ, "读取章节正文"),
     "listWritingChapters": ToolPolicy(ToolExecutionMode.READ, "查看写作章节"),
     "batchGetChapterContents": ToolPolicy(ToolExecutionMode.READ, "批量读取章节"),
