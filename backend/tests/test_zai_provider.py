@@ -85,7 +85,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
         [{"role": "user", "content": "继续"}],
         {
             "model": "glm-5.3-flash",
-            "model_profile": "zai:glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash", "profile_binding": "compatible",
             "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
             "thinking": {"type": "enabled"},
             "temperature": 1.0,
@@ -108,7 +108,7 @@ async def test_zai_non_stream_uses_sdk_native_parameters_and_normalizes_response
         "tool_choice": "required",
     }]
     assert result == {
-        "applied_output_limit": 4096,
+        "applied_generation_limit": 4096,
         "message": {
             "role": "assistant",
             "content": "完成",
@@ -179,6 +179,7 @@ async def test_zai_stream_bridges_sync_chunks_and_closes_resources(
         [{"role": "user", "content": "读取"}],
         {
             "model": "glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash", "profile_binding": "compatible",
             "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
             "thinking": {"type": "enabled"},
         },
@@ -214,14 +215,14 @@ async def test_zai_stream_honors_pre_start_cancellation_and_closes_resources(
     signal = asyncio.Event()
     signal.set()
 
-    result = await zai_chat.chat_stream(
-        "secret",
-        [{"role": "user", "content": "取消"}],
-        {"model": "glm-5.3-flash", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
-        signal,
-    )
-    assert [chunk async for chunk in result["stream"]] == []
-    assert raw_stream.close_calls == 1
+    from purra.cancellation import OperationCanceled
+    with pytest.raises(OperationCanceled):
+        await zai_chat.chat_stream("secret", [{"role": "user", "content": "取消"}], {
+            "model": "glm-5.3-flash", "model_profile": "zai:glm-5.3-flash",
+            "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
+        }, signal)
+    assert not client.create_calls
+    assert raw_stream.close_calls == 0
     assert client.close_calls == 1
 
 
@@ -231,13 +232,17 @@ async def test_zai_title_and_model_listing_use_the_sdk(monkeypatch: pytest.Monke
 
     title_client = _FakeClient(_Dumpable({
         "model": "glm-5.3-flash",
-        "choices": [{"message": {"role": "assistant", "content": "「春日写作」"}}],
+        "choices": [{"message": {"role": "assistant", "content": "「春日写作」"}, "finish_reason": "stop"}],
     }))
     monkeypatch.setattr(zai_chat, "_create_client", lambda *_args: title_client)
-    title = await zai_chat.generate_title(
-        "secret",
-        "写一段春天的故事",
-        {"model": "glm-5.3-flash", "baseURL": "https://open.bigmodel.cn/api/paas/v4/"},
+    from application.session_title_service import generate_session_title
+    title = await generate_session_title(
+        api_key="secret", provider="zai", prompt="写一段春天的故事",
+        options={
+            "model": "glm-5.3-flash",
+            "model_profile": "zai:glm-5.3-flash", "profile_binding": "compatible",
+            "baseURL": "https://open.bigmodel.cn/api/paas/v4/",
+        },
     )
     assert title == "春日写作"
     assert title_client.create_calls[0]["thinking"] == {"type": "enabled"}
@@ -283,14 +288,15 @@ async def test_ai_routes_select_zai_for_models_and_titles(monkeypatch: pytest.Mo
         assert base_url == "https://open.bigmodel.cn/api/paas/v4"
         return ["glm-5.3-flash"]
 
-    async def fake_title(api_key, prompt, options):
+    async def fake_title(*, api_key, prompt, options, provider, db):
         assert api_key == "secret"
         assert prompt == "春天"
         assert options["model"] == "glm-5.3-flash"
         return "春日"
 
     monkeypatch.setattr(zai_chat, "list_models", fake_models)
-    monkeypatch.setattr(zai_chat, "generate_title", fake_title)
+    monkeypatch.setattr("application.session_title_service.generate_session_title", fake_title)
+    monkeypatch.setattr("routers.ai.get_db", lambda: None)
 
     models_response = await list_models(ListModelsRequest(
         apiKey="secret",
@@ -307,3 +313,17 @@ async def test_ai_routes_select_zai_for_models_and_titles(monkeypatch: pytest.Mo
         prompt="春天",
     ))
     assert title_response == {"success": True, "data": "春日"}
+
+
+@pytest.mark.parametrize('effort', ['low', 'high', 'max'])
+@pytest.mark.parametrize('stream', [False, True])
+def test_zai_preserves_reasoning_effort_at_sdk_boundary(effort, stream):
+    from infrastructure.models.zai_chat import _build_chat_params
+    from infrastructure.models.profiles.glm5_3_flash import GLM5_3_FLASH_PROFILE
+    params = _build_chat_params([{'role': 'user', 'content': 'test'}], {
+        'model': 'glm-5.3-flash', 'thinking': {'type': 'enabled'},
+        'reasoning_effort': effort, 'max_tokens': 10000,
+    }, GLM5_3_FLASH_PROFILE, stream=stream)
+    assert params['reasoning_effort'] == effort
+    assert params['max_tokens'] == 10000
+    assert params['thinking'] == {'type': 'enabled'}

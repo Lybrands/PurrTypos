@@ -14,6 +14,8 @@ async def create_chat_stream(
     signal: asyncio.Event | None = None,
 ) -> dict[str, Any]:
     """Route a streaming chat request to the appropriate provider adapter."""
+    if api_provider not in {"openai", "anthropic", "zai"}:
+        raise ValueError("unsupported model provider")
     if api_provider == "anthropic":
         from infrastructure.models.anthropic_chat import (
             chat_stream_as_openai_format,
@@ -39,6 +41,8 @@ async def create_chat_no_stream(
     signal: asyncio.Event | None = None,
 ) -> dict[str, Any]:
     """Route a non-streaming chat request to the appropriate provider adapter."""
+    if api_provider not in {"openai", "anthropic", "zai"}:
+        raise ValueError("unsupported model provider")
     if api_provider == "anthropic":
         from infrastructure.models.anthropic_chat import (
             chat_no_stream_as_openai_format,

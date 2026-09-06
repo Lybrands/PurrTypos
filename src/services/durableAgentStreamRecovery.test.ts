@@ -32,7 +32,7 @@ const snapshot = (
   status: AiAgentRunSnapshot['run']['status'],
   events: AiAgentRunSnapshot['events'] = [],
 ): AiAgentRunSnapshot => ({
-  version: 1,
+  version: 2,
   run: {
     runId: 'run-recover',
     sessionId: 7,

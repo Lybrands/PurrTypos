@@ -140,7 +140,6 @@ export default function GhostCompletion({
       ],
       options: {
         ...runtimeOptions,
-        max_tokens: 120,
       },
       enableAgentTools: false,
       bookId: bookId ?? undefined,

@@ -28,7 +28,7 @@ def _providers(key: str) -> MemoryProviders:
             ),
             model="fixture",
             finish_reason="stop",
-            applied_output_limit=cap,
+            applied_generation_limit=cap,
             usage=ModelTokenUsage(1, 1),
         )
 
@@ -45,7 +45,7 @@ def _providers(key: str) -> MemoryProviders:
             max_embedding_calls=20,
             max_input_chars=10_000,
             max_output_tokens=1_024,
-            max_call_output_tokens=512,
+            result_capacity_target_tokens=512,
         ),
         complete=complete,
         embed=embed,

@@ -38,6 +38,7 @@ from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
     parse_candidate_validation_contract,
+    normalize_episode_metadata_payload,
 )
 from exceptions import AppError
 from infrastructure.persistence.sqlite_long_task_repository import (
@@ -345,7 +346,13 @@ class ScreenplayTaskModelCalls:
                 tool_profile=contract.tool_profile,
                 deliverable_revision_scope=_late_stage_revision_scope(
                     descriptor,
-                    allowed_roles={"sceneList", "screenplayDraft"},
+                    allowed_roles={
+                        "sourceAnalysis",
+                        "creativeBrief",
+                        "structure",
+                        "sceneList",
+                        "screenplayDraft",
+                    },
                     required_roles={"sceneList"},
                     base_revision_id=str(
                         unit_input.get("baseRevisionId") or ""
@@ -360,6 +367,7 @@ class ScreenplayTaskModelCalls:
                 "kind": contract.validation_kind,
                 "expectedSceneId": scene_id,
             },
+            scene_ids_by_episode=_scene_ids_by_episode(task),
             signal=signal,
         )
         candidate = result.candidate
@@ -421,6 +429,7 @@ class ScreenplayTaskModelCalls:
                 "kind": contract.validation_kind,
                 "episodeNumber": episode_number,
             },
+            scene_ids_by_episode=_scene_ids_by_episode(task),
             signal=signal,
         )
         return {
@@ -493,6 +502,7 @@ class ScreenplayTaskModelCalls:
                 "reviewedDraftId": reviewed_draft_id,
                 "reviewedContentDigest": reviewed_input.content_digest,
             },
+            scene_ids_by_episode=_scene_ids_by_episode(task),
             signal=signal,
         )
         payload = dict(result.candidate["payload"])
@@ -741,6 +751,7 @@ class ScreenplayTaskModelCalls:
             conversation_turn_id=str(task["turnId"]),
             bind_run=bind_run,
             candidate_validation_contract=validation_contract,
+            scene_ids_by_episode=_scene_ids_by_episode(task),
             signal=signal,
         )
         return {
@@ -903,6 +914,7 @@ class ScreenplayTaskModelCalls:
             ],
         }
         assert self._models is not None
+        contract = self._part_contract(task, unit)
         result = await self._models.run_public_text(
             runtime=runtime,
             session_id=int(task["sessionId"]),
@@ -1217,6 +1229,7 @@ async def _record_part_run_usage(
 ):
     row = await db.fetch_one(
         "SELECT status, model_attempt_count, unreported_usage_attempts, "
+        "unreported_reasoning_attempts, "
         "input_tokens, output_tokens, reasoning_tokens "
         "FROM ai_agent_runs WHERE id = ?",
         [str(run_id or "").strip()],
@@ -1231,8 +1244,12 @@ async def _record_part_run_usage(
             row.get("unreported_usage_attempts") or 0
         ),
         input_tokens=int(row.get("input_tokens") or 0),
-        output_tokens=int(row.get("output_tokens") or 0),
-        reasoning_tokens=int(row.get("reasoning_tokens") or 0),
+        generation_tokens=int(row.get("output_tokens") or 0),
+        reasoning_tokens=(
+            None
+            if int(row.get("unreported_reasoning_attempts") or 0) > 0
+            else int(row.get("reasoning_tokens") or 0)
+        ),
     )
     for _attempt in range(16):
         task = await long_tasks.load(task_id)
@@ -1431,6 +1448,43 @@ def _dependency_part_keys(
     )
 
 
+def _scene_ids_by_episode(
+    task: Mapping[str, Any],
+) -> dict[int, tuple[str, ...]]:
+    """Return the accepted scene order without adding it to model messages."""
+
+    result: dict[int, tuple[str, ...]] = {}
+    for candidate in task.get("units") or ():
+        if not isinstance(candidate, Mapping):
+            continue
+        unit_input = candidate.get("input")
+        if not isinstance(unit_input, Mapping):
+            continue
+        number = unit_input.get("episodeNumber")
+        raw_scene_ids = unit_input.get("sceneIds")
+        if (
+            isinstance(number, bool)
+            or not isinstance(number, int)
+            or number <= 0
+            or not isinstance(raw_scene_ids, (list, tuple))
+            or not raw_scene_ids
+        ):
+            continue
+        scene_ids = tuple(
+            str(scene_id).strip() for scene_id in raw_scene_ids
+        )
+        if (
+            any(not scene_id for scene_id in scene_ids)
+            or len(scene_ids) != len(set(scene_ids))
+        ):
+            raise ValueError("screenplay task scene order is invalid")
+        existing = result.get(number)
+        if existing is not None and existing != scene_ids:
+            raise ValueError("screenplay task scene order changed within an episode")
+        result[number] = scene_ids
+    return result
+
+
 def _creative_brief_revision_scope(
     descriptor: Mapping[str, Any] | None,
 ) -> dict[str, str]:
@@ -1559,8 +1613,10 @@ def _completed_part_outputs(
 
 def _scene_tool_instruction(episode_number: int, scene_id: str) -> str:
     return f"""创作第 {episode_number} 集的场景 {json.dumps(scene_id, ensure_ascii=False)}，遵循 instruction、constraints、preserve 和绑定的场景计划。
-缺少当前集材料时调用 getScreenplayEpisodeContext；补充依据沿用 evidenceDescriptor 绑定版本，其他集仅用于连续性核对。
-{_DEPENDENCY_READ_INSTRUCTION}
+先调用 getScreenplaySceneContext 读取当前场景计划、本集分集结构、精确前场衔接、锁定的创作简报和原作分析目录。
+以场景计划、分集结构和创作简报为创作约束。材料已足够时直接创作。需要原作依据时，使用 sourceAnalysis.readRequests 中的参数读取相关分析小节；sectionKeys 是文档字段键，不是章节名或 chapterId，可将同一文档的相关键合并到一次读取。原作关键动作或事实仍无法确认时，再读取直接相关的原文章节或检索故事事实。已读取材料不重复读取，其他集仅用于连续性核对。
+工具执行前按公开执行说明协议介绍当前场景目标与下一步动作；说明与最终剧本文本分开。
+优先保证在一次输出内完整结束本场。剧本文本不包含分析说明，也不延展场景计划之外的内容。
 最终回复只输出当前场景的完整可拍摄剧本文本。"""
 
 
@@ -1581,9 +1637,10 @@ def _episode_metadata_tool_instruction(episode_number: int) -> str:
     return f"""根据第 {episode_number} 集已完成的场景，生成集标题和连续性摘要。
 {_DEPENDENCY_READ_INSTRUCTION}
 按 sceneIds 顺序总结已发生的结果与未完成事项。
+dependencyPartKeys 已列出本集全部场景；按该清单批量读取正文，每批最多 12 项。已知键无需另行列目录。
 候选对象：
 {{"episodeNumber":{episode_number},"title":"简洁集标题","continuitySummary":"供下一集续写的连续性摘要"}}
-{_CANDIDATE_WRITE_INSTRUCTION}"""
+读取成功后，最终回复只输出上述 JSON 对象。候选结果由宿主校验并保存。"""
 
 
 def _review_dimension_tool_instruction(
@@ -1595,7 +1652,7 @@ def _review_dimension_tool_instruction(
     issue_limit = len(unique_scene_ids)
     example_scene_ids = json.dumps(unique_scene_ids[:1], ensure_ascii=False)
     return f"""审阅第 {episode_number} 集绑定场景的 {dimension} 维度。
-使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext。草稿与场景计划分别绑定 reviewedDraftId、evidenceDescriptor.reviewInputRef.scenePlanRevisionId；按需读取其他集或项目文档核对。
+先调用 getScreenplayEpisodeContext 读取当前集材料。草稿与场景计划分别绑定 reviewedDraftId、evidenceDescriptor.reviewInputRef.scenePlanRevisionId；按需读取其他集或项目文档核对。
 候选对象：
 {{"episodeNumber":{episode_number},"reviewDimension":{json.dumps(dimension, ensure_ascii=False)},"title":{json.dumps(f'第 {episode_number} 集 {dimension} 审阅', ensure_ascii=False)},"contentText":"当前维度的审阅结论及其依据","contentJson":{{"verdict":"revise","issues":[{{"id":"issue-1","severity":"major","description":"具体表现、造成的影响与修改方向","sceneIds":{example_scene_ids}}}]}}}}
 issues 按影响排序，同因合并，最多提交 {issue_limit} 个问题；sceneIds 只引用 {json.dumps(unique_scene_ids, ensure_ascii=False)}。
@@ -1754,7 +1811,7 @@ def _creative_brief_section_tool_instruction(section_key: str) -> str:
         )
     )
     return f"""生成 creativeBrief 的 {section_key} 章节，遵循 instruction、constraints、preserve 和项目已确认的创作条件。
-缺少项目依据时，按 evidenceDescriptor.acceptedRevisionIds 绑定的 role、revisionId 调用 readScreenplayDeliverable。
+evidenceDescriptor.acceptedRevisionIds 非空时，先按其绑定的 role、revisionId 调用 readScreenplayDeliverable；为空时仅依据当前任务的原创约束。
 {_DEPENDENCY_READ_INSTRUCTION}
 候选对象：
 {{"sectionKey":"{section_key}","title":"章节标题","contentText":"当前章节的紧凑 Markdown 正文","contentJson":{content_json}}}
@@ -1804,7 +1861,7 @@ def _source_chapter_digest_tool_instruction(
 ) -> str:
     section_key = f"source_digest:chapter:{chapter_id}"
     return f"""提取第 {chapter_index} 章（{json.dumps(chapter_title, ensure_ascii=False)}）的事实摘要，范围为绑定的 chapterId。
-缺少本章正文时调用 readSourceChapters；其他授权章节仅作理解本章的上下文。
+先调用 readSourceChapters 读取本章正文；其他授权章节仅作理解本章的上下文。
 候选对象：
 {{"sectionKey":{json.dumps(section_key, ensure_ascii=False)},"title":"当前章节事实摘要","contentText":"只包含本章事件边界的紧凑摘要","contentJson":{_source_digest_schema(chapter_id)}}}
 {_SOURCE_DIGEST_CONSTRAINTS}
@@ -1859,7 +1916,7 @@ def _source_analysis_section_tool_instruction(section_key: str) -> str:
 
 def _structure_episode_plan_index_tool_instruction() -> str:
     return f"""依据项目形式、主线阶段和用户约束划分各集边界，生成分集索引。
-缺少项目依据时，按 evidenceDescriptor 绑定的 role、revisionId 调用 readScreenplayDeliverable。
+先按 evidenceDescriptor 绑定的 role、revisionId 调用 readScreenplayDeliverable 读取项目依据。
 {_DEPENDENCY_READ_INSTRUCTION}
 候选对象：
 {{"sectionKey":"episode_plan:index","title":"分集索引","contentText":"简短的分集索引 Markdown","contentJson":{{"episodes":[{{"number":1,"id":"ep01","title":"集标题","summary":"本集叙事边界与核心推进","sourceChapterIds":[]}}]}}}}
@@ -1869,7 +1926,7 @@ episodes 包含 1 至 {_MAX_STRUCTURE_EPISODES} 集，number 从 1 连续递增�
 
 def _structure_series_arc_index_tool_instruction() -> str:
     return f"""生成全剧主线的阶段索引。
-缺少创作依据时，按 evidenceDescriptor 绑定的 role、revisionId 调用 readScreenplayDeliverable。
+先按 evidenceDescriptor 绑定的 role、revisionId 调用 readScreenplayDeliverable 读取创作依据。
 候选对象：
 {{"sectionKey":"series_arc:index","title":"全剧阶段索引","contentText":"简短的阶段索引 Markdown","contentJson":{{"phases":[{{"key":"phase-1","title":"阶段标题","objective":"该阶段的叙事目标"}}]}}}}
 phases 按叙事顺序排列，包含 1 至 {_MAX_STRUCTURE_PHASES} 项。key、title 各自唯一且非空；key 长度 1 至 128，只用字母、数字、点、下划线或连字符；objective 非空。
@@ -1933,7 +1990,7 @@ characterArcs 只含当前人物，各字段非空。turningEpisodes 至少一�
 
 def _scene_list_fragment_tool_instruction(episode_number: int) -> str:
     return f"""规划第 {episode_number} 集场景，遵循已采纳结构的目标与叙事边界。
-缺少当前集结构时，调用 readScreenplayDeliverable，使用 role=structure、evidenceDescriptor.structureRevisionId 和 episodeNumber={episode_number}；其他集或项目文档按需用于连续性核对。
+先调用 readScreenplayDeliverable 读取当前集结构，使用 role=structure、evidenceDescriptor.structureRevisionId 和 episodeNumber={episode_number}；其他集或项目文档按需用于连续性核对。
 候选对象：
 {{"sectionKey":"episode-{episode_number}","title":"第 {episode_number} 集场景表","contentText":"当前集场景表的 Markdown 文档","contentJson":{{"scenes":[{{"id":"ep{episode_number}-scene-1","episodeNumber":{episode_number},"heading":"内外景·地点·时间","objective":"目标","conflict":"冲突或实际阻力","turn":"局势变化或本场形成的新条件","synopsis":"场景梗概"}}]}}}}
 scenes 非空，按出场顺序排列，只含当前集；id 全剧唯一，修订保留原 id，新场景可用集号加场内序号。
@@ -3000,26 +3057,7 @@ def _validate_episode_metadata_candidate(
     candidate: Mapping[str, Any],
     episode_number: int,
 ) -> dict[str, Any]:
-    raw = candidate.get("payload")
-    if (
-        not isinstance(raw, Mapping)
-        or set(raw) != {"episodeNumber", "title", "continuitySummary"}
-        or isinstance(raw.get("episodeNumber"), bool)
-        or not isinstance(raw.get("episodeNumber"), int)
-        or raw.get("episodeNumber") != episode_number
-        or not isinstance(raw.get("title"), str)
-        or not isinstance(raw.get("continuitySummary"), str)
-    ):
-        raise ValueError("episode metadata number does not match")
-    title = raw["title"].strip()
-    continuity = raw["continuitySummary"].strip()
-    if not title or not continuity:
-        raise ValueError("episode metadata title and continuity are required")
-    metadata = {
-        "episodeNumber": episode_number,
-        "title": title,
-        "continuitySummary": continuity,
-    }
+    metadata = normalize_episode_metadata_payload(candidate.get("payload"), episode_number)
     return {**dict(candidate), "payload": metadata, "contentText": ""}
 
 

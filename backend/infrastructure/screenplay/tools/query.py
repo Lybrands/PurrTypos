@@ -139,6 +139,7 @@ class ScreenplayToolQuery:
                 row,
                 output,
                 content_limit=content_limit,
+                full_text=scope.get("toolAccess") == "episode_metadata",
             ))
         return {"dependencies": dependencies}
 
@@ -206,7 +207,15 @@ class ScreenplayToolQuery:
         role = str(arguments["role"])
         revision_id = str(arguments.get("revisionId") or "").strip()
         episode = arguments.get("episodeNumber")
+        requested_representation = arguments.get("representation")
         defaults = scope.get("deliverableRevisionScope") or {}
+        if scope.get("toolAccess") == "draft_scene":
+            bound_revision = str(defaults.get(role) or "").strip()
+            if not bound_revision or (revision_id and revision_id != bound_revision):
+                raise ScreenplayToolInputError(
+                    "Scene reads require a bound reference revision.",
+                    guidance="Use the role and revisionId from the bound scene materials.",
+                )
         revision_id = revision_id or str(defaults.get(role) or "").strip()
         if revision_id:
             row = await self._db.fetch_one(
@@ -279,22 +288,51 @@ class ScreenplayToolQuery:
                         "role": role, "revisionId": revision_id, "available": True,
                         "episodeNumbers": list(numbers), "requiresEpisodeNumber": True,
                     }
-        return {
+        result = {
             "role": role,
             "revisionId": revision_id,
             "available": part is not None,
-            **(
-                {
-                    "payload": _bounded_payload(
-                        _json(part.get("payload_json")),
-                        32_000,
-                    ),
-                    "contentText": _clip(part.get("content_text"), 32_000),
-                }
-                if part is not None
-                else {}
-            ),
         }
+        if part is None:
+            return result
+        content = _json(part.get("payload_json"))
+        sections = arguments.get("sectionKeys")
+        if sections is not None:
+            if (
+                not isinstance(sections, list) or not 1 <= len(sections) <= 12
+                or any(not isinstance(key, str) or key not in content for key in sections)
+                or len(set(sections)) != len(sections)
+                or requested_representation == "text"
+            ):
+                raise ScreenplayToolInputError(
+                    "sectionKeys must identify distinct existing structured sections.",
+                    guidance="Select keys from the document section index and use structured representation.",
+                    details={
+                        "availableSectionKeys": list(content),
+                        "readRequests": _section_read_requests(content, role, revision_id, episode),
+                    },
+                )
+            content = {key: content[key] for key in sections}
+            result["sectionKeys"] = sections
+        if requested_representation == "section_index":
+            return {
+                **result, **_scene_analysis_index(content),
+                "readRequests": _section_read_requests(content, role, revision_id, episode),
+            }
+        structured = _bounded_payload(
+            content,
+            32_000,
+        )
+        text = _clip(part.get("content_text"), 32_000)
+        representation = str(
+            requested_representation
+            or ("structured" if structured else "text")
+        )
+        result.update({
+            "representation": representation,
+            "content": structured if representation == "structured" else text,
+        })
+        return result
 
     async def search_deliverables(self, scope, arguments) -> dict[str, Any]:
         query = str(arguments["query"]).strip()
@@ -401,6 +439,98 @@ class ScreenplayToolQuery:
                 context.get("currentDraft"),
                 60_000,
             ),
+        }
+
+    async def scene_context(self, scope, _arguments) -> dict[str, Any]:
+        if (
+            str(scope.get("toolAccess") or "") != "draft_scene"
+            or str(scope.get("expectedPartType") or "") != "scene"
+        ):
+            raise ScreenplayToolInputError(
+                "The bound Run is not a draft scene.",
+                guidance="Use this tool only from a draft scene Part.",
+            )
+        scene_id = str(scope.get("expectedPartKey") or "").strip()
+        if not scene_id:
+            raise ScreenplayToolInputError(
+                "The current scene identity is missing.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        episode_context = await self.episode_context(scope, {})
+        episode = episode_context.get("episode")
+        scenes = episode.get("scenes") if isinstance(episode, Mapping) else None
+        matches = [
+            dict(item)
+            for item in scenes or ()
+            if isinstance(item, Mapping)
+            and str(item.get("id") or "").strip() == scene_id
+        ]
+        if len(matches) != 1:
+            raise ScreenplayToolInputError(
+                "The current scene is absent or duplicated in the bound scene list.",
+                guidance="Stop this Run and rebuild it from the accepted scene list.",
+            )
+        dependency_keys = scope.get("dependencyPartKeys") or ()
+        if not isinstance(dependency_keys, (list, tuple)) or any(
+            not isinstance(value, str) or not value.strip()
+            for value in dependency_keys
+        ):
+            raise ScreenplayToolInputError(
+                "The current scene dependency scope is invalid.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        dependency_result = (
+            await self.task_dependencies(
+                scope,
+                {"partKeys": list(dependency_keys)},
+            )
+            if dependency_keys
+            else {"dependencies": []}
+        )
+        revision_scope = scope.get("deliverableRevisionScope") or {}
+        if not isinstance(revision_scope, Mapping):
+            raise ScreenplayToolInputError(
+                "The current scene Revision scope is invalid.",
+                guidance="Stop this Run and retry the durable task from the host.",
+            )
+        upstream: dict[str, Any] = {}
+        for role in ("sourceAnalysis", "creativeBrief", "structure"):
+            revision_id = str(revision_scope.get(role) or "").strip()
+            if not revision_id:
+                continue
+            material = await self.read_deliverable(scope, {
+                "role": role,
+                "revisionId": revision_id,
+                "representation": "section_index" if role == "sourceAnalysis" else "structured",
+                **({"episodeNumber": scope["boundEpisodeNumber"]} if role == "structure" else {}),
+            })
+            if material.get("available"):
+                upstream[role] = {
+                    "revisionId": revision_id,
+                    **({"representation": "section_index", "sections": material.get("sections", []),
+                        "readRequests": material.get("readRequests", [])}
+                       if role == "sourceAnalysis" else {"content": material.get("content")}),
+                }
+        episode_plan = {
+            key: value
+            for key, value in dict(episode or {}).items()
+            if key != "scenes"
+        }
+        return {
+            "sceneListId": episode_context.get("sceneListId"),
+            "episodeNumber": scope.get("boundEpisodeNumber"),
+            "sceneId": scene_id,
+            "episodePlan": episode_plan,
+            "scenePlan": matches[0],
+            "previousEpisode": episode_context.get("previousEpisode"),
+            "currentSceneDraft": _current_scene_draft(
+                episode_context.get("currentDraft"),
+                scene_id,
+            ),
+            "dependencies": dependency_result.get("dependencies") or [],
+            "sourceAnalysis": upstream.get("sourceAnalysis"),
+            "creativeBrief": upstream.get("creativeBrief"),
+            "episodeStructure": upstream.get("structure"),
         }
 
     async def inspect_source_structure(self, scope, arguments) -> dict[str, Any]:
@@ -932,11 +1062,34 @@ def _bounded_payload(value: object, limit: int) -> dict[str, Any] | None:
     }
 
 
+def _scene_analysis_index(content: object) -> dict[str, Any]:
+    values = content if isinstance(content, Mapping) else {}
+    return {
+        "representation": "section_index",
+        "sections": [
+            {"key": str(key), "characters": len(json.dumps(value, ensure_ascii=False))}
+            for key, value in values.items()
+            if key not in {"schemaVersion", "documentKind"}
+        ],
+    }
+
+
+def _section_read_requests(content, role, revision_id, episode=None):
+    return [
+        {"role": role, "revisionId": revision_id,
+         "representation": "structured", "sectionKeys": [str(key)],
+         **({"episodeNumber": episode} if episode is not None else {})}
+        for key in content
+        if key not in {"schemaVersion", "documentKind"}
+    ]
+
+
 def _task_dependency_payload(
     row: Mapping[str, Any],
     output: Mapping[str, Any],
     *,
     content_limit: int,
+    full_text: bool = False,
 ) -> dict[str, Any]:
     metadata = _json(row.get("metadata_json"))
     content = output.get("contentJson")
@@ -999,7 +1152,11 @@ def _task_dependency_payload(
             or "unknown"
         ),
         "contentJson": content_json,
-        **({"contentTextTail": text[-1_200:]} if text else {}),
+        **(({
+            "contentText": _clip(text, content_limit),
+            "contentTextCharacters": len(text),
+            "contentTextTruncated": len(text) > content_limit,
+        } if full_text else {"contentTextTail": text[-1_200:]}) if text else {}),
         "sourceRunRefs": source_run_refs,
     }
 
@@ -1012,6 +1169,31 @@ def _continuity_only(value: object) -> dict[str, Any] | None:
         for key in ("episodeNumber", "title", "continuitySummary")
         if value.get(key) is not None
     }
+
+
+def _current_scene_draft(
+    value: object,
+    scene_id: str,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    result = {
+        key: value[key]
+        for key in ("episodeNumber", "title", "continuitySummary")
+        if key in value
+    }
+    raw_scenes = value.get("sceneTexts") or value.get("scenes") or ()
+    if isinstance(raw_scenes, list):
+        selected = next((
+            dict(item)
+            for item in raw_scenes
+            if isinstance(item, Mapping)
+            and str(item.get("sceneId") or item.get("id") or "").strip()
+            == scene_id
+        ), None)
+        if selected is not None:
+            result["scene"] = selected
+    return result or None
 
 
 __all__ = ["ScreenplayToolQuery"]

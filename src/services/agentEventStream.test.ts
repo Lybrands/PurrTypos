@@ -54,3 +54,33 @@ test('empty pages may advance but non-advancing backlog fails closed', async () 
     onEvent: () => { assert.fail('invalid page must not commit') },
   }), /游标/)
 })
+
+test('buffered replay yields between slices without dropping or reordering pages', async t => {
+  let now = 0
+  t.mock.method(performance, 'now', () => now)
+  const order: string[] = []
+  await consumeAgentEventStream({
+    url: () => '/events', signal: new AbortController().signal,
+    fetch: (async () => stream(
+      { nextCursor: 1, hasMore: true }, { nextCursor: 2, hasMore: true },
+      { nextCursor: 3, done: true },
+    )) as typeof fetch,
+    onEvent: page => { order.push(`page:${page.nextCursor}`); now += 9 },
+    yieldToMain: async () => { order.push('yield') },
+  })
+  assert.deepEqual(order, ['page:1', 'yield', 'page:2', 'yield', 'page:3'])
+})
+
+test('cancellation during a replay yield stops consumption of the buffered remainder', async t => {
+  let now = 0
+  t.mock.method(performance, 'now', () => now)
+  const owner = new AbortController()
+  const cursors: number[] = []
+  await consumeAgentEventStream({
+    url: () => '/events', signal: owner.signal,
+    fetch: (async () => stream({ nextCursor: 1 }, { nextCursor: 2, done: true })) as typeof fetch,
+    onEvent: page => { cursors.push(page.nextCursor); now += 9 },
+    yieldToMain: async () => { owner.abort() },
+  })
+  assert.deepEqual(cursors, [1])
+})

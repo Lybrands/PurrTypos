@@ -61,7 +61,6 @@ def _public_bundle(
     user_request: str,
 ) -> PublicFactBundle:
     facts = tuple(artifact.get("facts") or ())
-    cards = tuple(artifact.get("craftCards") or ())
     for fact_limit, card_limit, text_limit in (
         (10, 5, 360),
         (8, 4, 300),
@@ -73,13 +72,10 @@ def _public_bundle(
             PublicFact("userRequest", _clip(user_request, 1_000)),
             PublicFact("presentationRequirements", (
                 build_agent_final_response_policy()
-                + "\n直接给出一篇连贯、结构清晰的 Markdown 分析答复；综合材料，"
-                "不要逐条倾倒内部记录，也不要提及任务、产物、审核状态或工具。"
-                "内容应覆盖全局故事概览，人物目标与冲突、关键事件及因果脉络，"
-                "把写作技法按类型组织成一个写作 Skill，合并重复或过细的观察；Skill 内只写"
-                "通用写作逻辑和风格特征，不带入人物、地点、具体情节或引文。原文证据如需"
-                "展示必须与 Skill 描述分开。并说明证据覆盖与仍不确定之处。"
-                "明确区分正文事实、角色认知和分析推断，不得把准备分析写成已经完成。"
+                + "\n根据已保存结果简要介绍故事概览和写作方法的用途、适用边界及迁移检验结论。"
+                "不要另行生成或改写一套方法，完整方法与两轮试写在结果面板中供审核。"
+                "复核不通过时明确说明需要修订；通过也只代表模型复核，不能声称普遍有效或已经成熟。"
+                "区分正文事实、角色认知和分析推断，不暴露内部标识。"
             )),
             PublicFact(
                 "storyOverview",
@@ -89,10 +85,13 @@ def _public_bundle(
                 "factThreads",
                 [_fact_projection(item, text_limit) for item in facts[:fact_limit]],
             ),
-            PublicFact(
-                "writingTechniques",
-                [_card_projection(item, text_limit) for item in cards[:card_limit]],
-            ),
+            PublicFact("writingSkill", {
+                "name": (artifact.get("writingSkill") or {}).get("name"),
+                "purpose": (artifact.get("writingSkill") or {}).get("purpose"),
+                "limitations": (artifact.get("writingSkill") or {}).get("limitations", []),
+                "reviewStatus": artifact.get("skillReviewStatus"),
+                "assessment": (artifact.get("distillation") or {}).get("assessment"),
+            }),
             PublicFact("coverage", _coverage_projection(artifact.get("coverage"))),
             PublicFact(
                 "uncertainties",
@@ -125,17 +124,6 @@ def _fact_projection(value: object, limit: int) -> Mapping[str, Any]:
         "predicate": _clip(value.get("predicate"), 120),
         "value": _clip(value.get("value"), limit),
         "lifecycle": _clip(value.get("lifecycleStatus"), 64),
-        "evidence": _evidence_projection(value.get("evidence"), 2),
-    }
-
-
-def _card_projection(value: object, limit: int) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        return {"description": _clip(value, limit)}
-    return {
-        "kind": _clip(value.get("cardKind"), 80),
-        "title": _clip(value.get("title"), 120),
-        "description": _clip(value.get("bodyMarkdown"), limit),
         "evidence": _evidence_projection(value.get("evidence"), 2),
     }
 

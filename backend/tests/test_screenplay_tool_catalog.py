@@ -10,6 +10,7 @@ import pytest_asyncio
 import application.agent_composition as agent_composition_module
 import domains.screenplay_agent.candidate_projection as candidate_projection_module
 from application.composition_factory import create_agent_composition
+from application.agent_tool_presentation import enforce_agent_tool_catalog_presentation
 from application.screenplay_agent_task_executor import (
     normalize_screenplay_candidate,
 )
@@ -21,6 +22,7 @@ from database.connection import DatabaseConnection
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.tools.catalog import (
     build_screenplay_tool_catalog as build_domain_catalog,
+    screenplay_operation_display_params,
     screenplay_tool_display_names,
 )
 from domains.screenplay_agent.tools.schemas import SCREENPLAY_TOOL_SCHEMAS
@@ -31,6 +33,7 @@ from infrastructure.screenplay import (
 from infrastructure.screenplay.candidate_completion_projector import (
     ScreenplayCandidateCompletionProjector,
 )
+from infrastructure.screenplay.tools.query import ScreenplayToolQuery
 from purra.contracts import (
     AgentRunRequest,
     ExecutionState,
@@ -42,6 +45,7 @@ from purra.contracts import (
     ToolCall,
     ToolCallDelta,
 )
+from purra.json_values import freeze_json_mapping
 from purra.artifacts.errors import ArtifactValidationError
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
@@ -106,7 +110,10 @@ def test_screenplay_tool_operations_project_only_the_bound_episode_number():
             name="writeScreenplayCandidatePart",
             arguments_json="{}",
         ),
-    ) == {"episodeNumber": 7}
+    ) == {
+        "episodeNumber": 7,
+        "displayNames": {"zh-CN": "写入第 7 集剧本候选稿"},
+    }
 
 
 @pytest.mark.parametrize(
@@ -122,6 +129,10 @@ def test_screenplay_tool_operations_project_only_the_bound_episode_number():
          {"deliverableRole": "sourceAnalysis"}, "读取原作分析"),
         ({"role": "structure", "episodeNumber": True}, False,
          {"deliverableRole": "structure"}, "读取分集结构"),
+        ({"role": "structure", "episodeNumber": 2, "representation": "text"}, 1,
+         {"deliverableRole": "structure", "episodeNumber": 2,
+          "taskEpisodeNumber": 1, "targetDetail": "渲染文本"},
+         "读取第 2 集分集结构正文"),
     ],
 )
 def test_deliverable_display_distinguishes_read_episode_and_task_episode(
@@ -142,28 +153,48 @@ def test_deliverable_display_distinguishes_read_episode_and_task_episode(
         {**arguments, "private": "secret"},
         ToolCall(id="read", name="readScreenplayDeliverable", arguments_json="{}"),
     )
-    assert params == expected_params
+    assert params == {
+        **expected_params,
+        "displayNames": {"zh-CN": expected_label},
+    }
     assert screenplay_tool_display_names(
         "readScreenplayDeliverable",
         episode_number=params.get("episodeNumber"),
         deliverable_role=params.get("deliverableRole"),
         task_episode_number=params.get("taskEpisodeNumber"),
+        target_detail=params.get("targetDetail"),
     ) == {"zh-CN": expected_label}
 
 
 @pytest.mark.parametrize("name,arguments,label", [
+    ("readScreenplayTaskDependencies", {},
+     "查看第 1 集当前可读取的任务产出"),
     ("readScreenplayTaskDependencies", {"partKeys": ["draft:1:scene-z"]},
-     "读取任务依赖：第 1 集第 1 场产出"),
+     "读取第 1 集第 1 场已完成剧本"),
     ("readScreenplayTaskDependencies", {"partKeys": ["draft:1:scene-a"]},
-     "读取任务依赖：第 1 集第 2 场产出"),
+     "读取第 1 集第 2 场已完成剧本"),
     ("readScreenplayTaskDependencies", {"partKeys": ["draft:2:scene-z"]},
-     "读取任务依赖：第 2 集场景 scene-z 产出"),
+     "读取第 2 集指定场景的已完成剧本"),
     ("searchSourceText", {"query": "母亲\n庆功宴\t起床", "limit": 8},
-     "为第 1 集检索原文：母亲 庆功宴 起床"),
+     "为第 1 集在原文中查找“母亲 庆功宴 起床”"),
     ("searchSourceText", {"query": "网吧 通宵 回家", "limit": 8},
-     "为第 1 集检索原文：网吧 通宵 回家"),
+     "为第 1 集在原文中查找“网吧 通宵 回家”"),
     ("readSourceChapters", {"chapterIds": ["chapter-b", "chapter-a"]},
-     "为第 1 集读取原文章节：第2章 迷途、第1章 清河桥"),
+     "为第 1 集读取第2章 迷途、第1章 清河桥的原文"),
+    ("readSourceChapters", {"chapterIds": ["private-chapter-id"]},
+     "为第 1 集读取所选 1 个原文章节的原文"),
+    ("listSourceCharacters", {"query": "母亲"},
+     "为第 1 集筛选与“母亲”相关的原作人物"),
+    ("listSourceWorldEntities", {"types": ["location", "faction"], "query": "清河"},
+     "为第 1 集在地点、势力中筛选与“清河”相关的条目"),
+    ("listSourceWorldEntities", {"types": ["location", "faction"]},
+     "为第 1 集查看地点、势力设定"),
+    ("readSourceCharacters", {"characterIds": [11, 12]},
+     "为第 1 集读取所选 2 位原作人物的资料"),
+    ("readSourceOutline", {"outlineIds": ["outline-a", "outline-b"]},
+     "为第 1 集读取所选 2 条原作大纲"),
+    ("querySourceStoryFacts", {"query": "红门", "kinds": ["plot_thread"]},
+     "为第 1 集在情节线索中查找与“红门”相关的记录"),
 ])
 def test_screenplay_read_display_uses_requested_targets_and_manifest_order(name, arguments, label):
     request = replace(_request(_context(episode_number=1, source_scope={
@@ -183,6 +214,7 @@ def test_screenplay_read_display_uses_requested_targets_and_manifest_order(name,
         state, {**arguments, "private": "PRIVATE_CONTENT"},
         ToolCall(id="call", name=name, arguments_json=json.dumps(arguments)),
     )
+    assert params["displayNames"] == {"zh-CN": label}
     chunk = _with_screenplay_tool_display_names({
         "kind": "operation.started", "payload": {
             "kind": "tool", "display": {"labelParams": {"toolName": name, **params}},
@@ -190,6 +222,115 @@ def test_screenplay_read_display_uses_requested_targets_and_manifest_order(name,
     })
     assert chunk["payload"]["display"]["labelParams"]["displayNames"] == {"zh-CN": label}
     assert "PRIVATE_CONTENT" not in json.dumps(chunk)
+
+
+def test_composed_screenplay_projection_keeps_frozen_dependency_targets():
+    async def handler(state, arguments, signal):
+        raise AssertionError("display must not execute a tool")
+
+    catalog = enforce_agent_tool_catalog_presentation(
+        "screenplay",
+        build_domain_catalog(
+            handlers={key: handler for key in SCREENPLAY_TOOL_SCHEMAS}
+        ),
+    )
+    registration = next(
+        item for item in catalog.registrations()
+        if item.schema.name == "readScreenplayTaskDependencies"
+    )
+
+    params = registration.operation_display_params(
+        ExecutionState(domain={
+            "boundEpisodeNumber": 1,
+            "sceneIds": ["ep01-s01", "ep01-s02"],
+        }),
+        freeze_json_mapping({"partKeys": ["draft:1:ep01-s02"]}),
+        ToolCall(
+            id="call-frozen-dependency",
+            name="readScreenplayTaskDependencies",
+            arguments_json='{"partKeys":["draft:1:ep01-s02"]}',
+        ),
+    )
+
+    assert params["readTargets"] == ["第 1 集第 2 场已完成剧本"]
+    assert params["displayNames"] == {
+        "zh-CN": "读取第 1 集第 2 场已完成剧本",
+    }
+
+
+def test_dependency_projection_distinguishes_cross_episode_and_structure_parts():
+    params = screenplay_operation_display_params(
+        {
+            "boundEpisodeNumber": 2,
+            "sceneIds": ["ep02-s01"],
+            "sceneIdsByEpisode": {
+                "1": ["ep01-s01", "ep01-s02"],
+                "2": ["ep02-s01"],
+            },
+        },
+        {"partKeys": [
+            "draft:1:ep01-s02",
+            "section:structure:episode_plan:episode-7",
+            "section:structure:series_arc:index",
+            "section:sourceAnalysis:characters",
+        ]},
+        "readScreenplayTaskDependencies",
+    )
+
+    assert params["readTargets"] == [
+        "第 1 集第 2 场已完成剧本",
+        "第 7 集分集结构",
+        "全剧主线阶段目录",
+        "人物分析",
+    ]
+    assert params["displayNames"] == {
+        "zh-CN": "读取第 1 集第 2 场已完成剧本、第 7 集分集结构等 4 项",
+    }
+
+
+def test_screenplay_candidate_display_names_the_bound_business_part():
+    request = replace(
+        _request(_context(
+            target_role="screenplayDraft",
+            expected_part_type="scene",
+            expected_part_key="scene-b",
+            episode_number=3,
+        )),
+        metadata={"screenplaySceneIds": ["scene-a", "scene-b"]},
+    )
+    state = ScreenplayExecutionStateFactory().create(request)
+
+    async def handler(state, arguments, signal):
+        raise AssertionError("display must not execute a tool")
+
+    catalog = build_domain_catalog(
+        handlers={key: handler for key in SCREENPLAY_TOOL_SCHEMAS}
+    )
+    registration = next(
+        item for item in catalog.registrations()
+        if item.schema.name == "writeScreenplayCandidatePart"
+    )
+    params = registration.operation_display_params(
+        state,
+        {"candidate": {"contentText": "PRIVATE_CONTENT"}},
+        ToolCall(
+            id="call-write-scene",
+            name="writeScreenplayCandidatePart",
+            arguments_json="{}",
+        ),
+    )
+
+    assert params == {
+        "episodeNumber": 3,
+        "targetDetail": "第 2 场",
+        "displayNames": {"zh-CN": "写入第 3 集第 2 场候选稿"},
+    }
+    assert screenplay_tool_display_names(
+        "writeScreenplayCandidatePart",
+        episode_number=params["episodeNumber"],
+        target_detail=params["targetDetail"],
+    ) == {"zh-CN": "写入第 3 集第 2 场候选稿"}
+    assert "PRIVATE_CONTENT" not in json.dumps(params)
 
 
 async def _seed_task_dependency(
@@ -865,15 +1006,14 @@ async def test_part_tool_profiles_expose_only_their_declared_capabilities(
         tool_access="final_response",
     )))
 
-    assert "readSourceChapters" in draft
-    assert "getScreenplayEpisodeContext" in draft
-    assert "inspectScreenplayProject" in draft
-    assert "readScreenplayDeliverable" in draft
-    assert "readScreenplayTaskDependencies" in draft
-    assert "writeScreenplayCandidatePart" not in draft
+    assert draft == {
+        "getScreenplaySceneContext",
+        "readScreenplayDeliverable",
+        "readSourceChapters",
+        "querySourceStoryFacts",
+    }
     assert metadata == {
         "readScreenplayTaskDependencies",
-        "writeScreenplayCandidatePart",
     }
     assert review == {
         "inspectScreenplayProject", "readScreenplayDeliverable", "searchScreenplayDeliverables",
@@ -1017,12 +1157,33 @@ async def test_candidate_completion_requires_content_of_required_parts(screenpla
     )
     scope = {"dependencyPartKeys": ["section:premise"]}
 
-    async def record(payload, error=None):
+    await screenplay_tool_db.execute(
+        "INSERT INTO ai_agent_run_events "
+        "(run_id, event_type, kind, source, visibility, payload_json) "
+        "VALUES ('run-dependency-read', 'stream.opened', 'stream.opened', "
+        "'provider', 'private', ?)",
+        [json.dumps({"contextEvidence": [{
+            "source": "purrtypos.prepared_read",
+            "metadata": {
+                "complete": True,
+                "toolName": "readScreenplayTaskDependencies",
+                "partKeys": ["section:premise"],
+            },
+        }]})],
+    )
+    with pytest.raises(ValueError, match="dependencies were not read"):
+        await projector._validate_dependency_read("run-dependency-read", scope)
+
+    async def record(
+        payload,
+        error=None,
+        tool_name="readScreenplayTaskDependencies",
+    ):
         await screenplay_tool_db.execute(
             "INSERT INTO ai_agent_run_events (run_id, event_type, payload_json) "
             "VALUES ('run-dependency-read', 'tool.results', ?)",
             [json.dumps({"results": [{
-                "tool_name": "readScreenplayTaskDependencies", "error": error,
+                "tool_name": tool_name, "error": error,
                 "content": json.dumps(payload),
             }]})],
         )
@@ -1035,11 +1196,14 @@ async def test_candidate_completion_requires_content_of_required_parts(screenpla
         await record(payload, error)
         with pytest.raises(ValueError, match="dependencies were not read"):
             await projector._validate_dependency_read("run-dependency-read", scope)
-    await record({"dependencies": [{"partKey": "section:premise"}]})
+    await record(
+        {"dependencies": [{"partKey": "section:premise"}]},
+        tool_name="getScreenplaySceneContext",
+    )
     await projector._validate_dependency_read("run-dependency-read", scope)
 
 
-async def test_draft_scene_completion_evidence_requires_episode_context_read(
+async def test_draft_scene_completion_evidence_accepts_scene_or_legacy_context(
     screenplay_tool_db,
 ):
     projector = ScreenplayCandidateCompletionProjector(
@@ -1051,7 +1215,7 @@ async def test_draft_scene_completion_evidence_requires_episode_context_read(
         "getScreenplayEpisodeContext",
     )
     for sequence, tool_name in enumerate(
-        ("inspectSourceStructure", "getScreenplayEpisodeContext"),
+        ("inspectSourceStructure", "getScreenplaySceneContext"),
         start=1,
     ):
         operation_id = f"operation-draft-read-{sequence}"
@@ -1080,17 +1244,115 @@ async def test_draft_scene_completion_evidence_requires_episode_context_read(
                 f"draft-read-finish-{sequence}",
             ],
         )
-        has_episode_context = await projector._has_successful_tool_read(
+        has_scene_context = await projector._has_successful_tool_read(
             "run-draft-read",
-            "getScreenplayEpisodeContext",
+            "getScreenplaySceneContext",
         )
-        assert has_episode_context is (tool_name == "getScreenplayEpisodeContext")
+        assert has_scene_context is (tool_name == "getScreenplaySceneContext")
     assert await projector._has_successful_tool_read(
-        "run-draft-read", "getScreenplayEpisodeContext", episode_number=2,
+        "run-draft-read", "getScreenplaySceneContext", episode_number=2,
     )
     assert not await projector._has_successful_tool_read(
-        "run-draft-read", "getScreenplayEpisodeContext", episode_number=1,
+        "run-draft-read", "getScreenplaySceneContext", episode_number=1,
     )
+
+
+async def test_scene_context_uses_only_host_bound_scene_dependencies_and_revisions(
+    screenplay_tool_db,
+):
+    query = ScreenplayToolQuery(screenplay_tool_db)
+    calls = []
+
+    async def episode_context(scope, arguments):
+        calls.append(("episode", arguments))
+        return {
+            "sceneListId": "scene-list-locked",
+            "episode": {
+                "number": 2,
+                "title": "第二集",
+                "summary": "本集推进",
+                "scenes": [
+                    {"id": "scene-1", "objective": "旧场目标"},
+                    {"id": "scene-2", "objective": "当前场目标"},
+                ],
+            },
+            "previousEpisode": {"episodeNumber": 1, "continuitySummary": "承接"},
+            "currentDraft": {
+                "episodeNumber": 2,
+                "sceneTexts": [
+                    {"sceneId": "scene-1", "sceneText": "旧场正文"},
+                    {"sceneId": "scene-2", "sceneText": "当前场正文"},
+                ],
+            },
+        }
+
+    async def task_dependencies(scope, arguments):
+        calls.append(("dependencies", arguments))
+        return {"dependencies": [{"partKey": arguments["partKeys"][0]}]}
+
+    async def read_deliverable(scope, arguments):
+        calls.append(("deliverable", arguments))
+        return {
+            "available": True,
+            "content": {"constraints": "完整创作约束"},
+            "sections": [{"key": "characters", "characters": 16746}],
+        }
+
+    query.episode_context = episode_context
+    query.task_dependencies = task_dependencies
+    query.read_deliverable = read_deliverable
+    result = await query.scene_context(
+        {
+            "toolAccess": "draft_scene",
+            "expectedPartType": "scene",
+            "expectedPartKey": "scene-2",
+            "boundEpisodeNumber": 2,
+            "dependencyPartKeys": ["draft:2:scene-1"],
+            "deliverableRevisionScope": {
+                "sourceAnalysis": "analysis-locked",
+                "creativeBrief": "brief-locked",
+                "structure": "structure-locked",
+                "sceneList": "scene-list-locked",
+            },
+        },
+        {},
+    )
+
+    assert result["scenePlan"] == {
+        "id": "scene-2",
+        "objective": "当前场目标",
+    }
+    assert result["currentSceneDraft"]["scene"] == {
+        "sceneId": "scene-2",
+        "sceneText": "当前场正文",
+    }
+    assert result["dependencies"] == [{"partKey": "draft:2:scene-1"}]
+    assert result["sourceAnalysis"]["revisionId"] == "analysis-locked"
+    assert result["creativeBrief"]["revisionId"] == "brief-locked"
+    assert result["sourceAnalysis"]["sections"] == [{"key": "characters", "characters": 16746}]
+    assert "content" not in result["sourceAnalysis"]
+    assert result["creativeBrief"]["content"] == {"constraints": "完整创作约束"}
+    assert result["episodeStructure"] == {
+        "revisionId": "structure-locked", "content": {"constraints": "完整创作约束"},
+    }
+    assert calls == [
+        ("episode", {}),
+        ("dependencies", {"partKeys": ["draft:2:scene-1"]}),
+        ("deliverable", {
+            "role": "sourceAnalysis",
+            "revisionId": "analysis-locked",
+            "representation": "section_index",
+        }),
+        ("deliverable", {
+            "role": "creativeBrief",
+            "revisionId": "brief-locked",
+            "representation": "structured",
+        }),
+        ("deliverable", {
+            "role": "structure", "revisionId": "structure-locked",
+            "representation": "structured", "episodeNumber": 2,
+        }),
+    ]
 
 
 async def test_candidate_artifact_stores_long_content_only_once(
@@ -1627,11 +1889,70 @@ async def test_deliverable_read_uses_reference_defaults_and_allows_other_version
     )
     wrong_role = await read(state, {"role": "sourceAnalysis"})
 
-    assert json.loads(bound.content)["revisionId"] == "brief-bound"
+    bound_payload = json.loads(bound.content)
+    assert bound_payload["revisionId"] == "brief-bound"
+    assert bound_payload["representation"] == "text"
+    assert bound_payload["content"] == "brief-bound"
+    assert "payload" not in bound_payload
+    assert "contentText" not in bound_payload
     assert old.error_code is None
     assert json.loads(old.content)["revisionId"] == "brief-old"
     assert wrong_role.error_code is None
     assert json.loads(wrong_role.content)["available"] is False
+
+    payload = {"characters": {"name": "角色😀"}, "story": "长篇原作" * 10000}
+    await screenplay_tool_db.execute(
+        "UPDATE screenplay_revision_parts SET payload_json = ? WHERE revision_id = 'brief-bound'",
+        [json.dumps(payload, ensure_ascii=False)],
+    )
+    scene = ExecutionState(domain=_context(
+        expected_part_type="scene", expected_part_key="scene-a", tool_access="draft_scene",
+        deliverable_revision_scope={"creativeBrief": "brief-bound"},
+    ).to_core_context().payload, run_id="scene-read")
+    index = json.loads((await read(scene, {"role": "creativeBrief", "representation": "section_index"})).content)
+    assert index["sections"] == [
+        {"key": key, "characters": len(json.dumps(value, ensure_ascii=False))}
+        for key, value in payload.items()
+    ]
+    selected = json.loads((await read(scene, {"role": "creativeBrief", "sectionKeys": ["characters"]})).content)
+    assert selected["content"] == {"characters": payload["characters"]}
+    ready = json.loads((await read(scene, index["readRequests"][0])).content)
+    assert ready["content"] == selected["content"]
+    failed = json.loads((await read(scene, {"role": "creativeBrief", "sectionKeys": ["misspelled"]})).content)
+    repaired = json.loads((await read(scene, failed["readRequests"][0])).content)
+    assert repaired["content"] == selected["content"]
+    for invalid in (
+        {"role": "creativeBrief", "revisionId": "brief-old"},
+        {"role": "sourceAnalysis"},
+        {"role": "creativeBrief", "sectionKeys": ["missing"]},
+        {"role": "creativeBrief", "sectionKeys": ["missing"], "representation": "section_index"},
+        {"role": "creativeBrief", "sectionKeys": ["characters", "characters"]},
+        {"role": "creativeBrief", "sectionKeys": ["characters"], "representation": "text"},
+    ):
+        assert (await read(scene, invalid)).error_code == "tool_input_invalid"
+
+
+def test_metadata_reads_scene_body_while_scene_reads_only_continuity_tail():
+    from infrastructure.screenplay.tools.query import _task_dependency_payload
+    row = {"unit_id": "draft:1:scene-z", "metadata_json": "{}"}
+    output = {"sceneText": "开头" + "中间" * 800 + "结尾"}
+    scene = _task_dependency_payload(row, output, content_limit=4000)
+    metadata = _task_dependency_payload(row, output, content_limit=4000, full_text=True)
+    assert scene["contentTextTail"] == output["sceneText"][-1200:]
+    assert "contentText" not in scene
+    assert metadata["contentText"] == output["sceneText"]
+    assert not metadata["contentTextTruncated"]
+    limited = _task_dependency_payload(row, output, content_limit=1500, full_text=True)
+    assert limited["contentTextTruncated"]
+    assert limited["contentTextCharacters"] == len(output["sceneText"])
+
+
+def test_scene_context_label_uses_manifest_ordinal_without_exposing_internal_id():
+    params = screenplay_operation_display_params(
+        {"boundEpisodeNumber": 1, "expectedPartKey": "private-a", "sceneIds": ["private-z", "private-a"]},
+        {}, "getScreenplaySceneContext",
+    )
+    assert params["targetDetail"] == "第 2 场的场景计划、衔接与改编依据"
 
 
 async def test_scene_list_structure_read_can_select_any_episode_or_full_document(
@@ -1684,8 +2005,13 @@ async def test_scene_list_structure_read_can_select_any_episode_or_full_document
     )
 
     full = json.loads((await read(state, {"role": "structure"})).content)
-    assert len(full["payload"]["episodes"]) == 2
+    assert full["representation"] == "structured"
+    assert len(full["content"]["episodes"]) == 2
     bound = json.loads((await read(state, {"role": "structure", "episodeNumber": 2})).content)
+    text = json.loads((await read(state, {
+        "role": "structure",
+        "representation": "text",
+    })).content)
     wrong_episode = await read(
         state,
         {"role": "structure", "episodeNumber": 1},
@@ -1696,12 +2022,15 @@ async def test_scene_list_structure_read_can_select_any_episode_or_full_document
     )
 
     assert bound["revisionId"] == "structure-bound"
-    assert bound["payload"] == {
+    assert bound["content"] == {
         "episode": {"number": 2, "title": "第二集-structure-bound"},
     }
-    assert bound["contentText"] == ""
+    assert bound["representation"] == "structured"
+    assert "payload" not in bound and "contentText" not in bound
+    assert text["representation"] == "text"
+    assert text["content"] == "完整结构不得泄露"
     assert wrong_episode.error_code is None
-    assert json.loads(wrong_episode.content)["payload"]["episode"]["number"] == 1
+    assert json.loads(wrong_episode.content)["content"]["episode"]["number"] == 1
     assert wrong_revision.error_code is None
     assert json.loads(wrong_revision.content)["revisionId"] == "structure-old"
 
@@ -1839,17 +2168,42 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
     )
     assert foreign_deliverable.error_code == "tool_input_invalid"
 
-    class EpisodeGateway(_HostPreparedSceneModelGateway):
-        reuse_prepared = False
+    class EpisodeGateway(_SceneModelGateway):
+        second_run = False
 
         async def stream(self, messages, invocation, signal=None):
-            if self.reuse_prepared:
-                assert not any(message.role.value == "tool" for message in messages)
+            if self.second_run:
+                results = [
+                    message.content for message in messages
+                    if message.role.value == "tool"
+                ]
+                if results:
+                    assert len(results) == 1
+                    assert 'scene-list-bound' in str(results[0])
+                    assert json.loads(results[0])["episode"]["episodeNumber"] == 1
+                    return await super().stream(messages, invocation, signal)
                 supplied = "\n".join(str(message.content) for message in messages)
-                assert '"tool":"getScreenplayEpisodeContext"' in supplied
-                assert '"episodeNumber":1' in supplied
-                assert 'scene-list-bound' in supplied
-                return await super().stream(messages, invocation, signal)
+                assert 'scene-list-bound' not in supplied
+                self.invocations.append(invocation)
+
+                async def cached_read_chunks():
+                    yield ModelStreamChunk(content_delta="【公开说明】核对本集上下文后创作下一场。【说明结束】")
+                    yield ModelStreamChunk(
+                        tool_call_deltas=(ToolCallDelta(
+                            index=0,
+                            id="call-current-episode-cached",
+                            type="function",
+                            name="getScreenplayEpisodeContext",
+                            arguments_fragment=json.dumps({"episodeNumber": 1}),
+                        ),),
+                        finish_reason=ModelFinishReason.TOOL_CALLS,
+                    )
+
+                return ModelStream(
+                    applied_generation_limit=invocation.max_generation_tokens,
+                    chunks=cached_read_chunks(),
+                    model="fixture-model",
+                )
             if self.invocations:
                 results = [
                     message.content for message in messages
@@ -1867,6 +2221,8 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
             }
 
             async def chunks():
+                if len(self.invocations) == 1:
+                    yield ModelStreamChunk(content_delta="【公开说明】核对相邻分集后创作当前场景。【说明结束】")
                 yield ModelStreamChunk(
                     tool_call_deltas=(ToolCallDelta(
                         index=0, id=f"call-current-episode-{len(self.invocations)}", type="function",
@@ -1877,7 +2233,7 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
                 )
 
             return ModelStream(
-                applied_output_limit=invocation.max_call_output_tokens,
+                applied_generation_limit=invocation.max_generation_tokens,
                 chunks=chunks(), model="fixture-model",
             )
 
@@ -1894,8 +2250,8 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
                 "apiKey": "fixture-key", "apiProvider": "openai",
                 "options": {
                     "model": "deepseek-v4-flash",
-                    "model_profile": "deepseek:deepseek-v4-flash",
-                    "max_tokens": 4096,
+                    "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+                    "max_generation_tokens": 4096,
                 },
             }),
             session_id=1,
@@ -1903,7 +2259,7 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
             user_payload={"sceneId": "scene-1"},
             domain_context=_context(
                 target_role="screenplayDraft", expected_part_type="scene",
-                expected_part_key="scene-1", tool_access="draft_scene",
+                expected_part_key="scene-1", tool_access="review_dimension",
                 episode_number=1,
                 deliverable_revision_scope={"sceneList": "scene-list-bound"},
             ),
@@ -1923,20 +2279,20 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
         results = [json.loads(row["payload_json"]) for row in events]
         assert len(results) == 3
         assert results[-1]["fromCache"] is True
-        gateway.reuse_prepared = True
+        gateway.second_run = True
         next_candidate = await ScreenplayToolCallingService(
             screenplay_tool_db, composition=composition,
         ).run_candidate(
             runtime=ScreenplayAgentRuntimeRequest.model_validate({
                 "apiKey": "fixture-key", "apiProvider": "openai",
                 "options": {"model": "deepseek-v4-flash",
-                            "model_profile": "deepseek:deepseek-v4-flash", "max_tokens": 4096},
+                            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible", "max_generation_tokens": 4096},
             }),
             session_id=1, system_instruction="创作当前场景。",
             user_payload={"sceneId": "scene-2"},
             domain_context=replace(_context(
                 target_role="screenplayDraft", expected_part_type="scene",
-                expected_part_key="scene-2", tool_access="draft_scene", episode_number=1,
+                expected_part_key="scene-2", tool_access="review_dimension", episode_number=1,
                 deliverable_revision_scope={"sceneList": "scene-list-bound"},
             ), unit_id="generate-next-scene"),
             conversation_turn_id="turn-next-scene",
@@ -1947,11 +2303,11 @@ async def test_episode_context_can_read_across_episodes_and_use_task_defaults(
             },
         )
         assert next_candidate.candidate["payload"]["sceneId"] == "scene-2"
-        assert len(gateway.invocations) == 5
+        assert len(gateway.invocations) == 6
         count = await screenplay_tool_db.fetch_one(
             "SELECT COUNT(*) AS total FROM ai_agent_run_events WHERE event_type = 'tool.call_completed'"
         )
-        assert count["total"] == 3
+        assert count["total"] == 4
     finally:
         await composition.shutdown()
 
@@ -2126,7 +2482,94 @@ async def test_scoped_creative_brief_requires_deliverable_read_not_any_read(
             assert result.error_code is None
 
 
-class _HostPreparedSceneModelGateway:
+@pytest.mark.parametrize("reply_mode", ["valid", "repair", "invalid"])
+async def test_metadata_is_captured_after_read_without_a_write_confirmation_round(
+    screenplay_tool_db, monkeypatch, reply_mode,
+):
+    from purra.errors import ModelGatewayError
+
+    await screenplay_tool_db.execute(
+        "INSERT INTO screenplay_projects (id, title) VALUES ('screenplay-project', '项目')"
+    )
+    await _seed_task_dependency(
+        screenplay_tool_db, dependency_key="draft:1:scene-1",
+        output={"sceneText": "PRIVATE_SCENE：人物取得证物。"},
+    )
+    calls = []
+    payload = {"episodeNumber": 1, "title": "证物", "continuitySummary": "PRIVATE_SUMMARY：人物持有证物。"}
+
+    async def stream(_key, messages, options, _provider, signal=None):
+        calls.append(messages)
+        assert options["temperature"] == 0.7
+        names = {tool["function"]["name"] for tool in options.get("tools", [])}
+        assert names <= {"readScreenplayTaskDependencies"}
+        if len(calls) == 1:
+            assert names == {"readScreenplayTaskDependencies"}
+
+        async def chunks():
+            if len(calls) == 1:
+                yield {"choices": [{"delta": {"content": "【公开说明】核对本集场景后整理连续性摘要。【说明结束】"}, "finish_reason": None}]}
+                yield {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": "read-scenes", "type": "function",
+                    "function": {"name": "readScreenplayTaskDependencies", "arguments": '{"partKeys":["draft:1:scene-1"]}'},
+                }]}, "finish_reason": "tool_calls"}]}
+            else:
+                tool_text = "".join(m.get("content", "") for m in messages if m["role"] == "tool")
+                assert "PRIVATE_SCENE" in tool_text
+                value = payload if reply_mode == "valid" or (reply_mode == "repair" and len(calls) > 2) else {**payload, "episodeNumber": 2}
+                yield {"choices": [{"delta": {"content": json.dumps(value, ensure_ascii=False)}, "finish_reason": "stop"}]}
+
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
+
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", stream)
+    composition = create_agent_composition(screenplay_tool_db)
+    try:
+        service = ScreenplayToolCallingService(screenplay_tool_db, composition=composition)
+        kwargs = dict(
+            runtime=ScreenplayAgentRuntimeRequest.model_validate({
+                "apiKey": "test", "apiProvider": "openai", "options": {
+                    "model": "model", "model_profile": "deepseek:deepseek-v4-flash",
+                    "profile_binding": "compatible", "max_generation_tokens": 4096,
+                    "temperature": 0.7,
+                },
+            }),
+            session_id=1, system_instruction="读取本集场景后输出标题和连续性摘要 JSON。",
+            user_payload={"episodeNumber": 1},
+            domain_context=_context(
+                target_role="screenplayDraft", expected_part_type="episode_metadata",
+                expected_part_key="1", tool_access="episode_metadata", episode_number=1,
+                dependency_part_keys=("draft:1:scene-1",),
+            ),
+            conversation_turn_id="metadata-turn",
+            candidate_validation_contract={"protocol": "purrtypos.screenplay.candidate-validation/v1", "kind": "episode_metadata", "episodeNumber": 1},
+        )
+        if reply_mode == "invalid":
+            with pytest.raises(ModelGatewayError):
+                await service.run_candidate(**kwargs)
+            assert len(calls) <= 5
+            assert await screenplay_tool_db.fetch_all(
+                "SELECT id FROM ai_agent_artifacts WHERE created_by_run_id IN "
+                "(SELECT id FROM ai_agent_runs WHERE mode='screenplay_durable_unit')"
+            ) == []
+        else:
+            result = await service.run_candidate(**kwargs)
+            assert result.candidate["payload"] == payload
+            assert len(calls) == (2 if reply_mode == "valid" else 3)
+            assert await screenplay_tool_db.fetch_one(
+                "SELECT final_response FROM ai_agent_runs WHERE id=?", [result.run_id],
+            ) == {"final_response": ""}
+            assert await screenplay_tool_db.fetch_one(
+                "SELECT count(*) AS total FROM ai_agent_artifacts WHERE created_by_run_id=? AND status='finalized'",
+                [result.run_id],
+            ) == {"total": 1}
+        public = await screenplay_tool_db.fetch_all("SELECT payload_json FROM ai_agent_run_events WHERE visibility='public'")
+        assert "PRIVATE_SCENE" not in json.dumps(public)
+        assert "PRIVATE_SUMMARY" not in json.dumps(public)
+    finally:
+        await composition.shutdown()
+
+
+class _SceneModelGateway:
     def __init__(self) -> None:
         self.invocations = []
         self.messages = []
@@ -2152,12 +2595,12 @@ class _HostPreparedSceneModelGateway:
                 finish_reason=ModelFinishReason.STOP,
             )
 
-        return ModelStream(applied_output_limit=invocation.max_call_output_tokens, chunks=chunks(), model="fixture-model")
+        return ModelStream(applied_generation_limit=invocation.max_generation_tokens, chunks=chunks(), model="fixture-model")
 
     async def complete(self, messages, invocation, signal=None):
         del messages, signal
         return ModelCompletion(
-            applied_output_limit=invocation.max_call_output_tokens,
+            applied_generation_limit=invocation.max_generation_tokens,
             message={"role": "assistant", "content": "unused"},
             model="fixture-model",
         )

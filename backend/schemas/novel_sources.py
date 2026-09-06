@@ -43,7 +43,7 @@ class ArchiveSourceWorkRequest(BaseModel):
 class StartNovelAnalysisRequest(BaseModel):
     runtime: ScreenplayAgentRuntimeRequest
     prompt: str = Field(
-        default="分析这部小说的全局故事概览、事实脉络和写作技法。",
+        default="保留故事概览与事实脉络，蒸馏可执行的写作方法并检验迁移效果。",
         min_length=1,
         max_length=20_000,
     )

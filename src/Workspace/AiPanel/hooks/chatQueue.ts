@@ -3,6 +3,8 @@ import type { AiModelConfig, EntityId, WritingMethodOverrides } from "../../../t
 export type ChatRunOutcome = "completed" | "paused" | "failed" | "canceled";
 
 export interface QueuedChatSubmission {
+  id: string;
+  editing?: boolean;
   content: string;
   sessionId: number;
   bookId: EntityId;

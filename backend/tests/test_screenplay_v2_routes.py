@@ -1232,8 +1232,9 @@ async def test_planned_review_decision_selects_revision_not_finalization(
         {"projectId": project_id},
         {"role": "review", "revisionId": review_id},
     )
-    assert review_document["payload"]["reviewedDraftId"] == draft_id
-    assert [issue["id"] for issue in review_document["payload"]["issues"]] == [
+    assert review_document["representation"] == "structured"
+    assert review_document["content"]["reviewedDraftId"] == draft_id
+    assert [issue["id"] for issue in review_document["content"]["issues"]] == [
         "arc-1", "pace-1",
     ]
 

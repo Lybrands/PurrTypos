@@ -53,6 +53,11 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "inspectScreenplayProject": _object({}),
     "readScreenplayDeliverable": _object({
         "role": _ROLES["items"],
+        "sectionKeys": {
+            "type": "array", "minItems": 1, "maxItems": 12, "uniqueItems": True,
+            "items": {"type": "string", "minLength": 1, "maxLength": 120},
+            "description": "只读取这些结构化顶层章节，键名来自文档目录；省略读取完整文档。不可与 text 表示同时使用。",
+        },
         "revisionId": {
             "type": "string",
             "minLength": 1,
@@ -64,6 +69,14 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "episodeNumber": {
             "type": "integer", "minimum": 1,
             "description": "按集读取；省略时读取文档，分集存储的交付物返回集数目录。",
+        },
+        "representation": {
+            "type": "string",
+            "enum": ["structured", "text", "section_index"],
+            "description": (
+                "只返回一种内容表示。structured 返回结构化内容，text 返回渲染文本，section_index 返回顶层章节目录及长度；"
+                "省略时优先返回非空结构化内容，否则返回文本。"
+            ),
         },
     }, ("role",)),
     "searchScreenplayDeliverables": _object({
@@ -91,6 +104,7 @@ SCREENPLAY_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             ),
         },
     }),
+    "getScreenplaySceneContext": _object({}),
     "inspectSourceStructure": _object({"cursor": _CURSOR, "limit": _LIMIT}),
     "readSourceChapters": _object({
         "chapterIds": {
@@ -202,9 +216,16 @@ SCREENPLAY_TOOL_DESCRIPTIONS = {
         "每次最多读取 12 项。"
     ),
     "inspectScreenplayProject": "查看当前剧本项目、阶段和已有交付物的紧凑清单。",
-    "readScreenplayDeliverable": "读取当前项目内一个已接受或指定版本的交付物。revisionId 必须属于所选 role。",
+    "readScreenplayDeliverable": (
+        "按需读取当前项目内一个已接受或指定版本的交付物。revisionId 必须属于"
+        "所选 role；每次只返回 structured 或 text 一种内容表示。"
+    ),
     "searchScreenplayDeliverables": "检索当前项目交付物。默认检索已接受版本，includeHistory=true 时包含其他已有版本；结果标明版本是否已接受。",
     "getScreenplayEpisodeContext": "读取指定集的场景计划、前集连续性与当前草稿。",
+    "getScreenplaySceneContext": (
+        "读取当前场景已绑定的场景计划、本集分集结构、精确前场依赖、原作分析目录与创作简报；"
+        "场景、集数、版本和 Part key 均由宿主锁定。"
+    ),
     "inspectSourceStructure": "分页查看当前许可改编范围内的原作卷章结构，并返回可读取正文的 chapterId。",
     "readSourceChapters": "按 chapterId 读取当前许可范围内的原文章节；chapterIds 不接受 outlineId。",
     "searchSourceText": "在当前许可改编范围内检索原文并返回短摘录。",

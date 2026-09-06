@@ -319,7 +319,7 @@ export function buildAssistantTimeline(
     canonicalOutput.commentaryBlocks
       .filter((block) => !block.aborted)
       .forEach((block) => {
-        const narration = publicAgentProgressNarration(block.text);
+        const narration = block.text.trim();
         if (!narration) return;
         canonicalParts.push({
           sequence: block.firstSequence,
@@ -474,12 +474,13 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
     : operation.toolName;
   if (operation.kind === "tool" && toolName) {
     const displayNames = localizedDisplayNames(params.displayNames);
+    const displayName = resolveLocalizedToolDisplayName(displayNames);
+    if (displayName) return displayName;
     return toolCallDisplayRow(
       toolName,
       {},
       [],
       [],
-      resolveLocalizedToolDisplayName(displayNames),
     ).label;
   }
   const labels: Record<string, string> = {

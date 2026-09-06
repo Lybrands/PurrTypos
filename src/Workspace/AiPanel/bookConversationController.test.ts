@@ -66,7 +66,7 @@ const bindings: BookConversationBindings = {
   messages,
   prependedHistory: historyMessages,
   activities,
-  queuedMessages: ['继续审阅'],
+  queuedSubmissions: [{ id: 'q-review', sessionId: 7, content: '继续审阅' }],
   prompt: '',
   setPrompt: noOp,
   initializing: false,
@@ -408,10 +408,14 @@ test('local non-journal terminal metadata reloads as structured state, never Ass
 
 test('book adapter exposes only display queue entries', () => {
   assert.deepEqual(
-    toBookQueuedSubmissions(7, ['第一条', '第二条']),
+    toBookQueuedSubmissions(7, [
+      { id: 'q-first', sessionId: 7, content: '第一条' },
+      { id: 'q-second', sessionId: 7, content: '第二条' },
+      { id: 'other-session', sessionId: 8, content: '其他会话' },
+    ]),
     [
-      { id: 'book-queue-7-0', sessionId: 7, content: '第一条' },
-      { id: 'book-queue-7-1', sessionId: 7, content: '第二条' },
+      { id: 'q-first', sessionId: 7, content: '第一条' },
+      { id: 'q-second', sessionId: 7, content: '第二条' },
     ],
   )
 })
@@ -431,7 +435,7 @@ test('book adapter maps history, current messages, queue, model and actions', ()
   }])
   assert.deepEqual(controller.conversation.messages, [...historyMessages, ...messages])
   assert.deepEqual(controller.conversation.queuedSubmissions, [{
-    id: 'book-queue-7-0',
+    id: 'q-review',
     sessionId: 7,
     content: '继续审阅',
   }])

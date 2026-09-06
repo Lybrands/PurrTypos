@@ -13,27 +13,10 @@ from purra.json_values import freeze_json_mapping, thaw_json_mapping
 
 
 NOVEL_ANALYSIS_DOMAIN_NAMESPACE = "purrtypos.novel_analysis"
-NOVEL_ANALYSIS_SCHEMA_VERSION = 1
+NOVEL_ANALYSIS_SCHEMA_VERSION = 2
 NOVEL_ANALYSIS_ARTIFACT_KIND = "novel_source_analysis_candidate"
 NOVEL_ANALYSIS_REVIEW_ARTIFACT_KIND = "novel_source_analysis_review"
 NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX = "novel-analysis-artifact://"
-NOVEL_ANALYSIS_CRAFT_CATEGORIES = {
-    "narrative_structure": "叙事结构",
-    "characterization": "人物塑造",
-    "point_of_view": "视角与信息控制",
-    "pacing_and_tension": "节奏与张力",
-    "language_and_style": "语言与文风",
-    "dialogue": "对话设计",
-    "imagery_and_atmosphere": "意象与氛围",
-    "theme_and_symbolism": "主题与象征",
-}
-
-
-def novel_analysis_craft_category_label(value: object) -> str:
-    key = str(value or "").strip()
-    return NOVEL_ANALYSIS_CRAFT_CATEGORIES.get(key, "其他写作技法")
-
-
 @dataclass(frozen=True, slots=True)
 class NovelAnalysisSegment:
     id: str
@@ -206,11 +189,15 @@ def compile_novel_analysis_recipe(
         raise ValueError("novel analysis requires admitted plan steps")
 
     frozen_segments = tuple(segments)
+    compact_source = (
+        len(frozen_segments) == 1
+        and len(sections) == 1
+        and frozen_segments[0].end_character - frozen_segments[0].start_character <= 4_000
+    )
     if any(item.section_id not in sections for item in frozen_segments):
         raise ValueError("novel analysis recipe segment is outside section scope")
     specs: list[tuple[str, str, tuple[str, ...], Mapping[str, Any]]] = []
     extract_ids: list[str] = []
-    local_candidate_ids: list[str] = []
     if frozen_segments:
         for index, segment in enumerate(frozen_segments):
             unit_id = f"extract:{index + 1}:{segment.id}"
@@ -228,6 +215,7 @@ def compile_novel_analysis_recipe(
                     "endCharacter": segment.end_character,
                     "analysisSchemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
                     "displayTitle": f"分析来源片段 {index + 1}",
+                    **({"includeStoryOverview": True} if compact_source else {}),
                 },
             ))
     else:
@@ -245,8 +233,9 @@ def compile_novel_analysis_recipe(
                     "displayTitle": f"分析来源章节 {index + 1}",
                 },
             ))
-    if frozen_segments:
-        local_candidate_ids.extend(extract_ids)
+    if compact_source:
+        normalized_root_id = extract_ids[0]
+    elif frozen_segments:
         current = list(extract_ids)
         level = 1
         while len(current) > 1:
@@ -290,31 +279,36 @@ def compile_novel_analysis_recipe(
             normalized_root_id = current[0]
     else:
         normalized_root_id = "normalize:entities"
-        local_candidate_ids.append(normalized_root_id)
         specs.append((
             normalized_root_id,
             "normalize_entities",
             tuple(extract_ids),
             {"displayTitle": "归一人物、实体与时间线"},
         ))
-    specs.extend((
-        (
+    if not compact_source:
+        specs.append((
             "aggregate:story",
             "aggregate_story",
             (normalized_root_id,),
             {"displayTitle": "聚合剧情线与人物认知"},
-        ),
+        ))
+    specs.extend((
         (
             "validate:evidence",
             "validate_evidence",
-            tuple((*local_candidate_ids, "aggregate:story")),
+            tuple(dict.fromkeys((*extract_ids, normalized_root_id if compact_source else "aggregate:story"))),
             {"displayTitle": "校验来源证据"},
         ),
+        ("skill:draft", "distill_skill", ("validate:evidence",), {"displayTitle": "蒸馏可执行写作方法"}),
+        ("skill:trial", "trial_skill", ("skill:draft",), {"displayTitle": "在新场景中试写"}),
+        ("skill:revise", "revise_skill", ("validate:evidence", "skill:draft", "skill:trial"), {"displayTitle": "复核证据并修订方法"}),
+        ("skill:retrial", "trial_skill", ("skill:revise",), {"displayTitle": "检验修订后的方法"}),
+        ("skill:assess", "assess_skill", ("validate:evidence", "skill:revise", "skill:retrial"), {"displayTitle": "评估迁移效果与适用边界"}),
         (
             "report:coverage",
             "coverage_report",
-            ("validate:evidence",),
-            {"displayTitle": "生成覆盖率与冲突报告"},
+            ("validate:evidence", "skill:trial", "skill:revise", "skill:retrial", "skill:assess"),
+            {"displayTitle": "汇总分析与方法检验结果"},
         ),
         (
             "artifact:review",
@@ -323,38 +317,12 @@ def compile_novel_analysis_recipe(
             {"displayTitle": "形成待审核分析"},
         ),
     ))
-    stage_order = (
-        "extract_section",
-        "normalize_entities",
-        "aggregate_story",
-        "validate_evidence",
-        "coverage_report",
-        "build_review_artifact",
+    if len(planned) > len(specs):
+        raise ValueError("novel analysis execution recipe has fewer units than the model-authored plan")
+    planner_step_ids = tuple(
+        planned[min(index * len(planned) // len(specs), len(planned) - 1)]
+        for index in range(len(specs))
     )
-    stage_by_kind = {
-        kind: index for index, kind in enumerate(stage_order)
-    }
-    if len(planned) <= len(stage_order):
-        planner_step_ids = tuple(
-            planned[min(
-                stage_by_kind[kind] * len(planned) // len(stage_order),
-                len(planned) - 1,
-            )]
-            for _, kind, _, _ in specs
-        )
-    else:
-        if len(planned) > len(specs):
-            raise ValueError(
-                "novel analysis execution recipe has fewer units than the "
-                "model-authored plan"
-            )
-        planner_step_ids = tuple(
-            planned[min(
-                index * len(planned) // len(specs),
-                len(planned) - 1,
-            )]
-            for index in range(len(specs))
-        )
     steps = tuple(
         ExecutionRecipeStep(
             id=unit_id,
@@ -366,6 +334,7 @@ def compile_novel_analysis_recipe(
                 "extract_section",
                 "normalize_entities",
                 "aggregate_story",
+                "distill_skill", "trial_skill", "revise_skill", "assess_skill",
             } else 1,
             metadata=dict(metadata),
         )
@@ -401,7 +370,7 @@ def compile_novel_analysis_recipe(
         steps=steps,
         max_parallelism=min(4, len(frozen_segments or sections)),
         metadata={
-            "recipeVersion": 3 if segments else 1,
+            "recipeVersion": 5,
             "analysisSchemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
             "recipeDigest": digest,
         },
@@ -420,7 +389,7 @@ def canonical_digest(value: object) -> str:
 
 def novel_analysis_model_call_count(recipe: ExecutionRecipe) -> int:
     return sum(
-        step.kind in {"extract_section", "normalize_entities", "aggregate_story"}
+        step.kind in {"extract_section", "normalize_entities", "aggregate_story", "distill_skill", "trial_skill", "revise_skill", "assess_skill"}
         for step in recipe.steps
     )
 
@@ -428,7 +397,6 @@ def novel_analysis_model_call_count(recipe: ExecutionRecipe) -> int:
 __all__ = [
     "NOVEL_ANALYSIS_ARTIFACT_KIND",
     "NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX",
-    "NOVEL_ANALYSIS_CRAFT_CATEGORIES",
     "NOVEL_ANALYSIS_DOMAIN_NAMESPACE",
     "NOVEL_ANALYSIS_REVIEW_ARTIFACT_KIND",
     "NOVEL_ANALYSIS_SCHEMA_VERSION",
@@ -437,5 +405,4 @@ __all__ = [
     "canonical_digest",
     "compile_novel_analysis_recipe",
     "novel_analysis_model_call_count",
-    "novel_analysis_craft_category_label",
 ]

@@ -65,8 +65,8 @@ def route_planning_stream(
             }
 
         return {
-            "applied_output_limit": response.get(
-                "applied_output_limit",
+            "applied_generation_limit": response.get(
+                "applied_generation_limit",
                 options.get("max_tokens"),
             ),
             "stream": chunks(),

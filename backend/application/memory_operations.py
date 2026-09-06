@@ -10,8 +10,6 @@ from purra.contracts import (
     AgentMessage,
     ContextEvidenceReceipt,
     ModelCompletion,
-    ModelFinishReason,
-    ModelTokenUsage,
 )
 from purra_mem0 import (
     MemoryBudget,
@@ -25,10 +23,9 @@ from purra_mem0 import (
 )
 from purra.retrieval import RetrievalRequest
 
-from infrastructure.models.provider_router import create_chat_no_stream
+from application.model_request_service import ModelRequestService, BackgroundModelContext
 from infrastructure.memory import MemoryResourceError
 from services.model_settings_service import (
-    build_model_options,
     get_setting_value,
 )
 
@@ -671,7 +668,7 @@ class MemoryApplicationService:
             max_embedding_calls=100,
             max_input_chars=400_000,
             max_output_tokens=0,
-            max_call_output_tokens=1,
+            result_capacity_target_tokens=1,
         )
         providers = resource.providers(
             budget=budget,
@@ -778,7 +775,7 @@ class MemoryApplicationService:
             max_embedding_calls=2,
             max_input_chars=20_000,
             max_output_tokens=0,
-            max_call_output_tokens=1,
+            result_capacity_target_tokens=1,
         )
         providers = resource.providers(
             budget=budget,
@@ -871,7 +868,7 @@ class MemoryApplicationService:
             max_embedding_calls=0,
             max_input_chars=1,
             max_output_tokens=0,
-            max_call_output_tokens=1,
+            result_capacity_target_tokens=1,
         )
         providers = resource.providers(
             budget=budget,
@@ -949,7 +946,7 @@ class MemoryApplicationService:
             max_embedding_calls=16 if inference else 2,
             max_input_chars=40_000 if inference else 20_000,
             max_output_tokens=1_200 if inference else 0,
-            max_call_output_tokens=1_200 if inference else 1,
+            result_capacity_target_tokens=1_200 if inference else 1,
         )
         complete = self._complete if inference else self._unexpected_completion
         return resource.providers(budget=budget, complete=complete)
@@ -967,27 +964,18 @@ class MemoryApplicationService:
             raise MemoryOperationError("memory_component_unavailable")
         return self._resource
 
-    async def _complete(self, messages, max_output_tokens, signal) -> ModelCompletion:
+    async def _complete(
+        self,
+        messages,
+        result_capacity_target_tokens,
+        signal,
+    ) -> ModelCompletion:
         config = await self._strict_memory_model()
-        options = build_model_options(config, max_tokens=max_output_tokens)
-        raw = await create_chat_no_stream(
-            str(config["apiKey"]),
-            [
-                {"role": message.role.value, "content": message.content}
-                for message in messages
-            ],
-            options,
-            str(config.get("apiProvider") or "openai"),
-            signal,
-        )
-        message = AgentMessage.from_mapping(raw.get("message") or {})
-        usage = _model_usage(raw.get("usage"))
-        return ModelCompletion(
-            message=message,
-            model=str(raw.get("model") or config["name"]),
-            finish_reason=_finish_reason(raw.get("finish_reason")),
-            usage=usage,
-            applied_output_limit=raw.get("applied_output_limit"),
+        service = ModelRequestService()
+        return await service.complete(
+            api_key=str(config["apiKey"]), runtime=service.runtime_from_settings(config),
+            context=BackgroundModelContext("memory_component", result_capacity_target_tokens),
+            messages=messages, signal=signal, db=self._db,
         )
 
     async def _strict_memory_model(self) -> dict[str, Any]:
@@ -1066,36 +1054,3 @@ class MemoryApplicationService:
         return MemoryOperationError(
             str(code) if code in allowed else "memory_operation_failed"
         )
-
-
-def _finish_reason(value: Any) -> ModelFinishReason:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"stop", "end_turn", "stop_sequence"}:
-        return ModelFinishReason.STOP
-    if normalized in {"length", "max_tokens"}:
-        return ModelFinishReason.LENGTH
-    if normalized in {"tool_calls", "tool_use"}:
-        return ModelFinishReason.TOOL_CALLS
-    return ModelFinishReason.OTHER
-
-
-def _model_usage(value: Any) -> ModelTokenUsage | None:
-    if not isinstance(value, Mapping):
-        return None
-    input_tokens = value.get("prompt_tokens", value.get("input_tokens"))
-    output_tokens = value.get("completion_tokens", value.get("output_tokens"))
-    if type(input_tokens) is not int or type(output_tokens) is not int:
-        return None
-    return ModelTokenUsage(input_tokens=input_tokens, output_tokens=output_tokens)
-
-
-__all__ = [
-    "LOCAL_USER_ID",
-    "MEMORY_KINDS",
-    "MEMORY_MODEL_ID_KEY",
-    "MEMORY_SCOPE_TYPES",
-    "MemoryApplicationService",
-    "MemoryOperationError",
-    "memory_metadata",
-    "memory_record_dict",
-]

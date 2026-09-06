@@ -58,8 +58,6 @@ def _operation_status(disposition: FailureDisposition) -> str:
         "split_part",
     }:
         return "running"
-    if disposition is FailureDisposition.PAUSE_RECOVERABLE:
-        return "paused"
     if disposition is FailureDisposition.CANCEL:
         return "canceled"
     return "failed"
@@ -95,7 +93,7 @@ def test_series_arc_deadline_fixture_is_sanitized_and_reproducible():
         "modelAttemptCount": 4,
         "reportedUsageAttempts": 3,
         "inputTokens": 92_285,
-        "outputTokens": 878,
+        "generationTokens": 878,
         "reasoningTokens": 443,
         "providerOutputEvents": 469,
         "failedInvocationDeltaBatchEvents": 442,

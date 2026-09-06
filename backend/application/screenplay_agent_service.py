@@ -42,25 +42,28 @@ from purra.task_admission import (
     LongTaskDispatchReceipt,
     TaskAdmissionDecision,
 )
-from purra.model_protocol import resolve_invocation_output_limit
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
     ResponseTransactionPolicy,
 )
+from application.agent_conversation_input import conversation_messages, conversation_input_metadata
+from infrastructure.persistence.agent_conversation_history import screenplay_history
 from application.agent_run_service import AgentRunService
 from application.agent_cancellation_service import AgentCancellationService
 from application.screenplay_agent_task_executor import ScreenplayTaskUnitExecutor
+from application.screenplay_tool_calling import screenplay_run_provenance
 from application.screenplay_checkpoint_planning import (
     SqliteScreenplayCheckpointRepository,
 )
+from application.screenplay_manifest_compiler import SCREENPLAY_RECIPE_VERSION
 from application.model_runtime import (
-    fit_output_limit_to_context,
     model_request_from_runtime,
+    runtime_context_window_tokens,
     reasoning_mode_from_options,
 )
-from application.request_mapping import context_window_tokens
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
+from domains.screenplay_agent.recovery import screenplay_failure_message
 from domains.screenplay_agent import (
     ContinuationStartLost,
     ScreenplayIntentCommandMismatchError,
@@ -177,14 +180,8 @@ class ScreenplayAgentService:
             )
             return
         try:
-            request = _root_request(turn, runtime)
-            model_request = request.model
+            request = _root_request(turn, runtime, await screenplay_history(self._db, turn))
             window = int(request.context_window or 200_000)
-            output_limit = resolve_invocation_output_limit(
-                model_request.capability_snapshot,
-                model_request.options.get("max_tokens"),
-            )
-            output_limit = fit_output_limit_to_context(output_limit, window)
             lifecycle = _ScreenplayTurnRunLifecycle(
                 self._db,
                 self._repository,
@@ -196,11 +193,14 @@ class ScreenplayAgentService:
                 api_key=runtime.apiKey.get_secret_value(),
                 options=AgentCoreRunOptions(
                     turn_id=turn_id,
-                    output_limit=output_limit,
                     default_context_window_tokens=window,
                     force_planned_tool_choice=False,
                     require_tool_call=False,
-                    reasoning_mode=reasoning_mode_from_options(runtime.options),
+                    reasoning_mode=reasoning_mode_from_options(request.model.options),
+                    provenance=screenplay_run_provenance(
+                        runtime, {"turnId": turn_id}, model_request=request.model,
+                        output_contract="assistant_text", tool_protocol_contract="host_tools",
+                    ),
                     binding=RunBinding(
                         namespace="screenplay.conversation_turn",
                         aggregate_id=str(turn["projectId"]),
@@ -333,14 +333,8 @@ class ScreenplayAgentService:
                     admission=admission,
                 ),
             )
-            request = _root_request(turn, runtime)
-            model_request = request.model
+            request = _root_request(turn, runtime, await screenplay_history(self._db, turn))
             window = int(request.context_window or 200_000)
-            output_limit = resolve_invocation_output_limit(
-                model_request.capability_snapshot,
-                model_request.options.get("max_tokens"),
-            )
-            output_limit = fit_output_limit_to_context(output_limit, window)
             lifecycle = _ScreenplayContinuationRunLifecycle(
                 self._db,
                 self._repository,
@@ -355,11 +349,15 @@ class ScreenplayAgentService:
                 api_key=runtime.apiKey.get_secret_value(),
                 options=AgentCoreRunOptions(
                     turn_id=operation.turn_id,
-                    output_limit=output_limit,
                     default_context_window_tokens=window,
                     force_planned_tool_choice=False,
                     require_tool_call=False,
-                    reasoning_mode=reasoning_mode_from_options(runtime.options),
+                    reasoning_mode=reasoning_mode_from_options(request.model.options),
+                    provenance=screenplay_run_provenance(
+                        runtime, {"turnId": operation.turn_id, "continuationOf": source_root_run_id},
+                        model_request=request.model, output_contract="assistant_text",
+                        tool_protocol_contract="host_tools",
+                    ),
                     binding=RunBinding(
                         namespace="screenplay.conversation_turn",
                         aggregate_id=str(turn["projectId"]),
@@ -407,8 +405,36 @@ class ScreenplayAgentService:
             # a terminal product failure outside that transaction.
             return
         code, message = _task_failure(error)
-        with suppress(Exception):
+        async with self._db.transaction(cancellation_linearizable=True):
+            turn = await self._repository.load_turn(turn_id)
             operation = await self._operations.load_for_turn(turn_id)
+            if turn is None:
+                return
+            if operation is not None and operation.status.terminal:
+                await self._operations.reconcile_terminal_turn(turn_id)
+                return
+            if str(turn.get("status") or "") == "paused":
+                if operation is not None and operation.status.value != "paused":
+                    turn_error = dict(turn.get("error") or {})
+                    pause_code = str(
+                        turn_error.get("code") or "screenplay_task_paused"
+                    )
+                    await self._operations.pause(
+                        operation.id,
+                        code=pause_code,
+                        message=str(turn_error.get("message") or message),
+                        command_id=(
+                            f"operation:align-pause:{operation.id}:"
+                            f"{operation.revision}:{pause_code}"
+                        ),
+                    )
+                return
+            if str(turn.get("status") or "") in {
+                "completed",
+                "failed",
+                "canceled",
+            }:
+                return
             if operation is not None and not operation.status.terminal:
                 await self._operations.fail(
                     operation.id,
@@ -448,6 +474,11 @@ class ScreenplayAgentService:
                 turn_id,
                 idempotency_key=idempotency_key,
             )
+            if receipt.terminal_status in {"succeeded", "failed", "canceled"}:
+                receipt = await self._operations.settle_cancel(
+                    turn_id,
+                    receipt_id=receipt.id,
+                )
         except LookupError as error:
             raise NotFoundError("剧本 Agent Turn 不存在") from error
         except ValueError as error:
@@ -501,7 +532,8 @@ class ScreenplayAgentService:
             or ""
         ).strip()
         source = await self._db.fetch_one(
-            "SELECT status, session_id, binding_aggregate_id FROM ai_agent_runs "
+            "SELECT status, session_id, binding_aggregate_id "
+            "FROM ai_agent_runs "
             "WHERE id = ?",
             [source_root_run_id],
         )
@@ -511,7 +543,10 @@ class ScreenplayAgentService:
             or int(source.get("session_id") or 0) != operation.session_id
             or str(source.get("binding_aggregate_id") or "") != operation.project_id
         ):
-            raise AppError("resume requires a canceled matching Root Run", 409)
+            raise AppError(
+                "resume requires a canceled matching Root Run",
+                409,
+            )
         try:
             resumed = await self._operations.resume_with_model(
                 operation.id,
@@ -619,7 +654,9 @@ class ScreenplayAgentService:
                 cancellation_roots=tuple(cancellation_roots),
             ):
                 await self._settle_truncated_cancellations(rows)
-                break
+                settled_rows = await self._truncate_rows(turn_id)
+                if self._truncated_turns_settled(settled_rows):
+                    break
             if time.monotonic() >= deadline:
                 raise AppError("truncate cancellation timed out", 409)
             await asyncio.sleep(max(
@@ -649,6 +686,16 @@ class ScreenplayAgentService:
                 str(row["turn_id"]),
                 receipt_id=str(row["cancel_receipt_id"]),
             )
+
+    @staticmethod
+    def _truncated_turns_settled(rows) -> bool:
+        return all(
+            str(row.get("turn_status") or "")
+            not in {"queued", "planning", "running", "paused"}
+            and row.get("execution_owner_id") is None
+            and row.get("lease_expires_at_ms") is None
+            for row in rows
+        )
 
     @staticmethod
     async def _cancel_local_truncate_tasks(rows) -> None:
@@ -688,6 +735,8 @@ class ScreenplayAgentService:
         return await self._db.fetch_all(
             "SELECT t.id AS turn_id, t.status AS turn_status, "
             "t.cancel_receipt_id AS cancel_receipt_id, "
+            "t.execution_owner_id AS execution_owner_id, "
+            "t.lease_expires_at_ms AS lease_expires_at_ms, "
             "t.planner_run_id AS root_run_id, o.id AS operation_id, "
             "o.long_task_id AS task_id "
             "FROM screenplay_agent_turns AS t "
@@ -789,23 +838,10 @@ def _task_failure(error: Exception) -> tuple[str, str]:
         return error.code, str(error)
     if not isinstance(error, ModelGatewayError):
         return "screenplay_task_failed", str(error) or "剧本任务执行失败。"
-    message = _task_failure_message(error.code)
+    message = screenplay_failure_message(error.code)
     if message.startswith("剧本任务执行失败") and str(error):
         message = str(error)
     return error.code, message
-
-
-def _task_failure_message(code: str) -> str:
-    messages = {
-        "model_output_truncated": (
-            "模型本轮输出额度耗尽，未形成完整候选稿；不完整结果未被保存。"
-            "请重试；若重复出现，请更换模型或减少本次生成的内容量。"
-        ),
-        "model_output_filtered": "模型输出被服务商安全策略中止，请调整要求后重试。",
-        "upstream_stream_interrupted": "模型流式响应在完成前中断，请检查网络后重试。",
-        "unsupported_model_finish_reason": "模型以不受支持的状态结束，请更换模型后重试。",
-    }
-    return messages.get(code, "剧本任务执行失败，请查看诊断信息后重试。")
 
 
 def _capability_requirements(stored: Mapping[str, Any], runtime):
@@ -871,8 +907,19 @@ class _ScreenplayTurnRunLifecycle:
             return
         expected = "failed"
         if result.status is RunStatus.CANCELED:
-            expected = "canceled"
-            if operation is not None and operation.long_task_id:
+            explicitly_canceled = bool(
+                turn.get("cancelRequestedAtMs") is not None
+                or (
+                    operation is not None
+                    and operation.cancel_requested_at_ms is not None
+                )
+            )
+            expected = "canceled" if explicitly_canceled else "failed"
+            if (
+                not explicitly_canceled
+                and operation is not None
+                and operation.long_task_id
+            ):
                 task = await self._db.fetch_one(
                     "SELECT status FROM ai_agent_long_tasks WHERE id = ?",
                     [operation.long_task_id],
@@ -987,6 +1034,11 @@ def _execution_recipe_from_metadata(value: object) -> ExecutionRecipe:
     if not isinstance(value, Mapping):
         raise ValueError("screenplay durable Recipe is missing")
     raw = dict(value)
+    if raw.get("recipeVersion") != SCREENPLAY_RECIPE_VERSION:
+        raise ValueError(
+            "screenplay durable Recipe version is unsupported: "
+            f"expected {SCREENPLAY_RECIPE_VERSION}"
+        )
     reserved = {"kind", "maxParallelism", "steps"}
     steps = raw.get("steps")
     if (
@@ -1026,12 +1078,13 @@ def _execution_recipe_from_metadata(value: object) -> ExecutionRecipe:
     )
 
 
-def _root_request(turn: Mapping[str, Any], runtime) -> AgentRunRequest:
+def _root_request(turn: Mapping[str, Any], runtime, history=()) -> AgentRunRequest:
+    window = runtime_context_window_tokens(runtime)
     return AgentRunRequest(
-        messages=(AgentMessage(
+        messages=conversation_messages((*history, AgentMessage(
             role=MessageRole.USER,
             content=str(turn["userContent"]),
-        ),),
+        )), context_window=window),
         model=model_request_from_runtime(runtime),
         domain_context=ScreenplayAgentDomainContext(
             project_id=str(turn["projectId"]),
@@ -1040,11 +1093,10 @@ def _root_request(turn: Mapping[str, Any], runtime) -> AgentRunRequest:
         ).to_core_context(),
         session_id=int(turn["sessionId"]),
         mode="agent",
-        context_window=context_window_tokens(
-            runtime.contextWindow or runtime.options.get("context_window")
-        ),
+        context_window=window,
         tools_enabled=True,
-        metadata={"locale": str(getattr(runtime, "locale", "zh-CN"))},
+        metadata={**conversation_input_metadata(source="persisted_public_turns", scope=f"screenplay:{turn['projectId']}:{turn['sessionId']}"),
+                  "locale": str(getattr(runtime, "locale", "zh-CN"))},
     )
 
 

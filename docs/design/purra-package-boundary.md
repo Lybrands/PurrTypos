@@ -2,8 +2,7 @@
 
 ## 定位
 
-同级仓库 `../purra` 是可独立构建、仅依赖 Python 标准库的通用 Agent
-框架。PurrTypos 是它的一个宿主，不是框架内部的特殊分支。
+PurrA 是可独立发布、仅依赖 Python 标准库的通用 Agent 框架。PurrTypos 是它的一个宿主，不是框架内部的特殊分支。
 
 框架负责完整 Agent Run 的通用不变量：规划、上下文与输出预算、模型结束
 原因、恢复额度、工具授权、Artifact、Work Item、检查点、取消、终态和标准事件。
@@ -47,14 +46,16 @@ Gateway，不能自行建立第二条 Agent 模型执行链路。
 
 ## 受管模型执行边界
 
-迁移债务已经清零。Application、Domain 和 Router 不得直接构造
-`ModelInvocation`，也不得在 Composition Root 之外取得原始
-`ProviderModelGateway`。静态架构测试把这两条约束作为零容忍不变量，新增旁路会
-直接使 CI 失败。
+普通 Application、Domain、Router 和 Service 不得直接构造 `ModelInvocation`
+或取得原始 `ProviderModelGateway`。明确的装配白名单为 Composition Root，以及
+私有后台生成的 `application/model_request_service.py`；后者要求任务 owner 和结果容量，
+使用已有预算契约，不创建第二条 Agent 执行链路。静态架构测试禁止其余业务旁路。
+三类 Agent 和后台调用的公共解析、SDK 参数核验及协议职责遵循
+[模型请求公共入口与适配规范](2026-09-06-model-request-boundary-refactor.md)。
 
 记忆重排、响应裁判、会话压缩和剧本结构化生成都只向
 `ManagedModelExecutor` 提交 `ModelRequest`、`OutputBudgetPolicy`、工作单元数量和
-推理模式。PurrA 负责解析唯一实际输出额度、构造供应商调用、记录调用参数、限制
+推理模式。业务结果容量目标不充当模型总生成上限。PurrA 负责解析实际生成额度、构造供应商调用、记录调用参数、限制
 兼容降级次数，并统一解释流式与非流式结束原因。
 
 供应商没有给出结束原因，或者明确以 `length`、过滤或未知原因结束时，结果一律
@@ -69,30 +70,39 @@ JSON 修复只允许处理“供应商已正常结束，但完整输出不符合
 
 ## 打包
 
-- 开发和测试安装仓库内固定的
-  `backend/vendor/purra-0.5.0-py3-none-any.whl`，不从相邻源码 checkout 导入；
+- 开发、CI 和分发统一通过 `backend/requirements-purra.txt` 安装 PyPI 0.5.0
+  的 `purra`、`purra-openai`、`purra-anthropic`、`purra-mem0[managed]`；
 - PyInstaller 分析当前 Python 环境中安装的 PurrA，无需注入源码路径；
-- Electron / Web 分发在安装前校验 wheel SHA-256
-  `0d380d4d65f1378574c940e2c35b6f7de8f23c147d299e56b5376c6ee1e535b4`，
-  再把实际包文件放入后端资源；
+- Electron / Web 分发从同一依赖清单安装实际包文件到后端资源；
 - 框架包本身不依赖 FastAPI、Pydantic、模型 SDK 或数据库驱动。
 
-Core 的本地 wheel 是唯一依赖来源，不回退到 PyPI 或相邻 PurrA 源码。当前
-`purra-mem0` 集成仍从同级仓库的独立 Python 包安装；它不能改变 Core 的实际导入
-路径。发布框架、推送分支与远端 CI 验证不属于本地切换。
+运行时不依赖相邻源码目录或仓库内历史 wheel。已有同版本本地安装需强制
+重装这四个发布包，并重启后端；安装步骤见 README。
 
-## 0.5.0 输出契约
+## 当前生成预算契约（0.5.0）
 
-单次调用使用 `max_call_output_tokens` / `maxCallOutputTokens`，Run 和 Long Task
-累计输出预算使用 `max_run_output_tokens` / `maxRunOutputTokens`。各产品显式
-声明 Run 预算；`None` 保持原有无有限累计上限的策略，不表示无限单次输出。
+`ModelRequest.max_generation_tokens` / `maxGenerationTokens` 仅表示用户显式
+生成上限；模型能力快照提供 `max_generation_tokens` 能力上限。工作流的
+`result_capacity_target_tokens` / `resultCapacityTargetTokens` 是结果容量目标，
+用于规划和上下文预留，不是 Provider 总生成限制。三者不再共用一个字段。
 
-Provider SDK 适配器回报最终请求参数中的 `applied_output_limit`。缺失、与请求
-不符、或 usage 超过单次上限时，由 PurrA 拒绝结果，不提交为成功输出。
-Provider 原生 `max_tokens` / `max_completion_tokens` 和思考配置保持原语义。
+PurrA 生成 `InvocationOutputBudget` v2，记录用户上限、模型上限、结果目标和
+实际限制来源。实际上限受模型能力、用户显式上限及可用上下文共同约束。
+Run 和 Long Task 累计用量使用 `max_run_generation_tokens` /
+`maxRunGenerationTokens`，独立于单次调用；`None` 不表示无限单次输出。
 
-旧运行状态不做隐式迁移：0.4.1 的预算字段不会被解释成无限预算。历史数据不会
-删除，但旧 Run / Long Task 不支持跨此契约续跑；需要发起新任务。
+Provider SDK 适配器回报最终请求参数中的 `applied_generation_limit`。缺失、
+与请求不符、usage 超限或 `length` 结束均失败，不提交成功 finish。流式/非流式
+共用该检查，已发生的用量和失败诊断仍保留。公开累计用量是 `generationTokens`；
+Provider 未报告 reasoning 用量时保留未知，不按零计算。
+
+Provider 原生 `max_tokens` / `max_completion_tokens` 保持其原生含义。思考模式、
+强度和显式思考预算按用户配置传递，业务 Part 不再注入低强度或较小总生成上限。
+受管 Hook 也必须符合持久化 Root 的模型与用户配置身份。
+
+技术失败不作为可恢复业务暂停；合法的用户暂停和需要用户重新确定业务范围的暂停
+仍有独立语义。旧字段不提供别名，不迁移历史运行状态，不删除历史数据；旧 Run /
+Long Task 不支持跨此契约续跑，需要发起新任务。
 
 ## 0.5.0 Retriever 与 RAG 接入
 
@@ -126,7 +136,8 @@ Provider 原生 `max_tokens` / `max_completion_tokens` 和思考配置保持原�
 共用一条重规划规则；Retriever 不经过旧 handler 返回值转换。预算读取只接受当前
 字段，未知字段直接拒绝，不提供别名、迁移或旧版回退。
 
-这次没有安装或启用独立的 `purra-mem0`。Core 本地引入不会自动启用 Mem0 的
+历史说明：最初 Retriever 接入阶段没有安装或启用独立的 `purra-mem0`；
+当前已通过发布包接入该组件。安装 Core 本身不会自动启用 Mem0 的
 Embedding、向量存储、候选提取或生命周期管理。该组件的实际接入还需要明确
 Provider/存储配置、现有数据分工、来源修改与撤回事件、检查点证据重验和费用边界；
 不能把当前 SQLite 检索适配描述为已完成 Mem0 RAG 迁移。

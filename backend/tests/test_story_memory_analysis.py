@@ -76,6 +76,7 @@ async def _configure_model(db: DatabaseConnection, *, automatic: bool = False) -
                 "name": "test-model",
                 "apiKey": "test-key",
                 "baseUrl": "http://example.test/v1",
+                "profileMaxGenerationTokens": 8_192, "supportsThinking": False, "thinkingOnly": False, "contextWindow": "128k",
             }
         ],
     )
@@ -103,7 +104,9 @@ async def test_explicit_analysis_stages_inferred_candidates_and_is_idempotent(
         assert "林墨抵达旧城区" in messages[-1]["content"]
         assert f'"id":{character_id}' in messages[-1]["content"]
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -131,7 +134,7 @@ async def test_explicit_analysis_stages_inferred_candidates_and_is_idempotent(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     content = "林墨抵达旧城区。妹妹的线索也指向这里。"
 
     first = await analyze_chapter(
@@ -190,7 +193,9 @@ async def test_auto_resolved_analysis_reuses_the_same_chapter_revision(
         nonlocal calls
         calls += 1
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -209,7 +214,7 @@ async def test_auto_resolved_analysis_reuses_the_same_chapter_revision(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     content = "林墨抵达旧城区。"
 
     first = await analyze_chapter(
@@ -262,9 +267,13 @@ async def test_automatic_analysis_is_disabled_without_opt_in(
     async def fake_chat(*_args, **_kwargs):
         nonlocal called
         called = True
-        return {"message": {"content": '{"changes":[]}'}}
+        return {
+            "message": {"role": "assistant","content": '{"changes":[]}'},
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+        }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     receipt = await analyze_chapter(
         db,
         book_id="book-1",
@@ -289,7 +298,9 @@ async def test_inline_article_save_can_trigger_opted_in_analysis(
 
     async def fake_chat(*_args, **_kwargs):
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -307,7 +318,7 @@ async def test_inline_article_save_can_trigger_opted_in_analysis(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     response = await save_article(
         "chapter-1",
         SaveArticleRequest(content="林墨左臂受伤。", source="inline_edit"),
@@ -340,7 +351,9 @@ async def test_new_revision_invalidates_old_pending_delta(
         else:
             excerpt, value = "林墨已经进入北城。", "北城"
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -358,7 +371,7 @@ async def test_new_revision_invalidates_old_pending_delta(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     first = await analyze_chapter(
         db,
         book_id="book-1",
@@ -391,7 +404,9 @@ async def test_plain_article_save_invalidates_candidates_without_calling_model(
 
     async def fake_chat(*_args, **_kwargs):
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -409,7 +424,7 @@ async def test_plain_article_save_invalidates_candidates_without_calling_model(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     analyzed = await analyze_chapter(
         db,
         book_id="book-1",
@@ -444,7 +459,9 @@ async def test_returning_to_a_stale_revision_reanalyzes_instead_of_reusing_it(
         excerpt = "林墨留在旧城区。" if old_revision else "林墨进入北城。"
         value = "旧城区" if old_revision else "北城"
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -462,7 +479,7 @@ async def test_returning_to_a_stale_revision_reanalyzes_instead_of_reusing_it(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     first = await analyze_chapter(
         db,
         book_id="book-1",
@@ -500,7 +517,9 @@ async def test_model_candidates_without_exact_evidence_are_discarded_and_cached(
         nonlocal calls
         calls += 1
         return {
-            "message": {
+            "finish_reason": "stop",
+            "applied_generation_limit": 8_192,
+            "message": {"role": "assistant",
                 "content": json.dumps(
                     {
                         "changes": [
@@ -517,7 +536,7 @@ async def test_model_candidates_without_exact_evidence_are_discarded_and_cached(
             }
         }
 
-    monkeypatch.setattr(story_memory_analysis_service, "create_chat_no_stream", fake_chat)
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
     first = await analyze_chapter(
         db,
         book_id="book-1",
@@ -535,3 +554,81 @@ async def test_model_candidates_without_exact_evidence_are_discarded_and_cached(
     assert first.delta_id is None
     assert second.status.value == "reused"
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("provider_result", "expected_error"),
+    [
+        (
+            {
+                "finish_reason": "length",
+                "applied_generation_limit": 8_192,
+            },
+            "model output is incomplete",
+        ),
+        (
+            {
+                "applied_generation_limit": 8_192,
+            },
+            "without a finish reason",
+        ),
+        (
+            {
+                "finish_reason": "stop",
+            },
+            "did not apply the requested generation limit",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_incomplete_or_unacknowledged_background_completion_never_stages_candidates(
+    db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_result: dict[str, object],
+    expected_error: str,
+):
+    character_id = await _seed_chapter(db)
+    await _configure_model(db)
+    content = "林墨抵达旧城区。"
+
+    async def fake_chat(*_args, **_kwargs):
+        return {
+            **provider_result,
+            "message": {"role": "assistant",
+                "content": json.dumps(
+                    {
+                        "changes": [
+                            {
+                                "kind": "character_state",
+                                "characterId": str(character_id),
+                                "attribute": "location",
+                                "value": "旧城区",
+                                "source": {"excerpt": content},
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        }
+
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_no_stream", fake_chat)
+    receipt = await analyze_chapter(
+        db,
+        book_id="book-1",
+        chapter_id="chapter-1",
+        content=content,
+    )
+
+    assert receipt.status.value == "failed"
+    assert receipt.delta_id is None
+    run = await db.fetch_one(
+        "SELECT status, delta_id, candidate_count, error "
+        "FROM story_memory_analysis_runs WHERE book_id = ? AND chapter_id = ?",
+        ["book-1", "chapter-1"],
+    )
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["delta_id"] is None
+    assert run["candidate_count"] == 0
+    assert expected_error in str(run["error"])

@@ -2,6 +2,7 @@ import React from "react";
 import type { AiTaskPlan } from "../../agent-runtime";
 import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
 import ToolDiagnosticsCard from "./ToolDiagnosticsCard";
+import DiagnosticText, { characterCount } from "./DiagnosticText";
 import type {
   AiErrorReport,
   AiModelInputDiagnostic,
@@ -20,6 +21,9 @@ import {
   recordAiDebugRunUsageSnapshot,
   isAiDebugRunActive,
   subscribeAiDebugStore,
+  getAiDebugInspectorVisible,
+  setAiDebugInspectorVisible,
+  subscribeAiDebugInspectorVisibility,
   type AiDebugRun,
   type AiDebugTurnGroup,
   type AiDebugDelegationActivity,
@@ -123,22 +127,25 @@ function formatTokens(value: unknown): string {
   return String(Math.round(tokens));
 }
 
-function tokenUsageText(usage: AiDebugTokenUsage): string {
+export function tokenUsageText(usage: AiDebugTokenUsage): string {
   if (usage.totalTokens === 0 && usage.unreportedAttempts > 0) return "Token 未上报";
   const incomplete = !usage.complete || usage.unreportedAttempts > 0;
-  return `${formatTokens(usage.totalTokens)}${incomplete ? "+" : ""} Token`;
+  return `输入 ${formatTokens(usage.inputTokens)} / 输出 ${formatTokens(usage.generationTokens)}${incomplete ? "+" : ""} Token`;
 }
 
 function tokenUsageTitle(usage: AiDebugTokenUsage): string {
   const parts = [
     `输入 ${usage.inputTokens}`,
-    `输出 ${usage.outputTokens}`,
-    `推理 ${usage.reasoningTokens}`,
+    `生成 ${usage.generationTokens}`,
+    `推理 ${usage.reasoningTokens ?? '未上报'}`,
     `合计 ${usage.totalTokens}`,
   ];
   if (!usage.complete) parts.push("当前仅显示已上报用量");
   if (usage.unreportedAttempts > 0) {
     parts.push(`${usage.unreportedAttempts} 次模型调用未返回用量`);
+  }
+  if (usage.unreportedReasoningAttempts > 0) {
+    parts.push(`${usage.unreportedReasoningAttempts} 次模型调用未单独上报推理用量`);
   }
   return parts.join(" · ");
 }
@@ -159,12 +166,18 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
     <details className={`ai-dev-inspector__tool ai-dev-inspector__tool--${tool.status}`}>
       <summary>
         <span className="ai-dev-inspector__tool-index">{tool.index + 1}</span>
-        <strong>{tool.name}</strong>
+        <strong>{tool.displayName || tool.name}</strong>
         {tool.cached && <span className="ai-dev-inspector__tag">缓存</span>}
         <span className="ai-dev-inspector__tool-duration">{formatDuration(duration)}</span>
         <span>{tool.status === "running" ? "运行中" : tool.status === "failed" ? "失败" : "完成"}</span>
       </summary>
       <div className="ai-dev-inspector__tool-detail">
+        {tool.displayName && tool.displayName !== tool.name && (
+          <>
+            <span>工具函数</span>
+            <pre>{tool.name}</pre>
+          </>
+        )}
         {tool.errorCode && (
           <>
             <span>错误代码</span>
@@ -190,16 +203,10 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
           </>
         )}
         {tool.argumentsValue !== undefined && (
-          <>
-            <span>参数</span>
-            <pre>{formatJson(tool.argumentsValue)}</pre>
-          </>
+          <DiagnosticText label="参数" text={formatJson(tool.argumentsValue)} />
         )}
         {tool.result !== undefined && (
-          <>
-            <span>结果</span>
-            <pre>{formatJson(tool.result)}</pre>
-          </>
+          <DiagnosticText label="结果" text={formatJson(tool.result)} />
         )}
         {tool.argumentsValue === undefined && tool.result === undefined && (
           <div className="ai-dev-inspector__notice">
@@ -367,7 +374,11 @@ function ModelCallRow({
   index: number;
   source: string;
 }) {
-  const maxCallOutputTokens = call.parameters?.maxCallOutputTokens;
+  const outputBudget = call.parameters?.outputBudget as Record<string, unknown> | undefined;
+  const maxGenerationTokens =
+    outputBudget?.maxGenerationTokens ?? call.parameters?.maxGenerationTokens;
+  const requestedUserMaxGenerationTokens = outputBudget?.requestedUserMaxGenerationTokens;
+  const resultCapacityTargetTokens = outputBudget?.resultCapacityTargetTokens;
   const modelCapabilities = call.parameters?.modelOutputCapabilities as Record<string, unknown> | undefined;
   const roundLabel =
     call.logicalRound != null
@@ -376,20 +387,26 @@ function ModelCallRow({
         ? `轮次 ${call.round}`
         : "";
   return (
-    <div className="ai-dev-inspector__model-call">
-      <div>
+    <details className="ai-dev-inspector__model-call">
+      <summary>
         <span>#{index + 1}</span>
         <strong>{MODEL_PHASE_LABELS[call.phase] || call.phase}</strong>
         {call.count > 1 ? <em>×{call.count}</em> : null}
         <small>{source}</small>
         {roundLabel ? <small>{roundLabel}</small> : null}
-      </div>
+      </summary>
       <div className="ai-dev-inspector__tool-chips">
-        {maxCallOutputTokens ? (
-          <span>本次上限 {formatTokens(maxCallOutputTokens)}</span>
+        {maxGenerationTokens ? (
+          <span>本次生成上限 {formatTokens(maxGenerationTokens)}</span>
         ) : null}
-        {modelCapabilities?.maxCallOutputTokens ? (
-          <span>模型上限 {formatTokens(modelCapabilities.maxCallOutputTokens)}</span>
+        {requestedUserMaxGenerationTokens ? (
+          <span>用户上限 {formatTokens(requestedUserMaxGenerationTokens)}</span>
+        ) : null}
+        {resultCapacityTargetTokens ? (
+          <span>结果容量目标 {formatTokens(resultCapacityTargetTokens)}</span>
+        ) : null}
+        {modelCapabilities?.maxGenerationTokens ? (
+          <span>模型能力上限 {formatTokens(modelCapabilities.maxGenerationTokens)}</span>
         ) : null}
         {call.toolNames.length > 0
           ? call.toolNames.map((name) => <code key={name}>{name}</code>)
@@ -397,11 +414,11 @@ function ModelCallRow({
       </div>
       {call.parameters ? (
         <details className="ai-dev-inspector__model-parameters">
-          <summary>传给模型的参数（已脱敏）</summary>
+          <summary>调用前请求配置（已脱敏） <small>{characterCount(formatJson(call.parameters)).toLocaleString()} 字符</small></summary>
           <pre>{formatJson(call.parameters)}</pre>
         </details>
       ) : null}
-    </div>
+    </details>
   );
 }
 
@@ -508,6 +525,7 @@ function PlannerModelOutputCard({
   status: AiDebugRunStatus;
 }) {
   const [outputs, setOutputs] = React.useState<AiPlannerModelOutputDiagnostic[]>([]);
+  const [opened, setOpened] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -541,6 +559,7 @@ function PlannerModelOutputCard({
   React.useEffect(() => {
     requestVersion.current += 1;
     setOutputs([]);
+    setOpened(false);
     setLoaded(false);
     setError("");
     setLoading(false);
@@ -550,34 +569,42 @@ function PlannerModelOutputCard({
   }, [runId]);
 
   React.useEffect(() => {
-    if (!runId) return;
+    if (!runId || !opened) return;
     void load();
-  }, [load, hasPlan, status]);
+  }, [load, hasPlan, status, opened]);
 
   if (!runId || (loaded && !loading && !error && outputs.length === 0 && !hasPlan)) {
     return null;
   }
 
   return (
-    <details className="ai-dev-inspector__planner-raw">
+    <details className="ai-dev-inspector__planner-raw" open={opened}
+      onToggle={(event) => setOpened(event.currentTarget.open)}>
       <summary>
         <span>
           <strong>Planner 原始模型返回</strong>
           <small>精确持久化内容，不含 reasoning</small>
         </span>
         <em data-status={error ? "fail" : outputs.length ? "pass" : "captured"}>
-          {loading ? "读取中" : error ? "读取失败" : outputs.length ? `${outputs.length} 次调用` : "等待返回"}
+          {loading ? "读取中" : error ? "读取失败" : outputs.length ? `${outputs.length} 次调用` : loaded ? "暂无记录" : "展开读取"}
         </em>
       </summary>
-      <div className="ai-dev-inspector__planner-raw-body">
+      {opened && <div className="ai-dev-inspector__planner-raw-body">
         {error ? <div className="ai-dev-inspector__error">{error}</div> : null}
         {outputs.map((output) => (
-          <section className="ai-dev-inspector__planner-attempt" key={output.invocationId}>
-            <div className="ai-dev-inspector__inline-meta">
+          <details className="ai-dev-inspector__planner-attempt" key={output.invocationId}>
+            <summary className="ai-dev-inspector__inline-meta">
               <span>{output.model || "未知模型"}</span>
               <span>revision {output.revision} / attempt {output.attempt}</span>
               <span>{output.status}{output.finishReason ? ` · ${output.finishReason}` : ""}</span>
-            </div>
+              <span>{characterCount(output.rawContent || '').toLocaleString()} 字符{output.rawContentTruncated ? ' · 已截断' : ''}</span>
+              {typeof output.timing.firstActivityMs === 'number' ? (
+                <span>首个模型活动 {formatDuration(output.timing.firstActivityMs)}</span>
+              ) : null}
+              {typeof output.timing.firstPublicProgressMs === 'number' ? (
+                <span>首段公开进展 {formatDuration(output.timing.firstPublicProgressMs)}</span>
+              ) : null}
+            </summary>
             {output.contentDeltaConflict ? (
               <div className="ai-dev-inspector__error">
                 同一 Provider source span 出现冲突，只保留首次持久化值。
@@ -599,17 +626,17 @@ function PlannerModelOutputCard({
                 timing: output.timing,
               })}</pre>
             </details>
-          </section>
+          </details>
         ))}
         <button type="button" onClick={() => void load()} disabled={loading}>
           {loading ? "读取中…" : "重新读取"}
         </button>
-      </div>
+      </div>}
     </details>
   );
 }
 
-function ModelInputDiagnosticsCard({
+export function ModelInputDiagnosticsCard({
   runId,
   status,
 }: {
@@ -695,35 +722,37 @@ function ModelInputDiagnosticsCard({
           <div className="ai-dev-inspector__notice">当前 Run 尚无模型调用记录。</div>
         ) : null}
         {calls.map((call, index) => (
-          <section className="ai-dev-inspector__planner-attempt" key={call.eventRowId}>
-            <div className="ai-dev-inspector__inline-meta">
+          <details className="ai-dev-inspector__planner-attempt" key={call.eventRowId}>
+            <summary className="ai-dev-inspector__inline-meta">
               <span>#{index + 1} · {call.phase}</span>
               <span>{call.provider || "未知 Provider"} / {call.model || "未知模型"}</span>
               {call.round != null ? <span>round {call.round}</span> : null}
               {call.attempt != null ? <span>attempt {call.attempt}</span> : null}
               {call.revision != null ? <span>revision {call.revision}</span> : null}
-            </div>
+              <span>{call.messages.length} 条消息 · {call.messages.reduce((sum, message) => sum + characterCount(formatJson(message)), 0).toLocaleString()} 字符（诊断序列化）</span>
+            </summary>
+            {call.sdkRequest ? (
+              <DiagnosticText label="SDK 参数核验（已脱敏）" text={formatJson(call.sdkRequest)} />
+            ) : null}
             {call.captured ? (
               <div className="ai-dev-inspector__messages">
                 {call.messages.map((message, messageIndex) => {
                   const role = String(message.role || "unknown");
                   return (
-                    <article
-                      className={`ai-dev-inspector__captured-message ai-dev-inspector__message--${role}`}
+                    <DiagnosticText
                       key={`${call.eventRowId}:${messageIndex}`}
-                    >
-                      <header><span>{role}</span><small>#{messageIndex + 1}</small></header>
-                      <pre>{formatJson(message)}</pre>
-                    </article>
+                      label={`#${messageIndex + 1} · ${role}`}
+                      text={formatJson(message)}
+                    />
                   );
                 })}
               </div>
             ) : (
               <div className="ai-dev-inspector__notice">
-                该调用产生于模型输入诊断启用之前，没有补造历史内容。
+                该调用未捕获输入消息，无法还原；未补造历史内容。
               </div>
             )}
-          </section>
+          </details>
         ))}
         <button type="button" onClick={() => void load()} disabled={loading}>
           {loading ? "读取中…" : "重新读取"}
@@ -811,13 +840,15 @@ function RunTechnicalDetails({
   modelCallRows: Array<{ key: string; call: AiDebugModelCall; source: string }>;
   modelToolNames: string[];
 }) {
+  const [opened, setOpened] = React.useState(false);
   return (
-    <details className="ai-dev-inspector__technical">
+    <details className="ai-dev-inspector__technical" open={opened}
+      onToggle={(event) => setOpened(event.currentTarget.open)}>
       <summary>
         <span>技术明细</span>
         <small>{run.eventCount} 个事件</small>
       </summary>
-      <div className="ai-dev-inspector__technical-body">
+      {opened && <div className="ai-dev-inspector__technical-body">
         <div className="ai-dev-inspector__identifiers">
           <div><span>Agent Run ID</span><code title={run.agentRunId}>{run.agentRunId || "—"}</code></div>
           <div><span>Stream ID</span><code title={run.id}>{run.id}</code></div>
@@ -834,7 +865,7 @@ function RunTechnicalDetails({
 
         {modelCallRows.length > 0 ? (
           <details className="ai-dev-inspector__model-calls">
-            <summary>模型调用 <small>{modelCallRows.reduce((sum, item) => sum + item.call.count, 0)} 次</small></summary>
+            <summary>模型操作记录 <small>{modelCallRows.reduce((sum, item) => sum + item.call.count, 0)} 次已记录</small></summary>
             <div>
               {modelCallRows.map((item, index) => (
                 <ModelCallRow
@@ -849,7 +880,7 @@ function RunTechnicalDetails({
         ) : null}
 
         <details className="ai-dev-inspector__text-block">
-          <summary>请求参数</summary>
+          <summary>请求参数 <small>{characterCount(formatJson(run.request.meta)).toLocaleString()} 字符</small></summary>
           <pre>{formatJson(run.request.meta)}</pre>
         </details>
 
@@ -862,7 +893,7 @@ function RunTechnicalDetails({
                   className={`ai-dev-inspector__message ai-dev-inspector__message--${message.role}`}
                   key={`${message.role}-${index}`}
                 >
-                  <summary><span>{message.role}</span><small>#{index + 1}</small></summary>
+                  <summary><span>{message.role}</span><small>#{index + 1} · {characterCount(formatJson(message.content)).toLocaleString()} 字符</small></summary>
                   <pre>{formatJson(message.content)}</pre>
                 </details>
               ))}
@@ -891,17 +922,16 @@ function RunTechnicalDetails({
             ) : null}
           </div>
         </details>
-      </div>
+      </div>}
     </details>
   );
 }
 
-function RunTimelineItem({
+const RunTimelineItem = React.memo(function RunTimelineItem({
   run,
   index,
   total,
   rootRunId,
-  isCurrent,
   now,
 }: {
   run: AiDebugRun;
@@ -911,8 +941,8 @@ function RunTimelineItem({
   isCurrent: boolean;
   now: number;
 }) {
-  const [open, setOpen] = React.useState(isCurrent);
-  React.useEffect(() => setOpen(isCurrent), [isCurrent, run.id]);
+  const [open, setOpen] = React.useState(false);
+  React.useEffect(() => setOpen(false), [run.id]);
   const isRoot = Boolean(rootRunId && run.agentRunId === rootRunId);
   const elapsed = (run.finishedAt ?? now) - run.startedAt;
   const modelCallRows = [
@@ -927,7 +957,10 @@ function RunTimelineItem({
       source: activity.agentTitle || activity.agentName,
     }))),
   ];
-  const modelCallCount = modelCallRows.reduce((sum, item) => sum + item.call.count, 0);
+  const modelCallCount = Math.max(
+    modelCallRows.reduce((sum, item) => sum + item.call.count, 0),
+    run.tokenUsage?.modelAttempts ?? 0,
+  );
   const modelToolNames = [...new Set(modelCallRows.flatMap((item) => item.call.toolNames))];
   const usage = run.tokenUsage;
 
@@ -957,7 +990,7 @@ function RunTimelineItem({
           </span>
         </summary>
 
-        <div className="ai-dev-inspector__run-card-body">
+        {open && <div className="ai-dev-inspector__run-card-body">
 
           <div className="ai-dev-inspector__run-facts">
             <span><b>{formatDuration(elapsed)}</b>耗时</span>
@@ -968,9 +1001,11 @@ function RunTimelineItem({
               <span title={tokenUsageTitle(usage)}>
                 <b>{tokenUsageText(usage)}</b>本段消耗
               </span>
-              <span><b>{formatTokens(usage.inputTokens)} / {formatTokens(usage.outputTokens)}</b>输入 / 输出</span>
-              {usage.reasoningTokens > 0 ? (
+              <span><b>{formatTokens(usage.inputTokens)} / {formatTokens(usage.generationTokens)}</b>输入 / 生成</span>
+              {usage.reasoningTokens != null && usage.reasoningTokens > 0 ? (
                 <span><b>{formatTokens(usage.reasoningTokens)}</b>其中推理 Token</span>
+              ) : usage.reasoningTokens == null ? (
+                <span><b>未上报</b>推理 Token 明细</span>
               ) : null}
               {usage.unreportedAttempts > 0 ? (
                 <span><b>{usage.unreportedAttempts}</b>用量未上报的调用</span>
@@ -982,7 +1017,7 @@ function RunTimelineItem({
           <FailureDiagnosisCard report={run.errorReport} tools={run.tools} fallback={run.error} />
           <ErrorReportCard run={run} />
 
-          {run.tools.length > 0 ? (
+          {!run.agentRunId && run.tools.length > 0 ? (
             <div className="ai-dev-inspector__run-section">
               <div className="ai-dev-inspector__section-title">
                 <span>工具执行</span><small>{run.tools.length} 个</small>
@@ -1024,11 +1059,11 @@ function RunTimelineItem({
             modelCallRows={modelCallRows}
             modelToolNames={modelToolNames}
           />
-        </div>
+        </div>}
       </details>
     </section>
   );
-}
+});
 
 function ConversationTimeline({
   turn,
@@ -1075,7 +1110,7 @@ function ConversationTimeline({
     : now;
   const modelCallCount = runs.reduce((sum, run) => (
     sum
-    + run.modelCalls.reduce((count, call) => count + call.count, 0)
+    + Math.max(run.modelCalls.reduce((count, call) => count + call.count, 0), run.tokenUsage?.modelAttempts ?? 0)
     + run.delegationActivities.reduce((count, activity) => (
       count + activity.modelCalls.reduce((calls, call) => calls + call.count, 0)
     ), 0)
@@ -1134,7 +1169,7 @@ function ConversationTimeline({
             total={runs.length}
             rootRunId={rootRunId}
             isCurrent={run.id === currentRunId}
-            now={now}
+            now={isAiDebugRunActive(run) ? now : run.finishedAt ?? run.updatedAt}
           />
         ))}
       </div>
@@ -1144,6 +1179,20 @@ function ConversationTimeline({
 
 
 export default function AiDevInspector() {
+  const visible = React.useSyncExternalStore(
+    subscribeAiDebugInspectorVisibility,
+    getAiDebugInspectorVisible,
+    getAiDebugInspectorVisible,
+  );
+  return visible ? <VisibleAiDevInspector /> : (
+    <button type="button" className="ai-dev-inspector-launcher"
+      aria-label="打开 AI 诊断" onClick={() => setAiDebugInspectorVisible(true)}>
+      AI 诊断
+    </button>
+  );
+}
+
+function VisibleAiDevInspector() {
   const snapshot = React.useSyncExternalStore(
     subscribeAiDebugStore,
     getAiDebugSnapshot,
@@ -1160,12 +1209,10 @@ export default function AiDevInspector() {
     ? aiDebugConversationLifecycle(currentTurn)
     : undefined;
   const [collapsed, setCollapsed] = React.useState(false);
-  const [hidden, setHidden] = React.useState(true);
   const [position, setPosition] = React.useState<Position>(
     () => clampPosition(loadPosition(), false),
   );
   const [now, setNow] = React.useState(Date.now);
-  const lastOpenedTurnRef = React.useRef<string | null>(null);
   const dragRef = React.useRef<{
     pointerId: number;
     startX: number;
@@ -1173,18 +1220,13 @@ export default function AiDevInspector() {
     origin: Position;
   } | null>(null);
 
+  const ticking = !collapsed && Boolean(currentTurn?.runs.some(isAiDebugRunActive));
   React.useEffect(() => {
-    if (!currentTurn || lastOpenedTurnRef.current === currentTurn.key) return;
-    lastOpenedTurnRef.current = currentTurn.key;
-    setHidden(false);
-    setCollapsed(false);
-  }, [currentTurn?.key]);
-
-  React.useEffect(() => {
-    if (!currentTurn?.runs.some(isAiDebugRunActive)) return;
-    const interval = window.setInterval(() => setNow(Date.now()), 250);
+    if (!ticking) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(interval);
-  }, [currentTurn?.key, currentTurn?.runs]);
+  }, [ticking]);
 
   React.useEffect(() => {
     const handleResize = () => setPosition((current) => clampPosition(current, collapsed));
@@ -1230,7 +1272,6 @@ export default function AiDevInspector() {
     });
   };
 
-  if (hidden) return null;
   const status = lifecycle?.status ?? "starting";
 
   return (
@@ -1268,7 +1309,7 @@ export default function AiDevInspector() {
             {collapsed ? "▣" : "—"}
           </button>
           {!collapsed ? (
-            <button type="button" onClick={() => setHidden(true)} aria-label="关闭调试面板" title="下次任务开始时自动打开">
+            <button type="button" onClick={() => setAiDebugInspectorVisible(false)} aria-label="关闭调试面板" title="下次提交新任务时打开">
               ×
             </button>
           ) : null}

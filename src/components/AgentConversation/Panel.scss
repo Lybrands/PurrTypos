@@ -68,15 +68,20 @@
 
 .agent-conversation-panel__queue-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
+  align-items: start;
 
-  > span:last-child {
+  .agent-conversation-panel__queue-content {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 }
+
+.agent-conversation-panel__queue { max-height: 260px; overflow-y: auto; }
+.agent-conversation-panel__queue-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.agent-conversation-panel__queue-editor { min-width: 0; }
 
 .agent-conversation-panel__queue-more {
   color: var(--text-muted);

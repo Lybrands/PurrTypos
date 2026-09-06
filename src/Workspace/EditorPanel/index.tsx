@@ -63,7 +63,7 @@ interface EditorPanelProps {
   fullscreen?: boolean
   onToggleFullscreen?: () => void
   modelConfigs?: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   /** 工作台搜索：注册 Lexical 实例 */
   onLexicalEditor?: (editor: import('lexical').LexicalEditor | null) => void
 }
@@ -565,7 +565,7 @@ interface AiFloatBoxProps {
   loading: boolean
   result: string
   modelConfigs: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   selectedModelId: string
   onPromptChange: (v: string) => void
   onModelChange: (v: string) => void

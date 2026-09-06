@@ -195,7 +195,13 @@ class SqliteScreenplayTaskResolver:
 
         refs = {
             "sceneList": (head_id("structure"),),
-            "screenplayDraft": (head_id("sceneList"), base_revision_id or ""),
+            "screenplayDraft": (
+                head_id("sourceAnalysis"),
+                head_id("creativeBrief"),
+                head_id("structure"),
+                head_id("sceneList"),
+                base_revision_id or "",
+            ),
             "review": (head_id("sceneList"), head_id("screenplayDraft")),
         }.get(target, ())
         return tuple(dict.fromkeys(value for value in refs if value))

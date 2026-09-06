@@ -580,8 +580,18 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   runtime.setChatRuntimeLoading(7, true)
   const first = renderHook({ loading: true })
   assert.equal(first.result.handleSubmit({ content: '冻结 A 请求' }), 'queued')
-  const queued = runtime.getChatRuntimeQueue()[0]
+  let queued = runtime.getChatRuntimeQueue()[0]
   assert.ok(queued)
+  assert.ok(queued.id)
+  assert.equal(first.result.updateQueuedSubmission(queued.id, { editing: true }), true)
+  assert.equal(runtime.updateChatQueuedSubmission(8, 'book-a', queued.id, null), false)
+  assert.equal(first.result.updateQueuedSubmission(queued.id, { content: '修改后的 A 请求', editing: false }), true)
+  queued = runtime.getChatRuntimeQueue()[0]
+  assert.equal(queued.content, '修改后的 A 请求')
+  assert.equal(first.result.handleSubmit({ content: '应被删除的消息' }), 'queued')
+  const deleted = runtime.getChatRuntimeQueue()[1].id
+  assert.equal(first.result.updateQueuedSubmission(deleted, null), true)
+  assert.equal(first.result.updateQueuedSubmission(deleted, { content: 'stale' }), false)
 
   runtime.setChatRuntimeLoading(7, false)
   globalThis.document.documentElement.lang = 'locale-B'
@@ -621,6 +631,7 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   }
 
   assert.equal(streamRequest.sessionId, 7)
+  assert.equal(streamRequest.messages.at(-1).content, '修改后的 A 请求')
   assert.equal(streamRequest.locale, 'locale-A')
   assert.equal(streamRequest.bookId, 'book-a')
   assert.equal(streamRequest.chapterId, 'chapter-a')

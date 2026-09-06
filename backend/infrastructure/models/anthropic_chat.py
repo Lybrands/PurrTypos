@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
@@ -15,11 +16,9 @@ from infrastructure.models.capabilities import (
     normalize_thinking_enabled,
     require_supported_reasoning_mode,
 )
-from infrastructure.models.profiles import resolve_model_profile
-from utils.session_title import (
-    SESSION_TITLE_SYSTEM_PROMPT,
-    normalize_session_title,
-)
+from purra.cancellation import await_with_cancellation, raise_if_stopped
+from infrastructure.models.request_boundary import prepare_sdk_request, record_provider_response
+from infrastructure.models.profiles.descriptors import profile_for_options
 from purra.stream_ownership import OwnedAsyncIterator, close_async_resource, openai_chunk_is_terminal
 from utils.url import normalize_base_url
 
@@ -197,6 +196,25 @@ def _merge_anthropic_usage(target: dict[str, int], usage: Any) -> None:
         if value >= 0:
             target[name] = value
 
+    output_details = (
+        usage.get("output_tokens_details")
+        if isinstance(usage, dict)
+        else getattr(usage, "output_tokens_details", None)
+    )
+    raw_thinking_tokens = (
+        output_details.get("thinking_tokens")
+        if isinstance(output_details, Mapping)
+        else getattr(output_details, "thinking_tokens", None)
+    )
+    if raw_thinking_tokens is None or isinstance(raw_thinking_tokens, bool):
+        return
+    try:
+        thinking_tokens = int(raw_thinking_tokens)
+    except (TypeError, ValueError):
+        return
+    if thinking_tokens >= 0:
+        target["thinking_tokens"] = thinking_tokens
+
 
 def _anthropic_usage_as_openai(
     usage: dict[str, int],
@@ -207,7 +225,7 @@ def _anthropic_usage_as_openai(
     cache_read = usage.get("cache_read_input_tokens", 0)
     prompt_tokens = usage["input_tokens"] + cache_creation + cache_read
     completion_tokens = usage.get("output_tokens", 0)
-    return {
+    result: dict[str, Any] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": prompt_tokens + completion_tokens,
@@ -215,27 +233,38 @@ def _anthropic_usage_as_openai(
             "cached_tokens": cache_read,
         },
     }
+    if "thinking_tokens" in usage:
+        result["completion_tokens_details"] = {
+            "reasoning_tokens": usage["thinking_tokens"],
+        }
+    return result
+
+
+def _anthropic_stop_reason_as_openai(reason: Any) -> str:
+    """Map only documented successful terminals to ``stop``.
+
+    Unknown reasons, including ``pause_turn``, remain provider-specific so the
+    Core normalizer classifies them as a protocol failure instead of success.
+    """
+    normalized = str(reason or "").strip().lower()
+    return {
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+        "tool_use": "tool_calls",
+        "max_tokens": "length",
+        "model_context_window_exceeded": "length",
+        "refusal": "content_filter",
+    }.get(normalized, normalized or "anthropic_missing_stop_reason")
 
 
 # ── Thinking parameter helpers ──────────────────────────────────
 # 注：``thinking={"type":"enabled","budget_tokens":N}`` 这种形状的构造
 # 统一实现位于 ``infrastructure.models.capabilities``。
-# 本文件只保留对错误返回的"自动降级重试"。
+# 本文件只负责保留并校验调用方显式提供的配置。
 
 # ── Streaming (Anthropic → OpenAI chunks) ───────────────────────
 
-async def chat_stream_as_openai_format(
-    api_key: str,
-    messages: list[dict],
-    options: dict[str, Any] | None = None,
-    signal: asyncio.Event | None = None,
-) -> dict[str, Any]:
-    """
-    Stream via Anthropic and yield OpenAI-format chunks through an async generator.
-
-    Returns ``{"stream": async_generator, "model": str}``.
-    """
-    opts = options or {}
+def _compile_chat(messages, opts, *, stream):
     model: str = str(opts.get("model") or "").strip()
     temperature = opts.get("temperature")
     thinking_enabled = normalize_thinking_enabled(opts)
@@ -243,7 +272,7 @@ async def chat_stream_as_openai_format(
     tool_choice = opts.get("tool_choice")
     max_tokens: int | None = opts.get("max_tokens")
     base_url: str | None = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
+    profile = profile_for_options(opts)
     require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     top_k: Any = opts.get("top_k")
 
@@ -257,15 +286,15 @@ async def chat_stream_as_openai_format(
     thinking_param, max_out = build_anthropic_thinking_param(
         thinking_enabled and not native_thinking,
         max_tokens,
+        opts.get("thinking") if not native_thinking else None,
     )
-    thinking_on = native_thinking or thinking_param is not None
     anthropic_tools = openai_tools_to_anthropic(tools)
 
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": max_out,
         "messages": anth_messages,
-        "stream": True,
+        "stream": stream,
     }
     if system:
         params["system"] = system
@@ -279,16 +308,38 @@ async def chat_stream_as_openai_format(
     if temperature is not None:
         params["temperature"] = temperature
     if top_k is not None:
-        try:
-            tk = int(top_k)
-            if tk > 0:
-                params["top_k"] = tk
-        except (TypeError, ValueError):
-            pass
+        if type(top_k) is not int or top_k <= 0:
+            raise ValueError("top_k must be a positive integer")
+        params["top_k"] = top_k
+    for key in ("top_p", "output_config"):
+        if opts.get(key) is not None:
+            params[key] = opts[key]
+    return params, profile
 
+
+async def chat_stream_as_openai_format(
+    api_key: str,
+    messages: list[dict],
+    options: dict[str, Any] | None = None,
+    signal: asyncio.Event | None = None,
+) -> dict[str, Any]:
+    """
+    Stream via Anthropic and yield OpenAI-format chunks through an async generator.
+
+    Returns ``{"stream": async_generator, "model": str}``.
+    """
+    opts = options or {}
+    params, profile = _compile_chat(messages, opts, stream=True)
+    raise_if_stopped(signal)
+    params = await prepare_sdk_request(params, opts, protocol="anthropic_compatible")
+    model = str(opts.get("model") or "")
+    base_url = opts.get("baseURL")
+    thinking_on = profile.native_anthropic_thinking or params.get("thinking") is not None
+    raise_if_stopped(signal)
     client = _create_client(api_key, base_url)
     try:
-        raw_stream = await client.messages.create(**params)
+        raw_stream = await await_with_cancellation(client.messages.create(**params), signal)
+        await record_provider_response()
     except BaseException:
         await close_async_resource(client)
         raise
@@ -375,12 +426,11 @@ async def chat_stream_as_openai_format(
         if not message_stop_seen:
             return
         usage = _anthropic_usage_as_openai(native_usage)
-        if last_stop_reason == "tool_use":
-            yield _openai_chunk({}, "tool_calls", usage)
-        elif last_stop_reason == "max_tokens":
-            yield _openai_chunk({}, "length", usage)
-        else:
-            yield _openai_chunk({}, "stop", usage)
+        yield _openai_chunk(
+            {},
+            _anthropic_stop_reason_as_openai(last_stop_reason),
+            usage,
+        )
 
     return {
         "stream": OwnedAsyncIterator(
@@ -390,7 +440,7 @@ async def chat_stream_as_openai_format(
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
-        "applied_output_limit": params["max_tokens"],
+        "applied_generation_limit": params["max_tokens"],
     }
 
 
@@ -407,58 +457,16 @@ async def chat_no_stream_as_openai_format(
     ``{"message": {...}, "model": str}``.
     """
     opts = options or {}
-    model: str = str(opts.get("model") or "").strip()
-    temperature = opts.get("temperature")
-    thinking_enabled = normalize_thinking_enabled(opts)
-    tools: list | None = opts.get("tools")
-    tool_choice = opts.get("tool_choice")
-    max_tokens: int | None = opts.get("max_tokens")
-    base_url: str | None = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
-    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
-    top_k: Any = opts.get("top_k")
-
-    converted = openai_messages_to_anthropic(messages)
-    system: str | None = converted["system"]
-    anth_messages: list[dict] = converted["messages"]
-    if not anth_messages:
-        raise ValueError("消息为空")
-
-    native_thinking = profile.native_anthropic_thinking
-    thinking_param, max_out = build_anthropic_thinking_param(
-        thinking_enabled and not native_thinking,
-        max_tokens,
-    )
-    anthropic_tools = openai_tools_to_anthropic(tools)
-
-    params: dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_out,
-        "messages": anth_messages,
-        "stream": False,
-    }
-    if system:
-        params["system"] = system
-    if thinking_param:
-        params["thinking"] = thinking_param
-    if anthropic_tools:
-        params["tools"] = anthropic_tools
-        converted_tool_choice = openai_tool_choice_to_anthropic(tool_choice)
-        if converted_tool_choice:
-            params["tool_choice"] = converted_tool_choice
-    if temperature is not None:
-        params["temperature"] = temperature
-    if top_k is not None:
-        try:
-            tk = int(top_k)
-            if tk > 0:
-                params["top_k"] = tk
-        except (TypeError, ValueError):
-            pass
-
+    params, profile = _compile_chat(messages, opts, stream=False)
+    raise_if_stopped(signal)
+    params = await prepare_sdk_request(params, opts, protocol="anthropic_compatible")
+    model = str(opts.get("model") or "")
+    base_url = opts.get("baseURL")
+    raise_if_stopped(signal)
     client = _create_client(api_key, base_url)
     try:
-        msg = await client.messages.create(**params)
+        msg = await await_with_cancellation(client.messages.create(**params), signal)
+        await record_provider_response()
     finally:
         await close_async_resource(client)
 
@@ -498,97 +506,12 @@ async def chat_no_stream_as_openai_format(
     return {
         "message": message,
         "model": getattr(msg, "model", None) or model,
-        "finish_reason": getattr(msg, "stop_reason", None),
+        "finish_reason": _anthropic_stop_reason_as_openai(
+            getattr(msg, "stop_reason", None)
+        ),
         "usage": _anthropic_usage_as_openai(native_usage),
-        "applied_output_limit": params["max_tokens"],
+        "applied_generation_limit": params["max_tokens"],
     }
 
 
 # ── Title extraction helper ─────────────────────────────────────
-
-def _extract_anthropic_title_plain_text(msg: Any) -> str:
-    if msg is None:
-        return ""
-    content = getattr(msg, "content", None)
-    if isinstance(content, str):
-        return re.sub(r"[\r\n]+", " ", content).strip()
-
-    blocks = content if isinstance(content, list) else []
-
-    from_text = "".join(
-        getattr(b, "text", "") if getattr(b, "type", None) == "text" else ""
-        for b in blocks
-    )
-    from_text = re.sub(r"[\r\n]+", " ", from_text).strip()
-    if from_text:
-        return from_text
-
-    fallback_parts: list[str] = []
-    for b in blocks:
-        b_type = getattr(b, "type", None)
-        if b_type == "thinking" and isinstance(getattr(b, "thinking", None), str):
-            fallback_parts.append(b.thinking)
-        elif isinstance(getattr(b, "text", None), str):
-            fallback_parts.append(b.text)
-        elif isinstance(getattr(b, "content", None), str):
-            fallback_parts.append(b.content)
-    return re.sub(r"[\r\n]+", " ", "".join(fallback_parts)).strip()
-
-
-# ── Title generation ────────────────────────────────────────────
-
-async def generate_title(
-    api_key: str,
-    text: str,
-    options: dict[str, Any] | None = None,
-) -> str:
-    """Generate a short session title (≤10 chars) via Anthropic."""
-    opts = options or {}
-    model: str = opts.get("model", "")
-    base_url: str | None = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
-    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
-    thinking_enabled = normalize_thinking_enabled(opts)
-
-    user_text = str(text or "").strip()[:4000]
-
-    thinking_param, max_tokens = build_anthropic_thinking_param(
-        thinking_enabled and not profile.native_anthropic_thinking
-        if thinking_enabled is not None
-        else None,
-        512,
-    )
-    payload: dict[str, Any] = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": SESSION_TITLE_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_text}],
-    }
-    if thinking_param is not None:
-        payload["thinking"] = thinking_param
-    for key in ("temperature", "top_k"):
-        if opts.get(key) is not None:
-            payload[key] = opts[key]
-    client = _create_client(api_key, base_url)
-    try:
-        msg = await client.messages.create(**payload)
-    finally:
-        await close_async_resource(client)
-
-    raw = _extract_anthropic_title_plain_text(msg)
-    logger.info("[ai-generate-title][anthropic] 模型返回原文: %s", raw)
-
-    if not raw:
-        block_types: Any
-        if isinstance(getattr(msg, "content", None), list):
-            block_types = [getattr(b, "type", type(b).__name__) for b in msg.content]
-        else:
-            block_types = type(getattr(msg, "content", None)).__name__
-        logger.warning(
-            "[ai-generate-title][anthropic] 无可见正文（非抛错）: stop_reason=%s blockTypes=%s model=%s",
-            getattr(msg, "stop_reason", None),
-            block_types,
-            model,
-        )
-
-    return normalize_session_title(raw)

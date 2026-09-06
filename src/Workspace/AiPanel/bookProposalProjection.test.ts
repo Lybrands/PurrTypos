@@ -16,7 +16,7 @@ function deferred<T>() {
 }
 
 const productSnapshot = (proposalId: string): AiAgentRunSnapshot => ({
-  version: 1,
+  version: 2,
   run: {
     runId: 'run-1',
     sessionId: 7,

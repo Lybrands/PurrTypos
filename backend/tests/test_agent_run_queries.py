@@ -148,17 +148,18 @@ async def test_run_snapshot_pages_events_with_a_stable_cursor(temp_db):
 
     first = await service.get_snapshot(run_id, limit=2)
     assert first is not None
-    assert first["version"] == 1
+    assert first["version"] == 2
     assert first["run"]["runId"] == run_id
     assert first["run"]["status"] == "running"
     assert first["run"]["activity"] == {
         "modelAttemptCount": 2,
         "usage": {
             "inputTokens": 1200,
-            "outputTokens": 80,
+            "generationTokens": 80,
             "reasoningTokens": 25,
             "totalTokens": 1280,
             "unreportedAttempts": 1,
+            "unreportedReasoningAttempts": 0,
         },
         "providerOutputEvents": 12,
         "providerOutputBytes": 3456,
@@ -647,7 +648,6 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert first.json()["data"] == {
         "status": "canceled",
         "newlyRequested": True,
-        "delegationsCanceled": 0,
         "terminalized": True,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -655,7 +655,6 @@ async def test_run_cancel_route_is_persistent_and_idempotent(temp_db):
     assert second.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -733,7 +732,6 @@ async def test_run_cancel_route_replays_tombstone_after_project_cleanup(temp_db)
     assert response.json()["data"] == {
         "status": "canceled",
         "newlyRequested": False,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "completed",
         "cancellationEpoch": 1,
@@ -777,7 +775,6 @@ async def test_run_cancel_route_does_not_steal_live_executor_lease(temp_db):
     assert response.json()["data"] == {
         "status": "cancel_requested",
         "newlyRequested": True,
-        "delegationsCanceled": 0,
         "terminalized": False,
         "cancellationStatus": "draining",
         "cancellationEpoch": 1,

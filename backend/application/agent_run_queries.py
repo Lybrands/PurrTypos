@@ -5,13 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from purra.contracts import AgentDelegation, DelegationAggregation
 from purra.json_values import thaw_json_mapping
 from purra.output import AgentOutputRepository, OutputVisibility
 from application.sse_mapping import canonical_output_to_sse_chunk
 
 
-RUN_SNAPSHOT_VERSION = 1
+RUN_SNAPSHOT_VERSION = 2
 
 
 class RunSnapshotQuery(Protocol):
@@ -88,7 +87,6 @@ class AgentRunQueryService:
                 "chunk": mapped_chunk,
             }
             envelopes.append(envelope)
-        aggregation = _aggregate_delegations(persisted.delegations)
         product_events = (
             await self._product_events.list_for_run(normalized_run_id)
             if self._product_events is not None
@@ -101,11 +99,23 @@ class AgentRunQueryService:
             "events": envelopes,
             "productEvents": product_events,
             "delegations": {
-                "items": [
-                    _delegation_view(item)
-                    for item in persisted.delegations
-                ],
-                "aggregate": _aggregation_view(aggregation),
+                "items": [],
+                "aggregate": {
+                    "state": "ready",
+                    "counts": {
+                        status: 0
+                        for status in (
+                            "queued",
+                            "claimed",
+                            "running",
+                            "done",
+                            "failed",
+                            "canceled",
+                        )
+                    },
+                    "requiredFailures": [],
+                    "results": [],
+                },
             },
             "nextCursor": (
                 output_events[-1].sequence
@@ -140,14 +150,21 @@ def _run_view(
             "modelAttemptCount": int(run.get("model_attempt_count") or 0),
             "usage": {
                 "inputTokens": int(run.get("input_tokens") or 0),
-                "outputTokens": int(run.get("output_tokens") or 0),
-                "reasoningTokens": int(run.get("reasoning_tokens") or 0),
+                "generationTokens": int(run.get("output_tokens") or 0),
+                "reasoningTokens": (
+                    None
+                    if int(run.get("unreported_reasoning_attempts") or 0) > 0
+                    else int(run.get("reasoning_tokens") or 0)
+                ),
                 "totalTokens": (
                     int(run.get("input_tokens") or 0)
                     + int(run.get("output_tokens") or 0)
                 ),
                 "unreportedAttempts": int(
                     run.get("unreported_usage_attempts") or 0
+                ),
+                "unreportedReasoningAttempts": int(
+                    run.get("unreported_reasoning_attempts") or 0
                 ),
             },
             "providerOutputEvents": int(run.get("provider_output_events") or 0),
@@ -160,57 +177,4 @@ def _run_view(
             "endpointDigest": run.get("endpoint_digest"),
             "requestProfileDigest": run.get("request_profile_digest"),
         },
-    }
-
-
-def _delegation_view(
-    run: AgentDelegation,
-) -> dict[str, Any]:
-    return {
-        "delegationId": run.id,
-        "runId": run.run_id,
-        "agentName": run.agent_name,
-        "agentTitle": run.agent_title,
-        "objective": run.objective,
-        "status": run.status.value,
-        "required": run.required,
-        "priority": run.priority,
-        "resultSummary": run.result_summary,
-        "error": run.error,
-    }
-
-
-def _aggregate_delegations(
-    items: tuple[AgentDelegation, ...],
-) -> DelegationAggregation:
-    counts = {
-        status: sum(item.status.value == status for item in items)
-        for status in ("queued", "claimed", "running", "done", "failed", "canceled")
-    }
-    failures = tuple(
-        item.id
-        for item in items
-        if item.required and item.status.value in {"failed", "canceled"}
-    )
-    pending = counts["queued"] + counts["claimed"] + counts["running"]
-    state = "pending" if pending else ("blocked" if failures else "ready")
-    return DelegationAggregation(
-        state=state,  # type: ignore[arg-type]
-        counts=counts,
-        required_failures=failures,
-        results=tuple({
-            "delegationId": item.id,
-            "agentName": item.agent_name,
-            "agentTitle": item.agent_title,
-            "summary": item.result_summary or "",
-        } for item in items if item.status.value == "done"),
-    )
-
-
-def _aggregation_view(value: DelegationAggregation) -> dict[str, Any]:
-    return {
-        "state": value.state,
-        "counts": dict(value.counts),
-        "requiredFailures": list(value.required_failures),
-        "results": [dict(item) for item in value.results],
     }

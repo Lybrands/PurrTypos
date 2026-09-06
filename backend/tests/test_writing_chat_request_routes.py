@@ -61,7 +61,7 @@ def request_body(request_id: str = "chat-route-1") -> dict:
         "sessionId": 7,
         "options": {
             "model": "deepseek-v4-flash",
-            "model_profile": "deepseek:deepseek-v4-flash",
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
         },
         "enableAgentTools": True,
         "bookId": "book-1",
@@ -327,6 +327,14 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
                         "expectedTools": [],
                         "riskLevel": "read",
                     },
+                    {
+                        "id": "review-atmosphere-consistency",
+                        "title": "核对改写与章节环境的一致性",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    },
                 ],
             }
         elif planner_round == 2:
@@ -380,7 +388,7 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
                 }],
             }
         return {
-            "applied_output_limit": _options.get("max_tokens"),
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -427,7 +435,7 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -451,7 +459,7 @@ async def test_replan_repairs_completed_step_rewrites_in_one_root(
             provider_options={
                 "model": "deepseek-v4-flash",
                 "baseURL": "https://provider.test/v1/",
-                "max_tokens": 2_048,
+                "max_generation_tokens": 2_048,
             },
             signal=asyncio.Event(),
         )
@@ -530,7 +538,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
     async def _planner(_key, _messages, _options, _provider, signal=None):
         assert signal is not None
         return {
-            "applied_output_limit": _options.get("max_tokens"),
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -544,6 +552,20 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
                         "executor": "tool",
                         "expectedTools": ["editChapterContent"],
                         "riskLevel": "write",
+                    }, {
+                        "id": "summarize-edit-effects",
+                        "title": "说明候选稿中的氛围改动",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
+                    }, {
+                        "id": "review-candidate-status",
+                        "title": "核对候选稿的审阅与应用状态",
+                        "type": "review",
+                        "executor": "model",
+                        "expectedTools": [],
+                        "riskLevel": "read",
                     }],
                 }, ensure_ascii=False),
             },
@@ -613,7 +635,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
                     }],
                 }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "route-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -637,7 +659,7 @@ async def test_agent_edit_persists_candidate_receipt_without_applying_article(
             provider_options={
                 "model": "deepseek-v4-flash",
                 "baseURL": "https://provider.test/v1/",
-                "max_tokens": 2_048,
+                "max_generation_tokens": 2_048,
             },
             signal=asyncio.Event(),
         )

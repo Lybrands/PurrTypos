@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from graphlib import CycleError, TopologicalSorter
 from typing import Any
@@ -33,9 +33,13 @@ from purra.recovery import (
 )
 
 
+LongTaskClaimGuard = Callable[[LongTaskRecord, LongTaskUnitRecord], Awaitable[bool]]
+
+
 class SqliteLongTaskRepository:
-    def __init__(self, db) -> None:
+    def __init__(self, db, *, claim_guard: LongTaskClaimGuard | None = None) -> None:
         self._db = db
+        self._claim_guard = claim_guard
 
     @asynccontextmanager
     async def _mutation_transaction(self):
@@ -297,7 +301,7 @@ class SqliteLongTaskRepository:
                     usage.invocation_count,
                     usage.unreported_usage_attempts,
                     usage.input_tokens,
-                    usage.output_tokens,
+                    usage.generation_tokens,
                     usage.reasoning_tokens,
                 ],
             )
@@ -381,15 +385,51 @@ class SqliteLongTaskRepository:
             if int((active or {}).get("count") or 0) >= task.max_parallelism:
                 return None
             await self._db.execute(
-                "UPDATE ai_agent_long_task_units SET status = 'blocked', "
+                "UPDATE ai_agent_long_task_units SET status = 'failed', "
                 "worker_id = NULL, lease_expires_at_ms = NULL, "
                 "error_code = 'lease_expired_attempts_exhausted', "
+                "disposition = 'fail_permanent', "
+                "failure_json = ?, "
                 "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
                 "AND status IN ('claimed', 'running') "
                 "AND COALESCE(lease_expires_at_ms, 0) <= ? "
                 "AND attempt >= max_attempts",
-                [task.id, now_ms],
+                [
+                    _json_dump({
+                        "category": "permanent_external",
+                        "code": "lease_expired_attempts_exhausted",
+                        "scope": "systemic",
+                        "effectState": "unknown",
+                        "checkpointAvailable": False,
+                        "partSplittable": False,
+                    }),
+                    task.id,
+                    now_ms,
+                ],
             )
+            exhausted = await self._db.fetch_one(
+                "SELECT unit_id FROM ai_agent_long_task_units "
+                "WHERE task_id = ? AND required = 1 AND status = 'failed' "
+                "AND error_code = 'lease_expired_attempts_exhausted' "
+                "ORDER BY position ASC LIMIT 1",
+                [task.id],
+            )
+            if exhausted is not None:
+                await self._db.execute(
+                    "UPDATE ai_agent_long_task_units SET status = 'canceled', "
+                    "worker_id = NULL, lease_expires_at_ms = NULL, "
+                    "error_code = COALESCE(error_code, 'task_failed_dependency'), "
+                    "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                    "AND unit_id <> ? AND status NOT IN "
+                    "('completed', 'expanded', 'failed', 'canceled')",
+                    [task.id, str(exhausted["unit_id"])],
+                )
+                await self._refresh_task_totals(task.id)
+                await self._update_task_status(
+                    await self._require(task.id),
+                    LongTaskStatus.FAILED,
+                )
+                return None
             row = await self._db.fetch_one(
                 "SELECT u.* FROM ai_agent_long_task_units AS u "
                 "WHERE u.task_id = ? AND u.attempt < u.max_attempts AND ("
@@ -407,6 +447,10 @@ class SqliteLongTaskRepository:
                 [task.id, now_ms],
             )
             if row is None:
+                return None
+            if self._claim_guard is not None and not await self._claim_guard(
+                task, _unit(row),
+            ):
                 return None
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'claimed', "
@@ -637,8 +681,6 @@ class SqliteLongTaskRepository:
                 target = LongTaskUnitStatus.WAITING_RETRY
             elif disposition is FailureDisposition.SPLIT_PART:
                 target = LongTaskUnitStatus.NEEDS_SPLIT
-            elif disposition is FailureDisposition.PAUSE_RECOVERABLE:
-                target = LongTaskUnitStatus.BLOCKED
             elif disposition is FailureDisposition.CANCEL:
                 target = LongTaskUnitStatus.CANCELED
             else:
@@ -667,11 +709,6 @@ class SqliteLongTaskRepository:
                 LongTaskUnitStatus.NEEDS_SPLIT,
             }:
                 await self._touch_task(task)
-            elif target is LongTaskUnitStatus.BLOCKED:
-                if decision.scope is FailureScope.SYSTEMIC:
-                    await self._update_task_status(task, LongTaskStatus.PAUSED)
-                else:
-                    await self._pause_if_no_runnable_work(task)
             elif target is LongTaskUnitStatus.CANCELED:
                 await self._update_task_status(task, LongTaskStatus.CANCELED)
             else:
@@ -985,28 +1022,8 @@ class SqliteLongTaskRepository:
                 return await self._require(task.id)
             if task.status is not LongTaskStatus.PAUSED:
                 raise ValueError(f"long task cannot transition from {task.status.value}")
-            blocked = await self._db.fetch_one(
-                "SELECT COUNT(*) AS count FROM ai_agent_long_task_units "
-                "WHERE task_id = ? AND status = 'blocked'",
-                [task.id],
-            )
-            blocked_count = int((blocked or {}).get("count") or 0)
-            if blocked_count and extra_attempts == 0:
-                raise ValueError(
-                    "blocked long task resume requires additional attempts"
-                )
-            if blocked_count:
-                await self._db.execute(
-                    "UPDATE ai_agent_long_task_units SET status = 'pending', "
-                    "max_attempts = max_attempts + ?, worker_id = NULL, "
-                    "lease_expires_at_ms = NULL, update_time = CURRENT_TIMESTAMP "
-                    "WHERE task_id = ? AND status = 'blocked'",
-                    [extra_attempts, task.id],
-                )
-            elif extra_attempts:
-                raise ValueError(
-                    "paused long task has no blocked unit requiring attempts"
-                )
+            if extra_attempts:
+                raise ValueError("paused long task does not accept retry attempts")
             await self._update_task_status(task, LongTaskStatus.RUNNING)
             return await self._require(task.id)
 
@@ -1048,6 +1065,29 @@ class SqliteLongTaskRepository:
                 "AND status IN ('claimed', 'running')",
                 [task.id],
             )
+            if int((active or {}).get("count") or 0) == 0:
+                candidate = await self._db.fetch_one(
+                    "SELECT unit_id FROM ai_agent_long_task_units "
+                    "WHERE task_id = ? AND required = 1 AND status NOT IN "
+                    "('completed', 'expanded', 'failed', 'canceled') "
+                    "ORDER BY position ASC LIMIT 1",
+                    [task.id],
+                )
+                if candidate is not None:
+                    await self._db.execute(
+                        "UPDATE ai_agent_long_task_units SET status = 'failed', "
+                        "worker_id = NULL, lease_expires_at_ms = NULL, "
+                        "error_code = ?, failure_json = ?, disposition = ?, "
+                        "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                        "AND unit_id = ?",
+                        [
+                            decision.code[:240],
+                            _json_dump(_failure_payload(decision)),
+                            decision.disposition.value,
+                            task.id,
+                            str(candidate["unit_id"]),
+                        ],
+                    )
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'failed', "
                 "worker_id = NULL, lease_expires_at_ms = NULL, "
@@ -1070,11 +1110,10 @@ class SqliteLongTaskRepository:
                 "'needs_split', 'blocked')",
                 [task.id],
             )
-            await self._db.execute(
-                "UPDATE ai_agent_long_tasks SET status = 'failed', "
-                "failed_units = MAX(failed_units, ?), revision = revision + 1, "
-                "update_time = CURRENT_TIMESTAMP WHERE id = ?",
-                [int((active or {}).get("count") or 0), task.id],
+            await self._refresh_task_totals(task.id)
+            await self._update_task_status(
+                await self._require(task.id),
+                LongTaskStatus.FAILED,
             )
             return await self._require(task.id)
 
@@ -1142,7 +1181,30 @@ class SqliteLongTaskRepository:
             elif done == task.total_units:
                 await self._update_task_status(task, LongTaskStatus.COMPLETED)
             elif blocked and not active:
-                await self._update_task_status(task, LongTaskStatus.PAUSED)
+                blocked_unit = await self._db.fetch_one(
+                    "SELECT unit_id, error_code FROM ai_agent_long_task_units "
+                    "WHERE task_id = ? AND required = 1 AND status = 'blocked' "
+                    "ORDER BY position ASC LIMIT 1",
+                    [task.id],
+                )
+                code = str(
+                    (blocked_unit or {}).get("error_code")
+                    or "long_task_no_runnable_work"
+                )
+                await self._db.execute(
+                    "UPDATE ai_agent_long_task_units SET status = 'failed', "
+                    "error_code = COALESCE(error_code, ?), "
+                    "disposition = 'fail_permanent', "
+                    "worker_id = NULL, lease_expires_at_ms = NULL, "
+                    "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                    "AND required = 1 AND status = 'blocked'",
+                    [code, task.id],
+                )
+                await self._refresh_task_totals(task.id)
+                await self._update_task_status(
+                    await self._require(task.id),
+                    LongTaskStatus.FAILED,
+                )
             return await self._require(task.id)
 
     async def _require(self, task_id: str) -> LongTaskRecord:
@@ -1265,30 +1327,6 @@ class SqliteLongTaskRepository:
             [task_id, task_id, task_id, task_id],
         )
 
-    async def _pause_if_no_runnable_work(self, task: LongTaskRecord) -> None:
-        work = await self._db.fetch_one(
-            "SELECT "
-            "SUM(CASE WHEN u.status IN ('claimed', 'running') THEN 1 ELSE 0 END) "
-            "AS active, "
-            "SUM(CASE WHEN u.attempt < u.max_attempts "
-            "AND u.status IN ('pending', 'waiting_retry') AND NOT EXISTS ("
-            "SELECT 1 FROM json_each(u.dependencies_json) AS dep "
-            "LEFT JOIN ai_agent_long_task_units AS prerequisite "
-            "ON prerequisite.task_id = u.task_id "
-            "AND prerequisite.unit_id = dep.value "
-            "WHERE prerequisite.status IS NULL "
-            "OR prerequisite.status <> 'completed') THEN 1 ELSE 0 END) AS ready "
-            "FROM ai_agent_long_task_units AS u WHERE u.task_id = ?",
-            [task.id],
-        )
-        active = int((work or {}).get("active") or 0)
-        ready = int((work or {}).get("ready") or 0)
-        if active or ready:
-            await self._touch_task(task)
-            return
-        await self._update_task_status(task, LongTaskStatus.PAUSED)
-
-
 def _task(row: dict[str, Any] | None) -> LongTaskRecord:
     if row is None:
         raise LookupError("long task does not exist")
@@ -1379,7 +1417,7 @@ def _usage_mapping(value: Mapping[str, Any]) -> LongTaskUsage:
             value.get("unreportedUsageAttempts") or 0
         ),
         input_tokens=int(value.get("inputTokens") or 0),
-        output_tokens=int(value.get("outputTokens") or 0),
+        generation_tokens=int(value.get("generationTokens") or 0),
         reasoning_tokens=(
             None
             if value.get("reasoningTokens") is None
@@ -1396,7 +1434,7 @@ def _usage_row(row: Mapping[str, Any]) -> LongTaskUsage:
             row.get("unreported_usage_attempts") or 0
         ),
         input_tokens=int(row.get("input_tokens") or 0),
-        output_tokens=int(row.get("output_tokens") or 0),
+        generation_tokens=int(row.get("output_tokens") or 0),
         reasoning_tokens=(
             None
             if row.get("reasoning_tokens") is None
@@ -1413,7 +1451,7 @@ def _aggregate_usage(row: Mapping[str, Any] | None) -> LongTaskUsage:
             value.get("unreported_usage_attempts") or 0
         ),
         input_tokens=int(value.get("input_tokens") or 0),
-        output_tokens=int(value.get("output_tokens") or 0),
+        generation_tokens=int(value.get("output_tokens") or 0),
         reasoning_tokens=(
             None
             if int(value.get("unknown_reasoning") or 0) > 0
@@ -1426,7 +1464,7 @@ def _budget_limits(value: Mapping[str, Any]) -> LongTaskBudgetLimits:
     fields = {
         "maxInvocationAttempts": "max_invocation_attempts",
         "maxInputTokens": "max_input_tokens",
-        "maxRunOutputTokens": "max_run_output_tokens",
+        "maxRunGenerationTokens": "max_run_generation_tokens",
         "maxReasoningTokens": "max_reasoning_tokens",
     }
     if set(value) - fields.keys():
@@ -1463,7 +1501,7 @@ def _task_budget_exhaustion(
         limit is not None
         for limit in (
             limits.max_input_tokens,
-            limits.max_run_output_tokens,
+            limits.max_run_generation_tokens,
             limits.max_reasoning_tokens,
         )
     ):
@@ -1473,7 +1511,11 @@ def _task_budget_exhaustion(
     for kind, value, limit in (
         ("model_attempts", usage.invocation_count, limits.max_invocation_attempts),
         ("input_tokens", usage.input_tokens, limits.max_input_tokens),
-        ("output_tokens", usage.output_tokens, limits.max_run_output_tokens),
+        (
+            "generation_tokens",
+            usage.generation_tokens,
+            limits.max_run_generation_tokens,
+        ),
         ("reasoning_tokens", usage.reasoning_tokens, limits.max_reasoning_tokens),
     ):
         if limit is not None and value is not None and (
@@ -1549,4 +1591,4 @@ def _require_acyclic_dependencies(graph: Mapping[str, tuple[str, ...]]) -> None:
         raise ValueError("expanded long task dependencies contain a cycle") from error
 
 
-__all__ = ["SqliteLongTaskRepository"]
+__all__ = ["LongTaskClaimGuard", "SqliteLongTaskRepository"]

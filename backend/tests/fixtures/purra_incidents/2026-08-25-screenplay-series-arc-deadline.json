@@ -12,7 +12,7 @@
     "modelAttemptCount": 4,
     "reportedUsageAttempts": 3,
     "inputTokens": 92285,
-    "outputTokens": 878,
+    "generationTokens": 878,
     "reasoningTokens": 443,
     "providerOutputEvents": 469,
     "failedInvocationDeltaBatchEvents": 442,

@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from purra.contracts import ReasoningMode
+from purra.errors import ContractViolationError
 from purra.model_protocol import ModelProtocolCapabilities
 
 
@@ -65,17 +66,47 @@ def require_supported_reasoning_mode(
 def build_anthropic_thinking_param(
     enabled: bool | None,
     max_tokens: int | None,
+    explicit_thinking: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
-    """计算 Anthropic 的 ``thinking`` 参数 + 调整后的 ``max_tokens``。
+    """Validate and preserve an explicit Anthropic thinking configuration.
 
-    关闭时返回 ``(None, max_out)`` —— 调用方应整段省略 ``thinking`` 字段。
-    开启时返回带 ``budget_tokens`` 的字典；budget 取 max_tokens 的一半，
-    并保证 ``max_tokens > budget``。
+    Anthropic counts extended thinking inside ``max_tokens``.  The host must
+    therefore never invent a thinking budget or enlarge the generation limit
+    to make an invalid pair fit.  ``adaptive`` has no manual token budget;
+    manual ``enabled`` thinking requires the caller's exact ``budget_tokens``.
     """
-    max_out = max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 8192
+    valid_max_tokens = type(max_tokens) is int and max_tokens > 0
+    if enabled and not valid_max_tokens:
+        raise ContractViolationError(
+            "Anthropic thinking requires a resolved positive generation limit",
+            code="anthropic_generation_limit_required",
+        )
+    max_out = max_tokens if valid_max_tokens else 8192
     if not enabled:
         return None, max_out
-    budget = min(32000, max(1024, max_out // 2))
-    if budget >= max_out:
-        max_out = budget + 2048
-    return {"type": "enabled", "budget_tokens": budget}, max_out
+    if not isinstance(explicit_thinking, Mapping):
+        raise ContractViolationError(
+            "Anthropic enabled thinking requires explicit budget_tokens",
+            code="anthropic_thinking_budget_required",
+        )
+    thinking = dict(explicit_thinking)
+    thinking_type = thinking.get("type")
+    if thinking_type == "adaptive":
+        return thinking, max_out
+    if thinking_type != "enabled":
+        raise ContractViolationError(
+            "Anthropic thinking configuration conflicts with enabled reasoning",
+            code="anthropic_thinking_configuration_invalid",
+        )
+    if "budget_tokens" not in thinking:
+        raise ContractViolationError(
+            "Anthropic enabled thinking requires explicit budget_tokens",
+            code="anthropic_thinking_budget_required",
+        )
+    budget = thinking["budget_tokens"]
+    if type(budget) is not int or not 1024 <= budget < max_out:
+        raise ContractViolationError(
+            "Anthropic thinking budget_tokens must satisfy 1024 <= budget_tokens < max_tokens",
+            code="anthropic_thinking_budget_invalid",
+        )
+    return thinking, max_out

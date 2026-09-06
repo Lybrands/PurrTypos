@@ -235,7 +235,11 @@ def candidate_completion_projection(
     }
     if not projection["turnId"]:
         raise ValueError("candidate projection turn id is required")
-    if host_candidate_template is not None:
+    if normalized_validation["kind"] == "episode_metadata":
+        if host_candidate_template is not None:
+            raise ValueError("episode metadata requires a JSON candidate")
+        projection["hostCapture"] = {"format": "json"}
+    elif host_candidate_template is not None:
         normalized_field = str(text_field or "").strip()
         if not normalized_field:
             raise ValueError("host candidate text field is required")
@@ -246,10 +250,29 @@ def candidate_completion_projection(
     return {SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE: projection}
 
 
+def normalize_episode_metadata_payload(raw, episode_number):
+    if (
+        not isinstance(raw, Mapping)
+        or set(raw) != {"episodeNumber", "title", "continuitySummary"}
+        or isinstance(raw.get("episodeNumber"), bool)
+        or not isinstance(raw.get("episodeNumber"), int)
+        or raw.get("episodeNumber") != episode_number
+        or not isinstance(raw.get("title"), str)
+        or not isinstance(raw.get("continuitySummary"), str)
+    ):
+        raise ValueError("episode metadata number does not match")
+    title = raw["title"].strip()
+    continuity = raw["continuitySummary"].strip()
+    if not title or not continuity:
+        raise ValueError("episode metadata title and continuity are required")
+    return {"episodeNumber": episode_number, "title": title, "continuitySummary": continuity}
+
+
 __all__ = [
     "SCREENPLAY_CANDIDATE_PROJECTION_ATTRIBUTE",
     "SCREENPLAY_CANDIDATE_PROJECTION_PROTOCOL",
     "SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL",
     "candidate_completion_projection",
     "parse_candidate_validation_contract",
+    "normalize_episode_metadata_payload",
 ]

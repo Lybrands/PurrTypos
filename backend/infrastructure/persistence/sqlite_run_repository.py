@@ -137,6 +137,15 @@ class SqliteRunRepository:
                 row.get("agent_preset_snapshot_json") or "{}",
                 "Run agent preset snapshot",
             ),
+            requested_user_max_generation_tokens=row.get(
+                "requested_user_max_generation_tokens"
+            ),
+            result_capacity_target_tokens=row.get(
+                "result_capacity_target_tokens"
+            ),
+            selected_context_window_tokens=row.get(
+                "selected_context_window_tokens"
+            ),
         )
 
     async def commit(
@@ -376,6 +385,15 @@ class SqliteRunRepository:
                 deadline_at_ms=params.deadline_at_ms,
                 runtime_limits=params.runtime_limits,
                 agent_preset_snapshot=params.agent_preset_snapshot,
+                requested_user_max_generation_tokens=(
+                    params.requested_user_max_generation_tokens
+                ),
+                result_capacity_target_tokens=(
+                    params.result_capacity_target_tokens
+                ),
+                selected_context_window_tokens=(
+                    params.selected_context_window_tokens
+                ),
             )
         except sqlite3.IntegrityError as error:
             if params.requested_run_id is not None and await self._db.fetch_one(
@@ -477,15 +495,23 @@ class SqliteRunRepository:
                 await self._db.execute(
                     "UPDATE ai_agent_runs SET "
                     "unreported_usage_attempts = unreported_usage_attempts + ?, "
+                    "unreported_reasoning_attempts = "
+                    "unreported_reasoning_attempts + ?, "
                     "input_tokens = input_tokens + ?, "
                     "output_tokens = output_tokens + ?, "
                     "reasoning_tokens = reasoning_tokens + ?, "
                     "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                     [
                         int(usage is None),
+                        int(usage is not None and usage.reasoning_tokens is None),
                         usage.input_tokens if usage is not None else 0,
-                        usage.output_tokens if usage is not None else 0,
-                        usage.reasoning_output_tokens if usage is not None else 0,
+                        usage.generation_tokens if usage is not None else 0,
+                        (
+                            usage.reasoning_tokens
+                            if usage is not None
+                            and usage.reasoning_tokens is not None
+                            else 0
+                        ),
                         normalized_run_id,
                     ],
                 )
@@ -538,6 +564,8 @@ class SqliteRunRepository:
             "AS model_attempt_count, "
             "COALESCE(SUM(unreported_usage_attempts), 0) "
             "AS unreported_usage_attempts, "
+            "COALESCE(SUM(unreported_reasoning_attempts), 0) "
+            "AS unreported_reasoning_attempts, "
             "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
             "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
             "COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens "
@@ -750,8 +778,11 @@ def _run_budget_snapshot(row) -> RunBudgetSnapshot:
         unreported_usage_attempts=int(
             value.get("unreported_usage_attempts") or 0
         ),
+        unreported_reasoning_attempts=int(
+            value.get("unreported_reasoning_attempts") or 0
+        ),
         input_tokens=int(value.get("input_tokens") or 0),
-        output_tokens=int(value.get("output_tokens") or 0),
+        generation_tokens=int(value.get("output_tokens") or 0),
         reasoning_tokens=int(value.get("reasoning_tokens") or 0),
     )
 
@@ -761,10 +792,10 @@ def _model_usage_payload(usage: ModelTokenUsage | None):
         return None
     return {
         "inputTokens": usage.input_tokens,
-        "outputTokens": usage.output_tokens,
+        "generationTokens": usage.generation_tokens,
         "totalTokens": usage.total_tokens,
         "cachedInputTokens": usage.cached_input_tokens,
-        "reasoningOutputTokens": usage.reasoning_output_tokens,
+        "reasoningTokens": usage.reasoning_tokens,
     }
 
 
@@ -783,18 +814,25 @@ def _run_budget_violation(
         limit is not None
         for limit in (
             limits.max_input_tokens,
-            limits.max_run_output_tokens,
+            limits.max_run_generation_tokens,
             limits.max_reasoning_tokens,
         )
     ):
         kind = "provider_usage_unreported"
     else:
-        kind = next(
+        kind = "reasoning_tokens_unreported" if (
+            snapshot.unreported_reasoning_attempts
+            and limits.max_reasoning_tokens is not None
+        ) else next(
             (
                 name
                 for name, value, limit in (
                     ("input_tokens", snapshot.input_tokens, limits.max_input_tokens),
-                    ("output_tokens", snapshot.output_tokens, limits.max_run_output_tokens),
+                    (
+                        "generation_tokens",
+                        snapshot.generation_tokens,
+                        limits.max_run_generation_tokens,
+                    ),
                     (
                         "reasoning_tokens",
                         snapshot.reasoning_tokens,

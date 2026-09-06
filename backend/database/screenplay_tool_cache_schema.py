@@ -15,6 +15,10 @@ SCREENPLAY_READ_DEPENDENCIES = {
     "readScreenplayDeliverable": _DELIVERABLE,
     "searchScreenplayDeliverables": _DELIVERABLE,
     "getScreenplayEpisodeContext": _DELIVERABLE,
+    "getScreenplaySceneContext": _DELIVERABLE | frozenset({
+        "ai_agent_long_tasks", "ai_agent_long_task_units",
+        "ai_agent_artifacts", "ai_agent_artifact_batches",
+    }),
     "inspectSourceStructure": _SOURCE,
     "readSourceChapters": _SOURCE | {"articles"},
     "searchSourceText": _SOURCE | {"articles"},

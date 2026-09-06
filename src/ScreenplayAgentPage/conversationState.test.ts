@@ -56,7 +56,7 @@ function task(overrides: Partial<ScreenplayAgentTask> = {}): ScreenplayAgentTask
     usage: {
       invocationCount: 1,
       inputTokens: 100,
-      outputTokens: 20,
+      generationTokens: 20,
       reasoningTokens: 5,
     },
     resultRevisionId: null,
@@ -115,7 +115,7 @@ function operation(
     usage: {
       invocationCount: 1,
       inputTokens: 100,
-      outputTokens: 20,
+      generationTokens: 20,
       reasoningTokens: 5,
     },
     ...overrides,

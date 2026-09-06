@@ -117,6 +117,19 @@ def classify_screenplay_run_failure(error: object) -> FailureSignal:
     )
 
 
+def screenplay_failure_message(code: str) -> str:
+    messages = {
+        "model_output_truncated": (
+            "模型本轮输出额度耗尽，未形成完整候选稿；不完整结果未被保存。"
+            "请重试；若重复出现，请更换模型或减少本次生成的内容量。"
+        ),
+        "model_output_filtered": "模型输出被服务商安全策略中止，请调整要求后重试。",
+        "upstream_stream_interrupted": "模型流式响应在完成前中断，请检查网络后重试。",
+        "unsupported_model_finish_reason": "模型以不受支持的状态结束，请更换模型后重试。",
+    }
+    return messages.get(code, "剧本任务执行失败，请查看诊断信息后重试。")
+
+
 def _failure_code(error: object) -> str:
     code = str(getattr(error, "code", "") or "").strip()
     if not code:
@@ -124,4 +137,7 @@ def _failure_code(error: object) -> str:
     return (code or "screenplay_task_failed")[:240]
 
 
-__all__ = ["classify_screenplay_run_failure"]
+__all__ = [
+    "classify_screenplay_run_failure",
+    "screenplay_failure_message",
+]

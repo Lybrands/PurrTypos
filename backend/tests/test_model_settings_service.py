@@ -1,49 +1,58 @@
-from services.model_settings_service import build_model_options
+import pytest
+from application.model_runtime import model_request_from_runtime, runtime_from_settings
+
+BASE = {"name": "deepseek-v4-flash", "baseUrl": "https://api.deepseek.com",
+        "presetId": "deepseek:deepseek-v4-flash", "contextWindow": "1m"}
+
+
+def resolve(config):
+    return model_request_from_runtime(runtime_from_settings(config))
 
 
 def test_model_options_preserve_the_persisted_reasoning_choice():
-    base = {
-        "name": "model",
-        "baseUrl": "https://provider.test/v1",
-        "presetId": "provider:model",
-    }
-
-    provider_default = build_model_options(base, max_tokens=1_200)
-    explicitly_enabled = build_model_options(
-        {
-            **base,
-            "thinkingEnabled": True,
-            "temperatureThinking": 0.7,
-        },
-        max_tokens=1_200,
-    )
-    explicitly_disabled = build_model_options(
-        {
-            **base,
-            "thinkingEnabled": False,
-            "temperatureNonThinking": 0.2,
-        },
-        max_tokens=1_200,
-    )
-
-    assert "thinking" not in provider_default
-    assert "temperature" not in provider_default
-    assert explicitly_enabled["thinking"] == {"type": "enabled"}
-    assert explicitly_enabled["temperature"] == 0.7
-    assert explicitly_disabled["thinking"] == {"type": "disabled"}
-    assert explicitly_disabled["temperature"] == 0.2
+    default = resolve(BASE)
+    explicit = resolve({**BASE, "thinkingEnabled": True, "reasoningEffort": "low", "temperatureThinking": 0.7})
+    disabled = resolve({**BASE, "thinkingEnabled": False, "temperatureNonThinking": 0.2})
+    assert "thinking" not in default.options and "temperature" not in default.options
+    assert default.max_generation_tokens is None
+    assert default.capability_snapshot.max_generation_tokens == 393216
+    assert explicit.options["reasoning_effort"] == "low"
+    assert explicit.options["temperature"] == 0.7
+    assert disabled.options["thinking"]["type"] == "disabled"
+    assert disabled.options["temperature"] == 0.2
 
 
 def test_disabled_temperature_customization_does_not_invent_a_value():
-    options = build_model_options(
-        {
-            "name": "model",
-            "thinkingEnabled": True,
-            "customizeTemperature": False,
-            "temperatureThinking": 0.7,
-        },
-        max_tokens=4_000,
-    )
+    request = resolve({**BASE, "thinkingEnabled": True, "customizeTemperature": False, "temperatureThinking": 0.7})
+    assert "temperature" not in request.options
 
-    assert options["thinking"] == {"type": "enabled"}
-    assert "temperature" not in options
+
+def test_disabled_reasoning_cannot_silently_discard_explicit_effort():
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve({**BASE, "thinkingEnabled": False, "reasoningEffort": "max"})
+
+
+CUSTOM = {"name": "custom-model", "baseUrl": "https://proxy.example/v1", "contextWindow": "256k",
+          "supportsThinking": False, "thinkingOnly": False, "profileMaxGenerationTokens": 200000}
+
+
+def test_custom_model_profile_capability_and_user_ceiling_are_independent():
+    request = resolve({**CUSTOM, "maxGenerationTokens": 80000})
+    assert request.max_generation_tokens == 80000
+    assert request.capability_snapshot.max_generation_tokens == 200000
+
+
+def test_custom_model_uses_profile_capability_when_user_ceiling_is_unset():
+    request = resolve(CUSTOM)
+    assert request.max_generation_tokens is None
+    assert request.capability_snapshot.max_generation_tokens == 200000
+
+
+def test_custom_model_requires_profile_capability_not_only_user_ceiling():
+    with pytest.raises(ValueError, match="profile_max_generation_tokens"):
+        resolve({**CUSTOM, "profileMaxGenerationTokens": None, "maxGenerationTokens": 80000})
+
+
+def test_custom_user_ceiling_cannot_exceed_profile_capability():
+    with pytest.raises(ValueError, match="exceeds"):
+        resolve({**CUSTOM, "maxGenerationTokens": 200001})

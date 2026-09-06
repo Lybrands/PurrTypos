@@ -187,6 +187,7 @@ function settleQueue(
 
   queueMicrotask(() => {
     const queue = dependencies.getQueue()
+    if (queue.some(item => item.sessionId === dependencies.sessionId && item.editing)) return
     const nextIndex = queue.findIndex(
       (submission) => submission.sessionId === dependencies.sessionId,
     )

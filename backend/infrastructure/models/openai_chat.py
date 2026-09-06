@@ -2,7 +2,7 @@
 OpenAI-compatible infrastructure adapter.
 
 Uses the ``openai`` async Python SDK and exposes streaming / non-streaming
-chat plus a title-generation helper.
+chat through a shared parameter compiler.
 """
 
 from __future__ import annotations
@@ -13,16 +13,14 @@ from collections.abc import Mapping
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
+from purra.cancellation import await_with_cancellation, raise_if_stopped
+from infrastructure.models.request_boundary import prepare_sdk_request, record_provider_response
 
 from infrastructure.models.capabilities import (
     normalize_thinking_enabled,
     require_supported_reasoning_mode,
 )
-from infrastructure.models.profiles import resolve_model_profile
-from utils.session_title import (
-    SESSION_TITLE_SYSTEM_PROMPT,
-    normalize_session_title,
-)
+from infrastructure.models.profiles.descriptors import profile_for_options
 from purra.stream_ownership import (
     OwnedAsyncIterator,
     close_async_resource,
@@ -31,7 +29,6 @@ from purra.stream_ownership import (
 from utils.url import normalize_base_url
 
 logger = logging.getLogger(__name__)
-_STREAM_USAGE_TAIL_TIMEOUT_SECONDS = 0.75
 
 
 def _create_client(api_key: str, base_url: str | None) -> AsyncOpenAI:
@@ -39,6 +36,24 @@ def _create_client(api_key: str, base_url: str | None) -> AsyncOpenAI:
     if not url:
         raise ValueError("请填写接口地址")
     return AsyncOpenAI(api_key=api_key, base_url=url, max_retries=0)
+
+
+def _compile_chat(messages, opts, profile, *, stream):
+    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
+    params = {"model": str(opts.get("model") or ""), "messages": messages, "stream": stream}
+    params["extra_body"] = profile.build_openai_extra_body(normalize_thinking_enabled(opts))
+    for key in ("temperature", "reasoning_effort", "top_p", "response_format", "tools", "tool_choice"):
+        if opts.get(key) is not None:
+            params[key] = opts[key]
+    if opts.get("top_k") is not None:
+        value = opts["top_k"]
+        if type(value) is not int or value <= 0:
+            raise ValueError("top_k must be a positive integer")
+        params["extra_body"]["top_k"] = value
+    profile.apply_openai_output_limit(params, opts.get("max_tokens"))
+    if stream and profile.stream_usage:
+        params["stream_options"] = {"include_usage": True}
+    return params
 
 
 # ── Non-streaming chat ──────────────────────────────────────────
@@ -51,43 +66,17 @@ async def chat_no_stream(
 ) -> dict[str, Any]:
     """Single-shot completion.  Returns ``{"message": {...}, "model": str}``."""
     opts = options or {}
-    model: str = opts.get("model", "")
-    temperature = opts.get("temperature")
-    thinking_enabled = normalize_thinking_enabled(opts)
-    tools: list | None = opts.get("tools")
-    tool_choice: Any = opts.get("tool_choice")
-    max_tokens: int | None = opts.get("max_tokens")
-    base_url: str | None = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
-    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
-    top_k: Any = opts.get("top_k")
-    response_format = opts.get("response_format")
-
-    client = _create_client(api_key, base_url)
-
-    params: dict[str, Any] = {"model": model, "messages": messages, "stream": False}
-    if temperature is not None:
-        params["temperature"] = temperature
-    params.setdefault("extra_body", {}).update(
-        profile.build_openai_extra_body(thinking_enabled)
-    )
-    profile.apply_openai_output_limit(params, max_tokens)
-    if isinstance(response_format, Mapping):
-        params["response_format"] = dict(response_format)
-    if tools:
-        params["tools"] = tools
-        if tool_choice is not None:
-            params["tool_choice"] = tool_choice
-    if top_k is not None:
-        try:
-            tk = int(top_k)
-            if tk > 0:
-                params.setdefault("extra_body", {})["top_k"] = tk
-        except (TypeError, ValueError):
-            pass
+    model = str(opts.get("model") or "")
+    profile = profile_for_options(opts)
+    params = _compile_chat(messages, opts, profile, stream=False)
+    raise_if_stopped(signal)
+    params = await prepare_sdk_request(params, opts, protocol="openai_compatible")
+    raise_if_stopped(signal)
+    client = _create_client(api_key, opts.get("baseURL"))
 
     try:
-        res = await client.chat.completions.create(**params)
+        res = await await_with_cancellation(client.chat.completions.create(**params), signal)
+        await record_provider_response()
         choice = res.choices[0] if res.choices else None
         message = profile.normalize_openai_message(
             choice.message.model_dump() if choice and choice.message else {}
@@ -98,7 +87,9 @@ async def chat_no_stream(
             "model": res.model or model,
             "finish_reason": getattr(choice, "finish_reason", None),
             "usage": usage,
-            "applied_output_limit": params.get(profile.openai_output_token_parameter),
+            "applied_generation_limit": params.get(
+                profile.openai_output_token_parameter
+            ),
         }
     finally:
         await close_async_resource(client)
@@ -114,64 +105,17 @@ async def chat_stream(
 ) -> dict[str, Any]:
     """Streaming completion.  Returns ``{"stream": async_generator, "model": str}``."""
     opts = options or {}
-    model: str = opts.get("model", "")
-    temperature = opts.get("temperature")
-    thinking_enabled = normalize_thinking_enabled(opts)
-    tools: list | None = opts.get("tools")
-    tool_choice: Any = opts.get("tool_choice")
-    max_tokens: int | None = opts.get("max_tokens")
-    base_url: str | None = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
-    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
-    top_k: Any = opts.get("top_k")
-    response_format = opts.get("response_format")
-
-    tool_names = (
-        ", ".join(t.get("function", {}).get("name", "") for t in tools if t.get("function", {}).get("name"))
-        if tools
-        else ""
-    )
-    temp_log = f"temperature={temperature}" if temperature is not None else "temperature=(omit)"
-    tools_log = f" tools={tool_names}" if tool_names else ""
-    logger.info("[OpenAI] %s %s thinking=%s%s", model, temp_log, thinking_enabled, tools_log)
-
-    client = _create_client(api_key, base_url)
-
-    params: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
-    if temperature is not None:
-        params["temperature"] = temperature
-    params.setdefault("extra_body", {}).update(
-        profile.build_openai_extra_body(thinking_enabled)
-    )
-    profile.apply_openai_output_limit(params, max_tokens)
-    if isinstance(response_format, Mapping):
-        params["response_format"] = dict(response_format)
-    if tools:
-        params["tools"] = tools
-        if tool_choice is not None:
-            params["tool_choice"] = tool_choice
-    if top_k is not None:
-        try:
-            tk = int(top_k)
-            if tk > 0:
-                params.setdefault("extra_body", {})["top_k"] = tk
-        except (TypeError, ValueError):
-            pass
-
-    # OpenAI returns stream usage in a final choices=[] chunk when explicitly
-    # requested. Compatible providers may reject this option; retry the same
-    # request without it only when the error identifies this exact option.
-    params["stream_options"] = {"include_usage": True}
-    usage_tail_expected = True
+    model = str(opts.get("model") or "")
+    profile = profile_for_options(opts)
+    params = _compile_chat(messages, opts, profile, stream=True)
+    raise_if_stopped(signal)
+    params = await prepare_sdk_request(params, opts, protocol="openai_compatible")
+    usage_tail_expected = profile.stream_usage
+    raise_if_stopped(signal)
+    client = _create_client(api_key, opts.get("baseURL"))
     try:
-        try:
-            raw_stream = await client.chat.completions.create(**params)
-        except Exception as error:
-            if not _is_stream_usage_option_error(error):
-                raise
-            params.pop("stream_options", None)
-            usage_tail_expected = False
-            raw_stream = await client.chat.completions.create(**params)
+        raw_stream = await await_with_cancellation(client.chat.completions.create(**params), signal)
+        await record_provider_response()
     except BaseException:
         await close_async_resource(client)
         raise
@@ -187,11 +131,12 @@ async def chat_stream(
                 and normalized.get("usage") is None
             ):
                 try:
-                    tail = await asyncio.wait_for(
-                        anext(raw_stream),
-                        timeout=_STREAM_USAGE_TAIL_TIMEOUT_SECONDS,
-                    )
-                except (StopAsyncIteration, TimeoutError):
+                    # The protocol-defined usage record follows the finish
+                    # chunk. The SDK's request/read timeout remains the
+                    # transport bound; a local sub-second guess can discard a
+                    # valid Provider usage record.
+                    tail = await anext(raw_stream)
+                except StopAsyncIteration:
                     tail = None
                 except Exception:
                     # The finish chunk remains authoritative. A malformed
@@ -216,72 +161,10 @@ async def chat_stream(
             terminal_predicate=openai_chunk_is_terminal,
         ),
         "model": model,
-        "applied_output_limit": params.get(profile.openai_output_token_parameter),
+        "applied_generation_limit": params.get(
+            profile.openai_output_token_parameter
+        ),
     }
 
 
-def _is_stream_usage_option_error(error: Exception) -> bool:
-    message = str(error or "").strip().lower()
-    if not (
-        "stream_options" in message
-        or "include_usage" in message
-    ):
-        return False
-    return any(
-        marker in message
-        for marker in (
-            "unsupported",
-            "not support",
-            "unrecognized",
-            "unknown",
-            "unexpected",
-            "invalid",
-            "extra input",
-        )
-    )
-
-
 # ── Title generation ────────────────────────────────────────────
-
-async def generate_title(
-    api_key: str,
-    text: str,
-    options: dict[str, Any] | None = None,
-) -> str:
-    """Generate a short session title (≤10 chars) via a non-streaming call."""
-    opts = options or {}
-    model: str = opts.get("model", "")
-    base_url: str | None = opts.get("baseURL")
-    profile = resolve_model_profile(opts.get("model_profile"), model, base_url)
-    require_supported_reasoning_mode(opts, profile.protocol_capabilities())
-    thinking_enabled = normalize_thinking_enabled(opts)
-
-    client = _create_client(api_key, base_url)
-
-    try:
-        params: dict[str, Any] = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SESSION_TITLE_SYSTEM_PROMPT},
-                {"role": "user", "content": str(text or "").strip()},
-            ],
-            "stream": False,
-        }
-        profile.apply_openai_output_limit(params, 32)
-        if opts.get("temperature") is not None:
-            params["temperature"] = opts["temperature"]
-        extra_body = profile.build_openai_extra_body(thinking_enabled)
-        if opts.get("top_k") is not None:
-            extra_body["top_k"] = opts["top_k"]
-        if extra_body:
-            params["extra_body"] = extra_body
-        res = await client.chat.completions.create(**params)
-        raw = (
-            res.choices[0].message.content
-            if res.choices and res.choices[0].message
-            else ""
-        ) or ""
-        logger.info("[ai-generate-title][openai] 模型返回原文: %s", raw)
-        return normalize_session_title(raw)
-    finally:
-        await close_async_resource(client)

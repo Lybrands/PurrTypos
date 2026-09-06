@@ -1,4 +1,4 @@
-import type { BuiltinModelProfile } from '../types'
+import type { BuiltinModelPresentation } from '../types'
 
 const provider = {
   id: 'deepseek',
@@ -11,15 +11,6 @@ const provider = {
 const sharedPreset = {
   providerId: provider.id,
   summary: '1M 上下文，384K 最大输出，支持深度思考与工具调用',
-  contextWindowOptions: ['32k', '256k', '1m'],
-  contextWindow: '1m',
-  maxOutputTokens: 393_216,
-  supportsThinking: true,
-  thinkingOnly: false,
-  thinkingEnabled: true,
-  customizeTemperature: false,
-  temperatureThinking: 1,
-  temperatureNonThinking: 1,
 } as const
 
 const flashPreset = {
@@ -30,7 +21,7 @@ const flashPreset = {
   recommended: true,
 } as const
 
-export const deepseekV4FlashProfile: BuiltinModelProfile = {
+export const deepseekV4FlashProfile: BuiltinModelPresentation = {
   provider,
   preset: flashPreset,
 }

@@ -10,15 +10,12 @@ from infrastructure.persistence.run_store import (
     get_run_events_page,
     get_run_todos,
 )
-from infrastructure.persistence.sqlite_delegation_repository import (
-    SqliteDelegationRepository,
-)
+from infrastructure.persistence.model_input_diagnostics import _mapping
 
 
 class SqliteRunSnapshotReader:
     def __init__(self, db) -> None:
         self._db = db
-        self._delegations = SqliteDelegationRepository(db)
 
     async def load(
         self,
@@ -41,15 +38,26 @@ class SqliteRunSnapshotReader:
             run = await get_run(self._db, normalized_run_id)
             if run is None:
                 return None
+            if not run.get("model_name") or not run.get("model_provider"):
+                observed = await self._db.fetch_one(
+                    "SELECT payload_json FROM ai_agent_run_events "
+                    "WHERE run_id = ? AND event_type = 'stream.opened' ORDER BY id LIMIT 1",
+                    [normalized_run_id],
+                )
+                receipt = _mapping(observed["payload_json"]) if observed else {}
+                calls = receipt.get("callParameters") or []
+                parameters = _mapping(calls[0]) if isinstance(calls, list) and calls else {}
+                run = {
+                    **run,
+                    "model_name": run.get("model_name") or parameters.get("model") or receipt.get("model"),
+                    "model_provider": run.get("model_provider") or parameters.get("provider"),
+                }
             steps = await get_run_todos(self._db, normalized_run_id)
             events, has_more = await get_run_events_page(
                 self._db,
                 normalized_run_id,
                 after_id=normalized_after,
                 limit=normalized_limit,
-            )
-            delegations = await self._delegations.list_for_run(
-                normalized_run_id,
             )
         next_cursor = (
             int(events[-1].get("id") or 0)
@@ -60,7 +68,7 @@ class SqliteRunSnapshotReader:
             run=run,
             steps=tuple(steps),
             events=tuple(events),
-            delegations=delegations,
+            delegations=(),
             next_cursor=next_cursor,
             has_more=has_more,
         )

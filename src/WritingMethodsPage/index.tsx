@@ -44,7 +44,7 @@ function analysisSourceRef(method: WritingMethod) {
     const analysisId = String(sourceRef.analysisId ?? '')
     const craftCardIds = Array.isArray(sourceRef.craftCardIds)
       ? sourceRef.craftCardIds.map(String).filter(Boolean)
-      : [String(sourceRef.craftCardId ?? '')].filter(Boolean)
+      : []
     if (analysisId && craftCardIds.length) return { analysisId, craftCardIds }
   }
   return null

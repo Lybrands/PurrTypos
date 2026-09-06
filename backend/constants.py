@@ -11,6 +11,8 @@ FORESHADOWING_TYPES: list[str] = ["悬念", "道具", "线索", "对话"]
 # Provider content uses this explicit prefix to distinguish public progress
 # from an ordinary direct answer before the future tool call is known.
 AGENT_PUBLIC_PROGRESS_PREFIX = "【进展】"
+AGENT_PUBLIC_COMMENTARY_OPEN = "【公开说明】"
+AGENT_PUBLIC_COMMENTARY_CLOSE = "【说明结束】"
 
 BOOK_COLORS: list[str] = [
     "#4A90D9", "#E67E22", "#27AE60", "#8E44AD", "#C0392B",
