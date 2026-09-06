@@ -356,12 +356,11 @@ async def test_model_input_diagnostics_returns_captured_provider_messages(
         "(run_id, event_type, payload_json) VALUES (?, ?, ?)",
         [
             run_id,
-            "model.call_recorded",
+            "stream.opened",
             json.dumps({
-                "phase": "planning",
-                "count": 1,
-                "attempt": 0,
-                "parameters": {
+                "planningScope": {"revision": 0},
+                "planningAttempt": 0,
+                "callParameters": [{
                     "provider": "openai",
                     "model": "model",
                     "inputMessages": [
@@ -372,7 +371,7 @@ async def test_model_input_diagnostics_returns_captured_provider_messages(
                         },
                         {"role": "user", "content": "用户原始输入"},
                     ],
-                },
+                }],
             }, ensure_ascii=False),
         ],
     )

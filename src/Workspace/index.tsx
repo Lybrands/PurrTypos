@@ -62,7 +62,7 @@ interface WorkspaceProps {
   onGoHome?: () => void
   onOpenSettings: () => void
   modelConfigs?: AiModelConfig[]
-  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>) => void
+  onUpdateModelConfig?: (id: string, patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>) => void
   syncOutlineChapter?: boolean
   onReady?: () => void
 }

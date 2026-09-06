@@ -54,7 +54,7 @@ async def test_openai_stream_forwards_required_tool_choice(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_openai_stream_retries_without_unsupported_usage_option(
+async def test_openai_stream_does_not_retry_unsupported_usage_option(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from infrastructure.models import openai_chat
@@ -79,15 +79,11 @@ async def test_openai_stream_retries_without_unsupported_usage_option(
         chat = _Chat()
 
     monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: _Client())
-    await openai_chat.chat_stream(
-        "k",
-        [{"role": "user", "content": "read"}],
-        {"model": "mock", "baseURL": "http://example.invalid"},
-    )
-
-    assert len(calls) == 2
+    with pytest.raises(ValueError, match="include_usage"):
+        await openai_chat.chat_stream("k", [{"role": "user", "content": "read"}],
+                                      {"model": "mock", "baseURL": "http://example.invalid"})
+    assert len(calls) == 1
     assert calls[0]["stream_options"] == {"include_usage": True}
-    assert "stream_options" not in calls[1]
 
 
 @pytest.mark.asyncio
@@ -119,6 +115,7 @@ async def test_minimax_openai_stream_requests_split_reasoning(
         [{"role": "user", "content": "reason"}],
         {
             "model": "MiniMax-M3",
+            "model_profile": "minimax:MiniMax-M3", "profile_binding": "compatible",
             "baseURL": "https://api.minimaxi.com/v1",
             "thinking": {"type": "enabled"},
             "max_tokens": 2_048,
@@ -129,7 +126,7 @@ async def test_minimax_openai_stream_requests_split_reasoning(
         "reasoning_split": True,
         "thinking": {"type": "adaptive"},
     }
-    assert result["applied_output_limit"] == captured["max_completion_tokens"] == 2_048
+    assert result["applied_generation_limit"] == captured["max_completion_tokens"] == 2_048
     await result["stream"].aclose()
     assert "max_tokens" not in captured
 
@@ -167,7 +164,7 @@ async def test_kimi_k3_stream_forces_max_reasoning_and_preserves_history(
         messages,
         {
             "model": "kimi-k3",
-            "model_profile": "moonshot:kimi-k3",
+            "model_profile": "moonshot:kimi-k3", "profile_binding": "compatible",
             "baseURL": "https://api.moonshot.cn/v1",
             "thinking": {"type": "enabled"},
             "max_tokens": 2_048,
@@ -175,7 +172,7 @@ async def test_kimi_k3_stream_forces_max_reasoning_and_preserves_history(
     )
 
     assert captured["extra_body"] == {"reasoning_effort": "max"}
-    assert result["applied_output_limit"] == captured["max_completion_tokens"] == 2_048
+    assert result["applied_generation_limit"] == captured["max_completion_tokens"] == 2_048
     await result["stream"].aclose()
     assert "max_tokens" not in captured
     assert captured["messages"] == messages
@@ -448,7 +445,7 @@ async def test_openai_no_stream_releases_client_after_success(monkeypatch, profi
     )
 
     assert result["message"]["content"] == "done"
-    assert result["applied_output_limit"] == 2_048
+    assert result["applied_generation_limit"] == 2_048
     assert client.close_calls == 1
 
 
@@ -457,8 +454,10 @@ async def test_openai_title_generation_releases_client_after_success(monkeypatch
     from infrastructure.models import openai_chat
 
     response = SimpleNamespace(
+        model="mock",
         choices=[SimpleNamespace(
-            message=SimpleNamespace(content="新的标题"),
+            message=SimpleNamespace(content="新的标题", model_dump=lambda: {"role": "assistant", "content": "新的标题"}),
+            finish_reason="stop",
         )],
     )
 
@@ -468,10 +467,11 @@ async def test_openai_title_generation_releases_client_after_success(monkeypatch
     client = _ClosableOpenAIClient(_create)
     monkeypatch.setattr(openai_chat, "_create_client", lambda *_args: client)
 
-    title = await openai_chat.generate_title(
-        "k",
-        "conversation",
-        {"model": "mock", "baseURL": "http://example.invalid"},
+    from application.session_title_service import generate_session_title
+    title = await generate_session_title(
+        api_key="k", provider="openai", prompt="conversation",
+        options={"model": "mock", "baseURL": "http://example.invalid", "context_window": "128k",
+                 "profile_max_generation_tokens": 8192, "supports_thinking": False, "thinking_only": False},
     )
 
     assert title == "新的标题"

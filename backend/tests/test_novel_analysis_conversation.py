@@ -15,7 +15,8 @@ from application.novel_analysis_service import NovelAnalysisService
 from application.novel_analysis_stream import NovelAnalysisStreamQuery
 from application.sse_mapping import canonical_output_to_sse_chunk
 from database.connection import DatabaseConnection
-from domains.agent_policy import build_agent_public_progress_policy
+from domains.agent_policy import build_agent_public_progress_policy, build_agent_final_response_policy
+from domains.novel_analysis import NovelAnalysisDomainContext
 from domains.novel_analysis_prompts import build_novel_analysis_method_guidance
 from purra.contracts import ExecutionState
 from purra.errors import ModelGatewayError
@@ -24,13 +25,12 @@ from tests.test_novel_analysis import _source
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("read_again", [False, True])
 @pytest.mark.parametrize(
     ("submit", "invalid_first"),
     [(True, False), (True, True), (False, False)],
 )
 async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
-    tmp_path, monkeypatch, submit, invalid_first, read_again,
+    tmp_path, monkeypatch, submit, invalid_first,
 ):
     db = DatabaseConnection(tmp_path)
     await db.init()
@@ -50,25 +50,23 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
     async def stream(_key, messages, options, _provider, signal=None):
         calls.append(messages)
         assert build_agent_public_progress_policy() in "\n".join(str(m.get("content")) for m in messages)
-        assert build_novel_analysis_method_guidance() in "\n".join(str(m.get("content")) for m in messages)
+        assert build_agent_final_response_policy() not in "\n".join(str(m.get("content")) for m in messages)
+        assert build_novel_analysis_method_guidance() not in "\n".join(str(m.get("content")) for m in messages)
         assert options.get("response_format") is None
         tool_messages = [m for m in messages if m["role"] == "tool"]
-        assert "PRIVATE_SOURCE_MARKER" in json.dumps(messages)
-        assert "a" * 70_000 in json.dumps(messages)
-        read_count = int(read_again)
-        if not tool_messages and read_again:
-            tool, arguments, commentary = "readNovelAnalysisInput", {}, "核对当前分析材料"
-        elif len(tool_messages) == read_count and submit:
-            if read_again:
-                assert "PRIVATE_SOURCE_MARKER" in tool_messages[0]["content"]
-                assert len(tool_messages[0]["content"]) > 64_000
+        serialized = json.dumps(messages)
+        assert "PRIVATE_SOURCE_MARKER" in serialized
+        assert "a" * 70_000 in serialized
+        assert "Untrusted context block 'novel_analysis_unit_input'" in serialized
+        assert {item["function"]["name"] for item in options["tools"]} == {"submitNovelAnalysisResult"}
+        if not tool_messages and submit:
             result = (
                 {**candidate, "storyOverview": {"overview": "错误的概览字段"}}
                 if invalid_first
                 else candidate
             )
             tool, arguments, commentary = "submitNovelAnalysisResult", {"result": result}, "整理有原文依据的候选"
-        elif len(tool_messages) == read_count + 1 and submit and invalid_first:
+        elif len(tool_messages) == 1 and submit and invalid_first:
             assert "invalid_tool_arguments_schema" in tool_messages[-1]["content"]
             tool, arguments, commentary = "submitNovelAnalysisResult", {"result": candidate}, "修正分析候选格式"
         else:
@@ -76,19 +74,22 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
 
         async def chunks():
             if tool:
-                yield {"choices": [{"delta": {"content": commentary}, "finish_reason": None}]}
+                yield {"choices": [{"delta": {"content": "【公开说明】" + commentary}, "finish_reason": None}]}
+                early = await db.fetch_all("SELECT payload_json FROM ai_agent_run_events WHERE run_id=? AND visibility='public' AND channel='commentary'", [bindings[0]])
+                assert commentary in json.dumps(early, ensure_ascii=False)
+                yield {"choices": [{"delta": {"content": "【说明结束】"}, "finish_reason": None}]}
                 yield {"choices": [{"delta": {"tool_calls": [{
                     "index": 0, "id": f"call-{len(tool_messages)}", "type": "function",
                     "function": {"name": tool, "arguments": json.dumps(arguments)},
                 }]}, "finish_reason": "tool_calls"}]}
             else:
                 yield {"choices": [{"delta": {"content": "PRIVATE_FINAL_MARKER"}, "finish_reason": "stop"}]}
-        return {"applied_output_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
 
     monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", stream)
     runtime = ScreenplayAgentRuntimeRequest(
         apiKey="test-key", options={
-            "model": "model", "model_profile": "deepseek:deepseek-v4-flash", "max_tokens": 2048,
+            "model": "model", "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible", "max_generation_tokens": 2048,
         }, contextWindow="128k",
     )
     context = SimpleNamespace(
@@ -114,17 +115,16 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
         )
         assert result == candidate
         assert bindings == [run_id]
-        assert len(calls) == 2 + int(invalid_first) + int(read_again)
+        assert len(calls) == 2 + int(invalid_first)
         events = await composition.output_repository.list_events(run_id, after_sequence=0, limit=500)
         public = [chunk for event in events if (chunk := canonical_output_to_sse_chunk(event))]
         starts = [chunk for chunk in public if chunk["kind"] == "operation.started" and chunk["payload"]["kind"] == "tool"]
         finishes = [chunk for chunk in public if chunk["kind"] == "operation.finished"]
-        assert len(starts) == 1 + int(read_again)
+        assert len(starts) == 1
         assert {chunk["payload"]["operationId"] for chunk in starts} <= {
             chunk["payload"]["operationId"] for chunk in finishes if chunk["payload"]["status"] == "succeeded"
         }
         public_text = json.dumps(public, ensure_ascii=False)
-        assert ("核对当前分析材料" in public_text) is read_again
         assert "整理有原文依据的候选" in public_text
         assert "PRIVATE_SOURCE_MARKER" not in public_text
         assert "PRIVATE_FINAL_MARKER" not in public_text
@@ -134,23 +134,45 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
             context=context, instruction="提取有依据的事实", payload=input_payload,
         )
         assert repeated == (run_id, candidate)
-        assert len(calls) == 2 + int(invalid_first) + int(read_again)
+        assert len(calls) == 2 + int(invalid_first)
     finally:
         await composition.shutdown()
         await db.close()
 
 
 @pytest.mark.asyncio
-async def test_analysis_candidate_requires_a_real_read_and_bound_scope(tmp_path):
+async def test_analysis_candidate_requires_host_provided_input_and_bound_scope(tmp_path):
     db = DatabaseConnection(tmp_path)
     await db.init()
     try:
         tools = {item.schema.name: item for item in build_novel_analysis_tool_catalog(db).registrations()}
         submit = tools["submitNovelAnalysisResult"]
-        state = ExecutionState(domain={"interactionKind": "unit", "unitInput": {}})
+        state = ExecutionState(domain={"interactionKind": "unit", "unitInput": {
+            "sourceBinding": {"startCharacter": 1200, "endCharacter": 2400},
+            "sourceEvidence": {"title": "第一章 雨夜", "text": "PRIVATE"},
+        }})
         state.run_id = "unit-run"
+        submit_names = submit.operation_display_params(
+            state,
+            {"result": {"facts": []}},
+            SimpleNamespace(name="submitNovelAnalysisResult"),
+        )["displayNames"]
+        assert submit_names["zh-CN"] == "提交《第一章 雨夜》第 1200–2400 字符的分析候选"
+        assert "PRIVATE" not in json.dumps(submit_names, ensure_ascii=False)
+        await db.execute(
+            "INSERT INTO ai_agent_run_events "
+            "(run_id, event_type, kind, source, visibility, payload_json) "
+            "VALUES (?, 'stream.opened', 'stream.opened', 'provider', 'private', ?)",
+            [state.run_id, json.dumps({"contextEvidence": [{
+                "source": "purrtypos.prepared_read",
+                "metadata": {
+                    "complete": True,
+                    "toolName": "readNovelAnalysisInput",
+                },
+            }]})],
+        )
         result = await submit.handler(state, {"result": {"facts": [], "craftCards": []}}, None)
-        assert result.error_code == "novel_analysis_input_not_read"
+        assert result.error_code == "novel_analysis_input_not_provided"
         state.domain["interactionKind"] = "analysis"
         assert await submit.scope_validator(state, {}, None) == "novel_analysis_unit_scope_required"
     finally:
@@ -158,8 +180,12 @@ async def test_analysis_candidate_requires_a_real_read_and_bound_scope(tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_path, monkeypatch, cancel):
+@pytest.mark.parametrize(("cancel", "single_source", "stream_failure"), [
+    (False, False, False), (False, True, False), (True, False, False), (False, True, True),
+])
+async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
+    tmp_path, monkeypatch, cancel, single_source, stream_failure,
+):
     db = DatabaseConnection(tmp_path)
     await db.init()
     composition = create_agent_composition(db)
@@ -195,7 +221,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
         )
         assert "用户列出的交付维度只定义结果覆盖范围" in policy_context["content"]
         return {
-            "applied_output_limit": options.get("max_tokens"),
+            "applied_generation_limit": options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -226,6 +252,15 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
                             "dependsOn": ["trace-actions"],
                             "riskLevel": "read",
                         },
+                        {
+                            "id": "analyze-craft",
+                            "title": "分析信息差的叙事作用",
+                            "type": "analyze",
+                            "executor": "model",
+                            "expectedTools": [],
+                            "dependsOn": ["review-causality"],
+                            "riskLevel": "read",
+                        },
                     ],
                 }, ensure_ascii=False),
             },
@@ -245,7 +280,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
                     }],
                 }
             return {
-                "applied_output_limit": options.get("max_tokens"),
+                "applied_generation_limit": options.get("max_tokens"),
                 "stream": final_chunks(),
                 "model": "model",
             }
@@ -275,27 +310,35 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
                     }],
                 }
             return {
-                "applied_output_limit": options.get("max_tokens"),
+                "applied_generation_limit": options.get("max_tokens"),
                 "stream": auto_decision_chunks(),
                 "model": "model",
             }
         history = [message for message in messages if message["role"] == "tool"]
         if not history:
-            tool, args, title = "readNovelAnalysisInput", {}, "读取当前分析材料"
-        elif len(history) == 1:
-            source = json.loads(history[0]["content"])
-            if "sourceEvidence" in source:
+            source = json.loads(next(m["content"].split("\n", 1)[1] for m in messages
+                if m.get("content", "").startswith("Untrusted context block 'novel_analysis_unit_input'")))
+            if source.get("stage"):
+                from tests.support.writing_distillation import stage_result
+                if source["stage"] == "trial_skill":
+                    assert set(source) == {"stage", "writingSkill", "submissionContract"}
+                    assert source["submissionContract"]["tool"] == "submitWritingSkillTrials"
+                    assert "甲" not in json.dumps(source, ensure_ascii=False)
+                candidate = stage_result(source)
+            elif "sourceEvidence" in source:
                 excerpt = "甲看见一扇红门" if "甲看见" in source["sourceEvidence"]["text"] else "乙关上红门"
                 candidate = {"facts": [{
                     "factKind": "event", "subjectKey": "人物", "predicate": "行动", "value": excerpt,
                     "evidence": [{"sectionId": source["sourceBinding"]["sectionId"], "excerpt": excerpt}],
-                }], "craftCards": []}
+                }], "craftCards": [{"cardKind": "信息释放", "title": "行动改变信息", "bodyMarkdown": "人物行动后获得可观察的新信息。", "evidence": [{"sectionId": source["sourceBinding"]["sectionId"], "excerpt": excerpt}]}]}
+                if source.get("includeStoryOverview"):
+                    candidate["storyOverview"] = {"summaryMarkdown": "人物围绕红门行动", "evidence": candidate["facts"][0]["evidence"]}
             else:
                 candidate = source.get("normalizedCandidates") or source["sectionCandidates"][0]
                 candidate = {"facts": candidate["facts"], "craftCards": candidate["craftCards"]}
                 if "normalizedCandidates" in source:
                     candidate["storyOverview"] = {"summaryMarkdown": "人物围绕红门行动", "evidence": candidate["facts"][0]["evidence"]}
-            tool, args, title = "submitNovelAnalysisResult", {"result": candidate}, "核对事实的原文依据"
+            tool, args, title = next(name for name in available_tools if name.startswith("submit")), {"result": candidate}, "核对事实的原文依据"
         else:
             tool = None
 
@@ -304,6 +347,9 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
             if cancel:
                 await signal.wait()
                 raise asyncio.CancelledError
+            if stream_failure:
+                yield {"choices": [{"delta": {"content": "正在核对材料"}, "finish_reason": None}]}
+                raise ModelGatewayError("interrupted", code="upstream_stream_interrupted", retryable=True)
             if tool:
                 yield {"choices": [{"delta": {"content": title}, "finish_reason": None}]}
                 yield {"choices": [{"delta": {"tool_calls": [{
@@ -312,7 +358,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
                 }]}, "finish_reason": "tool_calls"}]}
             else:
                 yield {"choices": [{"delta": {"content": "private completion"}, "finish_reason": "stop"}]}
-        return {"applied_output_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -326,11 +372,11 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
         revision = await _source(db)
         service = NovelAnalysisService(db, composition)
         task = service.dispatch(
-            source_revision_id=revision["id"], section_ids=tuple(row["id"] for row in revision["sections"]),
+            source_revision_id=revision["id"], section_ids=tuple(row["id"] for row in (revision["sections"][:1] if single_source else revision["sections"])),
             task_idempotency_key="conversation-test", run_command_id="conversation-test",
             prompt="核对事实脉络", failed_resume_attempts=0,
             runtime=ScreenplayAgentRuntimeRequest(apiKey="test-key", options={
-                "model": "model", "model_profile": "deepseek:deepseek-v4-flash", "max_tokens": 2048,
+                "model": "model", "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible", "max_generation_tokens": 2048,
             }, contextWindow="128k"),
         )
         await asyncio.wait_for(started.wait(), 5)
@@ -381,8 +427,9 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
         assert recorded_method_context["content"] == (
             build_novel_analysis_method_guidance()
         )
-        assert view["taskStatus"] == ("canceled" if cancel else "completed"), view
-        assert view["finalResponse"] == ("" if cancel else final_summary)
+        assert view["taskStatus"] == ("canceled" if cancel else "failed" if stream_failure else "completed"), view
+        if not stream_failure:
+            assert view["finalResponse"] == ("" if cancel else final_summary)
         assert view["relatedRuns"]
         assert all(row["status"] != "running" for row in view["relatedRuns"])
         restored = await query.read_page(revision["id"])
@@ -418,10 +465,23 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
         assert [step["id"] for step in view["analysisPlan"]["steps"]] == [
             "trace-actions",
             "review-causality",
+            "analyze-craft",
         ]
-        if not cancel:
-            assert len(view["relatedRuns"]) == 4
+        if stream_failure:
+            units = await db.fetch_all("SELECT attempt, status FROM ai_agent_long_task_units WHERE task_id=? ORDER BY position", [view["taskId"]])
+            assert units[0]["attempt"] == 1
+            assert units[0]["status"] == "failed"
+            assert all(unit["attempt"] == 0 for unit in units[1:])
+            assert len(view["relatedRuns"]) == 1
+            child = await db.fetch_one("SELECT model_attempt_count FROM ai_agent_runs WHERE binding_namespace='novel_source_analysis.unit'")
+            assert child["model_attempt_count"] == 2
+        if not cancel and not stream_failure:
+            assert len(view["relatedRuns"]) == (6 if single_source else 9)
             assert view["completedUnits"] == view["totalUnits"]
+            if single_source:
+                assert view["totalUnits"] == 9
+                counts = await db.fetch_all("SELECT model_attempt_count FROM ai_agent_runs")
+                assert sum(row["model_attempt_count"] for row in counts) == 15
             assert view["artifactRef"]
             assert view["providerOutputEvents"] > 0
             artifact = await service.get_artifact(view["artifactRef"])
@@ -453,6 +513,128 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(tmp_
                 and row["chunk"].get("payload", {}).get("status") == "done"
             )
             assert final_events[0]["sequence"] < root_terminal["sequence"]
+    finally:
+        await composition.shutdown()
+        await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('effort', [None, 'low', 'high', 'max'])
+async def test_analysis_profile_preserves_resolved_effort_without_model_defaults(tmp_path, effort):
+    from application.novel_analysis_agent_profile import NovelAnalysisAgentProfile
+    from infrastructure.models.profiles.glm5_3_flash import GLM5_3_FLASH_PROFILE
+    from purra.contracts import AgentRunRequest, AgentMessage, ModelRequest
+    request = AgentRunRequest(messages=(AgentMessage(role='user', content='test'),),
+        model=ModelRequest(provider='zai', model='glm-5.3-flash',
+            capability_snapshot=GLM5_3_FLASH_PROFILE.capability_snapshot(context_window_tokens=32000),
+            options={} if effort is None else {'reasoning_effort': effort}),
+        domain_context=NovelAnalysisDomainContext(source_revision_id='r', command_id='c',
+            section_ids=('s',), interaction_kind='unit', unit_input={}).to_core_context())
+    prepared = await NovelAnalysisAgentProfile(None).prepare_request(request)
+    assert prepared.model.options.get('reasoning_effort') == effort
+
+
+@pytest.mark.parametrize('stage', ['distill_skill', 'trial_skill', 'revise_skill', 'assess_skill'])
+def test_analysis_unit_exposes_only_current_stage_result_schema(stage):
+    from application.novel_analysis_tools import build_novel_analysis_tool_catalog, analysis_submit_tool
+    from domains.writing_distillation import DISTILLATION_STAGES
+    from purra.contracts import AgentRunRequest, AgentMessage, ModelRequest
+    from purra.json_values import thaw_json_mapping
+    catalog = build_novel_analysis_tool_catalog(None)
+    request = AgentRunRequest(messages=(AgentMessage(role='user', content='test'),),
+        model=ModelRequest(provider='test', model='test'),
+        domain_context=NovelAnalysisDomainContext(source_revision_id='r', command_id='c',
+            section_ids=('s',), interaction_kind='unit', unit_input={'stage': stage}).to_core_context())
+    submit = analysis_submit_tool({'stage': stage})
+    assert catalog.enabled_names(request) == {submit}
+    schema = thaw_json_mapping(catalog.get(submit).schema.parameters)
+    assert schema['properties']['result'] == DISTILLATION_STAGES[stage]
+
+
+@pytest.mark.asyncio
+async def test_merged_candidate_rejects_unbound_quote_before_persistence(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        tools = {t.schema.name: t for t in build_novel_analysis_tool_catalog(db).registrations()}
+        state = ExecutionState(domain={'interactionKind':'unit','analysisInputProvided':True,'unitInput':{
+            'normalizedCandidates':{'facts':[{'evidence':[{'sectionId':'s1','excerpt':'逐字原文',
+                'segmentId':'host','segmentStartCharacter':0,'segmentEndCharacter':4}]}]}}})
+        state.run_id = 'test-unit'
+        result = await tools['submitNovelAnalysisResult'].handler(state, {'result':{'facts':[], 'craftCards':[],
+            'storyOverview':{'summaryMarkdown':'概览','evidence':[{'sectionId':'s1','excerpt':'改写引文'}]}}}, None)
+        assert result.error_code == 'novel_analysis_structured_output_invalid'
+        assert await db.fetch_all('SELECT id FROM ai_agent_artifacts') == []
+    finally:
+        await db.close()
+
+
+def test_submission_contract_exposes_complete_nested_fields_from_same_schema():
+    from application.novel_analysis_tools import analysis_submission_contract
+    from domains.writing_distillation import SKILL_SCHEMA
+    contract = analysis_submission_contract('distill_skill')
+    assert contract['completeReplacement'] is True
+    assert contract['requiredFields']['result'] == ['writingSkill','revisionNotes']
+    assert contract['requiredFields']['result.writingSkill'] == list(SKILL_SCHEMA['properties'])
+    assert contract['requiredFields']['result.writingSkill.procedure[]'] == ['action','rationale','check']
+    assert 'result.writingSkill.revisionNotes' not in contract['requiredFields']
+    assert analysis_submission_contract(None) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('repair', [True, False])
+async def test_silent_stage_cannot_submit_until_real_public_chunks_arrive(tmp_path, monkeypatch, repair):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    composition = create_agent_composition(db)
+    calls = []
+    bound = []
+
+    async def bind(run_id):
+        bound.append(run_id)
+
+    async def stream(_key, messages, options, _provider, signal=None):
+        calls.append(messages)
+        history = [m for m in messages if m['role'] == 'tool']
+        success = any('artifactRef' in m.get('content', '') for m in history)
+        if history and not success:
+            assert 'public_progress_required' in history[-1]['content']
+            assert await db.fetch_all('SELECT id FROM ai_agent_artifacts') == []
+
+        async def chunks():
+            if success:
+                yield {'choices':[{'delta':{'content':'PRIVATE_COMPLETION'}, 'finish_reason':'stop'}]}
+                return
+            if history and repair:
+                yield {'choices':[{'delta':{'content':'【公开说明】正在核对当前片段'}, 'finish_reason':None}]}
+                visible = await db.fetch_all("SELECT payload_json FROM ai_agent_run_events WHERE run_id=? AND visibility='public' AND channel='commentary'", [bound[0]])
+                assert '正在核对当前片段' in json.dumps(visible, ensure_ascii=False)
+                yield {'choices':[{'delta':{'content':'中的事实依据。【说明结束】'}, 'finish_reason':None}]}
+            yield {'choices':[{'delta':{'tool_calls':[{
+                'index':0, 'id':f'call-{len(calls)}', 'type':'function',
+                'function':{'name':'submitNovelAnalysisResult', 'arguments':json.dumps({'result':{'facts':[], 'craftCards':[]}})},
+            }]}, 'finish_reason':'tool_calls'}]}
+        return {'applied_generation_limit':options.get('max_tokens'), 'stream':chunks(), 'model':'model'}
+
+    monkeypatch.setattr('infrastructure.models.provider_router.create_chat_stream', stream)
+    runtime = ScreenplayAgentRuntimeRequest(apiKey='test', options={
+        'model':'model', 'model_profile':'deepseek:deepseek-v4-flash', 'profile_binding':'compatible',
+        'max_generation_tokens':2048}, contextWindow='128k')
+    context = SimpleNamespace(run_id='root', unit=SimpleNamespace(id='extract:1'), bind_run=bind,
+        task=SimpleNamespace(id='task', metadata={'sourceRevisionId':'revision', 'sectionIds':['section']}))
+    try:
+        models = NovelAnalysisModelCalls(db, composition, runtime)
+        if repair:
+            _, result = await models.run_json(context=context, instruction='提取当前片段事实', payload={'sourceEvidence':{'text':'PRIVATE_SOURCE'}})
+            assert result == {'facts':[], 'craftCards':[]}
+            assert len(calls) == 3
+        else:
+            with pytest.raises(ModelGatewayError):
+                await models.run_json(context=context, instruction='提取当前片段事实', payload={'sourceEvidence':{'text':'PRIVATE_SOURCE'}})
+            assert len(calls) <= 6
+            assert await db.fetch_all('SELECT id FROM ai_agent_artifacts') == []
+        public = await db.fetch_all("SELECT payload_json FROM ai_agent_run_events WHERE visibility='public' AND channel='commentary'")
+        assert 'PRIVATE_' not in json.dumps(public)
     finally:
         await composition.shutdown()
         await db.close()

@@ -1,3 +1,4 @@
+import { flushSync } from 'react-dom'
 import type { AgentConversationMessage } from '../contracts.ts'
 
 export type ConversationUpdater = (
@@ -13,33 +14,32 @@ export interface CommitScheduler {
   flushCommits: () => void;
 }
 
-/** 每帧最多一次 setConversations，合并同帧内多个 chunk updater */
+/** Commit each received chunk without a timer or a pending batch. */
 export function createCommitScheduler(
   setConversations: ConversationMessageSetter,
 ): CommitScheduler {
-  const pending: ConversationUpdater[] = [];
-  let rafId: number | null = null;
+  return {
+    scheduleCommit: updater => commitAgentChunk(() => setConversations(updater)),
+    flushCommits: () => undefined,
+  }
+}
 
-  const flushCommits = () => {
-    if (rafId != null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
-    }
-    if (pending.length === 0) return;
-    const batch = pending.splice(0);
-    setConversations((prev) => batch.reduce((state, fn) => fn(state), prev));
-  };
+export function commitAgentChunk(update: () => void): void {
+  flushSync(update)
+}
 
-  const scheduleCommit = (updater: ConversationUpdater) => {
-    pending.push(updater);
-    if (rafId != null) return;
-    rafId = requestAnimationFrame(() => {
-      rafId = null;
-      if (pending.length === 0) return;
-      const batch = pending.splice(0);
-      setConversations((prev) => batch.reduce((state, fn) => fn(state), prev));
-    });
-  };
-
-  return { scheduleCommit, flushCommits };
+/** Historical pages commit once; live chunks retain immediate delivery. */
+export function createAgentReplayPageCommit(replayingHistory: boolean, update: () => void) {
+  let pending = false
+  return {
+    change() {
+      if (replayingHistory) pending = true
+      else commitAgentChunk(update)
+    },
+    finish() {
+      if (!pending) return
+      pending = false
+      commitAgentChunk(update)
+    },
+  }
 }

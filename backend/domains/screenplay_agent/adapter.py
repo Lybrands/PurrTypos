@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -47,6 +47,19 @@ class ScreenplayExecutionStateFactory:
         context = ScreenplayAgentDomainContext.from_core_context(
             request.domain_context
         )
+        raw_scene_ids_by_episode = request.metadata.get(
+            "screenplaySceneIdsByEpisode"
+        )
+        scene_ids_by_episode = (
+            {
+                str(number): [str(scene_id) for scene_id in scene_ids]
+                for number, scene_ids in raw_scene_ids_by_episode.items()
+                if isinstance(scene_ids, Sequence)
+                and not isinstance(scene_ids, (str, bytes, bytearray))
+            }
+            if isinstance(raw_scene_ids_by_episode, Mapping)
+            else {}
+        )
         return ExecutionState(domain={
             "projectId": context.project_id,
             "taskId": context.task_id or context.turn_id,
@@ -56,6 +69,7 @@ class ScreenplayExecutionStateFactory:
             "expectedPartKey": context.expected_part_key,
             "dependencyPartKeys": list(context.dependency_part_keys),
             "sceneIds": list(request.metadata.get("screenplaySceneIds") or ()),
+            "sceneIdsByEpisode": scene_ids_by_episode,
             **(
                 {
                     "deliverableRevisionScope": dict(
@@ -309,7 +323,7 @@ class ScreenplayDomainAdapter:
         ScreenplayHostContextProvider()
     )
     runtime_limits: RuntimeLimits = RuntimeLimits(
-        max_run_output_tokens=None,
+        max_run_generation_tokens=None,
         max_model_rounds=8,
         max_progress_rounds=8,
         root_run_timeout_ms=None,

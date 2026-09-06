@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -13,11 +14,14 @@ from purra.contracts import (
     ApprovalDecision,
     ApprovalStatus,
     ContextBudgetClaim,
+    ModelRequest,
     PlannerLimits,
+    ReasoningMode,
     ToolExecutionLimits,
     ToolExecutionMode,
 )
 from purra.context_budget import resolve_context_budget_claims
+from purra.errors import ContractViolationError
 from purra.json_values import thaw_json_mapping
 from purra.context_orchestration import (
     ContextCompressionCoordinator,
@@ -30,7 +34,6 @@ from purra.api import (
     AgentPlanner,
     AgentModelTaskRunner,
     ContextStrategy,
-    DelegationPolicy,
     ExecutionProfile,
     AgentPreset,
 )
@@ -43,7 +46,6 @@ from purra.ports import (
     ContextCompressionHook,
     ConversationCompactor,
     ContextProvider,
-    DelegationRepository,
     ExecutionLeaseStore,
     RunControlStore,
     ResponseJudgePolicy,
@@ -63,8 +65,17 @@ from application.agent_profile_registry import (
     AgentProfile,
     AgentProfileRegistry,
 )
+from application.agent_tool_presentation import (
+    enforce_agent_tool_catalog_presentation,
+)
 from application.shared_agent_context import with_shared_agent_context
+from application.public_commentary_output import PublicCommentaryOutputProcessor
 from application.model_runtime import with_adapter_public_progress
+from application.run_provenance import (
+    _normalized_model_request_profile,
+    digest_model_endpoint,
+)
+from infrastructure.persistence.model_request_diagnostics import model_request_observer
 from infrastructure.models.provider_model_gateway import ProviderModelGateway
 from infrastructure.persistence.run_store import runtime_limits_from_mapping
 from infrastructure.models.model_conversation_summarizer import (
@@ -84,9 +95,6 @@ from infrastructure.persistence.run_execution_store import (
 from infrastructure.persistence.sqlite_run_snapshot_reader import (
     SqliteRunSnapshotReader,
 )
-from infrastructure.persistence.sqlite_delegation_repository import (
-    SqliteDelegationRepository,
-)
 from infrastructure.persistence.sqlite_conversation_compaction_repository import (
     SqliteConversationCompactionRepository,
 )
@@ -101,6 +109,7 @@ from infrastructure.persistence.sqlite_artifact_continuity_query import (
     SqliteSessionArtifactAuthorizer,
 )
 from infrastructure.persistence.sqlite_long_task_repository import (
+    LongTaskClaimGuard,
     SqliteLongTaskRepository,
 )
 from infrastructure.persistence import approval_store
@@ -119,6 +128,27 @@ def _uses_adapter_public_progress(request: AgentRunRequest) -> bool:
             or request.metadata.get("progressAudience") == "public"
         )
     )
+
+
+def _model_task_identity(model_request: ModelRequest, reasoning_mode) -> dict:
+    # Output shape is local to a structured task. Public progress is declared
+    # by the host adapter; both leave the user's model configuration unchanged.
+    options = thaw_json_mapping(model_request.options)
+    options.pop("response_format", None)
+    request = with_adapter_public_progress(replace(model_request, options=options))
+    profile = _normalized_model_request_profile(
+        request,
+        endpoint_digest=digest_model_endpoint(str(options.get("baseURL") or "")),
+        result_capacity_target_tokens=None,
+    )
+    encoded = json.dumps(
+        profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "schemaVersion": 1,
+        "modelRequestDigest": hashlib.sha256(encoded).hexdigest(),
+        "requestedReasoningMode": ReasoningMode(reasoning_mode).value,
+    }
 
 
 def _host_component_bindings(profile_id: str):
@@ -143,12 +173,11 @@ def _host_component_bindings(profile_id: str):
 def _compose_tool_catalog(
     base: ToolCatalog,
     *,
+    profile_id: str,
     extras: Sequence[ToolRegistration] = (),
     allowed_modes: frozenset[ToolExecutionMode] | None = None,
 ) -> ToolCatalog:
     additions = tuple(extras)
-    if not additions and allowed_modes is None:
-        return base
     base_registrations = tuple(base.registrations())
     if allowed_modes is not None:
         base_registrations = tuple(
@@ -166,7 +195,8 @@ def _compose_tool_catalog(
         enabled.update(addition_names)
         return enabled
 
-    return InMemoryToolCatalog(registrations, enablement=enabled_names)
+    catalog = InMemoryToolCatalog(registrations, enablement=enabled_names)
+    return enforce_agent_tool_catalog_presentation(profile_id, catalog)
 
 
 class AgentComposition:
@@ -186,11 +216,9 @@ class AgentComposition:
         provider_capabilities: ProviderCapabilityCache | None = None,
         approval_gateway: ApprovalGateway | None = None,
         tool_execution_limits: ToolExecutionLimits | None = None,
-        delegation_policy: DelegationPolicy = DelegationPolicy(),
+        long_task_claim_guard: LongTaskClaimGuard | None = None,
         memory_resource=None,
     ):
-        if not isinstance(delegation_policy, DelegationPolicy):
-            raise TypeError("delegation_policy must be a DelegationPolicy")
         self._db = db
         self._execution_db = execution_db or db
         self._execution_lease_store = SqliteRunControlStore(
@@ -200,7 +228,6 @@ class AgentComposition:
             db,
             cancellation_projectors=run_cancellation_projectors,
         )
-        self._delegation_repository = SqliteDelegationRepository(db)
         self._run_snapshot_reader = SqliteRunSnapshotReader(db)
         self._conversation_compaction_repository = (
             SqliteConversationCompactionRepository(db)
@@ -215,7 +242,7 @@ class AgentComposition:
             run_commit_projector=run_commit_projector,
         )
         self._output_publisher = InProcessAgentOutputPublisher()
-        self._output_processor = AgentOutputProcessor(
+        self._output_processor = PublicCommentaryOutputProcessor(
             self._output_repository,
             self._output_publisher,
         )
@@ -224,7 +251,9 @@ class AgentComposition:
             owner_id=self._repository.owner_id,
         )
         self._artifact_claim_repository = SqliteArtifactClaimRepository(db)
-        self._long_task_repository = SqliteLongTaskRepository(db)
+        self._long_task_repository = SqliteLongTaskRepository(
+            db, claim_guard=long_task_claim_guard,
+        )
         self._artifact_continuity = ArtifactContinuityCoordinator(
             query=SqliteArtifactContinuityQuery(db),
             claims=self._artifact_claim_repository,
@@ -233,7 +262,6 @@ class AgentComposition:
         self._provider_capabilities = (
             provider_capabilities or ProviderCapabilityCache()
         )
-        self._delegation_policy = delegation_policy
         self._memory_resource = memory_resource
         self._profiles = tuple(
             factory(
@@ -279,14 +307,6 @@ class AgentComposition:
         return self._run_control_store
 
     @property
-    def delegation_repository(self) -> DelegationRepository:
-        return self._delegation_repository
-
-    @property
-    def delegation_policy(self) -> DelegationPolicy:
-        return self._delegation_policy
-
-    @property
     def memory_resource(self):
         return self._memory_resource
 
@@ -317,20 +337,40 @@ class AgentComposition:
         run_id: str,
         turn_id: str,
         reasoning_mode,
+        model_request,
     ) -> AgentModelTaskRunner:
         """Compose a private model-task runner for an existing Run."""
 
         run = await self._db.fetch_one(
-            "SELECT runtime_limits_json, deadline_at_ms FROM ai_agent_runs WHERE id = ?",
+            "SELECT runtime_limits_json, deadline_at_ms, binding_attributes_json, "
+            "requested_user_max_generation_tokens, selected_context_window_tokens "
+            "FROM ai_agent_runs WHERE id = ?",
             [run_id],
         )
         if run is None:
             raise ValueError("model task requires an existing Run")
+        attributes = json.loads(run["binding_attributes_json"] or "{}")
+        identity = attributes.get("modelTaskIdentity")
+        if not isinstance(identity, dict) or identity.get("schemaVersion") != 1:
+            raise ContractViolationError(
+                "model task requires the persisted Root model identity",
+                code="model_request_identity_missing",
+            )
+        if (
+            identity != _model_task_identity(model_request, reasoning_mode)
+            or run["requested_user_max_generation_tokens"]
+            != model_request.max_generation_tokens
+        ):
+            raise ContractViolationError(
+                "model task differs from the persisted Root model request",
+                code="model_request_identity_conflict",
+            )
         limits = runtime_limits_from_mapping(json.loads(run["runtime_limits_json"]))
         return AgentModelTaskRunner(
             AgentModelInvocationManager(
-                ProviderModelGateway(api_key),
+                ProviderModelGateway(api_key, request_observer=model_request_observer(self._db)),
                 output_observer=self._output_processor,
+                operation_controller=AgentOperationController(self._output_processor),
                 invocation_timeout_ms=limits.provider_invocation_timeout_ms,
                 runtime_limits=limits,
                 budget_repository=self._repository,
@@ -338,10 +378,12 @@ class AgentComposition:
             ModelInvocationContext(
                 run_id=run_id,
                 turn_id=turn_id,
-                requested_reasoning_mode=reasoning_mode,
+                requested_reasoning_mode=identity["requestedReasoningMode"],
                 deadline_at_ms=run["deadline_at_ms"],
                 deadline_code="run_deadline_exceeded",
+                context_window_tokens=run["selected_context_window_tokens"],
             ),
+            model_request,
         )
 
     @property
@@ -408,11 +450,13 @@ class AgentComposition:
         long_task_executor=None,
         evidence_validator=None,
         public_progress_from_content: bool = False,
+        public_progress_requirement=None,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
         model_gateway = ProviderModelGateway(
             api_key,
+            request_observer=model_request_observer(self._db),
             on_required_tool_choice_unsupported=(
                 on_required_tool_choice_unsupported
             ),
@@ -476,9 +520,12 @@ class AgentComposition:
         )
         tool_catalog = _compose_tool_catalog(
             adapter.tool_catalog,
+            profile_id=profile.id,
             extras=extras,
             allowed_modes=normalized_modes,
         )
+        if public_progress_requirement is not None:
+            tool_catalog = public_progress_requirement.wrap_tools(tool_catalog)
         resolved_context_strategy = getattr(
             adapter,
             "context_strategy",
@@ -527,7 +574,6 @@ class AgentComposition:
             runtime_limits=adapter.runtime_limits,
             recovery_policy=adapter.recovery_policy,
             component_bindings=_host_component_bindings(profile.id),
-            delegation_policy=self._delegation_policy,
         )
         core = AgentCore(
             model_gateway=model_gateway,
@@ -546,7 +592,6 @@ class AgentComposition:
             execution_lease_store=self._execution_lease_store,
             execution_owner_id=self._repository.owner_id,
             execution_lease_duration_ms=self._repository.lease_duration_ms,
-            delegation_repository=self._delegation_repository,
             evidence_validator=evidence_validator,
         )
         self._active_cores.add(core)
@@ -606,6 +651,9 @@ class AgentComposition:
         attribute_hook = getattr(profile, "run_binding_attributes", None)
         if callable(attribute_hook):
             expected.update(dict(attribute_hook(request)))
+        expected["modelTaskIdentity"] = _model_task_identity(
+            request.model, options.reasoning_mode,
+        )
         for name, value in expected.items():
             current = attributes.get(name)
             if current not in (None, "") and current != value:

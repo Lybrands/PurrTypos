@@ -13,7 +13,12 @@ from infrastructure.persistence.model_input_diagnostics import (
 )
 
 
-_EVENT_TYPES = ("tool.calls_started", "tool.results", "tool.call_completed")
+_EVENT_TYPES = (
+    "tool.calls_started",
+    "tool.results",
+    "tool.call_completed",
+    "operation.started",
+)
 _PAGE_SIZE = 50
 _PREVIEW_CHARACTERS = 32_000
 _PRIVATE_FIELDS = _SECRET_FIELD_NAMES | {
@@ -76,9 +81,11 @@ def _preview(value: Any) -> dict[str, Any]:
 async def read_tool_diagnostics(db, run_id: str, *, after: int = 0) -> dict[str, Any]:
     """Return partial call records; consumers merge pages by (runId, toolCallId).
 
-    Raw runtime events are authoritative. Canonical runtime.event envelopes are
-    also supported for persisted journals without raw rows. Neither provider
-    deltas nor reasoning records are queried. Missing fields stay missing.
+    Raw runtime events remain authoritative for tool IO.  The canonical tool
+    Operation is the authority for the argument-sensitive public name, and is
+    joined by toolCallId. Canonical runtime.event envelopes are also supported
+    for persisted journals without raw rows. Neither provider deltas nor
+    reasoning records are queried. Missing fields stay missing.
     """
     placeholders = ",".join("?" for _ in _EVENT_TYPES)
     rows = await db.fetch_all(
@@ -106,19 +113,40 @@ async def read_tool_diagnostics(db, run_id: str, *, after: int = 0) -> dict[str,
         for item in items:
             if not isinstance(item, dict):
                 continue
-            call_id = item.get("id") if event_type == "tool.calls_started" else (
-                item.get("tool_call_id") if event_type == "tool.results"
-                else item.get("toolCallId")
-            )
+            if event_type == "operation.started":
+                if item.get("kind") != "tool":
+                    continue
+                label_params = _mapping(
+                    _mapping(item.get("display")).get("labelParams")
+                )
+                call_id = label_params.get("toolCallId")
+            else:
+                label_params = {}
+                call_id = item.get("id") if event_type == "tool.calls_started" else (
+                    item.get("tool_call_id") if event_type == "tool.results"
+                    else item.get("toolCallId")
+                )
             if not isinstance(call_id, str) or not call_id.strip():
                 continue
             call = calls.setdefault(call_id, {
                 "runId": run_id, "toolCallId": call_id, "eventRowId": row["id"],
             })
-            name = item.get("name") or item.get("tool_name") or item.get("toolName")
+            name = (
+                label_params.get("toolName")
+                or item.get("name")
+                or item.get("tool_name")
+                or item.get("toolName")
+            )
             if name:
                 call["name"] = str(name)
-            if event_type == "tool.calls_started":
+            if event_type == "operation.started":
+                display_names = _mapping(label_params.get("displayNames"))
+                display_name = display_names.get("zh-CN")
+                if isinstance(display_name, str) and display_name.strip():
+                    call["displayName"] = display_name.strip()
+                if item.get("operationId"):
+                    call["operationId"] = str(item["operationId"])
+            elif event_type == "tool.calls_started":
                 call["startedAt"] = row["create_time"]
                 if "arguments_json" in item:
                     call["arguments"] = _preview(item["arguments_json"])

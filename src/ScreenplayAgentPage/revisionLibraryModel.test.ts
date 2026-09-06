@@ -19,7 +19,19 @@ import {
   shouldShowRevisionDirectory,
   workingCopyDraftEquals,
   workingCopyEditorDraft,
+  revisionLibraryRoles,
+  REVISION_LIBRARY_ROLE_ORDER,
 } from './revisionLibraryModel.ts'
+
+test('document navigation follows creation order regardless of server order', () => {
+  const workspace = {
+    deliverables: [...REVISION_LIBRARY_ROLE_ORDER].reverse().map((role) => ({ role })),
+  } as ScreenplayV2Workspace
+  assert.deepEqual(revisionLibraryRoles(workspace), REVISION_LIBRARY_ROLE_ORDER)
+  assert.deepEqual(revisionLibraryRoles({
+    deliverables: [{ role: 'review' }, { role: 'creativeBrief' }],
+  } as ScreenplayV2Workspace), ['creativeBrief', 'review'])
+})
 
 const episode7Part: ScreenplayV2RevisionPart = {
   type: 'episode',

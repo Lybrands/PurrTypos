@@ -19,6 +19,9 @@ from purra.ports import (
 )
 from purra.recovery import RecoveryPolicy
 from purra.task_admission import LongTaskDispatcher, TaskAdmissionEvaluator
+from application.agent_tool_presentation import (
+    validate_agent_tool_catalog_presentation,
+)
 
 
 ContextProviderFactory = Callable[[AgentModelTaskRunner], ContextProvider]
@@ -134,6 +137,10 @@ class AgentProfileRegistry:
                 raise ValueError(
                     "Agent profile ids and namespaces must be unique"
                 )
+            validate_agent_tool_catalog_presentation(
+                profile_id,
+                profile.adapter.tool_catalog,
+            )
             by_id[profile_id] = profile
             by_namespace[namespace] = profile
         self._profiles = items

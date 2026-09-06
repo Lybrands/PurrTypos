@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -34,28 +35,17 @@ from domains.writing.response import (
 )
 from domains.writing.public_facts import WritingPublicFactsProvider
 from schemas.ai import ChatStreamRequest
-from infrastructure.models.profiles.registry import resolve_model_profile
+from application.agent_conversation_input import conversation_messages, conversation_input_metadata
 from application.model_runtime import (
-    fit_output_limit_to_context,
+    model_request_from_runtime,
     reasoning_mode_from_options,
 )
 from purra.model_protocol import (
     FeatureRequirement,
     TaskCapabilityRequirements,
-    preflight_capabilities,
-    resolve_invocation_output_limit,
 )
 
 
-CONTEXT_WINDOW_TOKENS: dict[str, int] = {
-    "32k": 32_000,
-    "64k": 64_000,
-    "128k": 128_000,
-    "200k": 200_000,
-    "256k": 256_000,
-    "300k": 300_000,
-    "1m": 1_000_000,
-}
 class UnsupportedCallerToolContractError(ValueError):
     """The single Writing Agent path cannot execute caller-defined tools."""
 
@@ -72,15 +62,6 @@ def build_chat_provider_options(
     if temperature is not None:
         result["temperature"] = temperature
     return result
-
-
-def context_window_tokens(value: Any) -> int:
-    key = str(value or "").strip().lower()
-    if not key:
-        return CONTEXT_WINDOW_TOKENS["200k"]
-    if key not in CONTEXT_WINDOW_TOKENS:
-        raise ValueError(f"不支持的上下文窗口配置：{value}")
-    return CONTEXT_WINDOW_TOKENS[key]
 
 
 def to_writing_agent_request(
@@ -105,11 +86,10 @@ def to_writing_agent_request(
             "caller-owned tools and tool_choice are not supported by the "
             "composed writing agent"
         )
-    model = str(options.pop("model", "") or "").strip()
-    profile_id = str(options.pop("model_profile", "") or "").strip() or None
-    options.pop("tools", None)
-    options.pop("tool_choice", None)
-    window_label = body.contextWindow or options.pop("context_window", None)
+    window_label = body.contextWindow or options.get("context_window")
+    runtime = SimpleNamespace(options=options, contextWindow=window_label,
+                              baseURL=options.get("baseURL") or body.baseURL,
+                              apiProvider=body.apiProvider)
     context = WritingDomainContext(
         book_id=body.bookId,
         chapter_id=body.chapterId,
@@ -131,48 +111,26 @@ def to_writing_agent_request(
             _is_writing_method_recommendation_request(body.messages)
         ),
     )
-    profile = resolve_model_profile(
-        profile_id,
-        model,
-        str(options.get("baseURL") or ""),
-    )
-    reasoning_mode = reasoning_mode_from_options(options)
-    selected_context_window = context_window_tokens(window_label)
-    snapshot = profile.capability_snapshot(
-        context_window_tokens=selected_context_window,
-    )
-    preflight_capabilities(
-        snapshot,
-        TaskCapabilityRequirements(
-            reasoning_mode=reasoning_mode,
-            tool_calling=(
-                FeatureRequirement.REQUIRED
-                if body.enableAgentTools and body.bookId
-                else FeatureRequirement.OPTIONAL
-            ),
-            structured_output_level="none",
-            streaming_required=True,
-            cancellation_required=True,
-        ),
-    )
+    model_request = model_request_from_runtime(runtime, requirements=TaskCapabilityRequirements(
+        reasoning_mode=reasoning_mode_from_options(options),
+        tool_calling=FeatureRequirement.REQUIRED if body.enableAgentTools and body.bookId else FeatureRequirement.OPTIONAL,
+        structured_output_level="none", streaming_required=True, cancellation_required=True,
+    ))
+    selected_context_window = model_request.capability_snapshot.context_window_tokens
     request = AgentRunRequest(
-        messages=tuple(
+        messages=conversation_messages(tuple(
             AgentMessage.from_mapping(message)
             for message in body.messages
             if isinstance(message, Mapping)
-        ),
-        model=ModelRequest(
-            provider=body.apiProvider,
-            model=model,
-            capability_snapshot=snapshot,
-            options=options,
-        ),
+        ), context_window=selected_context_window),
+        model=model_request,
         domain_context=context.to_core_context(),
         session_id=body.sessionId,
         mode=body.chatAgentMode,
         context_window=selected_context_window,
         tools_enabled=bool(body.enableAgentTools and body.bookId),
         metadata={
+            **conversation_input_metadata(source="client_public_messages", scope=f"writing:{body.bookId}:{body.sessionId}"),
             "locale": body.locale,
             **({"streamId": body.streamId} if body.streamId else {}),
         },
@@ -211,12 +169,7 @@ def writing_run_options(
     response_judge_policies: Sequence[ResponseJudgePolicy] = (),
 ) -> AgentCoreRunOptions:
     context = WritingDomainContext.from_core_context(request.domain_context)
-    output_limit = resolve_invocation_output_limit(
-        request.model.capability_snapshot,
-        request.model.options.get("max_tokens"),
-    )
     context_window = request.context_window or 200_000
-    output_limit = fit_output_limit_to_context(output_limit, context_window)
     response_constraints = writing_response_constraints(request)
     response_validators = writing_response_validators(request)
     judge_policies = tuple(response_judge_policies)
@@ -245,10 +198,9 @@ def writing_run_options(
             if request.metadata.get("streamId")
             else None
         ),
-        output_limit=output_limit,
         default_context_window_tokens=context_window,
         force_planned_tool_choice=force_planned_tool_choice,
-        reasoning_mode=reasoning_mode_from_options(provider_options),
+        reasoning_mode=reasoning_mode_from_options(request.model.options),
         provenance=provenance,
         binding=binding,
         response_constraints=response_constraints,

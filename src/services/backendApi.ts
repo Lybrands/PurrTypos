@@ -166,6 +166,7 @@ function aiErrorReportDiagnostics(data: AiStreamRequest): Record<string, unknown
     taskType: data.chatAgentMode === 'agent' ? '写作 Agent 任务' : '普通对话',
     toolsEnabled: data.enableAgentTools === true,
     thinkingMode: data.options?.thinking?.type ?? 'provider-default',
+    reasoningEffort: data.options?.reasoning_effort ?? 'provider-default',
     contextWindow: data.contextWindow || data.options?.context_window || '',
     messageCount: data.messages.length,
     associatedChapterCount: data.associatedChapterIds?.length || 0,
@@ -412,7 +413,7 @@ export const backendApi: BackendApi = {
   deleteWritingMethod: (data) => apiDelete(`/writing-methods/${data.methodId}`),
   createWritingMethodCandidates: (data) => apiPost(
     `/novel-analyses/${data.analysisId}/writing-method-candidates`,
-    { craftCardIds: data.craftCardIds ?? [] },
+    {},
   ),
   publishWritingMethodCandidateBatch: (data) => apiPost(
     `/writing-method-candidate-batches/${data.schemeId}/publish`,

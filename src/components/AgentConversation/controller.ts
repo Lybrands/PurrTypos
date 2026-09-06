@@ -7,6 +7,8 @@ import type {
   AiTaskPlan,
 } from '../../agent-runtime'
 import type { AiModelConfig } from '../../types'
+import type { ModelRuntimeConfigPatch } from './Composer/ModelPicker'
+import type { QueuedSubmissionEdit } from '../../agent-runtime/queuedSubmission'
 
 export interface AgentConversationSession {
   id: AgentSessionId
@@ -23,9 +25,11 @@ export interface AgentConversationController {
     messages: AgentConversationMessage[]
     activities: Record<string, AgentConversationActivity>
     queuedSubmissions: AgentQueuedSubmission[]
+    queuePaused?: boolean
     initializing: boolean
     running: boolean
     stopping: boolean
+    abortDisabled?: boolean
     paused: boolean
     resuming: boolean
     attachmentsVersion?: string | number
@@ -43,12 +47,13 @@ export interface AgentConversationController {
     placeholder: string
     ariaLabel: string
     submitDisabled: boolean
+    ready?: boolean
     selectedModel: AiModelConfig | null
     modelConfigs: AiModelConfig[]
     selectModel(id: string): void
     updateModel?: (
       id: string,
-      patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+      patch: ModelRuntimeConfigPatch,
     ) => void
     openModelSettings(): void
     taskPlan?: AiTaskPlan
@@ -62,6 +67,9 @@ export interface AgentConversationController {
     openHistorySession?(id: AgentSessionId): void | Promise<void>
     deleteSession?(id: AgentSessionId): void | Promise<void>
     send(content?: string): void | Promise<void>
+    retryQueued?(): void | Promise<void>
+    clearQueued?(): void | Promise<void>
+    updateQueuedSubmission?(id: string, patch: QueuedSubmissionEdit | null): boolean
     abort(): void | Promise<void>
     resume?(): void | Promise<void>
     editMessage(index: number, content: string): void | Promise<void>

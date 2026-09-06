@@ -33,11 +33,15 @@ from purra.contracts import (
 )
 from purra.artifacts import ArtifactStatus
 from purra.events import AgentEvent, CoreEventType
-from purra.errors import ModelGatewayError
+from purra.errors import ContractViolationError, ModelGatewayError
 from purra.ports import RunCommit
 from purra.cancellation import OperationCanceled
 from purra.json_values import thaw_json_mapping
-from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
+from purra.long_tasks import (
+    LongTaskCreateCommand,
+    LongTaskUnitResult,
+    LongTaskUnitSpec,
+)
 from purra.recovery import (
     FailureCategory,
     FailureDisposition,
@@ -47,6 +51,7 @@ from purra.recovery import (
 from application.screenplay_agent_service import (
     ScreenplayAgentService,
     _ScreenplayTurnRunLifecycle,
+    _execution_recipe_from_metadata,
     _task_failure,
 )
 from application.screenplay_task_resolver import ResolvedScreenplayTask
@@ -96,7 +101,6 @@ from application.screenplay_part_contracts import (
 )
 from application.screenplay_checkpoint_planning import (
     CHECKPOINT_PLAN_PROTOCOL,
-    ScreenplayCheckpointDecision,
     ScreenplayCheckpointInput,
     ScreenplayCheckpointOutcome,
     ScreenplayCheckpointPlanner,
@@ -167,23 +171,15 @@ from purra.testing import assert_task_orchestration_conforms
 pytestmark = pytest.mark.asyncio
 
 
-async def test_screenplay_part_contracts_are_explicit_and_bounded():
+async def test_screenplay_part_contracts_do_not_define_provider_token_budgets():
     assert PART_CONTRACTS
     assert all(
-        0 < contract.output_token_cap < 32_768
+        not hasattr(contract, "output_token_cap")
         for contract in PART_CONTRACTS.values()
     )
     assert all(
         contract.tool_profile != "all"
         for contract in PART_CONTRACTS.values()
-    )
-    assert (
-        PART_CONTRACTS["final_response"].output_token_cap
-        < PART_CONTRACTS["draft_scene"].output_token_cap
-    )
-    assert (
-        PART_CONTRACTS["structure.series_arc_index"].output_token_cap
-        == 8_192
     )
     assert all(
         not hasattr(contract, "reasoning_mode")
@@ -1109,6 +1105,44 @@ async def test_checkpoint_planner_accepts_only_future_copy_and_dependencies():
     assert "正文" not in serialized
 
 
+@pytest.mark.parametrize("condition", ["complete", "pending", "unknown", "episode", "failure", "constraint", "missing_receipts"])
+async def test_checkpoint_skips_model_only_for_verified_complete_business_scope(condition):
+    plan = ExecutionPlan(
+        title="创作", task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    remaining = {"pendingBusinessUnits": 0, "episodeNumbers": [], "sectionKeys": []}
+    if condition == "pending":
+        remaining["pendingBusinessUnits"] = 1
+    elif condition == "unknown":
+        del remaining["pendingBusinessUnits"]
+    elif condition == "episode":
+        remaining["episodeNumbers"] = [5]
+
+    class Models:
+        calls = 0
+
+        async def run_json(self, **kwargs):
+            self.calls += 1
+            value = {"protocol": CHECKPOINT_PLAN_PROTOCOL, "outcome": "unchanged"}
+            return StructuredModelResult(kwargs["validate"](value), "root")
+
+    models = Models()
+    decision = await ScreenplayCheckpointPlanner(models, runtime=object()).revise(
+        ScreenplayCheckpointInput(
+            checkpoint_key="episode:4", root_run_id="root", task_id="task", turn_id="turn",
+            project_id="project", session_id=1, target_role="screenplayDraft",
+            original_plan=plan, current_plan=plan, completed_summaries=(),
+            artifact_receipts=() if condition == "missing_receipts" else ({"digest": "sha256:" + "a" * 64},),
+            typed_failures=({"code": "validation_failed"},) if condition == "failure" else (),
+            constraint_changes=({"code": "changed_scope"},) if condition == "constraint" else (),
+            remaining_scope=remaining,
+        )
+    )
+    assert decision.outcome is ScreenplayCheckpointOutcome.UNCHANGED
+    assert models.calls == (0 if condition == "complete" else 1)
+
+
 async def test_checkpoint_loads_current_plan_from_authoritative_root_state(
     temp_db: DatabaseConnection,
 ):
@@ -1190,7 +1224,7 @@ async def test_checkpoint_root_plan_fails_closed_without_one_authoritative_plan_
         )
 
 
-async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
+async def test_stale_ready_checkpoint_is_persistently_failed_not_reemitted(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
@@ -1215,7 +1249,7 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
         reservation_epoch=int(reservation["reservation_epoch"]),
     )
 
-    row = await repository.pause_ready_conflict(
+    row = await repository.fail_ready_conflict(
         operation_id="operation-stale",
         checkpoint_key="episode:4",
         code="screenplay_checkpoint_ready_root_plan_conflict",
@@ -1224,7 +1258,8 @@ async def test_stale_ready_checkpoint_is_persistently_paused_not_reemitted(
         ))["plan_digest"]),
     )
 
-    assert row["status"] == "paused"
+    assert row["status"] == "failed"
+    assert row["outcome"] == ScreenplayCheckpointOutcome.FAILED.value
     assert row["error_code"] == (
         "screenplay_checkpoint_ready_root_plan_conflict"
     )
@@ -1260,6 +1295,436 @@ async def test_checkpoint_reservation_is_single_winner_and_expiry_recoverable(
     recovered = await reserve("owner-after-restart")
     assert recovered["_acquired"] is True
     assert recovered["reservation_owner"] == "owner-after-restart"
+
+
+async def test_checkpoint_planning_failure_is_terminal_and_owner_fenced(
+    temp_db: DatabaseConnection,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    stale = await repository.reserve(
+        operation_id="operation-planning-failure",
+        task_id="task-planning-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-planning-failure",
+        input_digest="sha256:" + "d" * 64,
+        reservation_token="owner-stale",
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans SET reservation_expires_at_ms = 0 "
+        "WHERE operation_id = ?",
+        ["operation-planning-failure"],
+    )
+    recovered = await repository.reserve(
+        operation_id="operation-planning-failure",
+        task_id="task-planning-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-planning-failure",
+        input_digest="sha256:" + "d" * 64,
+        reservation_token="owner-recovered",
+    )
+
+    with pytest.raises(RuntimeError, match="reservation_lost"):
+        await repository.fail_planning(
+            operation_id="operation-planning-failure",
+            checkpoint_key="episode:4",
+            code="model_output_truncated",
+            reservation_owner="owner-stale",
+            reservation_epoch=int(stale["reservation_epoch"]),
+        )
+    failed = await repository.fail_planning(
+        operation_id="operation-planning-failure",
+        checkpoint_key="episode:4",
+        code="model_output_truncated",
+        reservation_owner="owner-recovered",
+        reservation_epoch=int(recovered["reservation_epoch"]),
+    )
+
+    assert failed["status"] == "failed"
+    assert failed["outcome"] == ScreenplayCheckpointOutcome.FAILED.value
+    assert failed["error_code"] == "model_output_truncated"
+    assert failed["reservation_owner"] is None
+    assert failed["reservation_expires_at_ms"] is None
+
+
+async def test_review_checkpoint_gate_waits_for_all_episode_validations(
+    temp_db: DatabaseConnection,
+):
+    from infrastructure.screenplay.long_task_claim_guard import ScreenplayCheckpointClaimGuard
+
+    repository = SqliteLongTaskRepository(
+        temp_db, claim_guard=ScreenplayCheckpointClaimGuard(temp_db),
+    )
+    task = await repository.create(
+        "task-review-checkpoint-gate",
+        LongTaskCreateCommand(
+            namespace="purrtypos.screenplay",
+            kind="screenplay.review",
+            owner_id="project-review-checkpoint-gate",
+            created_by_run_id="root-review-checkpoint-gate",
+            units=(
+                LongTaskUnitSpec(
+                    id="review:1:validation", position=0,
+                    metadata={"unitKind": "validate_manifest_part", "input": {
+                        "validationKind": "review_episode", "episodeNumber": 1,
+                    }},
+                ),
+                LongTaskUnitSpec(
+                    id="review:2:generate", position=1,
+                    dependencies=("review:1:validation",),
+                    metadata={"unitKind": "generate_manifest_part"},
+                ),
+                LongTaskUnitSpec(
+                    id="review:2:validation", position=2,
+                    dependencies=("review:2:generate",),
+                    metadata={"unitKind": "validate_manifest_part", "input": {
+                        "validationKind": "review_episode", "episodeNumber": 2,
+                    }},
+                ),
+                LongTaskUnitSpec(
+                    id="compose-final-response", position=3,
+                    dependencies=("review:2:validation",),
+                    metadata={"unitKind": "compose_final_response"},
+                ),
+            ),
+            metadata={
+                "operationId": "operation-review-checkpoint-gate",
+                "checkpointPlanningEnabled": True,
+            },
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    for unit_id in (
+        "review:1:validation", "review:2:generate", "review:2:validation",
+    ):
+        unit = await repository.claim_ready_unit(
+            task.id, worker_id="review-worker", lease_duration_ms=30_000,
+        )
+        assert unit is not None, f"review stalled before {unit_id}"
+        assert unit.id == unit_id
+        await repository.complete_unit(
+            task.id, unit.id, worker_id="review-worker",
+            lease_epoch=unit.lease_epoch,
+            result=LongTaskUnitResult(output_ref=f"artifact://{unit_id}"),
+        )
+    assert await repository.claim_ready_unit(
+        task.id, worker_id="review-worker", lease_duration_ms=30_000,
+    ) is None
+
+
+@pytest.mark.parametrize("commit_ready_first", (False, True))
+async def test_checkpoint_ready_write_failure_preserves_error_and_terminates_receipt(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+    commit_ready_first: bool,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = ExecutionPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    original_ready = repository.ready
+    original_error = RuntimeError("checkpoint_ready_write_failed")
+
+    async def load_plan(*_args, **_kwargs):
+        return plan
+
+    async def roots(_root_run_id):
+        return None, "root-ready-failure"
+
+    async def revise(_value, _signal):
+        return SimpleNamespace(
+            outcome=ScreenplayCheckpointOutcome.UNCHANGED,
+            plan=None,
+        )
+
+    async def fail_ready(**kwargs):
+        if commit_ready_first:
+            await original_ready(**kwargs)
+        raise original_error
+
+    async def downstream(_update):
+        pytest.fail("failed ready transition must not publish a plan revision")
+
+    monkeypatch.setattr(repository, "load_root_plan", load_plan)
+    monkeypatch.setattr(repository, "continuation_plan_roots", roots)
+    monkeypatch.setattr(repository, "ready", fail_ready)
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(revise=revise),
+        downstream=downstream,
+        task_id="task-ready-failure",
+        root_run_id="root-ready-failure",
+        signal=None,
+    )
+    async with asyncio.timeout(2):
+        with pytest.raises(RuntimeError) as captured:
+            await observer._handle_checkpoint(
+                SimpleNamespace(id="task-ready-failure"),
+                (),
+                {
+                    "turnId": "turn-ready-failure",
+                    "projectId": "project-ready-failure",
+                    "sessionId": 1,
+                    "targetRole": "screenplayDraft",
+                },
+                "operation-ready-failure",
+                "episode:4",
+                SimpleNamespace(),
+            )
+
+    assert captured.value is original_error
+    failed = await repository.load("operation-ready-failure", "episode:4")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == "checkpoint_ready_write_failed"
+    assert failed["reservation_owner"] is None
+    assert failed["reservation_expires_at_ms"] is None
+    assert failed["reservation_epoch"] == 1
+    assert bool(failed["plan_digest"]) is commit_ready_first
+
+
+@pytest.mark.parametrize("failure_target", ("downstream", "applied"))
+async def test_checkpoint_applying_exception_fails_owned_receipt_with_original_error(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+    failure_target: str,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = ExecutionPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reservation = await repository.reserve(
+        operation_id="operation-apply-failure",
+        task_id="task-apply-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-apply-failure",
+        input_digest="sha256:" + "c" * 64,
+        reservation_token="planner",
+    )
+    ready = await repository.ready(
+        operation_id="operation-apply-failure",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.UNCHANGED,
+        reservation_owner="planner",
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+    original_error = RuntimeError(f"checkpoint_{failure_target}_failed")
+    downstream_calls = 0
+
+    async def downstream(_update):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        raise original_error
+
+    async def acknowledged(*_args, **_kwargs):
+        return ready["plan_digest"]
+
+    async def fail_applied(**_kwargs):
+        raise original_error
+
+    if failure_target == "applied":
+        monkeypatch.setattr(repository, "root_revision_digest", acknowledged)
+        monkeypatch.setattr(repository, "applied", fail_applied)
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=downstream,
+        task_id="task-apply-failure",
+        root_run_id="root-apply-failure",
+        signal=None,
+    )
+    async with asyncio.timeout(2):
+        with pytest.raises(RuntimeError) as captured:
+            await observer._emit_ready(
+                ready,
+                SimpleNamespace(event=AgentEvent(
+                    type=CoreEventType.LONG_TASK_PROGRESS,
+                    payload={"taskId": "task-apply-failure"},
+                )),
+            )
+
+    assert captured.value is original_error
+    failed = await repository.load("operation-apply-failure", "episode:4")
+    assert failed["status"] == "failed"
+    assert failed["error_code"] == str(original_error)
+    assert failed["reservation_owner"] is None
+    assert failed["reservation_expires_at_ms"] is None
+    assert failed["reservation_epoch"] == 2
+    assert downstream_calls == (1 if failure_target == "downstream" else 0)
+
+
+@pytest.mark.parametrize("failure_stage", ("reserved", "ready", "applying"))
+async def test_checkpoint_failure_cas_cannot_overwrite_a_newer_lease(
+    temp_db: DatabaseConnection,
+    failure_stage: str,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    plan = ExecutionPlan(
+        title="创作",
+        task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
+        steps=_bound_steps("evidence", "create", "deliver"),
+    )
+    reserved = await repository.reserve(
+        operation_id="operation-failure-fence",
+        task_id="task-failure-fence",
+        checkpoint_key="episode:4",
+        root_run_id="root-failure-fence",
+        input_digest="sha256:" + "b" * 64,
+        reservation_token="planner",
+    )
+    ready = await repository.ready(
+        operation_id="operation-failure-fence",
+        checkpoint_key="episode:4",
+        plan=plan,
+        outcome=ScreenplayCheckpointOutcome.UNCHANGED,
+        reservation_owner="planner",
+        reservation_epoch=int(reserved["reservation_epoch"]),
+    )
+    applying = await repository.acquire_applying(
+        operation_id="operation-failure-fence",
+        checkpoint_key="episode:4",
+        digest=str(ready["plan_digest"]),
+        reservation_token="old-applier",
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_checkpoint_plans SET reservation_expires_at_ms = 0 "
+        "WHERE operation_id = ?",
+        ["operation-failure-fence"],
+    )
+    recovered = await repository.acquire_applying(
+        operation_id="operation-failure-fence",
+        checkpoint_key="episode:4",
+        digest=str(ready["plan_digest"]),
+        reservation_token="new-applier",
+    )
+    stale = {"reserved": reserved, "ready": ready, "applying": applying}[failure_stage]
+    with pytest.raises(RuntimeError, match="reservation_lost"):
+        await repository.fail_execution(stale, code="stale_worker_failed")
+    current = await repository.load("operation-failure-fence", "episode:4")
+    assert current["status"] == "applying"
+    assert current["reservation_owner"] == "new-applier"
+    assert current["reservation_epoch"] == recovered["reservation_epoch"]
+    assert current["error_code"] is None
+
+
+async def test_checkpoint_failure_settlement_keeps_both_errors(
+    temp_db: DatabaseConnection,
+    monkeypatch,
+):
+    repository = SqliteScreenplayCheckpointRepository(temp_db)
+    receipt = await repository.reserve(
+        operation_id="operation-double-failure",
+        task_id="task-double-failure",
+        checkpoint_key="episode:4",
+        root_run_id="root-double-failure",
+        input_digest="sha256:" + "a" * 64,
+        reservation_token="planner",
+    )
+    original_error = ModelGatewayError(
+        "provider response was incomplete", code="model_output_truncated",
+    )
+    settlement_error = RuntimeError("checkpoint_failure_write_failed")
+
+    async def fail_settlement(*_args, **_kwargs):
+        raise settlement_error
+
+    monkeypatch.setattr(repository, "fail_execution", fail_settlement)
+    observer = _ScreenplayCheckpointObserver(
+        dispatcher=SimpleNamespace(_checkpoints=repository),
+        planner=SimpleNamespace(),
+        downstream=SimpleNamespace(),
+        task_id="task-double-failure",
+        root_run_id="root-double-failure",
+        signal=None,
+    )
+    with pytest.raises(ModelGatewayError) as captured:
+        await observer._fail_execution(receipt, original_error)
+    assert captured.value is original_error
+    assert captured.value.code == "model_output_truncated"
+    assert captured.value.__cause__ is settlement_error
+
+
+async def test_failed_checkpoint_rejects_downstream_claim_without_idle_loop(
+    temp_db: DatabaseConnection,
+):
+    from infrastructure.screenplay.long_task_claim_guard import ScreenplayCheckpointClaimGuard
+
+    repository = SqliteLongTaskRepository(
+        temp_db, claim_guard=ScreenplayCheckpointClaimGuard(temp_db),
+    )
+    task = await repository.create(
+        "task-failed-checkpoint-gate",
+        LongTaskCreateCommand(
+            namespace="purrtypos.screenplay",
+            kind="screenplay.draft",
+            owner_id="project-failed-checkpoint-gate",
+            created_by_run_id="root-failed-checkpoint-gate",
+            units=(
+                LongTaskUnitSpec(
+                    id="episode:4:validation",
+                    position=0,
+                    metadata={
+                        "unitKind": "validate_manifest_part",
+                        "input": {
+                            "validationKind": "draft_episode",
+                            "episodeNumber": 4,
+                        },
+                    },
+                ),
+                LongTaskUnitSpec(
+                    id="compose-final-response",
+                    position=1,
+                    dependencies=("episode:4:validation",),
+                    metadata={"unitKind": "compose_final_response"},
+                ),
+            ),
+            metadata={
+                "operationId": "operation-failed-checkpoint-gate",
+                "checkpointPlanningEnabled": True,
+            },
+        ),
+    )
+    task = await repository.start(task.id, expected_revision=task.revision)
+    validation = await repository.claim_ready_unit(
+        task.id,
+        worker_id="worker-checkpoint-gate",
+        lease_duration_ms=30_000,
+    )
+    assert validation is not None
+    await repository.complete_unit(
+        task.id,
+        validation.id,
+        worker_id="worker-checkpoint-gate",
+        lease_epoch=validation.lease_epoch,
+        result=LongTaskUnitResult(output_ref="artifact://episode-4-validation"),
+    )
+    checkpoints = SqliteScreenplayCheckpointRepository(temp_db)
+    reservation = await checkpoints.reserve(
+        operation_id="operation-failed-checkpoint-gate",
+        task_id=task.id,
+        checkpoint_key="episode:4",
+        root_run_id="root-failed-checkpoint-gate",
+        input_digest="sha256:" + "f" * 64,
+        reservation_token="checkpoint-owner",
+    )
+    await checkpoints.fail_planning(
+        operation_id="operation-failed-checkpoint-gate",
+        checkpoint_key="episode:4",
+        code="model_output_truncated",
+        reservation_owner="checkpoint-owner",
+        reservation_epoch=int(reservation["reservation_epoch"]),
+    )
+
+    with pytest.raises(ContractViolationError) as failure:
+        await repository.claim_ready_unit(
+            task.id,
+            worker_id="worker-checkpoint-gate",
+            lease_duration_ms=30_000,
+        )
+    assert failure.value.code == "model_output_truncated"
 
 
 async def test_ready_checkpoint_rebinds_to_continuation_root_after_crash(
@@ -2023,7 +2488,7 @@ async def test_checkpoint_root_digest_hydrates_hidden_tool_authority(
     ) == digest
 
 
-async def test_duplicate_root_revision_event_pauses_ready_receipt(
+async def test_duplicate_root_revision_event_fails_ready_receipt_without_reemission(
     temp_db: DatabaseConnection,
 ):
     repository = SqliteScreenplayCheckpointRepository(temp_db)
@@ -2074,19 +2539,25 @@ async def test_duplicate_root_revision_event_pauses_ready_receipt(
         root_run_id="root-duplicate-event",
         signal=None,
     )
-    await observer._emit_ready(
-        receipt,
-        SimpleNamespace(event=AgentEvent(
-            type=CoreEventType.LONG_TASK_PROGRESS,
-            payload={"taskId": "task-duplicate-event"},
-        )),
-    )
+    with pytest.raises(ScreenplayCheckpointStateError, match="duplicated"):
+        await observer._emit_ready(
+            receipt,
+            SimpleNamespace(event=AgentEvent(
+                type=CoreEventType.LONG_TASK_PROGRESS,
+                payload={"taskId": "task-duplicate-event"},
+            )),
+        )
 
     assert downstream_calls == 0
     assert (await repository.load(
         "operation-duplicate-event",
         "episode:4",
-    ))["status"] == "paused"
+    ))["status"] == "failed"
+    assert await temp_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_run_events WHERE run_id = ? "
+        "AND event_type = 'run.todos_updated'",
+        ["root-duplicate-event"],
+    ) == {"count": 2}
 
 
 async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event(
@@ -2181,7 +2652,7 @@ async def test_ready_checkpoint_has_single_apply_owner_and_single_revision_event
 
 
 @pytest.mark.parametrize("mutation", ("completed", "scope", "step_id"))
-async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutation):
+async def test_checkpoint_planner_only_pauses_for_explicit_reresolution(mutation):
     original = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
@@ -2222,30 +2693,30 @@ async def test_checkpoint_planner_pauses_on_unbounded_or_invalid_revision(mutati
             }
             return StructuredModelResult(kwargs["validate"](value), "child-plan")
 
-    decision = await ScreenplayCheckpointPlanner(Models(), runtime=object()).revise(
-        ScreenplayCheckpointInput(
-            checkpoint_key="episode:4",
-            root_run_id="root-1",
-            task_id="task-1",
-            turn_id="turn-1",
-            project_id="project-1",
-            session_id=1,
-            target_role="screenplayDraft",
-            original_plan=original,
-            current_plan=current,
-            completed_summaries=(),
-            artifact_receipts=(),
-            remaining_scope={},
-        )
+    checkpoint = ScreenplayCheckpointInput(
+        checkpoint_key="episode:4",
+        root_run_id="root-1",
+        task_id="task-1",
+        turn_id="turn-1",
+        project_id="project-1",
+        session_id=1,
+        target_role="screenplayDraft",
+        original_plan=original,
+        current_plan=current,
+        completed_summaries=(),
+        artifact_receipts=(),
+        remaining_scope={},
     )
-    assert decision.outcome is (
-        ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION
-        if mutation == "scope"
-        else ScreenplayCheckpointOutcome.PAUSED
-    )
+    planner = ScreenplayCheckpointPlanner(Models(), runtime=object())
+    if mutation == "scope":
+        decision = await planner.revise(checkpoint)
+        assert decision.outcome is ScreenplayCheckpointOutcome.REQUIRES_RERESOLUTION
+        return
+    with pytest.raises(ValueError, match="checkpoint"):
+        await planner.revise(checkpoint)
 
 
-async def test_checkpoint_planner_typed_model_failure_pauses_without_plan():
+async def test_checkpoint_planner_typed_model_failure_propagates():
     original = ExecutionPlan(
         title="创作",
         task_spec=_screenplay_task_spec(deliverable="screenplayDraft"),
@@ -2259,27 +2730,24 @@ async def test_checkpoint_planner_typed_model_failure_pauses_without_plan():
 
             raise TypedFailure("checkpoint provider unavailable")
 
-    decision = await ScreenplayCheckpointPlanner(
-        Models(),
-        runtime=object(),
-    ).revise(ScreenplayCheckpointInput(
-        checkpoint_key="episode:4",
-        root_run_id="root-1",
-        task_id="task-1",
-        turn_id="turn-1",
-        project_id="project-1",
-        session_id=1,
-        target_role="screenplayDraft",
-        original_plan=original,
-        current_plan=original,
-        completed_summaries=(),
-        artifact_receipts=(),
-    ))
-
-    assert decision == ScreenplayCheckpointDecision(
-        ScreenplayCheckpointOutcome.PAUSED,
-        code="checkpoint_provider_unavailable",
-    )
+    with pytest.raises(RuntimeError, match="provider unavailable") as captured:
+        await ScreenplayCheckpointPlanner(
+            Models(),
+            runtime=object(),
+        ).revise(ScreenplayCheckpointInput(
+            checkpoint_key="episode:4",
+            root_run_id="root-1",
+            task_id="task-1",
+            turn_id="turn-1",
+            project_id="project-1",
+            session_id=1,
+            target_role="screenplayDraft",
+            original_plan=original,
+            current_plan=original,
+            completed_summaries=(),
+            artifact_receipts=(),
+        ))
+    assert captured.value.code == "checkpoint_provider_unavailable"
 
 
 def _semantic_steps() -> tuple[TaskStep, ...]:
@@ -2575,14 +3043,27 @@ async def test_screenplay_child_context_round_trips_revision_and_episode_scope()
     }
 
 
+@pytest.mark.parametrize("reasoning_effort", (None, "high"))
 async def test_tool_calling_service_preserves_bound_revision_and_episode_scope(
     temp_db: DatabaseConnection,
     monkeypatch: pytest.MonkeyPatch,
+    reasoning_effort,
 ):
     captured = {}
 
     async def fake_child(**kwargs):
+        assert kwargs["request"].model.max_generation_tokens == 32_768
+        assert kwargs["request"].model.options.get("reasoning_effort") == (
+            reasoning_effort
+        )
         assert kwargs["request"].metadata["responseAudience"] == "internal"
+        assert kwargs["request"].metadata[
+            "screenplaySceneIdsByEpisode"
+        ] == {
+            "1": ["ep01-scene-1"],
+            "2": ["ep02-scene-1", "ep02-scene-2"],
+        }
+        assert "ep01-scene-1" not in kwargs["request"].latest_user_text()
         captured["payload"] = thaw_json_mapping(
             kwargs["request"].domain_context.payload
         )
@@ -2627,8 +3108,16 @@ async def test_tool_calling_service_preserves_bound_revision_and_episode_scope(
         tool_access="draft_scene",
     )
 
+    runtime = _request(1, "测试绑定").runtime
+    runtime.baseURL = "https://api.deepseek.com"
+    runtime.options.update({
+        "model": "deepseek-v4-flash",
+        "thinking": {"type": "enabled"},
+    })
+    if reasoning_effort is not None:
+        runtime.options["reasoning_effort"] = reasoning_effort
     await service.run_candidate(
-        runtime=_request(1, "测试绑定").runtime,
+        runtime=runtime,
         session_id=1,
         system_instruction="只写当前场景",
         user_payload={"episodeNumber": 2},
@@ -2639,6 +3128,10 @@ async def test_tool_calling_service_preserves_bound_revision_and_episode_scope(
             "protocol": "purrtypos.screenplay.candidate-validation/v1",
             "kind": "scene",
             "expectedSceneId": "scene-1",
+        },
+        scene_ids_by_episode={
+            1: ("ep01-scene-1",),
+            2: ("ep02-scene-1", "ep02-scene-2"),
         },
     )
 
@@ -2780,7 +3273,7 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
     assert steps[1].metadata["effectClass"] == "idempotent_write"
     assert steps[1].depends_on == (steps[0].id,)
     assert steps[2].depends_on == (steps[1].id,)
-    assert steps[3].depends_on == (steps[2].id,)
+    assert steps[3].depends_on == (steps[1].id, steps[2].id)
     assert steps[4].depends_on == (steps[3].id,)
     assert steps[5].depends_on == (steps[4].id,)
     assert steps[5].metadata["input"] == {
@@ -2791,11 +3284,26 @@ async def test_draft_manifest_has_stable_scene_parts_and_digest():
         "preserve": [],
         "baseRevisionId": None,
     }
-    assert compiled.recipe.metadata["recipeVersion"] == 7
+    assert compiled.recipe.metadata["recipeVersion"] == 10
     assert compiled.manifest.digest == repeated.manifest.digest
     assert [part.id for part in compiled.manifest.parts] == [
         part.id for part in repeated.manifest.parts
     ]
+
+
+@pytest.mark.parametrize("recipe_version", [7, 8])
+async def test_screenplay_continuation_rejects_obsolete_recipe(recipe_version):
+    with pytest.raises(ValueError, match="Recipe version is unsupported"):
+        _execution_recipe_from_metadata({
+            "kind": "screenplay.screenplayDraft",
+            "recipeVersion": recipe_version,
+            "maxParallelism": 1,
+            "steps": [{
+                "id": "draft:1:scene-1",
+                "kind": "generate_draft_scene",
+                "executor": "screenplay.task.unit",
+            }],
+        })
 
 
 async def test_scene_list_manifest_persists_episode_specific_part_identity():
@@ -3274,9 +3782,8 @@ async def test_compiled_recipe_persists_part_contracts_and_nonempty_budget():
     )
     assert limits.max_invocation_attempts is not None
     assert limits.max_input_tokens is not None
-    assert limits.max_run_output_tokens is not None
-    assert limits.max_reasoning_tokens is not None
-    assert limits.max_reasoning_tokens > 0
+    assert limits.max_run_generation_tokens is None
+    assert limits.max_reasoning_tokens is None
     assert limits.max_invocation_attempts > len(ai_steps) * 8
     assert screenplay_max_generated_units(compiled.recipe) == 134
 
@@ -3781,7 +4288,7 @@ async def _durable_screenplay_admission(
     ("root_status", "expected_status"),
     (
         (RunStatus.FAILED, "failed"),
-        (RunStatus.CANCELED, "canceled"),
+        (RunStatus.CANCELED, "failed"),
     ),
 )
 async def test_admitted_operation_settles_when_root_fails_before_dispatch(
@@ -3939,8 +4446,8 @@ async def test_screenplay_dispatch_rolls_back_task_identity_when_operation_attac
     assert task is not None
     assert task.budget_limits.max_invocation_attempts is not None
     assert task.budget_limits.max_input_tokens is not None
-    assert task.budget_limits.max_run_output_tokens is not None
-    assert task.budget_limits.max_reasoning_tokens is not None
+    assert task.budget_limits.max_run_generation_tokens is None
+    assert task.budget_limits.max_reasoning_tokens is None
     assert thaw_json_mapping(task.metadata)["maxGeneratedUnits"] == len(
         decision.execution_recipe.steps
     )
@@ -4678,9 +5185,10 @@ async def test_review_resolver_binds_every_episode_from_current_draft_head():
     assert context.requested_draft_revision_ids == ["draft-current"]
 
 
-async def test_late_stage_resolver_excludes_unrelated_accepted_heads():
+async def test_late_stage_resolver_binds_only_semantic_input_heads():
     workspace = {"workflow": {"heads": {
-        "creativeBrief": {"id": "brief-unrelated"},
+        "sourceAnalysis": {"id": "analysis-current"},
+        "creativeBrief": {"id": "brief-current"},
         "structure": {"id": "structure-current"},
         "sceneList": {"id": "scene-list-current"},
         "screenplayDraft": {"id": "draft-current"},
@@ -4696,7 +5204,13 @@ async def test_late_stage_resolver_excludes_unrelated_accepted_heads():
         workspace,
         "screenplayDraft",
         base_revision_id="draft-current",
-    ) == ("scene-list-current", "draft-current")
+    ) == (
+        "analysis-current",
+        "brief-current",
+        "structure-current",
+        "scene-list-current",
+        "draft-current",
+    )
     assert SqliteScreenplayTaskResolver._late_stage_revision_refs(
         workspace,
         "review",
@@ -4815,8 +5329,8 @@ def _request(session_id: int, content: str):
             "baseURL": "https://provider.example/v1",
             "options": {
                 "model": "planner-model",
-                "model_profile": "deepseek:deepseek-v4-flash",
-                "max_tokens": 32_768,
+                "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+                "max_generation_tokens": 32_768,
             },
             "contextWindow": "128k",
         },
@@ -4829,7 +5343,7 @@ async def test_screenplay_structured_calls_enable_supported_provider_json_mode(
     runtime = _request(1, "测试 JSON mode").runtime
     runtime.options.update({
         "model": "deepseek-v4-flash",
-        "model_profile": "deepseek:deepseek-v4-flash",
+        "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
         "response_format": {"type": "text"},
     })
     runtime.baseURL = "https://api.deepseek.com"
@@ -5371,7 +5885,22 @@ async def test_screenplay_failure_codes_have_typed_durable_dispositions(
 
     assert failure.category is expected_category
     assert failure.code == code
-    assert decision.disposition is FailureDisposition.PAUSE_RECOVERABLE
+    assert decision.disposition is FailureDisposition.FAIL_PERMANENT
+
+
+async def test_scene_output_truncation_fails_the_attempt_instead_of_pausing():
+    error = ModelGatewayError(
+        "model output is incomplete",
+        code="model_output_truncated",
+        retryable=False,
+    )
+    failure = classify_screenplay_run_failure(error)
+
+    assert failure.retryable is False
+    assert decide_failure(
+        failure,
+        attempts_remaining=3,
+    ).disposition is FailureDisposition.FAIL_PERMANENT
 
 
 @pytest.mark.parametrize("code", (
@@ -5561,6 +6090,40 @@ async def test_screenplay_stream_enriches_tool_operation_display_names():
     ] == {"zh-CN": "写入第 7 集剧本候选稿"}
 
 
+async def test_screenplay_stream_replaces_stale_operation_semantics_on_replay():
+    chunk = _with_screenplay_tool_display_names(
+        {
+            "kind": "operation.started",
+            "payload": {
+                "kind": "tool",
+                "display": {
+                    "labelParams": {
+                        "toolCallId": "dependency",
+                        "toolName": "readScreenplayTaskDependencies",
+                        "episodeNumber": 1,
+                        "targetDetail": "可读产出清单",
+                        "displayNames": {
+                            "zh-CN": "读取第 1 集任务依赖（可读产出清单）",
+                        },
+                    },
+                },
+            },
+        },
+        projected_params={
+            "episodeNumber": 1,
+            "readTargets": ["第 1 集第 2 场已完成剧本"],
+            "displayNames": {"zh-CN": "读取第 1 集第 2 场已完成剧本"},
+        },
+    )
+
+    params = chunk["payload"]["display"]["labelParams"]
+    assert params["displayNames"] == {
+        "zh-CN": "读取第 1 集第 2 场已完成剧本",
+    }
+    assert params["readTargets"] == ["第 1 集第 2 场已完成剧本"]
+    assert "targetDetail" not in params
+
+
 async def test_turn_persists_stage_command_and_rejects_changed_idempotent_replay(
     temp_db: DatabaseConnection,
 ):
@@ -5693,6 +6256,53 @@ async def test_restart_finishes_a_durable_cancel_request(
         "SELECT cancel_receipt_id FROM screenplay_agent_turns WHERE id = ?",
         [turn["id"]],
     ) == {"cancel_receipt_id": receipt.id}
+
+
+async def test_restart_reconciles_terminal_operation_with_paused_turn(
+    temp_db: DatabaseConnection,
+):
+    _, workspace, session = await _project_and_session(temp_db)
+    repository = SqliteScreenplayAgentRepository(
+        temp_db,
+        owner_id="screenplay-terminal-projection-recovery",
+    )
+    turn = await repository.begin_turn(
+        command_id="terminal-operation-before-restart",
+        project_id=workspace["project"]["id"],
+        session_id=session["id"],
+        content="继续生成剧本",
+        stage_command=None,
+        runtime_profile={"provider": "openai", "model": "test"},
+    )
+    await temp_db.execute(
+        "UPDATE screenplay_agent_turns SET status = 'paused', "
+        "error_json = '{\"code\":\"screenplay_task_paused\"}' WHERE id = ?",
+        [turn["id"]],
+    )
+    await temp_db.execute(
+        "INSERT INTO screenplay_agent_operations "
+        "(id, turn_id, project_id, session_id, status, target_role, "
+        "requirements_json, manifest_digest, error_json) "
+        "VALUES ('operation-terminal-before-restart', ?, ?, ?, 'failed', "
+        "'screenplayDraft', '{}', 'sha256:terminal-recovery', "
+        "'{\"code\":\"execution_projection_failed\","
+        "\"message\":\"终态投影失败。\"}')",
+        [turn["id"], workspace["project"]["id"], session["id"]],
+    )
+
+    recovered = await repository.recover_after_restart()
+
+    assert recovered == (turn["id"],)
+    assert await temp_db.fetch_one(
+        "SELECT status, error_json FROM screenplay_agent_turns WHERE id = ?",
+        [turn["id"]],
+    ) == {
+        "status": "failed",
+        "error_json": (
+            '{"code":"execution_projection_failed",'
+            '"message":"终态投影失败。"}'
+        ),
+    }
 
 
 async def _install_head(db, project_id: str, role: str, content: dict) -> str:
@@ -6264,7 +6874,12 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
     evidence = {
         "projectId": workspace["project"]["id"],
         "targetRole": "screenplayDraft",
-        "acceptedRevisionIds": {"sceneList": "scene-list-head"},
+        "acceptedRevisionIds": {
+            "sourceAnalysis": "analysis-head",
+            "creativeBrief": "brief-head",
+            "structure": "structure-head",
+            "sceneList": "scene-list-head",
+        },
         "episodeNumber": 1,
         "sceneIds": ["scene-1", "scene-2"],
         "sceneListRevisionId": "scene-list-head",
@@ -6375,13 +6990,16 @@ async def test_formal_generation_consumes_evidence_without_refetching_context(
         ("draft:1:scene-1",),
         ("draft:1:scene-2",),
     ]
-    assert all(context.episode_number == 1 for context in tool_calls.contexts)
     assert all(
         context.deliverable_revision_scope == {
+            "sourceAnalysis": "analysis-head",
+            "creativeBrief": "brief-head",
+            "structure": "structure-head",
             "sceneList": "scene-list-head",
         }
         for context in tool_calls.contexts[:2]
     )
+    assert all(context.episode_number == 1 for context in tool_calls.contexts)
     assert [payload["dependencyPartKeys"] for payload in tool_calls.user_payloads] == [
         [],
         ["draft:1:scene-1"],
@@ -6582,7 +7200,7 @@ async def test_review_dimension_parts_aggregate_host_side(
         and "reviewReport" not in payload
         for payload in tool_calls.user_payloads
     )
-    assert "使用已提供的当前集材料；缺失时调用 getScreenplayEpisodeContext" in tool_calls.system_instructions[0]
+    assert "先调用 getScreenplayEpisodeContext 读取当前集材料" in tool_calls.system_instructions[0]
     assert "最多提交 1 个问题" in tool_calls.system_instructions[0]
     assert all(
         context.episode_number == 1

@@ -15,7 +15,11 @@ export class NovelAnalysisConversationStream {
   private membership = ''
   private run?: NovelAnalysisRun
 
-  apply(page: NovelAnalysisStreamPage, cfg: AiModelConfig = historyModel) {
+  apply(
+    page: NovelAnalysisStreamPage,
+    cfg: AiModelConfig = historyModel,
+    onChunk?: (value: { runId: string; message: AgentConversationMessage }) => void,
+  ) {
     if (page.runs) this.run = page.runs[0]
     const fresh = page.chunks.filter(event => !this.events.has(event.cursor))
     for (const event of fresh) this.events.set(event.cursor, event)
@@ -37,6 +41,8 @@ export class NovelAnalysisConversationStream {
         userContent: run.prompt || '', model: cfg.name,
         turnStartedAt: performance.now() - (Number.isFinite(createdAt) ? Math.max(0, Date.now() - createdAt) : 0),
       }, event.chunk as AiStreamChunk, { cfg })
+      const message = this.replay.assistant(turnId)
+      if (message) onChunk?.({ runId: run.runId, message })
     }
     return { runId: run.runId, message: this.replay.assistant(turnId) ?? {
       role: 'assistant' as const, content: '', agentRunId: run.runId,
@@ -44,9 +50,14 @@ export class NovelAnalysisConversationStream {
   }
 }
 
+function analysisMayHaveError(run: NovelAnalysisRun) {
+  if (['pending', 'running', 'claimed'].includes(run.taskStatus || '')) return false
+  return [run.taskStatus, run.runStatus].some(status => ['failed', 'blocked', 'paused'].includes(status || ''))
+}
+
 function analysisErrorMessage(run: NovelAnalysisRun) {
-  if ((run.taskStatus || run.runStatus) === 'canceled') return ''
-  const code = run.error || (run.units || []).find((unit) => unit.errorCode)?.errorCode
+  if (!analysisMayHaveError(run)) return ''
+  const code = run.error || (run.units || []).find((unit) => unit.status === 'failed' && unit.errorCode)?.errorCode
   if (!code) return ''
   if (code === 'planning_failed') return '模型未能生成符合来源范围和安全约束的分析计划，请调整分析重点后重试。'
   if (code === 'durable_task_scope_conflict') return '已有分析任务尚未结束，请恢复或取消当前任务。'
@@ -57,6 +68,7 @@ function analysisErrorMessage(run: NovelAnalysisRun) {
   if (code === 'provider_insufficient_balance') return '模型账户余额或额度不足，请处理后重试。'
   if (code === 'model_invocation_deadline_exceeded') return '模型单次分析超过当前时限，未完成的步骤已经安全停止；可以重试或更换响应更快的模型。'
   if (code === 'model_invocation_failed') return '模型调用中断，可以保留当前任务并重试。'
+  if (code === 'model_reasoning_mode_conflict') return '模型请求的推理配置发生冲突，请检查模型调用链路。'
   if (code === 'user_paused_novel_analysis') return '任务由你暂停，恢复后会从未完成的步骤继续。'
   return `分析未完成：${code}`
 }
@@ -68,7 +80,8 @@ export function buildNovelAnalysisMessages(
 ): AgentConversationMessage[] {
   const runtimeMessage = replayed?.agentRunId === run.runId ? replayed : undefined
   const followUp = run.interactionKind === 'follow_up'
-  const error = analysisErrorMessage(run)
+  const mayHaveError = analysisMayHaveError(run)
+  const error = analysisErrorMessage(run) || (mayHaveError ? runtimeMessage?.error : undefined)
   const messages: AgentConversationMessage[] = []
   if (run.prompt) {
     messages.push({
@@ -89,8 +102,8 @@ export function buildNovelAnalysisMessages(
     longTaskId: run.taskId || undefined,
     model: runtimeMessage?.model || modelName,
     taskPlan: followUp ? runtimeMessage?.taskPlan : buildNovelAnalysisTaskPlan(run),
-    isError: Boolean(error || runtimeMessage?.isError),
-    error: error || runtimeMessage?.error || undefined,
+    isError: Boolean(error || (mayHaveError && runtimeMessage?.isError)),
+    error: error || undefined,
     ...buildNovelAnalysisTiming(run),
   })
   return messages

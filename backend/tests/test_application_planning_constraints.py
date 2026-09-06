@@ -341,11 +341,13 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
     )
     policy = facts["planningRules"][0]
     planner_payload = json.loads(str(messages[1].content))
-    planning_content = planner_payload["planningContext"][0]["content"]
+    planning_content = next(block["content"] for block in planner_payload["planningContext"]
+                            if block["name"] == "screenplay_planning_facts")
     planner_facts = json.loads(planning_content)
 
-    assert len(bundle.blocks) == 1
+    assert len(bundle.blocks) == 2
     assert [block.name for block in bundle.blocks] == [
+        "agent_input_policy",
         "screenplay_planning_facts",
     ]
     assert all(block.untrusted is False for block in bundle.blocks)
@@ -380,10 +382,59 @@ async def test_screenplay_planning_context_reaches_planner_once_with_host_comman
             runtime_reserve_tokens=4_000,
         ),
     )
-    assert len(runtime_bundle.blocks) == 2
+    assert len(runtime_bundle.blocks) == 3
     assert [block.name for block in runtime_bundle.blocks] == [
+        "agent_input_policy",
         "agent_final_response",
         "screenplay_planning_facts",
     ]
-    assert runtime_bundle.blocks[0].content == build_agent_final_response_policy()
-    assert runtime_bundle.blocks[1].content == planning_content
+    assert runtime_bundle.blocks[1].content == build_agent_final_response_policy()
+    assert runtime_bundle.blocks[2].content == planning_content
+
+
+async def test_screenplay_child_runtime_context_never_preloads_material_bodies():
+    async def unexpected_planning_load(project_id: str):
+        raise AssertionError(f"child Run loaded Root context for {project_id}")
+
+    request = _screenplay_request(
+        ScreenplayAgentDomainContext(
+            project_id="project-1",
+            task_id="task-1",
+            unit_id="draft:1:scene-1",
+            target_role="screenplayDraft",
+            expected_part_type="scene",
+            expected_part_key="scene-1",
+            dependency_part_keys=("scene-plan:1",),
+            deliverable_revision_scope={"sceneList": "revision-scene-list"},
+            episode_number=1,
+            tool_access="draft_scene",
+        ),
+        "创作第一场",
+    )
+    budget = ContextBudget(
+        window_tokens=128_000,
+        output_reserve_tokens=16_000,
+        safety_reserve_tokens=4_000,
+        runtime_reserve_tokens=4_000,
+    )
+    provider = ScreenplayHostContextProvider(
+        planning_context_loader=unexpected_planning_load,
+    )
+
+    domain_bundle = await provider.build_context(request, budget)
+    runtime_bundle = await with_shared_agent_context(provider).build_context(
+        request,
+        budget,
+    )
+
+    assert domain_bundle.blocks == ()
+    assert domain_bundle.diagnostics == {"contextMode": "screenplay-tools"}
+    assert [block.name for block in runtime_bundle.blocks] == [
+        "agent_input_policy",
+        "agent_final_response",
+    ]
+    assert not any(
+        block.name == "prepared_read_policy"
+        or block.name.startswith("read_material_")
+        for block in runtime_bundle.blocks
+    )

@@ -51,6 +51,7 @@ def test_explicit_writing_capability_maps_are_closed_and_immutable():
     assert len(WRITING_READ_CACHE_KEY_BUILDERS) == 11
     assert len(WRITING_CACHE_PROBES) == 13
     assert {item.schema.name for item in registrations} == set(WRITING_TOOL_POLICIES)
+    assert all(item.operation_display_params is not None for item in registrations)
     assert {
         item.schema.name
         for item in registrations

@@ -54,7 +54,7 @@ export default function AgentComposer({
     return !query || haystack.includes(query)
   })
   const selectCommand = (command: AgentComposerCommand) => {
-    if (command.disabled) return
+    if (disabled || command.disabled) return
     onChange('')
     command.onSelect()
   }
@@ -90,6 +90,7 @@ export default function AgentComposer({
             event.key !== 'Enter'
             || event.shiftKey
             || event.nativeEvent.isComposing
+            || disabled
             || submitDisabled
           ) return
           event.preventDefault()
@@ -109,7 +110,7 @@ export default function AgentComposer({
               type="button"
               role="option"
               aria-selected={Boolean(command.active)}
-              disabled={command.disabled}
+              disabled={disabled || command.disabled}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => selectCommand(command)}
             >

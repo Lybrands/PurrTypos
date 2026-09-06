@@ -1,3 +1,5 @@
+import { createAgentReplayPageCommit } from '../agent-runtime/chunkHandlers/commitScheduler'
+import { changeQueuedSubmission } from '../agent-runtime/queuedSubmission'
 import { services } from '@/services'
 import React from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -5,6 +7,7 @@ import AppHeader from '../components/AppHeader'
 import { AgentConversationPanel } from '../components/AgentConversation'
 import {
   recordAgentConversationDebugChunk,
+  setAiDebugInspectorVisible,
   type AiDebugChunk,
 } from '../components/AiDevInspector/store'
 import Markdown from '../components/Markdown'
@@ -165,7 +168,7 @@ interface ScreenplayAgentPageProps {
   modelConfigs: AiModelConfig[]
   onUpdateModelConfig?: (
     id: string,
-    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort'>>,
   ) => void
   onOpenBookshelf: () => void
   onOpenSettings: () => void
@@ -661,9 +664,15 @@ export default function ScreenplayAgentPage({
     ScreenplayConversationState | null
   >(null)
   const [agentChunkVersion, setAgentChunkVersion] = React.useState(0)
-  const [agentQueuedSubmissions, setAgentQueuedSubmissions] = React.useState<
+  const [agentQueuedSubmissions, setAgentQueuedSubmissionsState] = React.useState<
     ScreenplayQueuedSubmission[]
   >([])
+  const agentQueueRef = React.useRef(agentQueuedSubmissions)
+  const setAgentQueuedSubmissions = React.useCallback((update: React.SetStateAction<ScreenplayQueuedSubmission[]>) => {
+    const next = typeof update === 'function' ? update(agentQueueRef.current) : update
+    agentQueueRef.current = next
+    setAgentQueuedSubmissionsState(next)
+  }, [])
   const [agentQueueDraining, setAgentQueueDraining] = React.useState(false)
   const [agentSessionId, setAgentSessionId] = React.useState<number | null>(null)
   const [agentSessions, setAgentSessions] = React.useState<AiSession[]>([])
@@ -704,7 +713,6 @@ export default function ScreenplayAgentPage({
     createScreenplayOperationCommandLatch(),
   )
   const agentChunkCursorRef = React.useRef(0)
-  const agentChunkRenderPendingRef = React.useRef(false)
   const agentChunkReplayCaughtUpRef = React.useRef(true)
   const conversationPollErrorRef = React.useRef('')
   const reconciledConversationTurnRef = React.useRef({ scope: '', key: '' })
@@ -1622,7 +1630,6 @@ export default function ScreenplayAgentPage({
     setAgentSessionLoading(true)
     setAgentChunkHydrating(true)
     agentChunkReplayCaughtUpRef.current = false
-    agentChunkRenderPendingRef.current = false
     activeAgentSessionRef.current = sessionId
     setAgentSessionId(sessionId)
     const restoredDraft = lifecycle.getDraft(loadToken)
@@ -1672,7 +1679,6 @@ export default function ScreenplayAgentPage({
     agentChunkReplayRef.current.reset()
     agentChunkCursorRef.current = 0
     agentChunkReplayCaughtUpRef.current = false
-    agentChunkRenderPendingRef.current = false
     setAgentChunkHydrating(true)
     setAgentChunkVersion((current) => current + 1)
     agentPromptRef.current = ''
@@ -1856,7 +1862,10 @@ export default function ScreenplayAgentPage({
             onError: error => { if (!stopped) message.error(error.message) },
             onChunks: (page) => {
               if (stopped || activeAgentSessionRef.current !== agentSessionId) return
-              let changed = false
+              const pageCommit = createAgentReplayPageCommit(
+                !agentChunkReplayCaughtUpRef.current,
+                () => setAgentChunkVersion(current => current + 1),
+              )
               for (const event of page.chunks) {
                 if (event.cursor <= agentChunkCursorRef.current) continue
                 const state = agentConversationStateRef.current
@@ -1912,37 +1921,19 @@ export default function ScreenplayAgentPage({
                   })
                 }
                 agentChunkCursorRef.current = event.cursor
-                const terminalReplay = operation
-                  ? ['paused', 'succeeded', 'failed', 'canceled'].includes(
-                    operation.status,
-                  )
-                  : turn && ['paused', 'completed', 'failed', 'canceled'].includes(
-                    task?.status || turn.status,
-                  )
-                changed = (
-                  screenplayChunkChangesConversation(chunk)
-                  && (!terminalReplay || Boolean(chunk.done || chunk.error))
-                ) || changed
+                if (screenplayChunkChangesConversation(chunk)) {
+                  pageCommit.change()
+                }
               }
+              pageCommit.finish()
               agentChunkCursorRef.current = Math.max(
                 agentChunkCursorRef.current,
                 page.nextCursor,
               )
-              if (!agentChunkReplayCaughtUpRef.current) {
-                agentChunkRenderPendingRef.current = (
-                  agentChunkRenderPendingRef.current || changed
-                )
-                if (!page.hasMore) {
-                  agentChunkReplayCaughtUpRef.current = true
-                  setAgentChunkHydrating(false)
-                  if (agentChunkRenderPendingRef.current) {
-                    setAgentChunkVersion((current) => current + 1)
-                  }
-                  agentChunkRenderPendingRef.current = false
-                }
-                return
+              if (!page.hasMore) {
+                agentChunkReplayCaughtUpRef.current = true
+                setAgentChunkHydrating(false)
               }
-              if (changed) setAgentChunkVersion((current) => current + 1)
             },
           })
         }
@@ -2387,7 +2378,8 @@ export default function ScreenplayAgentPage({
       return
     }
     const runtime = runtimeOverride || runtimeForModel(model!)
-    if (agentRunning || agentSubmitting) {
+    if (agentRunning || agentSubmitting || agentQueueRef.current.some(item => item.projectId === openedProject.id
+      && item.sessionId === agentSessionId && item.editing)) {
       if (typeof editMessageIndex === 'number') {
         message.info('当前对话仍在执行，完成后再编辑历史消息')
         return
@@ -2426,6 +2418,7 @@ export default function ScreenplayAgentPage({
         ...(stageCommand ? { stageCommand } : {}),
       })
       if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
+      if (import.meta.env.DEV) setAiDebugInspectorVisible(true)
       const next = await conversationClient.load(openedProject.id, agentSessionId)
       if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
       agentConversationStateRef.current = next
@@ -2475,7 +2468,9 @@ export default function ScreenplayAgentPage({
       || !openedProject
       || agentSessionId == null
     ) return
-    const queued = agentQueuedSubmissions.find((submission) => (
+    if (agentQueueRef.current.some(item => item.projectId === openedProject.id
+      && item.sessionId === agentSessionId && item.editing)) return
+    const queued = agentQueueRef.current.find((submission) => (
       submission.projectId === openedProject.id
       && submission.sessionId === agentSessionId
     ))
@@ -3043,6 +3038,14 @@ export default function ScreenplayAgentPage({
       if (typeof sessionId === 'number') return deleteAgentHistorySession(sessionId)
     },
     send: (content) => runAgent(content),
+    updateQueuedSubmission: (id, patch) => {
+      if (!openedProject || agentSessionId == null) return false
+      const next = changeQueuedSubmission(agentQueueRef.current, id, patch,
+        item => item.projectId === openedProject.id && item.sessionId === agentSessionId)
+      if (next === agentQueueRef.current) return false
+      setAgentQueuedSubmissions(next)
+      return true
+    },
     abort: () => void stopAgent(),
     resume: resumeAgent,
     editMessage: (index, content) => runAgent(content, index),
@@ -3064,6 +3067,9 @@ export default function ScreenplayAgentPage({
     runAgent,
     stopAgent,
     switchAgentSession,
+    openedProject,
+    agentSessionId,
+    setAgentQueuedSubmissions,
   ])
   const screenplayConversationBindings = React.useMemo<
     ScreenplayConversationBindings | null
@@ -3083,8 +3089,7 @@ export default function ScreenplayAgentPage({
     setPrompt: updateAgentPrompt,
     initializing: projectLoading
       || agentSessionLoading
-      || agentChunkHydrating
-      || agentLoadInitializing,
+      || ((agentChunkHydrating || agentLoadInitializing) && agentMessages.length === 0),
     running: agentRunning || agentSubmitting,
     stopping: Boolean(
       cancelPendingConversationOperation

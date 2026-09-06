@@ -62,7 +62,7 @@ function snapshot(
   finalResponse = '',
 ): AiAgentRunSnapshot {
   return {
-    version: 1,
+    version: 2,
     run: {
       runId,
       sessionId: 7,

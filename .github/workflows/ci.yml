@@ -33,9 +33,12 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-purra.txt
+            backend/requirements-runtime.txt
       - run: python -m pip install -r backend/requirements.txt
       - name: Verify external PurrA dependency
-        run: python -c 'import pathlib, purra; assert "/packages/purra/src/" not in pathlib.Path(purra.__file__).as_posix()'
+        run: |
+          python -m pip check
+          python -m pytest backend/tests/test_purra_package.py -q
       - run: python -m pytest backend/tests
 
   windows-backend-package:
@@ -50,6 +53,7 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-purra.txt
+            backend/requirements-runtime.txt
       - name: Build frozen backend
         run: |
           python -m pip install -r backend/requirements.txt pyinstaller

@@ -86,6 +86,11 @@ REMOVED_COMPATIBILITY_PATHS = (
     BACKEND_DIR / "schemas" / "screenplay_conversation.py",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "screenplayConversationRuntime.ts",
     BACKEND_DIR / "application" / "screenplay_candidate_model.py",
+    BACKEND_DIR / "application" / "prepared_read_context.py",
+    BACKEND_DIR / "domains" / "read_materials.py",
+    BACKEND_DIR / "infrastructure" / "persistence" / "prepared_read_evidence.py",
+    BACKEND_DIR / "infrastructure" / "screenplay" / "tools" / "prepared_reads.py",
+    BACKEND_DIR / "infrastructure" / "writing" / "tools" / "prepared_reads.py",
 )
 GENERIC_RUNTIME_PERSISTENCE_FILES = (
     BACKEND_DIR / "infrastructure" / "persistence" / "sqlite_run_repository.py",

@@ -34,6 +34,7 @@ import {
   mergeRequestedRevision,
   reviewComparisonForPart,
   revisionLibraryNavigationDecision,
+  revisionLibraryRoles,
   revisionLibraryWorkspacePresentation,
   resolveHistoryRevisionId,
   resolveRevisionLibrarySelection,
@@ -626,10 +627,7 @@ export default function RevisionLibraryModal({
         activeSelectedPart,
       )
     : null
-  const roleOptions = workspace.deliverables.map((deliverable) => ({
-    value: deliverable.role,
-    label: ROLE_LABELS[deliverable.role],
-  }))
+  const roles = revisionLibraryRoles(workspace)
   const revisionOptions = history.items.map((revision) => ({
     value: revision.id,
     label: `v${revision.revisionNo} · ${STATUS_LABELS[revision.status || 'candidate']} · ${formatTime(revision.createdAt)}`,
@@ -665,17 +663,23 @@ export default function RevisionLibraryModal({
       className="screenplay-revision-library-modal"
     >
       <div className="screenplay-revision-library">
+        <nav className="screenplay-revision-library__role-nav" aria-label="文档类型">
+          {roles.map((item) => (
+            <PurrButton
+              key={item}
+              type="text"
+              aria-current={role === item ? 'page' : undefined}
+              disabled={editingBusy}
+              onClick={() => selectRole(item)}
+            >
+              {ROLE_LABELS[item]}
+            </PurrButton>
+          ))}
+        </nav>
+        <div className="screenplay-revision-library__main">
         <header className="screenplay-revision-library__toolbar">
           <div className="screenplay-revision-library__selectors">
-            <div className="screenplay-revision-library__field">
-              <span>文档</span>
-              <PurrSelect<ScreenplayV2DeliverableRole>
-                value={role}
-                options={roleOptions}
-                className="screenplay-revision-library__role-select"
-                onChange={selectRole}
-              />
-            </div>
+            <strong>{ROLE_LABELS[role]}</strong>
             <div className="screenplay-revision-library__field">
               <span>版本</span>
               <PurrSelect<string>
@@ -936,6 +940,7 @@ export default function RevisionLibraryModal({
             </div>
           </>
         )}
+        </div>
       </div>
     </PurrModal>
   )

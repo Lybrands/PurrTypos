@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
+from purra.errors import ContractViolationError, ModelGatewayError
 
 from application.story_memory_mapping import story_setting_change_from_input
 from application.continuation_context import ContinuationContextService
@@ -20,13 +21,12 @@ from domains.writing.story_memory_analysis import (
     StoryMemoryAnalysisStatus,
 )
 from domains.writing.story_memory_ledger import StoryMemoryLedger
-from infrastructure.models.provider_router import create_chat_no_stream
+from application.model_request_service import ModelRequestService, BackgroundModelContext
 from infrastructure.persistence.writing.sqlite_story_memory_repository import (
     SqliteStoryMemoryRepository,
 )
 from schemas.story_memory import StorySettingInput
 from services.model_settings_service import (
-    build_model_options,
     is_setting_enabled,
     resolve_model_config,
 )
@@ -242,14 +242,13 @@ async def analyze_chapter(
                 ),
             },
         ]
-        options = build_model_options(config, max_tokens=4_000)
-        result = await create_chat_no_stream(
-            str(config["apiKey"]),
-            messages,
-            options,
-            str(config.get("apiProvider") or "openai"),
+        service = ModelRequestService()
+        result = await service.complete(
+            api_key=str(config["apiKey"]), runtime=service.runtime_from_settings(config),
+            context=BackgroundModelContext("story_memory_analysis", 4_000),
+            messages=messages, db=db,
         )
-        raw_content_value = (result.get("message") or {}).get("content") or ""
+        raw_content_value = result.message.content or ""
         candidates = _validated_changes(
             raw_content_value,
             chapter_id=clean_chapter_id,

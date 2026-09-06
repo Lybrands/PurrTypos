@@ -142,7 +142,7 @@ export interface BookConversationBindings {
   messages: AgentConversationMessage[]
   prependedHistory: AgentConversationMessage[]
   activities: Record<number, AgentConversationActivity>
-  queuedMessages: string[]
+  queuedSubmissions: AgentQueuedSubmission[]
   prompt: string
   setPrompt(value: string): void
   initializing: boolean
@@ -167,6 +167,7 @@ export interface BookConversationBindings {
     | 'openHistorySession'
     | 'deleteSession'
     | 'send'
+    | 'updateQueuedSubmission'
     | 'abort'
     | 'editMessage'
     | 'resolveToolApproval'
@@ -203,14 +204,10 @@ export interface UseBookConversationControllerParams extends Omit<
 
 export function toBookQueuedSubmissions(
   sessionId: number | null,
-  queuedMessages: string[],
+  queuedSubmissions: AgentQueuedSubmission[],
 ): AgentQueuedSubmission[] {
   if (sessionId == null) return []
-  return queuedMessages.map((content, index) => ({
-    id: `book-queue-${sessionId}-${index}`,
-    sessionId,
-    content,
-  }))
+  return queuedSubmissions.filter(item => item.sessionId === sessionId)
 }
 
 export function createBookConversationController(
@@ -236,7 +233,7 @@ export function createBookConversationController(
       activities: bindings.activities,
       queuedSubmissions: toBookQueuedSubmissions(
         bindings.activeSessionId,
-        bindings.queuedMessages,
+        bindings.queuedSubmissions,
       ),
       initializing: bindings.initializing,
       running: bindings.running,
@@ -259,6 +256,7 @@ export function createBookConversationController(
       setValue: bindings.setPrompt,
       placeholder: '想写点什么',
       ariaLabel: '输入希望写作 Agent 完成的任务',
+      ready: bindings.scopeAvailable !== false && bindings.activeSessionId != null && !bindings.initializing,
       submitDisabled: Boolean(
         !bindings.prompt.trim()
         || !selectedModel

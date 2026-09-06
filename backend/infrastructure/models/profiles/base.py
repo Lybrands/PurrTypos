@@ -25,7 +25,7 @@ class ModelProfile:
     base_urls: frozenset[str] = frozenset()
     native_anthropic_thinking = False
     openai_output_token_parameter = "max_tokens"
-    max_call_output_tokens: int | None = None
+    max_generation_tokens: int | None = None
     thinking_token_accounting = ThinkingTokenAccounting.UNKNOWN
     supports_json_object_output = False
     reasoning_control = ReasoningControl.SELECTABLE
@@ -34,6 +34,15 @@ class ModelProfile:
     required_tool_choice = FeatureSupport.SUPPORTED
     parallel_tool_calls = FeatureSupport.SUPPORTED
     public_progress = FeatureSupport.UNAVAILABLE
+    context_window_options = ("32k", "256k", "1m")
+    default_context_window = "1m"
+    reasoning_effort_options: tuple[str, ...] = ()
+    task_reasoning_preferences: Mapping[str, str] = {}
+    stream_usage = True
+    default_thinking_enabled = True
+    customize_temperature = False
+    default_temperature_thinking = 1
+    default_temperature_non_thinking = 1
 
     def matches(self, model: str, base_url: str | None) -> bool:
         return (
@@ -79,7 +88,7 @@ class ModelProfile:
 
     def output_capabilities(self) -> ModelOutputCapabilities:
         return ModelOutputCapabilities(
-            max_call_output_tokens=self.max_call_output_tokens,
+            max_generation_tokens=self.max_generation_tokens,
             thinking_token_accounting=self.thinking_token_accounting,
         )
 
@@ -89,11 +98,11 @@ class ModelProfile:
         context_window_tokens: int,
     ) -> ModelCapabilitySnapshot:
         return ModelCapabilitySnapshot(
-            schema_version=1,
+            schema_version=2,
             profile_id=self.profile_id,
             provider_protocol=self.provider_protocol,
             context_window_tokens=context_window_tokens,
-            max_call_output_tokens=self.max_call_output_tokens,
+            max_generation_tokens=self.max_generation_tokens,
             thinking_token_accounting=self.thinking_token_accounting,
             protocol=self.protocol_capabilities(),
             actionable=self.actionable,
@@ -128,6 +137,7 @@ class ModelProfile:
 class GenericModelProfile(ModelProfile):
     provider_protocol = "custom"
     actionable = True
+    default_thinking_enabled = None
     reasoning_control = ReasoningControl.UNAVAILABLE
     reasoning_replay = ReasoningReplayPolicy.FORBIDDEN
     tool_calling = FeatureSupport.SUPPORTED

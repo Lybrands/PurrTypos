@@ -35,36 +35,21 @@ export function getAgentProcessingLabel(
 ): string {
   const canonical = message.canonicalOutput
   if (canonical) {
+    if (canonical.runTerminal) return ''
     const activeOperation = [...canonical.operationOrder]
       .reverse()
       .map((operationId) => canonical.operations[operationId])
       .find((operation) => operation?.status === 'running')
     const planningLabel = activeOperation && planningOperationLabel(activeOperation)
-    if (planningLabel && activeOperation) {
-      const progress = [...canonical.planningProgress]
-        .reverse()
-        .find((item) => item.operationId === activeOperation.operationId)
-      const title = publicAgentProgressNarration(progress?.text)
-      if (title) return title
-      return `正在${planningLabel}`
+    if (planningLabel) return `正在${planningLabel}`
+    if (canonical.finalStreamStatus === 'open') return '正在生成回复'
+    const labels: Record<string, string> = {
+      tool: '正在执行工具',
+      validation: '正在校验输出',
+      context_compaction: '正在整理上下文',
+      delegation: '正在等待子任务',
     }
-    const invocationId = activeOperation?.invocationId
-    if (invocationId) {
-      const providerProgress = [...canonical.agentProgress]
-        .reverse()
-        .find((item) => item.invocationId === invocationId)
-      const providerTitle = publicAgentProgressNarration(providerProgress?.text)
-      if (providerTitle) return providerTitle
-      const modelTitle = [...canonical.commentaryBlocks]
-        .reverse()
-        .find((block) => !block.aborted && block.invocationId === invocationId)
-      const title = publicAgentProgressNarration(modelTitle?.text)
-      if (title) return title
-    }
-    const latestProgress = publicAgentProgressNarration(
-      canonical.agentProgress.at(-1)?.text,
-    )
-    if (latestProgress) return latestProgress
+    if (activeOperation && labels[activeOperation.kind]) return labels[activeOperation.kind]
   }
   return '正在思考'
 }

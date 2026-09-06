@@ -20,6 +20,9 @@ from application.screenplay_part_contracts import (
 )
 
 
+SCREENPLAY_RECIPE_VERSION = 10
+
+
 REVIEW_DIMENSIONS = (
     "continuity",
     "character_arc",
@@ -174,7 +177,7 @@ def compile_screenplay_manifest(
             max_parallelism=parallelism,
             metadata={
                 "targetRole": target_role,
-                "recipeVersion": 7,
+                "recipeVersion": SCREENPLAY_RECIPE_VERSION,
                 "manifestId": manifest.id,
                 "manifestDigest": manifest.digest,
                 "assemblyStrategy": strategy,
@@ -206,8 +209,10 @@ def _draft_parts(scenes, common):
             },
         ))
         previous_scene = evidence_id
+        episode_scene_parts: list[str] = []
         for scene_id in scenes[episode_number]:
             part_id = f"draft:{episode_number}:{scene_id}"
+            episode_scene_parts.append(part_id)
             parts.append(_part(
                 part_id,
                 ScreenplayPartKind.DRAFT_SCENE,
@@ -226,7 +231,7 @@ def _draft_parts(scenes, common):
             metadata_id,
             ScreenplayPartKind.EPISODE_METADATA,
             len(parts),
-            (previous_scene,),
+            tuple(episode_scene_parts),
             metadata={
                 "episodeNumber": episode_number,
                 "sceneIds": list(scenes[episode_number]),
@@ -810,5 +815,6 @@ __all__ = [
     "CompiledScreenplayManifest",
     "DOCUMENT_SECTIONS",
     "REVIEW_DIMENSIONS",
+    "SCREENPLAY_RECIPE_VERSION",
     "compile_screenplay_manifest",
 ]

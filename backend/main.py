@@ -180,7 +180,7 @@ async def lifespan(application: FastAPI):
         ).recover_after_restart()
         if recovered_turn_ids:
             logging.getLogger(__name__).warning(
-                "Failed %s credential-bound screenplay Turn(s) after restart",
+                "Recovered %s screenplay Turn projection(s) after restart",
                 len(recovered_turn_ids),
             )
 
@@ -207,19 +207,6 @@ async def lifespan(application: FastAPI):
             artifact_maintenance_repository,
             artifact_maintenance_policy,
         )
-
-        from infrastructure.persistence.sqlite_delegation_repository import (
-            SqliteDelegationRepository,
-        )
-
-        recovered_delegations = await (
-            SqliteDelegationRepository(db).recover_after_restart()
-        )
-        if recovered_delegations:
-            logging.getLogger(__name__).warning(
-                "Recovered Agent delegations after restart: %s",
-                recovered_delegations,
-            )
 
         set_agent_composition(composition)
         if memory_resource is not None:

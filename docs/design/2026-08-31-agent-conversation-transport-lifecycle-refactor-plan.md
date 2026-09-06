@@ -129,6 +129,19 @@ JSON 作为机器事件格式没有问题；禁止的是把内部 JSON 或宿主
 
 回归入口：`backend/tests/test_agent_planning.py`、三类 Profile 的 composition 测试、来源分析真实 Core/假 Provider 测试，以及公共 `AssistantOutput/timeline.test.ts`。必须覆盖尚未返回模型文本时可见、成功/失败/取消、动态规划、私有内容隔离与重复回放。
 
+### 4.3 所有 Agent 的工具步骤必须具有业务语义
+
+这是一条共享 Agent Profile / Operation 展示合同，不是 Planner 提示词。Planner 只决定调用哪个工具及其参数；展示名称由宿主在工具 Operation 启动前，根据已经校验的领域状态和本次参数生成。不得让模型额外输出步骤名称，也不得把展示规范、原文或产物正文塞入规划上下文。
+
+- 每个 Agent Profile 注册的每个工具都必须同时提供稳定的 `schema.display_names["zh-CN"]` 回退名和 `operation_display_params` 动态投影。缺少任一项时，`AgentProfileRegistry` 在应用装配期失败关闭；请求级附加工具在创建 Core 时执行同一检查。
+- 动态投影必须返回 canonical `display.labelParams.displayNames`。标签描述本次调用的具体业务目标，例如集、场、章节标题、交付物类型、检索词、人物或设定范围；不能只重复工具函数名。
+- 领域拥有业务名称解析。Core 只在 Operation 启动前调用投影并持久化参数，不理解人物、章节或剧本交付物；共享前端把 canonical `displayNames` 视为权威，不再按工具名维护领域分支。
+- 公开标签必须单行、简短、可重放，不包含正文、候选内容、凭据、内部数据库 ID 或无法向用户解释的技术键。只有不透明 ID 且宿主没有已授权名称映射时，使用“指定人物”“指定设定”等诚实回退，不伪造名称。
+- 实时、刷新和恢复消费同一已提交 Operation 标签。旧 Operation 没有保存业务目标时不事后猜测；新 Agent 或新工具若没有完成标签合同，不得进入生产装配。
+- 确定性测试至少覆盖：所有生产 Profile 全量注册检查、不同参数产生不同业务标签、敏感正文/内部 ID 不进入标签、执行期非法投影失败，以及前端实时与回放使用同一名称。
+
+公共执行入口为 `application/agent_tool_presentation.py`；Writing、Screenplay 与 Novel Analysis 的差异只存在于各自领域投影器中。该合同与本节的 planning Operation 规则共同构成三类 Agent 的统一公开执行范式。
+
 ## 5. 接口调用策略
 
 以下为用途约束；已实施的订阅 URL、游标和调用时机见第 9 节。

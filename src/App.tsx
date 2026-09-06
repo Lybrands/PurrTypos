@@ -13,6 +13,7 @@ import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
 import { Book, type AiModelConfig, type EntityId, type MemoryEmbeddingConfig } from './types'
 import { applyModelRuntimeConfigPatch } from './modelCatalog'
+import { installModelDescriptors } from './models/registry'
 import './App.scss'
 
 const HomePage = lazy(() => import('./HomePage'))
@@ -94,6 +95,7 @@ export default function App() {
   React.useEffect(() => {
     services.settings.getSettings().then((res) => {
       if (!res.success || !res.data) return
+      if (res.data.model_descriptors) installModelDescriptors(res.data.model_descriptors)
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
@@ -127,7 +129,7 @@ export default function App() {
 
   const updateModelConfig = React.useCallback((
     id: string,
-    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled'>>,
+    patch: Partial<Pick<AiModelConfig, 'contextWindow' | 'thinkingEnabled' | 'reasoningEffort' | 'modelPreferences'>>,
   ) => {
     setModelConfigs((prev) => {
       const next = prev.map((item) =>
@@ -311,6 +313,7 @@ export default function App() {
               <NovelSourcesPage
                 books={books}
                 modelConfigs={configuredModelConfigs}
+                onUpdateModelConfig={updateModelConfig}
                 onBack={handleEnterBookshelf}
                 onHome={handleBackToHome}
               />

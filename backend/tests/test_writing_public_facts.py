@@ -132,8 +132,8 @@ def test_validated_writing_request_selects_live_fact_presentation():
         apiProvider="openai",
         options={
             "model": "model",
-            "model_profile": "deepseek:deepseek-v4-flash",
-            "max_tokens": 2_048,
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 2_048,
         },
         enableAgentTools=True,
         bookId="book-1",
@@ -144,14 +144,14 @@ def test_validated_writing_request_selects_live_fact_presentation():
         body,
         {
             "model": "model",
-            "model_profile": "deepseek:deepseek-v4-flash",
-            "max_tokens": 2_048,
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 2_048,
         },
     )
 
     options = writing_run_options(
         request,
-        {"model": "model", "max_tokens": 2_048},
+        {"model": "model", "max_generation_tokens": 2_048},
     )
 
     assert options.resolved_response_transaction_policy.mode is (

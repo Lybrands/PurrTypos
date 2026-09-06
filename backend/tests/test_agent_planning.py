@@ -26,8 +26,8 @@ def _request() -> AgentRunRequest:
             apiKey="test-key",
             options={
                 "model": "test-model",
-                "model_profile": "deepseek:deepseek-v4-flash",
-                "max_tokens": 2048,
+                "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+                "max_generation_tokens": 2048,
             },
             contextWindow="128k",
         )),
@@ -81,7 +81,7 @@ async def test_every_product_planner_uses_the_versioned_provider_stream(
             }
 
         return {
-            "applied_output_limit": options.get("max_tokens"),
+            "applied_generation_limit": options.get("max_tokens"),
             "stream": chunks(),
             "model": "test-model",
         }

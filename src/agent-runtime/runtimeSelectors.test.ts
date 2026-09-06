@@ -39,6 +39,23 @@ test('history conversion never invents Assistant prose', () => {
   })
 })
 
+test('history keeps public answers independently of execution status and drops error-only messages', () => {
+  const convert = buildHistoryConverter()
+  for (const status of ['done', 'failed', 'canceled', 'paused', 'running']) {
+    assert.deepEqual(convert({ role: 'assistant', content: '公开正文', isError: true,
+      error: '连接中断', canonicalOutput: { runStatus: status, finalText: '公开正文' },
+    }), { role: 'assistant', content: '公开正文' })
+  }
+  assert.deepEqual(convert({ role: 'assistant', content: '已保存的部分正文', isError: true }),
+    { role: 'assistant', content: '已保存的部分正文' })
+  assert.deepEqual(convert({ role: 'assistant', content: '', isError: true,
+    canonicalOutput: { finalText: '流式部分正文', finalStreamStatus: 'aborted' },
+  }), { role: 'assistant', content: '流式部分正文' })
+  assert.equal(convert({ role: 'assistant', content: '连接中断', error: '连接中断', isError: true }), null)
+  assert.equal(convert({ role: 'assistant', content: '', error: '连接中断', reasoning: '私有思考' }), null)
+  assert.equal(convert({ role: 'tool', content: '工具结果' }), null)
+})
+
 test('context indicator uses the final prepared input estimate including tool schemas', () => {
   const usage = calculateContextUsage({
     messages: [{

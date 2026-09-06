@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,8 +20,10 @@ from purra.contracts import (
     RunBinding,
     RunProvenance,
     RunStatus,
+    ResponseValidationResult,
 )
 from purra.errors import ModelGatewayError
+from purra.structured_output import parse_json_object
 from purra.output import (
     PublicPresentationMode,
     ResponseTransactionMode,
@@ -31,7 +33,6 @@ from purra.output import (
 from application.agent_run_service import AgentRunService
 from application.durable_agent_run import run_durable_agent_unit
 from application.model_runtime import (
-    fit_output_limit_to_context,
     model_request_from_runtime,
     reasoning_mode_from_options,
     run_execution_intent,
@@ -39,12 +40,12 @@ from application.model_runtime import (
     with_adapter_public_progress,
 )
 from application.run_provenance import digest_model_endpoint
-from application.screenplay_model_policy import screenplay_output_limit
 from domains.screenplay_agent.agent_context import ScreenplayAgentDomainContext
 from domains.screenplay_agent.candidate_projection import (
     SCREENPLAY_CANDIDATE_VALIDATION_PROTOCOL,
     candidate_completion_projection,
     parse_candidate_validation_contract,
+    normalize_episode_metadata_payload,
 )
 from domains.screenplay_agent.recovery import classify_screenplay_run_failure
 from infrastructure.screenplay import ScreenplayCandidateArtifacts
@@ -57,6 +58,24 @@ BindRun = Callable[[str], Awaitable[None]]
 class ScreenplayCandidateRunResult:
     run_id: str
     candidate: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class EpisodeMetadataResponseValidator:
+    episode_number: int
+
+    def validate(self, *, content, messages):
+        try:
+            normalize_episode_metadata_payload(parse_json_object(content), self.episode_number)
+        except (ValueError, TypeError):
+            return ResponseValidationResult(
+                violation_code="screenplay_candidate_invalid",
+                repair_guidance=(
+                    f"最终回复只输出第 {self.episode_number} 集的 JSON 对象，字段为 "
+                    "episodeNumber、title、continuitySummary；集数必须匹配，标题与摘要不得为空。"
+                ),
+            )
+        return ResponseValidationResult()
 
 
 class ScreenplayToolCallingService:
@@ -79,6 +98,7 @@ class ScreenplayToolCallingService:
         bind_run: BindRun | None = None,
         candidate_validation_contract: Mapping[str, Any] | None = None,
         host_candidate_template: Mapping[str, Any] | None = None,
+        scene_ids_by_episode: Mapping[int, Sequence[str]] | None = None,
         signal=None,
     ) -> ScreenplayCandidateRunResult:
         validation_contract = parse_candidate_validation_contract(
@@ -93,11 +113,6 @@ class ScreenplayToolCallingService:
             model_request_from_runtime(runtime)
         )
         window = runtime_context_window_tokens(runtime)
-        output_limit = screenplay_output_limit(
-            model_request.capability_snapshot,
-            model_request.options.get("max_tokens"),
-        )
-        output_limit = fit_output_limit_to_context(output_limit, window)
         bound_context = ScreenplayAgentDomainContext(
             project_id=domain_context.project_id,
             task_id=domain_context.task_id,
@@ -146,16 +161,30 @@ class ScreenplayToolCallingService:
                     or (user_payload.get("evidenceDescriptor") or {}).get("sceneIds")
                     or ()
                 ),
+                "screenplaySceneIdsByEpisode": {
+                    str(number): [str(scene_id) for scene_id in scene_ids]
+                    for number, scene_ids in (scene_ids_by_episode or {}).items()
+                    if (
+                        isinstance(number, int)
+                        and not isinstance(number, bool)
+                        and number > 0
+                        and isinstance(scene_ids, Sequence)
+                        and not isinstance(scene_ids, (str, bytes, bytearray))
+                    )
+                },
             },
         )
         command_id = f"{domain_context.task_id}:{domain_context.unit_id}"
         options = AgentCoreRunOptions(
             turn_id=conversation_turn_id,
-            output_limit=output_limit,
             default_context_window_tokens=window,
             force_planned_tool_choice=False,
             require_tool_call=False,
-            reasoning_mode=reasoning_mode_from_options(runtime.options),
+            response_validators=(
+                (EpisodeMetadataResponseValidator(validation_contract["episodeNumber"]),)
+                if validation_contract["kind"] == "episode_metadata" else ()
+            ),
+            reasoning_mode=reasoning_mode_from_options(model_request.options),
             provenance=screenplay_run_provenance(
                 runtime,
                 user_payload,
@@ -250,7 +279,7 @@ def screenplay_run_provenance(
         sort_keys=True,
         separators=(",", ":"),
     )
-    reasoning_mode = reasoning_mode_from_options(runtime.options)
+    reasoning_mode = reasoning_mode_from_options(request.options)
     return RunProvenance(
         model_provider=request.provider,
         model_name=request.model,

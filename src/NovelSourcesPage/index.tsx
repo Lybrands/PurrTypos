@@ -1,3 +1,4 @@
+import { commitAgentChunk } from '../agent-runtime/chunkHandlers/commitScheduler'
 import React from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { services } from '@/services'
@@ -24,13 +25,14 @@ import {
   usePurrToast,
 } from '@/purr-components'
 import AppHeader from '../components/AppHeader'
-import { recordAgentConversationDebugChunk } from '../components/AiDevInspector/store'
+import { recordAgentConversationDebugChunk, setAiDebugInspectorVisible } from '../components/AiDevInspector/store'
 import {
   AgentConversationPanel,
   type AgentConversationController,
   type AgentConversationExtensions,
 } from '../components/AgentConversation'
 import Markdown from '../components/Markdown'
+import { WritingSkillReview } from './WritingSkillReview'
 import {
   NovelAnalysisEvidenceList,
   type NovelSourceEvidenceTarget,
@@ -40,11 +42,12 @@ import {
   type AgentConversationMessage,
 } from '../agent-runtime'
 import { normalizeApiProvider } from '../modelCatalog'
+import { createScopedComposer } from '../components/AgentConversation/scopedComposer'
+import { createAnalysisConversationController } from './analysisController'
 import type {
   AiModelConfig,
   Book,
   NovelAnalysisArtifact,
-  NovelAnalysisCraftCard,
   NovelAnalysisEvidence,
   NovelAnalysisRun,
   NovelSourceImportPreview,
@@ -65,39 +68,22 @@ type ImportView = 'choose' | 'freeze'
 const SOURCE_TEXT_WINDOW_SIZE = 20_000
 const LONG_SOURCE_SECTION_CHARACTERS = 100_000
 
+function analysisRuntimeForModel(model: AiModelConfig) {
+  const { options } = buildStreamOptions({ cfg: model, selectedModel: model.id })
+  return { apiKey: model.apiKey, baseURL: model.baseUrl || undefined,
+    apiProvider: normalizeApiProvider(model.apiProvider), locale: document.documentElement.lang || 'zh-CN',
+    options, contextWindow: options.context_window }
+}
+type AnalysisSubmissionSnapshot = { revisionId: string; runtime: ReturnType<typeof analysisRuntimeForModel> }
+
 const ACTIVE_ANALYSIS_STATUSES = new Set(['pending', 'running', 'claimed'])
 const BLOCKING_ANALYSIS_STATUSES = new Set([...ACTIVE_ANALYSIS_STATUSES, 'paused'])
-const CRAFT_CATEGORY_LABELS: Record<string, string> = {
-  narrative_structure: '叙事结构',
-  characterization: '人物塑造',
-  point_of_view: '视角与信息控制',
-  pacing_and_tension: '节奏与张力',
-  language_and_style: '语言与文风',
-  dialogue: '对话设计',
-  imagery_and_atmosphere: '意象与氛围',
-  theme_and_symbolism: '主题与象征',
-}
-
-function groupCraftCards(cards: NovelAnalysisCraftCard[]) {
-  const grouped = new Map<string, NovelAnalysisCraftCard[]>()
-  cards.forEach((card) => {
-    const values = grouped.get(card.cardKind) ?? []
-    values.push(card)
-    grouped.set(card.cardKind, values)
-  })
-  return Array.from(grouped, ([kind, items]) => ({
-    kind,
-    label: CRAFT_CATEGORY_LABELS[kind] ?? '其他写作技法',
-    items,
-  }))
-}
-
 function isAnalysisRunActive(run: NovelAnalysisRun) {
-  return ACTIVE_ANALYSIS_STATUSES.has(run.taskStatus || run.runStatus)
+  return ACTIVE_ANALYSIS_STATUSES.has(run.runStatus) || ACTIVE_ANALYSIS_STATUSES.has(run.taskStatus || '')
 }
 
 function isAnalysisRunBlocking(run: NovelAnalysisRun) {
-  return BLOCKING_ANALYSIS_STATUSES.has(run.taskStatus || run.runStatus)
+  return BLOCKING_ANALYSIS_STATUSES.has(run.runStatus) || BLOCKING_ANALYSIS_STATUSES.has(run.taskStatus || '')
 }
 
 function importSectionPreview(content: string, start: number, end: number) {
@@ -377,11 +363,13 @@ function NovelSourceReader({
 export default function NovelSourcesPage({
   books,
   modelConfigs,
+  onUpdateModelConfig,
   onBack,
   onHome,
 }: {
   books: Book[]
   modelConfigs: AiModelConfig[]
+  onUpdateModelConfig?: AgentConversationController['composer']['updateModel']
   onBack(): void
   onHome(): void
 }) {
@@ -421,8 +409,17 @@ export default function NovelSourcesPage({
   const [busy, setBusy] = React.useState(false)
   const [analysisRevisionId, setAnalysisRevisionId] = React.useState('')
   const [analysisModelId, setAnalysisModelId] = React.useState(modelConfigs[0]?.id ?? '')
-  const [analysisInput, setAnalysisInput] = React.useState('')
+  const [analysisComposer] = React.useState(() => createScopedComposer<AnalysisSubmissionSnapshot>())
+  const [composerVersion, refreshComposer] = React.useReducer(value => value + 1, 0)
+  const analysisScope = workId ? `${workId}:${detailWork?.id === workId && analysisRevisionId ? analysisRevisionId : 'pending'}` : ''
+  const analysisInput = analysisScope ? analysisComposer.draft(analysisScope) : ''
+  const setAnalysisInput = (value: string) => {
+    if (!analysisScope) return
+    analysisComposer.setDraft(analysisScope, value)
+    refreshComposer()
+  }
   const [analysisRuns, setAnalysisRuns] = React.useState<NovelAnalysisRun[]>([])
+  const [hydratedAnalysisRevision, setHydratedAnalysisRevision] = React.useState('')
   const [replayedAnalysis, setReplayedAnalysis] = React.useState<{
     runId: string
     message: AgentConversationMessage
@@ -480,6 +477,10 @@ export default function NovelSourcesPage({
   const loadDetail = React.useCallback(async (id: string) => {
     const generation = ++detailGeneration.current
     analysisRevisionRef.current = ''
+    setBusy(false)
+    setHydratedAnalysisRevision('')
+    setWatchedAnalysisCommandId('')
+    setReplayedAnalysis(null)
     const result = await services.novelSources.get({ workId: id })
     if (generation !== detailGeneration.current || currentWorkRef.current !== id) return
     if (!result.success || !result.data) {
@@ -489,6 +490,7 @@ export default function NovelSourcesPage({
     }
     setDetailWork(result.data)
     const latestRevisionId = result.data.latest_revision_id || result.data.revisions?.[0]?.id || ''
+    analysisComposer.adoptDraft(`${id}:pending`, `${id}:${latestRevisionId}`)
     analysisRevisionRef.current = latestRevisionId
     setSourceReaderOpen(false)
     setSourceReaderTarget(null)
@@ -500,11 +502,13 @@ export default function NovelSourcesPage({
     setPublishedAnalyses([])
     setAnalysisArtifact(null)
     setPublishedAnalysisId('')
-  }, [appMessage, navigate])
+  }, [analysisComposer, appMessage, navigate])
 
   const selectSourceRevision = React.useCallback((revisionId: string) => {
     if (!revisionId) return
     detailGeneration.current += 1
+    setBusy(false)
+    setHydratedAnalysisRevision('')
     analysisRevisionRef.current = revisionId
     setSourceRevisionId(revisionId)
     setSourceReaderTarget(null)
@@ -543,7 +547,7 @@ export default function NovelSourcesPage({
     navigate(location.pathname, { replace: true, state: null })
   }, [detailWork, location.pathname, location.state, navigate, workId])
   React.useEffect(() => {
-    if (!analysisModelId && modelConfigs[0]) setAnalysisModelId(modelConfigs[0].id)
+    if (!modelConfigs.some(model => model.id === analysisModelId)) setAnalysisModelId(modelConfigs[0]?.id ?? '')
   }, [analysisModelId, modelConfigs])
   const hasActiveAnalysis = analysisRuns.some(isAnalysisRunActive)
   const hasBlockingAnalysis = analysisRuns.some(isAnalysisRunBlocking)
@@ -551,37 +555,36 @@ export default function NovelSourcesPage({
   const runtime = React.useCallback(() => {
     const model = modelConfigs.find((item) => item.id === analysisModelId)
     if (!model) throw new Error('请先在设置中配置分析模型')
-    const { options } = buildStreamOptions({ cfg: model, selectedModel: model.id })
-    return {
-      apiKey: model.apiKey,
-      baseURL: model.baseUrl || undefined,
-      apiProvider: normalizeApiProvider(model.apiProvider),
-      locale: document.documentElement.lang || 'zh-CN',
-      options,
-      contextWindow: options.context_window,
-    }
+    return analysisRuntimeForModel(model)
   }, [analysisModelId, modelConfigs])
 
   const startAnalysis = async (
     revisionId: string,
-    prompt = '分析这部小说的全局故事概览、事实脉络和写作技法。',
+    prompt = '保留故事概览与事实脉络，蒸馏可执行的写作方法并检验迁移效果。',
+    frozenRuntime = runtime(),
   ) => {
+    const generation = detailGeneration.current
+    const isCurrent = () => generation === detailGeneration.current && analysisRevisionRef.current === revisionId
     const decision = await confirmDialog({
       title: '开始来源分析',
       content: '分析时只会按任务需要，把对应章节片段发送给当前模型。',
       confirmText: '开始分析',
     })
-    if (decision !== 'confirm') return false
+    if (decision !== 'confirm' || !isCurrent()) return false
     const commandId = `novel-analysis-${crypto.randomUUID()}`
+    let accepted = false
     setBusy(true)
     try {
       const result = await services.novelSources.startAnalysis({
         revisionId,
         commandId,
         prompt,
-        runtime: runtime(),
+        runtime: frozenRuntime,
       })
       if (!result.success) throw new Error(result.error || '启动分析失败')
+      accepted = true
+      if (!isCurrent()) return true
+      if (import.meta.env.DEV) setAiDebugInspectorVisible(true)
       setAnalysisRevisionId(revisionId)
       setAnalysisRuns([])
       setAnalysisArtifact(null)
@@ -591,17 +594,22 @@ export default function NovelSourcesPage({
       await reloadAnalysis(revisionId)
       return true
     } catch (error) {
-      setWatchedAnalysisCommandId('')
-      appMessage.error((error as Error).message)
-      return false
+      if (isCurrent()) {
+        if (!accepted) setWatchedAnalysisCommandId('')
+        appMessage.error((error as Error).message)
+      }
+      return accepted
     } finally {
-      setBusy(false)
+      if (isCurrent()) setBusy(false)
     }
   }
 
-  const followUpAnalysis = async (prompt: string) => {
+  const followUpAnalysis = async (prompt: string, frozenRuntime = runtime()) => {
     if (!analysisRevisionId || !analysisArtifact) return false
+    const generation = detailGeneration.current
+    const isCurrent = () => generation === detailGeneration.current && analysisRevisionRef.current === analysisRevisionId
     const commandId = `novel-analysis-follow-up-${crypto.randomUUID()}`
+    let accepted = false
     setBusy(true)
     try {
       const result = await services.novelSources.followUpAnalysis({
@@ -609,19 +617,24 @@ export default function NovelSourcesPage({
         artifactId: analysisArtifact.artifactId,
         prompt,
         commandId,
-        runtime: runtime(),
+        runtime: frozenRuntime,
       })
       if (!result.success) throw new Error(result.error || '发送追问失败')
+      accepted = true
+      if (!isCurrent()) return true
+      if (import.meta.env.DEV) setAiDebugInspectorVisible(true)
       setWatchedAnalysisCommandId(commandId)
       appMessage.success('追问已发送')
       await reloadAnalysis(analysisRevisionId)
       return true
     } catch (error) {
-      setWatchedAnalysisCommandId('')
-      appMessage.error((error as Error).message)
-      return false
+      if (isCurrent()) {
+        if (!accepted) setWatchedAnalysisCommandId('')
+        appMessage.error((error as Error).message)
+      }
+      return accepted
     } finally {
-      setBusy(false)
+      if (isCurrent()) setBusy(false)
     }
   }
 
@@ -690,14 +703,9 @@ export default function NovelSourcesPage({
     }
   }
 
-  const methodCandidateCards = (
-    publishedAnalyses.find((analysis) => analysis.id === publishedAnalysisId)?.craftCards ?? []
-  ).filter((card) => Boolean(card.id))
-  const analysisCraftGroups = groupCraftCards(analysisArtifact?.craftCards ?? [])
-
   const createMethodCandidates = async () => {
-    if (!publishedAnalysisId || !methodCandidateCards.length) {
-      return appMessage.info('当前分析没有可提炼的写作技法')
+    if (!publishedAnalysisId || analysisArtifact?.skillReviewStatus !== 'pending_review') {
+      return appMessage.info('当前写作方法尚未通过迁移复核')
     }
     setCreatingMethodCandidates(true)
     try {
@@ -705,7 +713,7 @@ export default function NovelSourcesPage({
         analysisId: publishedAnalysisId,
       })
       if (!result.success || !result.data) throw new Error(result.error || '生成候选写作方法失败')
-      appMessage.success(`已创建 1 个写作 Skill（${result.data.methods.length} 个分类模块），尚未发布`)
+      appMessage.success('已创建完整写作方法草稿，审核发布并绑定后可使用')
       navigate('/writing-methods')
     } catch (error) {
       appMessage.error((error as Error).message)
@@ -865,6 +873,39 @@ export default function NovelSourcesPage({
   const selectedAnalysisModel = modelConfigs.find((model) => model.id === analysisModelId)
   const waitingForRun = Boolean(watchedAnalysisCommandId) && !analysisRuns.some((run) => run.commandId === watchedAnalysisCommandId)
   const latestRun = analysisRuns[0]
+  const analysisReady = Boolean(analysisRevisionId && detailWork?.id === workId
+    && analysisRevisionRef.current === analysisRevisionId && hydratedAnalysisRevision === analysisRevisionId)
+  const analysisPending = Boolean(analysisScope && analysisComposer.pending(analysisScope))
+  const analysisQueued = analysisScope ? analysisComposer.queue(analysisScope) : []
+  const sendAnalysisMessage = (content?: string) => {
+    const prompt = String(content ?? analysisInput).trim()
+    if (!prompt || !analysisReady || !selectedAnalysisModel || latestRun?.taskStatus === 'paused'
+      || analysisRevisionRef.current !== analysisRevisionId || currentWorkRef.current !== workId) return
+    analysisComposer.enqueue(analysisScope, `novel-analysis-queue-${crypto.randomUUID()}`,
+      prompt, { revisionId: analysisRevisionId, runtime: runtime() }, content == null)
+    refreshComposer()
+  }
+  React.useEffect(() => {
+    if (!analysisReady || hasBlockingAnalysis || waitingForRun || busy) return
+    if ((latestRun?.artifactRef || latestRun?.analysisArtifactRef) && !analysisArtifact) return
+    const submission = analysisComposer.claim(analysisScope)
+    if (!submission) return
+    refreshComposer()
+    void (async () => {
+      let accepted = false
+      try {
+        accepted = analysisArtifact
+          ? await followUpAnalysis(submission.content, submission.snapshot.runtime)
+          : await startAnalysis(submission.snapshot.revisionId, submission.content, submission.snapshot.runtime)
+      } catch (error) {
+        if (analysisRevisionRef.current === submission.snapshot.revisionId) appMessage.error((error as Error).message)
+      } finally {
+        analysisComposer.settle(submission, accepted)
+        refreshComposer()
+      }
+    })()
+  }, [analysisReady, analysisScope, analysisComposer, composerVersion, hasBlockingAnalysis,
+    waitingForRun, busy, latestRun, analysisArtifact, startAnalysis, followUpAnalysis])
   React.useEffect(() => {
     if (!analysisRevisionId || analysisRevisionRef.current !== analysisRevisionId) return
     const controller = new AbortController()
@@ -878,11 +919,14 @@ export default function NovelSourcesPage({
         if (page.runs) {
           currentRun = page.runs[0]
           setAnalysisRuns(page.runs)
+          setHydratedAnalysisRevision(analysisRevisionId)
           const watched = page.runs.find(run => run.commandId === watchedAnalysisCommandRef.current)
           if (watched && !isAnalysisRunActive(watched)) setWatchedAnalysisCommandId('')
         }
-        const replayed = stream.apply(page, selectedAnalysisModel)
-        if (!page.hasMore) setReplayedAnalysis(replayed ?? null)
+        const replayed = stream.apply(page, selectedAnalysisModel, value => {
+          commitAgentChunk(() => setReplayedAnalysis(value))
+        })
+        if (!page.chunks.length) commitAgentChunk(() => setReplayedAnalysis(replayed ?? null))
         if (import.meta.env.DEV) {
           for (const event of page.chunks) recordAgentConversationDebugChunk({
             runId: event.runId, turnId: currentRun?.commandId,
@@ -893,7 +937,9 @@ export default function NovelSourcesPage({
         }
         if ('publishedId' in page && page.publishedId !== publishedId) {
           publishedId = page.publishedId
-          await reloadPublishedAnalysis(analysisRevisionId)
+          void reloadPublishedAnalysis(analysisRevisionId).catch(error => {
+            if (!controller.signal.aborted) appMessage.error(error.message)
+          })
         }
       },
     }).catch(error => { if (!controller.signal.aborted) appMessage.error(error.message) })
@@ -1009,18 +1055,10 @@ export default function NovelSourcesPage({
           model: selectedAnalysisModel?.name,
         }]
       : []
-  const sendAnalysisMessage = async (content?: string) => {
-    const prompt = String(content ?? analysisInput).trim()
-    if (!prompt || !analysisRevisionId || hasBlockingAnalysis || waitingForRun) return
-    const sent = analysisArtifact
-      ? await followUpAnalysis(prompt)
-      : await startAnalysis(analysisRevisionId, prompt)
-    if (sent) setAnalysisInput('')
-  }
   const resultPanel = analysisArtifact ? <section className="novel-analysis-result-summary">
     <div className="novel-analysis-result-summary-copy">
       <span>分析结果</span>
-      <strong>{analysisArtifact.storyOverview ? '1 个故事概览 · ' : ''}{analysisArtifact.facts.length} 条硬事实 · {analysisCraftGroups.length ? `1 个写作 Skill（${analysisCraftGroups.length} 类）` : '未形成写作 Skill'}</strong>
+      <strong>{analysisArtifact.storyOverview ? '1 个故事概览 · ' : ''}{analysisArtifact.facts.length} 条硬事实 · {analysisArtifact.writingSkill ? '1 个写作方法' : '未形成写作 Skill'}</strong>
     </div>
     <div className="novel-analysis-result-summary-actions">
       <em className={publishedAnalysisId ? 'is-saved' : ''}>{publishedAnalysisId ? '已保存' : '待保存'}</em>
@@ -1071,34 +1109,32 @@ export default function NovelSourcesPage({
         },
         {
           key: 'craft',
-          label: `写作 Skill（${analysisCraftGroups.length} 类）`,
+          label: '写作方法与迁移检验',
           children: <section className="novel-analysis-result-tab">
             <div className="novel-analysis-tab-context-action">
-              <div><strong>提炼为写作 Skill</strong><span>保存后按技法类型生成一个 Skill；原文证据不会进入 Skill 正文。</span></div>
-              {publishedAnalysisId ? <PurrButton size="small" loading={creatingMethodCandidates} onClick={() => void createMethodCandidates()}>创建 Skill 草稿</PurrButton> : <small>保存分析后可用</small>}
+              <div><strong>保存写作方法</strong><span>先审核方法、适用边界和新场景试写，再加入方法库。</span></div>
+              {publishedAnalysisId ? <PurrButton size="small" disabled={analysisArtifact.skillReviewStatus !== 'pending_review'} loading={creatingMethodCandidates} onClick={() => void createMethodCandidates()}>创建方法草稿</PurrButton> : <small>保存分析后可用</small>}
             </div>
-            {analysisCraftGroups.length ? <div className="novel-analysis-skill-groups">{analysisCraftGroups.map((group) => <section key={group.kind} className="novel-analysis-skill-group"><header><strong>{group.label}</strong><span>{group.items.length} 项技法</span></header><div className="novel-analysis-result-list">{group.items.map((card, index) => <article key={card.id || `${card.title}:${index}`}><strong>{card.title}</strong><Markdown>{card.bodyMarkdown}</Markdown><PurrButton type="text" size="small" aria-label={`查看 ${card.evidence.length} 条原文证据`} icon={<ArrowRightIcon />} iconPosition="end" onClick={() => showEvidence(`${card.title} · 原文证据`, card.evidence, { kind: 'craft', heading: card.title, body: card.bodyMarkdown })}>原文证据 {card.evidence.length}</PurrButton></article>)}</div></section>)}</div> : <p className="novel-analysis-result-empty">没有形成可验证的写作 Skill。</p>}
+            <WritingSkillReview artifact={analysisArtifact} />
+            <details><summary>来源观察与证据</summary>{analysisArtifact.craftCards.map((card, index) => <article key={index}><strong>{card.title}</strong><Markdown>{card.bodyMarkdown}</Markdown><PurrButton type="text" onClick={() => showEvidence(card.title, card.evidence, { kind: 'craft', heading: card.title, body: card.bodyMarkdown })}>查看原文证据</PurrButton></article>)}</details>
           </section>,
         },
       ]}
     />
   </section> : null
-  const analysisController: AgentConversationController = {
-    capabilities: {
-      inputDisabled: Boolean(hasBlockingAnalysis || waitingForRun),
-      sessionNavigationDisabled: true,
-      submitMode: 'send',
-    },
+  const analysisController = createAnalysisConversationController({
     conversation: {
-      identity: `novel-analysis:${workId}:${latestRun?.runId || watchedAnalysisCommandId || 'empty'}`,
+      identity: `novel-analysis:${analysisScope}`,
       sessions: [],
       activeSessionId: workId,
       messages: conversationMessages,
       activities: {},
-      queuedSubmissions: [],
-      initializing: false,
-      running: Boolean(hasActiveAnalysis || waitingForRun),
-      stopping: busy && Boolean(hasActiveAnalysis),
+      queuedSubmissions: analysisQueued.map(item => ({ id: item.id, sessionId: analysisScope, content: item.content })),
+      queuePaused: analysisComposer.held(analysisScope),
+      initializing: !analysisReady,
+      running: Boolean(hasActiveAnalysis || waitingForRun || analysisPending),
+      stopping: busy && !analysisPending && Boolean(hasActiveAnalysis),
+      abortDisabled: !analysisReady || analysisPending || waitingForRun || !latestRun,
       paused: latestRun?.taskStatus === 'paused',
       resuming: busy && latestRun?.taskStatus === 'paused',
       attachmentsVersion: analysisArtifact?.artifactId || '',
@@ -1110,10 +1146,13 @@ export default function NovelSourcesPage({
         ? '继续追问这份分析，或说明你想调整的方向'
         : '输入分析重点，或点击“快速分析”',
       ariaLabel: '来源分析',
-      submitDisabled: !analysisInput.trim() || busy || hasBlockingAnalysis || waitingForRun,
+      ready: analysisReady && (!busy || analysisPending),
+      submitDisabled: !analysisInput.trim() || !analysisReady || !selectedAnalysisModel
+        || (busy && !analysisPending),
       selectedModel: selectedAnalysisModel || null,
       modelConfigs,
       selectModel: setAnalysisModelId,
+      updateModel: onUpdateModelConfig,
       openModelSettings: () => navigate('/settings'),
       taskPlan: currentPlan,
     },
@@ -1123,9 +1162,19 @@ export default function NovelSourcesPage({
       closeSession: () => undefined,
       renameSession: () => undefined,
       send: sendAnalysisMessage,
+      retryQueued: () => { analysisComposer.retry(analysisScope); refreshComposer() },
+      clearQueued: () => { analysisComposer.cancelQueue(analysisScope); refreshComposer() },
+      updateQueuedSubmission: (id, patch) => {
+        const changed = analysisComposer.updateQueued(analysisScope, id, patch)
+        if (changed) refreshComposer()
+        return changed
+      },
       abort: async () => {
+        if (!analysisReady || analysisRevisionRef.current !== analysisRevisionId || currentWorkRef.current !== workId) return
+        analysisComposer.cancelQueue(analysisScope)
+        refreshComposer()
         if (!latestRun) return
-        if (latestRun.taskId) {
+        if (latestRun.taskId && BLOCKING_ANALYSIS_STATUSES.has(latestRun.taskStatus || '')) {
           await controlAnalysis(latestRun, 'cancel')
           return
         }
@@ -1137,7 +1186,7 @@ export default function NovelSourcesPage({
       editMessage: () => undefined,
       resolveToolApproval: async () => ({ success: false, error: '来源分析不开放工具审批' }),
     },
-  }
+  })
   const analysisExtensions: AgentConversationExtensions = {
     renderAssistantAttachment: (message) => (
       message.agentRunId === latestRun?.runId ? resultPanel : null
@@ -1145,7 +1194,7 @@ export default function NovelSourcesPage({
   }
   const analysisPanel = <section className="novel-analysis-workspace">
     <header className="novel-analysis-workspace-header">
-      <span>梳理全局故事概览、事实脉络与写作技法</span>
+      <span>理解故事，蒸馏写作方法并检验迁移效果</span>
     </header>
     <AgentConversationPanel
       className="novel-analysis-agent-panel"
@@ -1172,7 +1221,7 @@ export default function NovelSourcesPage({
         <header className="novel-detail-heading">
           <div><span>{detailWork.source_type === 'frozen_book' ? '原创冻结' : '本地导入'}</span><h1>{detailWork.title}</h1><p>{selectedRevision?.character_count.toLocaleString() ?? '—'} 字符 · 版本 {selectedRevision?.version_no ?? '—'} · 只读</p></div>
           <div className="novel-detail-actions">
-            <PurrButton type="primary" disabled={!analysisRevisionId || !modelConfigs.length || busy || hasBlockingAnalysis || waitingForRun} onClick={() => void startAnalysis(analysisRevisionId)}>快速分析</PurrButton>
+            <PurrButton type="primary" disabled={!analysisReady || !selectedAnalysisModel || busy || analysisPending || hasBlockingAnalysis || waitingForRun} onClick={() => void startAnalysis(analysisRevisionId)}>快速分析</PurrButton>
             <PurrButton danger icon={<DeleteIcon />} onClick={() => void deleteWork(detailWork)}>删除来源</PurrButton>
           </div>
         </header>
@@ -1215,7 +1264,7 @@ export default function NovelSourcesPage({
       /> : null}
     </PurrModal> : null}
     {analysisArtifact ? <PurrModal
-      title={`分析结果 · ${analysisArtifact.facts.length} 条硬事实 · ${analysisCraftGroups.length ? '1 个写作 Skill' : '未形成写作 Skill'}`}
+      title={`分析结果 · ${analysisArtifact.facts.length} 条硬事实 · ${analysisArtifact.writingSkill ? '1 个写作方法' : '未形成写作 Skill'}`}
       open={analysisResultOpen}
       width="min(1180px, calc(100vw - 48px))"
       footer={analysisResultActions}

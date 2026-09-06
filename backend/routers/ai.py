@@ -21,6 +21,7 @@ from application.request_mapping import (
     build_chat_provider_options,
     validate_writing_request_contract,
 )
+from dependencies import get_db
 from schemas.ai import (
     CaptureAiErrorReportRequest,
     ChatStreamRequest,
@@ -512,6 +513,9 @@ async def get_agent_run_tool_diagnostics(run_id: str, after: int = 0):
     """Read private tool IO only through the development diagnostics gate."""
     from config import DEV_DIAGNOSTICS_ENABLED
     from dependencies import get_db
+    from application.screenplay_tool_presentation import (
+        reproject_screenplay_tool_diagnostics,
+    )
     from infrastructure.persistence.run_store import get_run
     from infrastructure.persistence.tool_diagnostics import read_tool_diagnostics
 
@@ -522,9 +526,10 @@ async def get_agent_run_tool_diagnostics(run_id: str, after: int = 0):
     db = get_db()
     if await get_run(db, run_id) is None:
         return {"success": False, "error": "Agent Run 不存在"}
+    page = await read_tool_diagnostics(db, run_id, after=after)
     return {
         "success": True,
-        "data": await read_tool_diagnostics(db, run_id, after=after),
+        "data": await reproject_screenplay_tool_diagnostics(db, page),
     }
 
 
@@ -863,6 +868,12 @@ def _fallback_session_title_from_prompt(prompt: str | None) -> str:
     return normalize_session_title(t)
 
 
+@router.get("/ai/model-descriptors")
+async def get_model_descriptors():
+    from infrastructure.models.profiles.descriptors import model_descriptors
+    return {"success": True, "data": model_descriptors()}
+
+
 @router.post("/ai/title")
 async def generate_title(body: GenerateTitleRequest):
     key = (body.apiKey or "").strip()
@@ -880,53 +891,14 @@ async def generate_title(body: GenerateTitleRequest):
         title_options.pop(option_key, None)
 
     try:
-        if body.apiProvider == "anthropic":
-            from infrastructure.models.anthropic_chat import (
-                generate_title as anth_title,
-            )
-
-            title = await anth_title(key, body.prompt, title_options)
-            title = (title or "").strip()
-            if not title:
-                title = _fallback_session_title_from_prompt(body.prompt)
-                if title:
-                    logger.info("[ai-generate-title] anthropic used prompt fallback")
-                else:
-                    logger.warning("[ai-generate-title] anthropic empty title model=%s", model)
-            if not title:
-                return {"success": False, "error": "标题生成结果为空"}
-            logger.info("[ai-generate-title] 生成标题: %s", title)
-            return {"success": True, "data": title}
-
-        if body.apiProvider == "zai":
-            from infrastructure.models.zai_chat import generate_title as zai_title
-
-            title = await zai_title(
-                key,
-                body.prompt,
-                title_options,
-            )
-            title = (title or "").strip()
-            if not title:
-                title = _fallback_session_title_from_prompt(body.prompt)
-                if title:
-                    logger.info("[ai-generate-title] zai used prompt fallback")
-            if not title:
-                return {"success": False, "error": "标题生成结果为空"}
-            logger.info("[ai-generate-title] 生成标题: %s", title)
-            return {"success": True, "data": title}
-
-        from infrastructure.models.openai_chat import generate_title as openai_title
-
-        title = await openai_title(key, body.prompt, title_options)
-        title = (title or "").strip()
-        if not title:
-            title = _fallback_session_title_from_prompt(body.prompt)
-            if title:
-                logger.info("[ai-generate-title] openai used prompt fallback")
+        from application.session_title_service import generate_session_title
+        title = await generate_session_title(
+            api_key=key, provider=body.apiProvider, options=title_options,
+            prompt=body.prompt, db=get_db(),
+        )
+        title = title or _fallback_session_title_from_prompt(body.prompt)
         if not title:
             return {"success": False, "error": "标题生成结果为空"}
-        logger.info("[ai-generate-title] 生成标题: %s", title)
         return {"success": True, "data": title}
     except Exception as e:
         return {"success": False, "error": str(e)}

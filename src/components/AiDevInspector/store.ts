@@ -9,6 +9,7 @@ import {
   isCanonicalOutputEvent,
   type CanonicalOutputEvent,
 } from "../../agent-runtime/canonicalOutput.ts";
+import { resolveLocalizedToolDisplayName } from "../AgentConversation/toolCallLabels.ts";
 
 type AiStreamRequest = Parameters<ElectronAPI["aiChatStream"]>[0];
 export type AiDebugChunk = Parameters<
@@ -35,6 +36,7 @@ export interface AiDebugTool {
   batchIndex: number;
   index: number;
   name: string;
+  displayName?: string;
   argumentsText: string;
   argumentsValue: unknown;
   status: AiDebugToolStatus;
@@ -74,10 +76,11 @@ export interface AiDebugModelCall {
 
 export interface AiDebugTokenUsage {
   inputTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
+  generationTokens: number;
+  reasoningTokens: number | null;
   totalTokens: number;
   unreportedAttempts: number;
+  unreportedReasoningAttempts: number;
   modelAttempts: number;
   complete: boolean;
 }
@@ -242,18 +245,26 @@ export function aiDebugTurnTokenUsage(
   if (!usages.length) return undefined;
   const total = usages.reduce<AiDebugTokenUsage>((sum, usage) => ({
     inputTokens: sum.inputTokens + usage.inputTokens,
-    outputTokens: sum.outputTokens + usage.outputTokens,
-    reasoningTokens: sum.reasoningTokens + usage.reasoningTokens,
+    generationTokens: sum.generationTokens + usage.generationTokens,
+    reasoningTokens: (
+      sum.reasoningTokens === null || usage.reasoningTokens === null
+        ? null
+        : sum.reasoningTokens + usage.reasoningTokens
+    ),
     totalTokens: sum.totalTokens + usage.totalTokens,
     unreportedAttempts: sum.unreportedAttempts + usage.unreportedAttempts,
+    unreportedReasoningAttempts: (
+      sum.unreportedReasoningAttempts + usage.unreportedReasoningAttempts
+    ),
     modelAttempts: sum.modelAttempts + usage.modelAttempts,
     complete: sum.complete && usage.complete,
   }), {
     inputTokens: 0,
-    outputTokens: 0,
+    generationTokens: 0,
     reasoningTokens: 0,
     totalTokens: 0,
     unreportedAttempts: 0,
+    unreportedReasoningAttempts: 0,
     modelAttempts: 0,
     complete: true,
   });
@@ -275,6 +286,23 @@ let state: AiDebugState = {
 let eventSequence = 0;
 let notifyScheduled = false;
 const listeners = new Set<() => void>();
+const visibilityListeners = new Set<() => void>();
+let inspectorVisible = false;
+
+export function setAiDebugInspectorVisible(visible: boolean): void {
+  if (!DEBUG_STORE_ENABLED || inspectorVisible === visible) return;
+  inspectorVisible = visible;
+  visibilityListeners.forEach(listener => listener());
+}
+
+export function getAiDebugInspectorVisible(): boolean {
+  return inspectorVisible;
+}
+
+export function subscribeAiDebugInspectorVisibility(listener: () => void): () => void {
+  visibilityListeners.add(listener);
+  return () => visibilityListeners.delete(listener);
+}
 
 function latestUserPrompt(run: AiDebugRun): string {
   const message = [...run.request.messages]
@@ -391,7 +419,7 @@ function retainRecentTurns(runs: AiDebugRun[]): AiDebugRun[] {
 }
 
 function scheduleNotify(): void {
-  if (notifyScheduled) return;
+  if (notifyScheduled || listeners.size === 0) return;
   notifyScheduled = true;
   const notify = () => {
     notifyScheduled = false;
@@ -640,11 +668,21 @@ function upsertTools(
     ) {
       const display = chunk.payload.display as Record<string, unknown> | undefined;
       const params = display?.labelParams as Record<string, unknown> | undefined;
+      const rawDisplayNames = params?.displayNames;
+      const displayNames = rawDisplayNames
+        && typeof rawDisplayNames === "object"
+        && !Array.isArray(rawDisplayNames)
+        ? Object.fromEntries(
+          Object.entries(rawDisplayNames as Record<string, unknown>)
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        )
+        : undefined;
       tools = [...tools, {
         id: operationId,
         batchIndex: tools.length,
         index: 0,
         name: String(params?.toolName || "工具操作"),
+        displayName: resolveLocalizedToolDisplayName(displayNames),
         argumentsText: "",
         argumentsValue: undefined,
         status: "running",
@@ -842,6 +880,12 @@ function nonNegativeUsageInteger(value: unknown): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
+function nullableUsageInteger(value: unknown): number | null {
+  return value === null || value === undefined
+    ? null
+    : nonNegativeUsageInteger(value);
+}
+
 function persistedTokenUsage(
   activity: AiAgentRunSnapshot['run']['activity'],
   complete: boolean,
@@ -849,13 +893,16 @@ function persistedTokenUsage(
   const usage = activity?.usage;
   if (!usage) return undefined;
   const inputTokens = nonNegativeUsageInteger(usage.inputTokens);
-  const outputTokens = nonNegativeUsageInteger(usage.outputTokens);
+  const generationTokens = nonNegativeUsageInteger(usage.generationTokens);
   return {
     inputTokens,
-    outputTokens,
-    reasoningTokens: nonNegativeUsageInteger(usage.reasoningTokens),
-    totalTokens: nonNegativeUsageInteger(usage.totalTokens) || inputTokens + outputTokens,
+    generationTokens,
+    reasoningTokens: nullableUsageInteger(usage.reasoningTokens),
+    totalTokens: nonNegativeUsageInteger(usage.totalTokens) || inputTokens + generationTokens,
     unreportedAttempts: nonNegativeUsageInteger(usage.unreportedAttempts),
+    unreportedReasoningAttempts: nonNegativeUsageInteger(
+      usage.unreportedReasoningAttempts,
+    ),
     modelAttempts: nonNegativeUsageInteger(activity?.modelAttemptCount),
     complete,
   };
@@ -870,14 +917,22 @@ function runtimeTokenUsage(
     return current;
   }
   const inputTokens = nonNegativeUsageInteger(runtimeData.data.actualInputTokens);
-  const outputTokens = nonNegativeUsageInteger(runtimeData.data.actualOutputTokens);
+  const generationTokens = nonNegativeUsageInteger(
+    runtimeData.data.actualGenerationTokens,
+  );
   return {
     inputTokens,
-    outputTokens,
-    reasoningTokens: nonNegativeUsageInteger(runtimeData.data.reasoningOutputTokens),
+    generationTokens,
+    reasoningTokens: nullableUsageInteger(runtimeData.data.reasoningTokens),
     totalTokens: nonNegativeUsageInteger(runtimeData.data.actualTotalTokens)
-      || inputTokens + outputTokens,
+      || inputTokens + generationTokens,
     unreportedAttempts: 0,
+    unreportedReasoningAttempts: (
+      runtimeData.data.reasoningTokens === null
+      || runtimeData.data.reasoningTokens === undefined
+        ? 1
+        : 0
+    ),
     modelAttempts,
     complete: false,
   };
@@ -931,6 +986,7 @@ export function startAiDebugRun(
     conversationId?: number;
     conversationRootRunId?: string;
     source?: string;
+    openInspector?: boolean;
   } = {},
 ): void {
   if (!DEBUG_STORE_ENABLED) return;
@@ -974,9 +1030,18 @@ export function startAiDebugRun(
     runs: retainRecentTurns([run, ...withoutSameId]),
     selectedRunId: streamId,
   });
+  if (context.openInspector !== false) setAiDebugInspectorVisible(true);
 }
 
-/** Apply the durable per-Run usage counters without replaying the Run again. */
+function persistedTimestamp(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    ? `${value.replace(' ', 'T')}Z` : value;
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+/** Apply durable counters and timestamps, independently of browser replay speed. */
 export function recordAiDebugRunUsageSnapshot(
   snapshot: AiAgentRunSnapshot,
 ): void {
@@ -987,8 +1052,16 @@ export function recordAiDebugRunUsageSnapshot(
     snapshot.run.activity,
     snapshot.run.status !== 'running',
   );
-  if (!usage) return;
-  replaceRunByAgentRunId(runId, (run) => ({ ...run, tokenUsage: usage }));
+  const startedAt = persistedTimestamp(snapshot.run.createdAt);
+  const updatedAt = persistedTimestamp(snapshot.run.updatedAt);
+  const terminal = ['done', 'failed', 'canceled'].includes(snapshot.run.status);
+  replaceRunByAgentRunId(runId, (run) => ({
+    ...run, tokenUsage: usage ?? run.tokenUsage,
+    model: run.model || snapshot.run.provenance.modelName || undefined,
+    startedAt: startedAt ?? run.startedAt,
+    updatedAt: updatedAt ?? run.updatedAt,
+    finishedAt: terminal ? updatedAt ?? run.finishedAt : run.finishedAt,
+  }));
 }
 
 export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void {
@@ -1075,6 +1148,7 @@ export function recordAgentConversationDebugChunk(data: {
       turnId: data.turnId,
       conversationRootRunId: data.conversationRootRunId,
       source: data.source || 'Agent 对话',
+      openInspector: false,
     });
   } else if (
     data.conversationRootRunId
@@ -1086,7 +1160,9 @@ export function recordAgentConversationDebugChunk(data: {
     }));
   }
   recordAiDebugChunk(streamId, data.chunk);
-  if (data.source) replaceRun(streamId, run => ({ ...run, source: data.source! }));
+  if (data.source && existing && existing.source !== data.source) {
+    replaceRun(streamId, run => ({ ...run, source: data.source! }));
+  }
 }
 
 export function recordAiDebugErrorReportStatus(

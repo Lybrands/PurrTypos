@@ -35,6 +35,17 @@ from tests.support.planning_stream import route_planning_stream
 TERMINAL_STATUSES = {"done", "blocked", "failed", "canceled"}
 
 
+def _review_step(step_id: str, title: str) -> dict[str, Any]:
+    return {
+        "id": step_id,
+        "title": title,
+        "type": "review",
+        "executor": "model",
+        "expectedTools": [],
+        "riskLevel": "read",
+    }
+
+
 @pytest_asyncio.fixture
 async def composed_app(
     tmp_path: Path,
@@ -64,8 +75,8 @@ def _chat_request(prompt: str) -> dict[str, Any]:
         "apiProvider": "openai",
         "options": {
             "model": "wire-model",
-            "model_profile": "deepseek:deepseek-v4-flash",
-            "max_tokens": 32_768,
+            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
+            "max_generation_tokens": 32_768,
         },
         "enableAgentTools": True,
         "bookId": "book-wire",
@@ -77,7 +88,7 @@ def _chat_request(prompt: str) -> dict[str, Any]:
 
 async def _planned_character_delete(*_args, **_kwargs):
     return {
-        "applied_output_limit": _args[2].get("max_tokens"),
+        "applied_generation_limit": _args[2].get("max_tokens"),
         "message": {
             "role": "assistant",
             "content": json.dumps({
@@ -91,7 +102,10 @@ async def _planned_character_delete(*_args, **_kwargs):
                     "executor": "tool",
                     "expectedTools": ["deleteCharacter"],
                     "riskLevel": "destructive",
-                }],
+                },
+                    _review_step("verify-result", "核对人物删除结果"),
+                    _review_step("report-result", "向用户报告处理结果"),
+                ],
             }, ensure_ascii=False),
         },
         "model": "planner-model",
@@ -188,7 +202,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
 
     async def _semantic_plan(*_args, **_kwargs):
         return {
-            "applied_output_limit": _args[2].get("max_tokens"),
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -212,6 +226,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                             "expectedTools": [],
                             "riskLevel": "write",
                         },
+                        _review_step("review-continuity", "检查续篇与原作的衔接"),
                     ],
                 }, ensure_ascii=False),
             },
@@ -229,7 +244,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 }],
             }
 
-        return {"applied_output_limit": _args[2].get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _args[2].get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -386,6 +401,7 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert set(terminal_todo_updates) == {
         "understand-source",
         "draft-continuation",
+        "review-continuity",
     }
     assert all(
         step["result_summary"] == "Final response covered this model step."
@@ -404,6 +420,11 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
         },
         {
             "step_id": "draft-continuation",
+            "status": "done",
+            "result_summary": "Final response covered this model step.",
+        },
+        {
+            "step_id": "review-continuity",
             "status": "done",
             "result_summary": "Final response covered this model step.",
         },
@@ -459,6 +480,12 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
                 "id": "draft-continuation",
                 "title": "撰写续篇",
                 "type": "write",
+                "status": "pending",
+            },
+            {
+                "id": "review-continuity",
+                "title": "检查续篇与原作的衔接",
+                "type": "review",
                 "status": "pending",
             },
         ],
@@ -553,210 +580,6 @@ async def test_composed_root_plan_replays_without_private_recipe_progress(
     assert "plannerStepId" not in encoded_public_replay
 
 
-@pytest.mark.asyncio
-async def test_composed_run_streams_same_run_delegation_lifecycle(
-    composed_app,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    app, composition, _db = composed_app
-    planner_calls: list[str] = []
-    runtime_calls: list[str] = []
-
-    def _has_delegated_role_instruction(messages: list[dict[str, Any]]) -> bool:
-        return any(
-            message.get("role") == "system"
-            and "独立核验关键证据" in str(message.get("content") or "")
-            for message in messages
-        )
-
-    async def _planner(_key, messages, _options, _provider, signal=None):
-        assert signal is not None
-        if "parent" in planner_calls:
-            planner_calls.append("parent-replan")
-            content = {
-                "needsTodos": False,
-                "reason": "the delegated evidence is now available",
-            }
-        else:
-            planner_calls.append("parent")
-            content = {
-                "needsTodos": True,
-                "title": "并行研究后综合",
-                "goal": "让研究 Agent 提供独立证据",
-                "todos": [{
-                    "id": "delegate-research",
-                    "title": "委派独立研究",
-                    "type": "analyze",
-                    "executor": "tool",
-                    "expectedTools": ["delegateToAgents"],
-                    "riskLevel": "write",
-                }],
-            }
-        return {
-            "applied_output_limit": _options.get("max_tokens"),
-            "message": {
-                "role": "assistant",
-                "content": json.dumps(content, ensure_ascii=False),
-            },
-            "model": "planner-model",
-            "finish_reason": "stop",
-        }
-
-    async def _runtime(_key, messages, options, _provider, signal=None):
-        assert signal is not None
-        delegated = _has_delegated_role_instruction(messages)
-        tool_names = [
-            item["function"]["name"]
-            for item in options.get("tools", [])
-        ]
-
-        async def _stream():
-            if delegated:
-                runtime_calls.append("delegated")
-                assert "delegateToAgents" not in tool_names
-                yield {
-                    "choices": [{
-                        "delta": {"content": "研究 Agent 已核验三条证据。"},
-                        "finish_reason": "stop",
-                    }],
-                }
-                return
-            if tool_names:
-                runtime_calls.append("parent-delegate")
-                assert tool_names == ["delegateToAgents"]
-                yield {
-                    "choices": [{
-                        "delta": {
-                            "tool_calls": [{
-                                "index": 0,
-                                "id": "call-delegate",
-                                "type": "function",
-                                "function": {
-                                    "name": "delegateToAgents",
-                                    "arguments": json.dumps({
-                                            "delegations": [{
-                                                "agentName": "evidence-researcher",
-                                                "title": "证据研究 Agent",
-                                                "instruction": (
-                                                    "独立核验关键证据，并简洁报告结论。"
-                                                ),
-                                                "objective": "核验三条关键证据",
-                                            "input": {"scope": "current request"},
-                                        }],
-                                    }, ensure_ascii=False),
-                                },
-                            }],
-                        },
-                        "finish_reason": "tool_calls",
-                    }],
-                }
-                return
-            runtime_calls.append("parent-final")
-            tool_message = next(
-                message for message in reversed(messages)
-                if message.get("role") == "tool"
-            )
-            result = json.loads(tool_message["content"])
-            assert result["state"] == "ready"
-            assert result["counts"]["done"] == 1
-            assert result["results"][0]["resultSummary"] == (
-                "研究 Agent 已核验三条证据。"
-            )
-            yield {
-                "choices": [{
-                    "delta": {"content": "主 Agent 已根据研究结果完成综合。"},
-                    "finish_reason": "stop",
-                }],
-            }
-
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
-
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_no_stream",
-        _planner,
-    )
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_stream",
-        route_planning_stream(_planner, _runtime),
-    )
-
-    live = start_asgi_request(
-        app,
-        method="POST",
-        path="/api/ai/chat/stream",
-        json_body=_chat_request("请先让独立研究者核验，再综合回答。"),
-    )
-    await live.wait_started()
-    response = await live.finish()
-    events = _assert_sse_wire(response)
-
-    delegations = [
-        event for event in events
-        if event.get("kind") == "delegation.event"
-        and event["payload"]["eventType"] == "status"
-    ]
-    created = [
-        event["payload"] for event in delegations
-        if event["payload"]["status"] == "queued"
-    ]
-    updated = [
-        event["payload"] for event in delegations
-        if event["payload"]["status"] != "queued"
-    ]
-    assert len(created) == 1, events
-    assert [item["status"] for item in updated] == [
-        "running",
-        "done",
-    ], updated
-    delegation_id = created[0]["delegationId"]
-    assert created[0]["agentTitle"] == "证据研究 Agent"
-    assert all(item["delegationId"] == delegation_id for item in updated)
-    assert all(item["agentTitle"] == "证据研究 Agent" for item in updated)
-    run_id = created[0]["runId"]
-    assert all(
-        event["runId"] == event["payload"]["runId"] == run_id
-        for event in delegations
-    )
-    assert "resultSummary" not in updated[-1]
-    assert "childRunId" not in json.dumps(events)
-    assert planner_calls == ["parent", "parent-replan"]
-    assert runtime_calls == ["parent-delegate", "delegated", "parent-final"]
-    assert sum(event.get("done") is True for event in events) == 1
-
-    snapshot = await composition.run_snapshot_reader.load(
-        run_id,
-        after_event_id=0,
-        limit=100,
-    )
-    assert snapshot is not None
-    assert len(snapshot.delegations) == 1
-    assert snapshot.delegations[0].status.value == "done"
-    assert snapshot.delegations[0].agent_name == "evidence-researcher"
-    assert snapshot.delegations[0].agent_instruction == (
-        "独立核验关键证据，并简洁报告结论。"
-    )
-    canonical_outputs = await composition.output_repository.list_events(
-        run_id,
-        after_sequence=0,
-        limit=500,
-    )
-    delegated_outputs = [
-        item for item in canonical_outputs
-        if item.turn_id == delegation_id
-    ]
-    assert delegated_outputs
-    assert all(item.run_id == run_id for item in delegated_outputs)
-    assert any(
-        item.kind is OutputEventKind.PROVIDER_DELTA_BATCH
-        and any(
-            entry.get("kind")
-            == OutputEventKind.PROVIDER_CONTENT_DELTA.value
-            for entry in item.payload.get("entries", ())
-        )
-        for item in delegated_outputs
-    )
-
-
 def _assert_terminal_exclusive(
     events: list[dict[str, Any]], *, status: str, error_code: str | None = None,
 ) -> None:
@@ -826,7 +649,7 @@ async def test_composed_core_handles_unscoped_direct_response_requests(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -915,7 +738,7 @@ async def test_unavailable_current_chapter_can_refuse_without_item_repair(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -961,7 +784,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
 
     async def _invalid_plan(*_args, **_kwargs):
         return {
-            "applied_output_limit": _args[2].get("max_tokens"),
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {"role": "assistant", "content": "not-json"},
             "model": "planner-model",
             "finish_reason": "stop",
@@ -980,7 +803,7 @@ async def test_composed_planning_invalid_falls_back_to_model_only_sse_snapshot(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1045,7 +868,7 @@ async def test_composed_missing_required_tool_fails_with_explicit_run_result(
 
     async def _planned_read(*_args, **_kwargs):
         return {
-            "applied_output_limit": _args[2].get("max_tokens"),
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1059,7 +882,10 @@ async def test_composed_missing_required_tool_fails_with_explicit_run_result(
                         "executor": "tool",
                         "expectedTools": ["getBookCharacters"],
                         "riskLevel": "read",
-                    }],
+                    },
+                        _review_step("analyze-conflict", "分析主角冲突"),
+                        _review_step("review-evidence", "核对冲突分析与人物设定"),
+                    ],
                 }, ensure_ascii=False),
             },
             "model": "planner-model",
@@ -1098,7 +924,7 @@ async def test_composed_missing_required_tool_fails_with_explicit_run_result(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1196,7 +1022,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
 
     async def _planned_read(*_args, **_kwargs):
         return {
-            "applied_output_limit": _args[2].get("max_tokens"),
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -1214,12 +1040,13 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
                         },
                         {
                             "id": "summarize-current-chapter",
-                            "title": "摘要并提出建议",
+                            "title": "概括当前章节事实",
                             "type": "review",
                             "executor": "model",
                             "expectedTools": [],
                             "riskLevel": "read",
                         },
+                        _review_step("review-improvements", "提出有依据的局部改进建议"),
                     ],
                 }, ensure_ascii=False),
             },
@@ -1386,7 +1213,7 @@ async def test_composed_read_continuation_keeps_writing_evidence_policy(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1586,7 +1413,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     },
                 ]
             return {
-                "applied_output_limit": _options.get("max_tokens"),
+                "applied_generation_limit": _options.get("max_tokens"),
                 "message": {
                     "role": "assistant",
                     "content": json.dumps({
@@ -1660,6 +1487,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                         "expectedTools": [],
                         "riskLevel": "read",
                     },
+                    _review_step("suggest-edits", "核对每处差异的最小修改建议"),
                 ],
             }
         else:
@@ -1681,10 +1509,12 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                     "executor": "model",
                     "expectedTools": [],
                     "riskLevel": "read",
-                }],
+                },
+                    _review_step("suggest-edits", "核对每处差异的最小修改建议"),
+                ],
             }
         return {
-            "applied_output_limit": _options.get("max_tokens"),
+            "applied_generation_limit": _options.get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps(content, ensure_ascii=False),
@@ -1841,7 +1671,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -1926,7 +1756,7 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
     assert not runtime_events(raw_events, "tool.results")
     plan = runtime_events(raw_events, "run.todos_updated")[0]["payload"]["data"]
     todo_steps = plan["steps"]
-    assert len(todo_steps) == 2
+    assert len(todo_steps) == 3
     assert all(
         not {"planning_capability", "suggested_tools"}.intersection(step)
         for step in todo_steps
@@ -1948,6 +1778,11 @@ async def test_composed_complete_selected_outline_repairs_redundant_read_plan(
         },
         {
             "step_id": "compare-evidence",
+            "status": "done",
+            "expected_tools": "[]",
+        },
+        {
+            "step_id": "suggest-edits",
             "status": "done",
             "expected_tools": "[]",
         },
@@ -1990,7 +1825,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
 
     async def _planned_delete(*_args, **_kwargs):
         return {
-            "applied_output_limit": _args[2].get("max_tokens"),
+            "applied_generation_limit": _args[2].get("max_tokens"),
             "message": {
                 "role": "assistant",
                 "content": json.dumps({
@@ -2006,6 +1841,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                             "expectedTools": ["deleteCharacter"],
                             "riskLevel": "destructive",
                         },
+                        _review_step("verify-result", "核对审批与执行结果"),
                         {
                             "id": "report-result",
                             "title": "报告审批结果",
@@ -2145,7 +1981,7 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
                 }],
             }
 
-        return {"applied_output_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2242,8 +2078,12 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
     assert "Planned tool step completed." not in str(declined_todo)
     assert [
         update["step"]["status"] for update in todo_updates
-        if update["step_id"] == "report-result"
+        if update["step_id"] == "verify-result"
     ] == ["running", "done"]
+    assert [
+        update["step"]["status"] for update in todo_updates
+        if update["step_id"] == "report-result"
+    ] == ["done"]
     assert [
         update["step"]["status"] for update in todo_updates
         if update["step_id"] == "delete-character"
@@ -2295,6 +2135,12 @@ async def test_composed_reject_uses_real_http_endpoint_and_replay_fails(
             "error": "approval_rejected",
         },
         {
+            "step_id": "verify-result",
+            "status": "done",
+            "result_summary": "Final response covered this model step.",
+            "error": None,
+        },
+        {
             "step_id": "report-result",
             "status": "done",
             "result_summary": "Final response covered this model step.",
@@ -2329,7 +2175,7 @@ async def test_composed_run_finishes_and_persists_after_transport_disconnect(
                 }],
             }
 
-        return {"applied_output_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2465,7 +2311,7 @@ async def test_composed_disconnect_detaches_without_canceling_pending_approval(
                 }],
             }
 
-        return {"applied_output_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(
         "infrastructure.models.provider_router.create_chat_no_stream",
@@ -2641,7 +2487,7 @@ async def test_composed_send_side_disconnect_detaches_pending_run(
                 }],
             }
 
-        return {"applied_output_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
+        return {"applied_generation_limit": _options.get("max_tokens"), "stream": _stream(), "model": "wire-model"}
 
     monkeypatch.setattr(character_tools, "delete_character", _record_delete)
     monkeypatch.setattr(

@@ -7,8 +7,6 @@ from pathlib import Path
 
 from purra.contracts import AgentRunRequest
 from application.memory_reranking import ModelBackedMemoryReranker
-from application.prepared_read_context import PreparedReadContextProvider
-from infrastructure.writing.tools.prepared_reads import WritingPreparedReads
 from application.memory_operations import MemoryApplicationService
 from application.memory_evidence import BookMemoryEvidenceValidator
 from application.writing_method_service import WritingMethodService
@@ -43,7 +41,6 @@ class WritingAgentProfile:
     domain_namespace = WRITING_DOMAIN_NAMESPACE
 
     def __init__(self, db, *, skills_dir: Path, memory_resource=None) -> None:
-        self._prepared_reads = WritingPreparedReads(db)
         self._catalog_repository = SqliteWritingCatalogRepository(db)
         memory_operations = MemoryApplicationService(db, memory_resource)
         self._memory_operations = memory_operations
@@ -66,9 +63,7 @@ class WritingAgentProfile:
                 ),
                 skill_items=tuple(skill_catalog.skill_items()),
             ),
-            context_provider=PreparedReadContextProvider(
-                WritingContextProvider(self._context_source), self._prepared_reads.load,
-            ),
+            context_provider=WritingContextProvider(self._context_source),
         )
 
     @property
@@ -142,11 +137,10 @@ class WritingAgentProfile:
         return writing_context_claims(request)
 
     def context_provider_factory(self):
-        return lambda model_tasks: PreparedReadContextProvider(
-            WritingContextProvider(self._context_source.with_memory_reranker(
+        return lambda model_tasks: WritingContextProvider(
+            self._context_source.with_memory_reranker(
                 ModelBackedMemoryReranker(model_tasks), run_id=model_tasks.run_id,
-            )),
-            self._prepared_reads.load,
+            ),
         )
 
     def model_input_evidence_validator(self, request: AgentRunRequest):

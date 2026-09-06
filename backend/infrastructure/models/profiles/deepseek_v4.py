@@ -15,10 +15,11 @@ class DeepSeekV4FlashProfile(ModelProfile):
         "https://api.deepseek.com",
         "https://api.deepseek.com/v1",
     })
-    max_call_output_tokens = 393_216
+    max_generation_tokens = 393_216
     capability_source = "https://api-docs.deepseek.com/quick_start/pricing"
     thinking_token_accounting = ThinkingTokenAccounting.INCLUDED
     supports_json_object_output = True
+    reasoning_effort_options = ("low", "high", "max")
     reasoning_replay = ReasoningReplayPolicy.REQUIRED
     # The thinking endpoint rejects forced tool choice. AUTO remains usable,
     # and PurrA keeps the logical tool requirement fail-closed.

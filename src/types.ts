@@ -472,7 +472,7 @@ export interface ScreenplayOperationProjection {
 export interface ScreenplayOperationUsage {
   invocationCount: number;
   inputTokens: number;
-  outputTokens: number;
+  generationTokens: number;
   reasoningTokens: number | null;
 }
 
@@ -544,8 +544,12 @@ export interface ScreenplayConversationRuntimeInput {
     model: string;
     model_profile?: string;
     temperature?: number;
-    max_tokens?: number;
-    thinking?: { type: 'disabled' | 'enabled' };
+    profile_max_generation_tokens?: number;
+    max_generation_tokens?: number;
+    thinking?: { type: 'disabled' | 'enabled'; budget_tokens?: number };
+    supports_thinking?: boolean;
+    thinking_only?: boolean;
+    reasoning_effort?: AiReasoningEffort;
     context_window?: AiContextWindow;
   };
   contextWindow?: AiContextWindow;
@@ -776,7 +780,25 @@ export interface NovelAnalysisStoryOverview {
   contentDigest?: string;
 }
 
+export interface DistilledWritingSkill {
+  name: string;
+  purpose: string;
+  markdown: string;
+}
+export interface WritingSkillTrials {
+  trials: Array<{ brief: string; baseline: string; application: string; stepApplications: Array<{ step: number; observation: string }> }>;
+}
+export interface WritingSkillDistillation {
+  revisionNotes: string[];
+  initialTrials: WritingSkillTrials;
+  transferTrials: WritingSkillTrials;
+  assessment: { checks: Array<{ dimension: string; passed: boolean; reason: string }> };
+}
+
 export interface NovelAnalysisArtifact {
+  writingSkill?: DistilledWritingSkill;
+  distillation?: WritingSkillDistillation;
+  skillReviewStatus?: "pending_review" | "needs_revision";
   artifactId: string;
   artifactKind: string;
   sourceRevisionId: string;
@@ -842,6 +864,9 @@ export interface NovelAnalysisRun {
 }
 
 export interface PublishedNovelAnalysis {
+  writingSkill?: DistilledWritingSkill;
+  distillation?: WritingSkillDistillation;
+  skillReviewStatus?: "pending_review" | "needs_revision";
   id: string;
   sourceRevisionId: string;
   versionNo: number;
@@ -1293,19 +1318,13 @@ export interface AiContextCompactionState {
 }
 
 export interface AiOutputBudgetState {
-  policyKey: string;
-  workUnits: number;
-  targetTokens: number;
-  requestedTokens: number;
-  effectiveTokens: number;
-  reasoningReserveTokens: number;
-  thinkingEnabled: boolean;
-  taskHardCapTokens: number;
-  modelMaxOutputTokens?: number | null;
-  contextMaxOutputTokens: number;
-  limitingFactor: 'task_estimate' | 'task_hard_cap' | 'model_capability' | 'context_available';
-  executionMode: 'single' | 'chunked';
-  lengthStrategy: 'fail' | 'continue' | 'retry_larger';
+  maxGenerationTokens: number;
+  generationSource: 'user' | 'model_profile' | 'context_capacity';
+  profileMaxGenerationTokens: number;
+  requestedUserMaxGenerationTokens?: number | null;
+  resultCapacityTargetTokens?: number | null;
+  resultCapacitySource?: 'user' | 'workflow_policy' | null;
+  nonResultHeadroomTokens?: number | null;
 }
 
 export interface AiContextBudgetState {
@@ -1325,14 +1344,14 @@ export interface AiContextBudgetState {
   memoryTokens?: number;
   associatedTokens?: number;
   actualInputTokens?: number;
-  actualOutputTokens?: number;
+  actualGenerationTokens?: number;
   actualTotalTokens?: number;
   cachedInputTokens?: number;
-  reasoningOutputTokens?: number;
+  reasoningTokens?: number | null;
   actualUsageRound?: number;
   inputTokenEstimateAtUsage?: number;
   usageSource?: "provider";
-  requestedCallOutputTokens?: number;
+  requestedGenerationTokens?: number;
   finishReason?: string;
   outputBudget?: AiOutputBudgetState;
 }
@@ -1384,7 +1403,7 @@ export interface AiAgentRunProductEvent {
 }
 
 export interface AiAgentRunSnapshot {
-  version: 1;
+  version: 2;
   run: {
     runId: string;
     sessionId?: number | null;
@@ -1404,8 +1423,9 @@ export interface AiAgentRunSnapshot {
       modelAttemptCount: number;
       usage?: {
         inputTokens: number;
-        outputTokens: number;
-        reasoningTokens: number;
+        generationTokens: number;
+        reasoningTokens?: number | null;
+        unreportedReasoningAttempts?: number;
         totalTokens: number;
         unreportedAttempts: number;
       };
@@ -1709,6 +1729,7 @@ export interface AiAgentRunPlannerDiagnostics {
 }
 
 export interface AiModelInputDiagnostic {
+  sdkRequest?: Record<string, unknown> | null;
   eventRowId: number;
   phase: string;
   count: number;
@@ -1739,6 +1760,8 @@ export interface AiToolCallDiagnostic {
   toolCallId: string;
   eventRowId: number;
   name?: string;
+  displayName?: string;
+  operationId?: string;
   startedAt?: string;
   completedAt?: string;
   status?: 'completed' | 'failed';
@@ -2131,7 +2154,7 @@ export interface ElectronAPI {
   reorderBookWritingMethodBindings: (data: { bookId: EntityId; bindingIds: string[] }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
   upgradeBookWritingMethodBinding: (data: { bookId: EntityId; bindingId: string; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
   unbindBookWritingMethod: (data: { bookId: EntityId; bindingId: string }) => Promise<ApiResult<void>>;
-  createWritingMethodCandidates: (data: { analysisId: string; craftCardIds?: string[] }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
+  createWritingMethodCandidates: (data: { analysisId: string }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
   publishWritingMethodCandidateBatch: (data: { schemeId: string; methodIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevision: WritingSchemeRevision; bindingChanged: false }>>;
   previewNovelSourceImport: (data: NovelSourcePickedFile) => Promise<ApiResult<NovelSourceImportPreview>>;
   confirmNovelSourceImport: (data: NovelSourcePickedFile & {
@@ -2419,13 +2442,7 @@ export interface ElectronAPI {
     prompt: string;
     apiProvider?: AiApiProvider;
     model?: string;
-    options?: {
-      model: string;
-      model_profile?: string;
-      temperature?: number;
-      thinking?: { type: 'disabled' | 'enabled' };
-      context_window: AiContextWindow;
-    };
+    options?: import('./agent-runtime/streamOptions').StreamRequestOptions;
   }) => Promise<ApiResult<string>>;
   getAgentRunSnapshot: (data: {
     runId: string;
@@ -2493,8 +2510,12 @@ export interface ElectronAPI {
       /** 内置模型 profile id；高级自定义为空并走通用协议适配。 */
       model_profile?: string;
       temperature?: number;
-      max_tokens?: number;
-      thinking?: { type: "disabled" | "enabled" };
+      profile_max_generation_tokens?: number;
+      max_generation_tokens?: number;
+      thinking?: { type: "disabled" | "enabled"; budget_tokens?: number };
+      supports_thinking?: boolean;
+      thinking_only?: boolean;
+      reasoning_effort?: AiReasoningEffort;
       context_window?: AiContextWindow;
     };
     /** 是否允许三层 Writing Agent 暴露当前书籍范围内的工具。 */
@@ -2628,6 +2649,7 @@ export interface ElectronAPI {
 }
 
 export interface GeneralSettings {
+  model_descriptors?: Array<Record<string, unknown>>;
   sync_outline_chapter: boolean;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
@@ -2660,12 +2682,24 @@ export interface MemoryEmbeddingConfig {
 }
 
 export type AiContextWindow = '32k' | '64k' | '128k' | '200k' | '256k' | '300k' | '1m';
+export type AiReasoningEffort = 'low' | 'high' | 'max';
 
 export type AiBuiltinProviderId = 'zai' | 'deepseek' | 'moonshot' | 'minimax' | 'mimo';
 export type AiApiProvider = 'openai' | 'anthropic' | 'zai';
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
+export type ModelSettingChoice<T> = { state: 'inherit' | 'provider_default' } | { state: 'explicit'; value: T };
+
 export interface AiModelConfig {
+  modelSettingsVersion?: 1;
+  modelPreferences?: {
+    reasoning_mode?: ModelSettingChoice<'enabled' | 'disabled'>;
+    reasoning_effort?: ModelSettingChoice<AiReasoningEffort>;
+    temperature?: ModelSettingChoice<number>;
+  };
+  modelPreferenceSources?: Record<string, string>;
+  descriptorDigest?: string;
+  profileBinding?: 'compatible';
   id: string;
   /** 来自内置目录时记录预设 id；旧配置与高级自定义配置不需要该字段。 */
   presetId?: string;
@@ -2685,10 +2719,16 @@ export interface AiModelConfig {
   thinkingOnly: boolean;
   /** 当前模型是否以 thinking 模式请求，可在模型选择器中切换。 */
   thinkingEnabled?: boolean;
+  /** 用户明确选择的思考强度；未设置时保持服务商默认。 */
+  reasoningEffort?: AiReasoningEffort;
   /** 当前模型上下文窗口，用于历史、记忆和关联上下文预算。 */
   contextWindow?: AiContextWindow;
-  /** @deprecated Agent 输出预算现由后端按任务解析；仅保留以读取旧配置。 */
-  outputTokenBudget?: number;
+  /** 自定义模型由服务商确认的能力上限；内置模型由版本化 profile 提供。 */
+  profileMaxGenerationTokens?: number;
+  /** 用户明确设置的单次总生成上限；包含服务商计入同一配额的思考 token。 */
+  maxGenerationTokens?: number;
+  /** Anthropic 手动 extended-thinking 的显式预算；不会由应用推断。 */
+  thinkingBudgetTokens?: number;
   /**
    * 为 true 时在设置中展示并采用下方 temperature，请求会携带 temperature。
    * 为 false 时不传 temperature，由大模型接口使用其默认采样行为。

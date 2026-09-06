@@ -1,4 +1,4 @@
-import type { AiBuiltinProviderId, AiContextWindow } from '../types'
+import type { AiBuiltinProviderId, AiContextWindow, AiReasoningEffort } from '../types'
 
 export interface AiBuiltinProvider {
   id: AiBuiltinProviderId
@@ -16,11 +16,13 @@ export interface AiModelPreset {
   summary: string
   contextWindowOptions: readonly AiContextWindow[]
   contextWindow: AiContextWindow
-  /** 服务商公布的单次响应输出上限；未知时不填写。 */
-  maxOutputTokens?: number
+  /** 服务商公布的单次总生成上限，包含其计入同一配额的思考 token。 */
+  maxGenerationTokens?: number
   supportsThinking: boolean
   thinkingOnly: boolean
   thinkingEnabled: boolean
+  /** 该内置模型公开支持的用户可选思考强度。 */
+  reasoningEffortOptions?: readonly AiReasoningEffort[]
   customizeTemperature: boolean
   temperatureThinking: number
   temperatureNonThinking: number
@@ -30,4 +32,9 @@ export interface AiModelPreset {
 export interface BuiltinModelProfile {
   provider: AiBuiltinProvider
   preset: AiModelPreset
+}
+
+export interface BuiltinModelPresentation {
+  provider: AiBuiltinProvider
+  preset: Pick<AiModelPreset, 'id' | 'providerId' | 'name' | 'label' | 'summary' | 'recommended'>
 }

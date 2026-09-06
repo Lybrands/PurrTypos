@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from constants import AGENT_PUBLIC_COMMENTARY_OPEN
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -432,14 +434,14 @@ class SqliteAgentOutputRepository:
             "WHERE run_id = ? AND status = 'open' ORDER BY id",
             [run_id],
         )
-        return tuple(
-            _terminal_stream_abort_draft(
-                _stream_spec(row),
-                terminal_status,
-                occurred_at,
-            )
-            for row in rows
-        )
+        drafts = []
+        for row in rows:
+            spec = _stream_spec(row)
+            draft = _terminal_stream_abort_draft(spec, terminal_status, occurred_at)
+            if await self._has_live_commentary(spec):
+                draft = replace(draft, channel=OutputChannel.COMMENTARY, visibility=OutputVisibility.PUBLIC)
+            drafts.append(draft)
+        return tuple(drafts)
 
     async def _terminal_stream_abort_replay_events(
         self,
@@ -533,6 +535,7 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError("aborted output stream cannot commit")
 
             spec = _stream_spec(stream)
+            live_commentary = await self._has_live_commentary(spec)
             if spec.intent is AgentOutputIntent.FINAL_PUBLIC:
                 await self._project_final_conversation(spec)
 
@@ -545,8 +548,8 @@ class SqliteAgentOutputRepository:
                     source_event_key=f"stream:{stream_id}:committed",
                     source=OutputSource.RUNTIME,
                     kind=OutputEventKind.STREAM_COMMITTED,
-                    channel=_stream_channel(spec),
-                    visibility=_stream_visibility(spec),
+                    channel=OutputChannel.COMMENTARY if live_commentary else _stream_channel(spec),
+                    visibility=OutputVisibility.PUBLIC if live_commentary else _stream_visibility(spec),
                     payload={"finishReason": reason.value},
                     occurred_at=_now(),
                 )
@@ -558,6 +561,12 @@ class SqliteAgentOutputRepository:
                 [reason.value, stream_id],
             )
             return event
+
+    async def _has_live_commentary(self, spec):
+        return await self._db.fetch_one(
+            "SELECT id FROM ai_agent_run_events WHERE source_event_key = ?",
+            [f"public-commentary:{spec.invocation_id}:1"],
+        ) is not None
 
     async def publish_stream_content_as_commentary(
         self,
@@ -571,6 +580,8 @@ class SqliteAgentOutputRepository:
                     "only a committed model stream can publish commentary"
                 )
             spec = _stream_spec(stream)
+            if await self._has_live_commentary(spec):
+                return ()
             if spec.output_protocol is not None:
                 raise ContractViolationError(
                     "planning streams cannot be promoted to commentary"
@@ -628,6 +639,8 @@ class SqliteAgentOutputRepository:
                 _provider_text(row)
                 for row in rows
             )
+            if content.startswith(AGENT_PUBLIC_COMMENTARY_OPEN):
+                return ()
             if not content.strip():
                 return ()
 
@@ -779,6 +792,7 @@ class SqliteAgentOutputRepository:
             if stream["status"] != "open":
                 raise ContractViolationError("committed output stream cannot abort")
             spec = _stream_spec(stream)
+            live_commentary = await self._has_live_commentary(spec)
             event = await self._append_event_in_transaction(
                 AgentOutputEventDraft(
                     run_id=spec.run_id,
@@ -788,8 +802,8 @@ class SqliteAgentOutputRepository:
                     source_event_key=f"stream:{stream_id}:aborted",
                     source=OutputSource.RUNTIME,
                     kind=OutputEventKind.STREAM_ABORTED,
-                    channel=_stream_channel(spec),
-                    visibility=_stream_visibility(spec),
+                    channel=OutputChannel.COMMENTARY if live_commentary else _stream_channel(spec),
+                    visibility=OutputVisibility.PUBLIC if live_commentary else _stream_visibility(spec),
                     payload={"errorCode": normalized_error},
                     occurred_at=_now(),
                 )
@@ -801,6 +815,19 @@ class SqliteAgentOutputRepository:
                 [normalized_error, stream_id],
             )
             return event
+
+    async def has_public_progress(self, run_id: str) -> bool:
+        row = await self._db.fetch_one(
+            "SELECT 1 AS present FROM ai_agent_run_events e "
+            "JOIN ai_agent_output_streams s ON s.id = e.output_stream_id "
+            "WHERE e.run_id = ? AND e.visibility = 'public' "
+            "AND e.channel = 'commentary' AND s.status != 'aborted' "
+            "AND ((e.kind = 'provider.content_delta' AND trim(json_extract(e.payload_json, '$.delta')) != '') "
+            "OR (e.kind = 'agent.progress' AND trim(json_extract(e.payload_json, '$.text')) != '')) "
+            "LIMIT 1",
+            [str(run_id)],
+        )
+        return row is not None
 
     async def list_events(
         self,

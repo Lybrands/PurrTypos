@@ -13,7 +13,10 @@ from database.screenplay_tool_cache_schema import SCREENPLAY_READ_DEPENDENCIES
 _MAX_ENTRIES = 128
 _MAX_CONTENT_BYTES = 256 * 1024
 _SCOPE_FIELDS = (
-    "projectId", "sourceBookId", "sourceScope", "deliverableRevisionScope",
+    "projectId",
+    "sourceBookId",
+    "sourceScope",
+    "deliverableRevisionScope",
     "boundEpisodeNumber",
 )
 
@@ -22,17 +25,30 @@ def screenplay_cache_identity(tool_name, scope, arguments):
     if tool_name not in SCREENPLAY_READ_DEPENDENCIES:
         raise ValueError(f"No read-cache dependency contract for {tool_name}")
     fields = _SCOPE_FIELDS
-    if tool_name == "readScreenplayTaskDependencies":
+    if tool_name in {
+        "readScreenplayTaskDependencies",
+        "getScreenplaySceneContext",
+    }:
         fields += ("taskId", "unitId", "dependencyPartKeys")
-    bound_scope = thaw_json_mapping({
+    if tool_name == "getScreenplaySceneContext":
+        fields += ("expectedPartType", "expectedPartKey")
+    bound_scope = thaw_json_mapping(
+        {
             key: scope[key] for key in fields if key in scope
-        })
+        }
+    )
     key_content = json.dumps(
-        [2, tool_name, bound_scope, thaw_json_mapping(arguments)],
+        [4 if tool_name in {"getScreenplaySceneContext", "readScreenplayDeliverable"} else 3,
+         tool_name, bound_scope, thaw_json_mapping(arguments)],
         ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False,
     )
     key = hashlib.sha256(key_content.encode("utf-8")).hexdigest()
-    scope_key = json.dumps(bound_scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    scope_key = json.dumps(
+        bound_scope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return key, scope_key
 
 

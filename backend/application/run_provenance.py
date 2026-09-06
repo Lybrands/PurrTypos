@@ -7,19 +7,16 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any
 
-from purra.contracts import RunProvenance
+from purra.contracts import ModelRequest, RunProvenance
 from application.model_runtime import (
     reasoning_mode_from_options,
     run_execution_intent,
 )
-from infrastructure.models.profiles.registry import resolve_model_profile
-from purra.contracts import ModelRequest
 from application.agent_run_input import AgentRunInput
-from application.request_mapping import context_window_tokens
 from utils.url import normalize_base_url
 
 
-REQUEST_PROFILE_SCHEMA_VERSION = "agent-run-request-profile/v1"
+REQUEST_PROFILE_SCHEMA_VERSION = "agent-run-request-profile/v2"
 ENDPOINT_DIGEST_SCHEMA_VERSION = "agent-run-endpoint/v1"
 _SECRET_FIELD_NAMES = frozenset({
     "apikey",
@@ -34,25 +31,34 @@ _SECRET_FIELD_NAMES = frozenset({
 
 def build_chat_run_provenance(
     body: AgentRunInput,
+    model_request: ModelRequest,
+    *,
+    result_capacity_target_tokens: int | None = None,
 ) -> RunProvenance:
     """Hash the complete inbound profile without retaining credentials or URLs.
 
-    Runtime implementation details are intentionally not part of the request
-    profile, so equivalent model requests remain comparable over time.
+    The normalized model contract is supplied by the mapper that will execute
+    the Run. Provider SDK implementation details remain outside the profile.
     """
 
+    if not isinstance(model_request, ModelRequest):
+        raise TypeError("run provenance requires the normalized ModelRequest")
+    if (
+        result_capacity_target_tokens is not None
+        and (
+            type(result_capacity_target_tokens) is not int
+            or result_capacity_target_tokens <= 0
+        )
+    ):
+        raise ValueError("result capacity target must be a positive integer")
+
     raw = body.model_dump()
-    options = raw.get("options")
-    if not isinstance(options, Mapping):
-        options = {}
-    model_name = str(options.get("model") or "").strip()
-    if not model_name:
-        raise ValueError("run provenance requires a model name")
-    model_provider = str(body.apiProvider or "").strip().lower() or "openai"
-    context_window = context_window_tokens(
-        body.contextWindow or options.get("context_window")
+    model_name = model_request.model
+    model_provider = model_request.provider
+    context_window = model_request.capability_snapshot.context_window_tokens
+    endpoint_digest = digest_model_endpoint(
+        str(model_request.options.get("baseURL") or body.baseURL or "")
     )
-    endpoint_digest = digest_model_endpoint(body.baseURL)
 
     # Keep every non-secret request field, including messages, scope ids,
     # model options and caller tools. Endpoint identity is represented only by
@@ -63,30 +69,18 @@ def build_chat_run_provenance(
     profile["baseURL"] = {"endpointDigest": endpoint_digest}
     profile["apiProvider"] = model_provider
     profile["contextWindow"] = context_window
-    normalized_options = profile.get("options")
-    if isinstance(normalized_options, dict):
-        normalized_options["model"] = model_name
+    profile["options"] = _normalized_model_request_profile(
+        model_request,
+        endpoint_digest=endpoint_digest,
+        result_capacity_target_tokens=result_capacity_target_tokens,
+    )
     profile = {
         "schemaVersion": REQUEST_PROFILE_SCHEMA_VERSION,
         "request": profile,
     }
     request_profile_digest = _canonical_digest(profile)
-    model_profile_id = str(options.get("model_profile") or "").strip() or None
-    model_profile = resolve_model_profile(
-        model_profile_id,
-        model_name,
-        body.baseURL,
-    )
-    snapshot = model_profile.capability_snapshot(
-        context_window_tokens=context_window,
-    )
-    model_request = ModelRequest(
-        provider=model_provider,
-        model=model_name,
-        capability_snapshot=snapshot,
-        options=options,
-    )
-    requested_mode = reasoning_mode_from_options(options)
+    snapshot = model_request.capability_snapshot
+    requested_mode = reasoning_mode_from_options(model_request.options)
     return RunProvenance(
         model_provider=model_provider,
         model_name=model_name,
@@ -101,8 +95,38 @@ def build_chat_run_provenance(
             tool_protocol_contract=(
                 "host_tools" if body.enableAgentTools else "no_tools"
             ),
+            result_capacity_target_tokens=result_capacity_target_tokens,
         ),
     )
+
+
+def _normalized_model_request_profile(
+    model_request: ModelRequest,
+    *,
+    endpoint_digest: str,
+    result_capacity_target_tokens: int | None,
+) -> dict[str, Any]:
+    provider_options = _redact_secrets(dict(model_request.options))
+    if not isinstance(provider_options, dict):  # pragma: no cover - dict input
+        raise TypeError("normalized model request options must be an object")
+    for key in tuple(provider_options):
+        if _normalized_field_name(key) == "baseurl":
+            provider_options[key] = {"endpointDigest": endpoint_digest}
+    return {
+        "provider": model_request.provider,
+        "model": model_request.model,
+        "capabilitySnapshotDigest": (
+            model_request.capability_snapshot.digest()
+        ),
+        "profileMaxGenerationTokens": (
+            model_request.capability_snapshot.max_generation_tokens
+        ),
+        "requestedUserMaxGenerationTokens": (
+            model_request.max_generation_tokens
+        ),
+        "resultCapacityTargetTokens": result_capacity_target_tokens,
+        "providerOptions": provider_options,
+    }
 
 
 def digest_model_endpoint(base_url: str | None) -> str:
