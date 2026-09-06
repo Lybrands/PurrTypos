@@ -311,6 +311,10 @@ class DatabaseConnection:
                     ).fetchone()
                     if not has_books:
                         raise ValueError("不是有效的 PurrTypos 数据库备份")
+                    knowledge = validation.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='novel_knowledge_bindings'").fetchone()
+                    if knowledge:
+                        validation.execute("UPDATE novel_knowledge_bindings SET host_id='',state='reauthorization_required',semantic_config=NULL,generation=generation+1,version=version+1 WHERE state!='unbound'")
+                        validation.commit()
                 finally:
                     validation.close()
             except sqlite3.DatabaseError as error:

@@ -1,0 +1,25 @@
+.novel-knowledge-panel {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+  header, .knowledge-actions, .knowledge-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  header { justify-content: space-between; }
+  h2, h3, p { margin: 0; }
+  h2 { font-size: 20px; }
+  h3 { font-size: 15px; }
+  article, details { padding: 14px; border: 1px solid var(--border-color, #dedbd5); border-radius: 10px; }
+  details[open] > :not(summary) { margin-top: 12px; }
+  summary { cursor: pointer; font-weight: 600; }
+  .knowledge-note, footer, small { color: var(--text-secondary); }
+  .knowledge-notice { padding: 10px; border-inline-start: 3px solid var(--color-primary, #a48561); }
+  .knowledge-document-list { display: grid; gap: 8px; }
+  .knowledge-document-list small { display: block; overflow-wrap: anywhere; }
+  .knowledge-controls > .purr-input { flex: 1; min-width: 150px; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; background: var(--bg-secondary, #f6f5f2); padding: 12px; border-radius: 6px; }
+  .knowledge-source-text { line-height: 1.9; }
+  footer { border-top: 1px solid var(--border-color, #dedbd5); padding-top: 12px; }
+}

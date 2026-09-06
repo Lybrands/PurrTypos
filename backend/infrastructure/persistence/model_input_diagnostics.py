@@ -98,6 +98,10 @@ async def read_model_input_diagnostics(db, run_id: str) -> list[dict[str, Any]]:
             "captured": bool(messages),
             "messages": _redact(messages),
             "recordedAt": row.get("create_time"),
+            "novelKnowledge": [
+                _redact(receipt) for receipt in payload.get("contextEvidence", [])
+                if isinstance(receipt, dict) and receipt.get("source") == "novel_knowledge/v1"
+            ],
             "sdkRequest": _redact(_mapping(sent["record_json"])) if sent else None,
         })
     return result

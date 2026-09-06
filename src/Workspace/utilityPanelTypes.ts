@@ -8,6 +8,7 @@ export type WorkspaceUtilityTabKind =
   | 'memory'
   | 'writingMethods'
   | 'canon'
+  | 'knowledge'
   | 'setting'
   | 'dashboard'
 
@@ -66,3 +67,5 @@ export function createOutlineUtilityTab(
     outlineTarget: { mode, chapter },
   }
 }
+
+export const KNOWLEDGE_TAB: WorkspaceUtilityTab = { key: "knowledge", kind: "knowledge", title: "创作资料库" }

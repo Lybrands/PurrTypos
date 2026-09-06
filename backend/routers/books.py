@@ -250,6 +250,7 @@ async def delete_book(bookId: str):
             "update_time = CURRENT_TIMESTAMP WHERE source_book_id = ?",
             [bookId],
         )
+        await db.execute("UPDATE novel_knowledge_bindings SET state='unbound',generation=generation+1,version=version+1 WHERE book_id=?", [bookId])
         await db.execute("DELETE FROM books WHERE id = ?", [bookId])
 
     composition = get_agent_composition()

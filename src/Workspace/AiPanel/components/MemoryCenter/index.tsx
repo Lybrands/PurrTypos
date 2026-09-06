@@ -651,6 +651,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
 
   return (
     <div className="memory-center">
+      <PurrButton onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))}>查看外部创作资料与来源</PurrButton>
       <div className="memory-center-heading">
         <div>
           <div className="memory-center-heading-title">统一记忆中心</div>
