@@ -2,7 +2,7 @@
 
 > 状态：代码改造完成。`/ai/chat/stream` 只运行新的三层 Agent 架构；仓库不再提供旧 Agent loop、Runtime 兼容桥或新旧切换开关。
 >
-> 历史说明：本文是上一轮改造的完成记录，不定义本轮 Core 拆分或剧本对话重写边界。当前权威章程见 [`docs/design/purra-screenplay-refactor-charter.md`](design/purra-screenplay-refactor-charter.md)。
+> 历史说明：本文是早期改造的完成记录，不定义本轮 Core 拆分或剧本对话重写边界。当前权威章程见 [`docs/design/purra-screenplay-refactor-charter.md`](design/purra-screenplay-refactor-charter.md)。
 
 ## 1. 最终结构
 

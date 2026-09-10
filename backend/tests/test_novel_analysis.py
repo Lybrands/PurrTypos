@@ -110,7 +110,7 @@ def test_segmented_context_round_trips_and_recipe_freezes_ranges():
     extract = recipe.steps[0]
     assert extract.metadata["segmentId"] == segment.id
     assert extract.metadata["endCharacter"] == 120
-    assert recipe.metadata["recipeVersion"] == 5
+    assert recipe.metadata["recipeVersion"] == 7
 
 
 def test_hierarchical_recipe_bounds_fan_in_for_million_character_scope():
@@ -142,9 +142,9 @@ def test_hierarchical_recipe_bounds_fan_in_for_million_character_scope():
         step.metadata.get("aggregationRole") == "leaf"
         for step in normalizers
     ) == len(segments) // 2
-    assert len(validation.depends_on) == len(segments) + 1
-    assert validation.depends_on[-1] == "aggregate:story"
-    assert novel_analysis_model_call_count(recipe) == 105
+    assert validation.depends_on == (normalizers[-1].id,)
+    assert not any(step.kind == 'aggregate_story' for step in recipe.steps)
+    assert novel_analysis_model_call_count(recipe) == 100
     assert recipe.max_parallelism == 4
 
 
@@ -180,8 +180,9 @@ def test_host_combines_leaf_and_global_candidates_without_losing_evidence():
 
     combined = _combine_candidates((local, global_result))
 
-    assert len(combined["facts"]) == 2
-    assert len(combined["facts"][0]["evidence"]) == 2
+    assert len(combined["facts"]) == 3
+    assert combined["facts"][0]["evidence"] == local["facts"][0]["evidence"]
+    assert combined["facts"][1]["evidence"] == global_result["facts"][0]["evidence"]
 
 
 def test_model_merge_restores_repeated_evidence_to_each_frozen_segment():
@@ -300,12 +301,12 @@ async def _source(db):
     )
 
 
-async def test_evidence_validation_discards_bad_model_citations_without_losing_run(db):
+async def test_evidence_validation_reports_all_bad_citations_without_partial_acceptance(db):
     revision = await _source(db)
     section = revision["sections"][0]
     executor = NovelAnalysisTaskUnitExecutor(db)
 
-    validated = await executor._validate_candidates({
+    await_result = executor._validate_candidates({
         "facts": [{
             "factKind": "event",
             "subjectKey": "甲",
@@ -324,9 +325,11 @@ async def test_evidence_validation_discards_bad_model_citations_without_losing_r
         }],
     }, revision_id=revision["id"], section_ids=[section["id"]])
 
-    assert len(validated["facts"]) == 1
-    assert len(validated["facts"][0]["evidence"]) == 1
-    assert validated["craftCards"] == []
+    with pytest.raises(ValueError) as error:
+        await await_result
+    assert 'facts[0].evidence[1]' in str(error.value)
+    assert 'craftCards[0].evidence[0]' in str(error.value)
+
 
 
 async def _insert_task(db, revision_id: str, *, status: str):
@@ -393,14 +396,11 @@ async def _candidate_artifact(db, revision, *, status="completed"):
         "conflicts": [],
         "reviewStatus": "pending",
     }
-    from tests.support.writing_distillation import report
+    from tests.support.writing_techniques import candidate
     validated = await NovelAnalysisTaskUnitExecutor(db)._validate_candidates(payload, revision_id=revision["id"], section_ids=payload["sectionIds"])
     payload.update(validated)
-    payload["analysisSchemaVersion"] = 2
-    payload["distillation"] = report(payload["craftCards"])
-    from domains.writing_distillation import render_skill
-    payload["writingSkill"] = {**payload["distillation"]["writingSkill"], "markdown": render_skill(payload["distillation"]["writingSkill"])}
-    payload["skillReviewStatus"] = "pending_review"
+    payload["analysisSchemaVersion"] = 3
+    payload["techniqueResult"] = await candidate(db, revision["id"], payload["craftCards"])
     artifact = await NovelAnalysisArtifactStore(db).write(
         namespace=NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
         kind=NOVEL_ANALYSIS_ARTIFACT_KIND,
@@ -503,7 +503,7 @@ async def test_analysis_public_facts_use_committed_review_without_internal_ids(d
 
     assert "分析全局故事、事实脉络和写作技法" in public_input
     assert "甲看见红门后" in public_input
-    assert "行动驱动的信息释放" in public_input
+    assert "信息释放" in public_input
     assert "novel-analysis-artifact://" not in public_input
     assert revision["id"] not in public_input
     assert '"sectionTitle":"null"' not in public_input
@@ -911,7 +911,7 @@ async def test_follow_up_uses_inline_profile_with_bounded_current_artifact(db):
     )
     assert artifact_block.untrusted is True
     assert "限制视角" in artifact_block.content
-    assert "只读快照" in artifact_block.content
+    assert "只读摘要" in artifact_block.content
     assert revision["id"] not in artifact_block.content
     assert revision["sections"][0]["id"] not in artifact_block.content
 
@@ -1202,6 +1202,38 @@ async def test_review_correction_is_new_artifact_and_does_not_mutate_candidate(d
     assert published["facts"][0]["value"] == "修订后的事实"
 
 
+async def test_review_can_replace_generated_technique_with_a_new_sealed_revision(db):
+    revision = await _source(db)
+    reference, payload = await _candidate_artifact(db, revision)
+    from application.writing_technique_service import WritingTechniqueService
+
+    original = payload["techniqueResult"]["candidate"]
+    service = WritingTechniqueService(db)
+    draft = await service.create_draft(
+        operation_id="review-technique-copy",
+        technique_id=original["techniqueId"],
+        from_version={"kind": "technique", "id": original["techniqueId"], "versionId": original["versionId"]},
+    )
+    draft = await service.apply_changes(
+        original["techniqueId"], draft["draftId"], expected_revision=draft["draftRevision"],
+        operation_id="review-technique-edit", changes=[{"action": "put", "path": "SKILL.md", "content": "---\nname: 修订版\ndescription: 人工确认的技法。\n---\n正文"}],
+    )
+    draft = await service.seal(
+        "technique", original["techniqueId"], draft["draftId"], expected_revision=draft["draftRevision"],
+        expected_tree_digest=draft["treeDigest"], operation_id="review-technique-seal",
+    )
+    payload["techniqueResult"] = {
+        **payload["techniqueResult"],
+        "candidate": {"techniqueId": original["techniqueId"], "draftId": draft["draftId"], "versionId": draft["sealedRef"]["versionId"]},
+    }
+
+    reviewed = await NovelAnalysisService(db).review(
+        artifact_ref=reference, command_id="review-technique-command", payload=payload,
+    )
+
+    assert reviewed["techniqueResult"]["candidate"] == payload["techniqueResult"]["candidate"]
+
+
 async def test_analysis_long_task_pause_resume_cancel_retry_survive_restart(tmp_path):
     first = DatabaseConnection(tmp_path)
     await first.init()
@@ -1295,6 +1327,7 @@ async def test_service_resume_reuses_frozen_plan_without_replanning(db):
                 "sourceRevisionId": "source-revision",
                 "sectionIds": ["section-1"],
                 "idempotencyKey": "original-command",
+                "analysisSchemaVersion": 3,
                 "prompt": "重点分析人物因果",
             }, ensure_ascii=False),
         ],
@@ -1313,6 +1346,7 @@ async def test_service_resume_reuses_frozen_plan_without_replanning(db):
         retry_failed=False,
     )
 
+    assert captured["prompt"] == "继续分析"
     continuation = captured["durable_continuation"]
     assert result["status"] == "accepted"
     assert [
@@ -1404,7 +1438,9 @@ async def test_analysis_run_view_includes_durable_units_and_stream_activity(db):
 
     runs = await NovelAnalysisService(db).list_for_revision(revision["id"])
 
-    assert len(runs) == 1
+    assert len(runs) == 3
+    assert {run["runId"] for run in runs} == {"analysis-live-run", "analysis-old-run", "analysis-newer-failed-run"}
+    runs = [run for run in runs if run["runId"] == "analysis-live-run"]
     assert runs[0]["runId"] == "analysis-live-run"
     assert runs[0]["providerOutputEvents"] == 17
     assert runs[0]["analysisPlan"]["title"] == "因果分析"
@@ -1514,8 +1550,8 @@ def test_merged_evidence_only_inherits_scope_from_verbatim_contiguous_quote(quot
             'segmentId': 'seg-host', 'segmentStartCharacter': 20, 'segmentEndCharacter': 80}]
 
 
-@pytest.mark.parametrize('length,model_units,total_units', [(2225, 6, 9), (4000, 6, 9), (4001, 8, 11)])
-def test_short_source_merges_analysis_without_removing_transfer_checks(length, model_units, total_units):
+@pytest.mark.parametrize('length,model_units,total_units', [(339, 2, 5), (2225, 2, 5), (4000, 2, 5), (4001, 2, 5)])
+def test_short_source_generates_technique_without_forced_transfer_stages(length, model_units, total_units):
     recipe = compile_novel_analysis_recipe(
         section_ids=('s1',),
         segments=(NovelAnalysisSegment(id=f's1:0:{length}', section_id='s1', section_ordinal=0,
@@ -1525,14 +1561,14 @@ def test_short_source_merges_analysis_without_removing_transfer_checks(length, m
     assert novel_analysis_model_call_count(recipe) == model_units
     assert len(recipe.steps) == total_units
     assert recipe.max_parallelism == 1
-    assert recipe.steps[0].metadata.get('includeStoryOverview', False) is (length <= 4000)
+    assert not recipe.steps[0].metadata.get('includeStoryOverview', False)
     steps = {step.id: step for step in recipe.steps}
-    assert steps['skill:trial'].depends_on == ('skill:draft',)
-    assert steps['skill:retrial'].depends_on == ('skill:revise',)
-    assert steps['skill:assess'].depends_on == ('validate:evidence', 'skill:revise', 'skill:retrial')
-    if length <= 4000:
-        assert steps['validate:evidence'].depends_on == (recipe.steps[0].id,)
-        assert 'normalize:root' not in steps and 'aggregate:story' not in steps
+    assert steps['skill:draft'].depends_on == ('validate:evidence',)
+    assert steps['report:coverage'].depends_on == ('validate:evidence', 'skill:draft')
+    assert not {'skill:trial', 'skill:retrial', 'skill:assess', 'skill:revise'} & set(steps)
+    assert 'normalize:root' not in steps
+    assert 'aggregate:story' not in steps
+    assert steps['validate:evidence'].depends_on == (recipe.steps[0].id,)
 
 
 @pytest.mark.parametrize('effort', [None, 'high', 'max'])
@@ -1580,3 +1616,146 @@ async def test_analysis_retry_exhaustion_preserves_user_configuration(db, effort
     failure = NovelAnalysisTaskUnitExecutor(db).classify_failure(caught.value)
     assert not failure.retryable
     assert decide_failure(failure, attempts_remaining=1).disposition is not FailureDisposition.RETRY_ATTEMPT
+
+@pytest.mark.parametrize('plan_count', [1, 2, 3, 7, 12])
+@pytest.mark.parametrize('seed', range(4))
+def test_long_recipe_parallel_completion_preserves_serial_planner_transitions(plan_count, seed):
+    import random
+    from purra.contracts import StepStatus
+    from purra.run_state import RunSnapshot, RunStateMachine
+
+    planned = tuple(f'phase-{i}' for i in range(plan_count))
+    recipe = compile_novel_analysis_recipe(
+        section_ids=('section',), plan_step_ids=planned, segments=tuple(
+            NovelAnalysisSegment(id=f'section:{i}:100', section_id='section',
+                section_ordinal=0, start_character=i*100, end_character=(i+1)*100)
+            for i in range(53)))
+    assert len(recipe.steps) > 100
+    snapshot = RunSnapshot(run_id='long-regression', title='Long analysis', goal=None,
+        status=RunStatus.RUNNING, steps=tuple(TaskStep(id=key, title=key,
+            type=StepType.ANALYZE, executor=StepExecutor.MODEL,
+            depends_on=planned[index-1:index]) for index, key in enumerate(planned)))
+    done, active = set(), []
+    randomizer = random.Random(seed)
+    while len(done) < len(recipe.steps):
+        eligible = [step for step in recipe.steps if step.id not in done
+                    and step not in active and set(step.depends_on) <= done]
+        randomizer.shuffle(eligible)
+        active.extend(eligible[:4-len(active)])
+        assert active, 'recipe deadlocked'
+        assert len({step.plan_step_id for step in active}) == 1
+        statuses = {}
+        for key in planned:
+            members = [step for step in recipe.steps if step.plan_step_id == key]
+            statuses[key] = (StepStatus.DONE if all(step.id in done for step in members)
+                else StepStatus.RUNNING if any(step in active or step.id in done for step in members)
+                else StepStatus.PENDING)
+        snapshot = RunStateMachine.sync_durable_execution(snapshot, statuses).after
+        finished = active.pop(randomizer.randrange(len(active)))
+        done.add(finished.id)
+    snapshot = RunStateMachine.sync_durable_execution(
+        snapshot, {key: StepStatus.DONE for key in planned}).after
+    assert all(step.status is StepStatus.DONE for step in snapshot.steps)
+
+
+async def test_dispatch_observer_failure_pauses_with_reason_and_settles_root(db):
+    import asyncio
+    revision = await _source(db)
+    await _candidate_artifact(db, revision)
+    await db.execute("UPDATE ai_agent_long_tasks SET status='running' WHERE id='analysis-task'")
+    await db.execute("INSERT INTO ai_agent_long_task_units (task_id, unit_id, semantic_key, position, status) VALUES ('analysis-task', 'waiting', 'waiting', 0, 'running')")
+    repository = SqliteLongTaskRepository(db)
+    dispatcher = NovelAnalysisAgentProfile(db).create_long_task_dispatcher(
+        long_task_repository=repository, executor=NovelAnalysisTaskUnitExecutor(db))
+    failures = []
+    async def settle(run_id, error):
+        failures.append((run_id, str(error)))
+    dispatcher.set_execution_failure_handler(settle)
+    async def broken_observer(update):
+        raise ValueError('injected transition failure')
+    with pytest.raises(ValueError, match='injected transition failure'):
+        await asyncio.wait_for(dispatcher.execute('analysis-task', run_id='analysis-run',
+                               observer=broken_observer), timeout=3)
+    assert failures == [('analysis-run', 'injected transition failure')]
+    assert (await repository.load('analysis-task')).status.value == 'paused'
+
+async def test_recipe_recovery_preserves_outputs_and_rebinds_completed_child_runs(db):
+    revision = await _source(db)
+    await _candidate_artifact(db, revision)
+    recipe = compile_novel_analysis_recipe(section_ids=('s1', 's2'), plan_step_ids=('first', 'last'))
+    await db.execute("UPDATE ai_agent_long_tasks SET status='paused' WHERE id='analysis-task'")
+    for index, step in enumerate(recipe.steps):
+        await db.execute(
+            "INSERT INTO ai_agent_long_task_units (task_id,unit_id,semantic_key,position,status,"
+            "dependencies_json,metadata_json,run_id,output_ref) VALUES ('analysis-task',?,?,?,?,?,?,?,?)",
+            [step.id, step.id, index, 'completed' if index == 0 else 'running' if index == 1 else 'pending',
+             '[]', json.dumps({'plannerStepId': 'old', 'unitKind': step.kind, 'frozenInput': {'ids': ['one', 'two']}}),
+             'analysis-run' if index == 1 else None, 'saved-output' if index == 0 else None])
+    service = NovelAnalysisService(db)
+    await db.execute("UPDATE ai_agent_runs SET status='running' WHERE id='analysis-run'")
+    with pytest.raises(AppError, match='仍有子任务'):
+        await service._prepare_recipe_recovery('analysis-task', recipe)
+    await db.execute("UPDATE ai_agent_runs SET status='done' WHERE id='analysis-run'")
+    await service._prepare_recipe_recovery('analysis-task', recipe)
+    units = await SqliteLongTaskRepository(db).list_units('analysis-task')
+    assert units[0].status.value == 'completed'
+    assert units[0].output_ref == 'saved-output'
+    assert units[1].status.value == 'pending'
+    assert units[1].run_id == 'analysis-run'
+    for unit, step in zip(units, recipe.steps):
+        assert unit.metadata['plannerStepId'] == step.plan_step_id
+        assert list(unit.metadata['frozenInput']['ids']) == ['one', 'two']
+    before = [(unit.status, unit.run_id, unit.output_ref, unit.max_attempts) for unit in units]
+    await service._prepare_recipe_recovery('analysis-task', recipe)
+    after = await SqliteLongTaskRepository(db).list_units('analysis-task')
+    assert before == [(unit.status, unit.run_id, unit.output_ref, unit.max_attempts) for unit in after]
+
+async def test_dispatch_failure_settlement_survives_consumer_cancellation(db):
+    import asyncio
+    revision = await _source(db)
+    await _candidate_artifact(db, revision)
+    dispatcher = NovelAnalysisAgentProfile(db).create_long_task_dispatcher(
+        long_task_repository=SqliteLongTaskRepository(db), executor=NovelAnalysisTaskUnitExecutor(db))
+    started, release = asyncio.Event(), asyncio.Event()
+    settled = []
+    async def settle(run_id, error):
+        started.set()
+        await release.wait()
+        settled.append(str(error))
+    dispatcher.set_execution_failure_handler(settle)
+    async def observer(update):
+        raise ValueError('failed ACK')
+    execution = asyncio.create_task(dispatcher.execute('analysis-task', run_id='analysis-run', observer=observer))
+    await asyncio.wait_for(started.wait(), 3)
+    execution.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(execution, 3)
+    assert settled == ['failed ACK']
+
+
+async def test_dispatch_failure_persists_terminal_root_event(db):
+    from application.agent_composition import AgentComposition
+    from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+    from purra.contracts import RunCreateParams
+    from purra.run_controller import AgentRunController
+    repository = SqliteRunRepository(db)
+    events = []
+    class Sink:
+        async def emit(self, event):
+            events.append(event)
+    controller = AgentRunController(repository=repository, event_sink=Sink())
+    snapshot = await controller.start(RunCreateParams(session_id=None, prompt='test', mode=None))
+    from infrastructure.persistence.sqlite_agent_output_repository import SqliteAgentOutputRepository
+    composition = SimpleNamespace(_db=db, _repository=repository,
+        _output_repository=SqliteAgentOutputRepository(db, run_repository=repository), observe_event=events.append)
+    await AgentComposition._settle_dispatch_failure(composition, snapshot.run_id, ValueError('transition failure'))
+    saved = await repository.get(snapshot.run_id)
+    assert saved.status is RunStatus.FAILED
+    assert 'transition failure' in saved.error
+    assert any(event.type == 'run.failed' for event in events)
+    lifecycle = await db.fetch_one(
+        "SELECT kind, payload_json FROM ai_agent_run_events WHERE run_id=? AND source_event_key=?",
+        [snapshot.run_id, f'run:{snapshot.run_id}:failed'])
+    assert lifecycle['kind'] == 'run.lifecycle'
+    assert json.loads(lifecycle['payload_json'])['status'] == 'failed'

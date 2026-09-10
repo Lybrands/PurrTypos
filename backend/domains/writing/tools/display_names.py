@@ -47,7 +47,8 @@ WRITING_TOOL_DISPLAY_NAMES: Mapping[str, Mapping[str, str]] = {
     "resolveForeshadowing": _names("回收伏笔", "Resolve Foreshadowing"),
     "searchMemories": _names("检索长期记忆", "Search Long-term Memory"),
     "searchSparkIdeas": _names("检索设定", "Search Story Notes"),
-    "searchWritingMethods": _names("检索写作方法目录", "Search Writing Methods"),
+    "searchWritingTechniques": _names("检索已授权写作技法", "Search Authorized Writing Techniques"),
+    "readWritingTechnique": _names("读取写作技法文件", "Read Writing Technique File"),
     "readContinuationSourceSection": _names(
         "读取冻结来源章节", "Read Frozen Source Chapter"
     ),

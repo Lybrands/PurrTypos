@@ -539,12 +539,17 @@ async def init_schema(db: DatabaseConnection) -> None:
 
     await init_continuation_schema(db)
 
-    from database.writing_method_schema import init_writing_method_schema
+    from database.writing_technique_retirement import retire_writing_method_schema
+    await retire_writing_method_schema(db)
+    from database.writing_technique_schema import init_writing_technique_schema
+    await init_writing_technique_schema(db)
 
-    await init_writing_method_schema(db)
-
+    from database.novel_analysis_sessions_schema import init_analysis_sessions
+    await init_analysis_sessions(db)
     from database.novel_knowledge_schema import init_novel_knowledge_schema
     await init_novel_knowledge_schema(db)
+    from database.creation_material_schema import init_creation_material_schema
+    await init_creation_material_schema(db)
 
     # ── screenplay projects / versioned documents ────────────────
     # 剧本项目与书架作品是“引用”关系而不是所有权关系。source_book_id

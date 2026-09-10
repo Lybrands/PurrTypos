@@ -94,18 +94,14 @@ export function buildExportEntries(
 
 /**
  * 整本书合并为单个 TXT 内容（投稿 / 发布平台格式）：
- * 卷标题独立一行（如有），每章「章节标题 + 空行 + 正文」，章间空两行。
+ * 每章「章节标题 + 空行 + 正文」，章间空两行；有卷时把卷名并入章节标题。
  */
 export function buildSingleTxtContent(book: ExportBookData): string {
   const parts: string[] = []
-  let lastVolumeId: EntityId | null | undefined = undefined
   for (const ch of book.chapters) {
-    if (ch.volumeTitle != null && ch.volumeId !== lastVolumeId) {
-      parts.push(ch.volumeTitle)
-      lastVolumeId = ch.volumeId
-    }
     const body = (ch.content || '').replace(/\r\n/g, '\n').trim()
-    parts.push(`${ch.title}\n\n${body}`)
+    const title = ch.volumeTitle ? `${ch.volumeTitle} · ${ch.title}` : ch.title
+    parts.push(`${title}\n\n${body}`)
   }
   return parts.join('\n\n\n') + '\n'
 }

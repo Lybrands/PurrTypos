@@ -2,7 +2,7 @@
 
 日期：2026-08-31。状态：源码适配与离线集成验证已完成；真实数据转存、真实 Provider、运行中服务切换和完整应用 E2E 尚未执行。
 
-用户已授权开始执行。当前进度、变更边界、基线失败名称和验证证据见 [执行记录](./2026-08-31-purra-memory-component-adoption-execution.md)。阶段内已完成的源码项据实勾选；需要真实数据、服务或 Provider 的退出条件继续保持未完成。真实数据转换、服务切换与发布仍遵守本文约束。
+当前进度、变更边界、基线失败名称和验证证据见 [执行记录](./2026-08-31-purra-memory-component-adoption-execution.md)。阶段内已完成的源码项据实勾选；需要真实数据、服务或 Provider 的退出条件继续保持未完成。真实数据转换、服务切换与发布仍遵守本文约束。
 
 ## 1. 目标与不可改变的约束
 
@@ -23,7 +23,7 @@
 
 | 项目 | 2026-08-31 的事实 | 对执行的要求 |
 | --- | --- | --- |
-| PurrTypos | HEAD 为 b23a97f，工作树包含大量既有未提交修改 | 执行前保存相关路径基线；不覆盖、回滚或提交其他任务的修改 |
+| PurrTypos | 基线提交 b23a97f | 基线仅用于该阶段行为对照 |
 | PurrA | HEAD 为 06f712a，Retriever、Mem0、Planner 等包含未提交工作 | 不能把 HEAD 当成完整依赖版本；记录所用源码/构建产物摘要并复核并行变更 |
 | Core | requirements-purra.txt 使用本地 editable 依赖；当前虚拟环境实际导入同级 purra/src 下的 0.5.0 | 保持公共包导入；打包产物不能依赖开发机路径 |
 | 记忆组件 | PurrTypos 虚拟环境尚未安装 purra-mem0 | 本文目标尚未完成，不把之前的 Retriever 适配算成 Mem0 接入 |
@@ -313,22 +313,22 @@ git diff --check
 ## 11. 执行时需要明确、但不阻塞当前计划的条件
 
 - 数据切换：默认保留旧数据，先副本演练；真实转存、涉及外发的向量化和原库清理在结果可审阅后取得明确授权。未决定前不自动转换或清库。
-- Provider：复用用户已授权的配置；若没有可用 Embedding 或额度，完成所有离线工作并报告具体缺项，不反复要求用户提前给凭据。未配置期间不回退旧实现。
+- Provider：使用已配置的服务；缺少 Embedding 或额度时标记相关验收未完成，不回退旧实现。
 - 规则：默认延续显式用户写入、AI 提炼待审、Story Memory 既有审核阈值/权威规则。自动接受策略变更要单独写明，不借组件升级偷偷放宽。
 - 并行改动：会话传输与 Planner 正在变化，实施前协调共享文件；本文不授权覆盖其未提交内容。
 - 发布：本计划不包含自动提交、推送、发包或部署；完成后交付实际变更、验证记录、剩余风险与数据切换状态。
 
 ## 12. 核对来源
 
-以下链接指向本次实际检查的本地代码；框架文档中关于旧任务“只改框架/暂不指定消费项目”的描述是当时范围，不覆盖本次用户明确提出的 PurrTypos 接入目标。当前能力以源码和行为测试为准。
+以下链接列出接入相关代码。框架能力以源码和行为测试为准。
 
-- [PurrA 组件说明](/Users/liuyubin/Lybrand_project/purra/integrations/mem0/README.md)、[Python 公共用法](/Users/liuyubin/Lybrand_project/purra/integrations/mem0/python/README.md)、[组件实现](/Users/liuyubin/Lybrand_project/purra/integrations/mem0/python/src/purra_mem0/memory.py)、[持久控制账本](/Users/liuyubin/Lybrand_project/purra/integrations/mem0/python/src/purra_mem0/_journal.py)、[上下文组装](/Users/liuyubin/Lybrand_project/purra/integrations/mem0/python/src/purra_mem0/context.py)。
-- [框架记忆范围记录](/Users/liuyubin/Lybrand_project/purra/docs/plans/2026-08-31-purra-mem0-integration-scope.md)、[中文效果验收](/Users/liuyubin/Lybrand_project/purra/integrations/mem0/EVALUATION.md)。
-- [管理路由](/Users/liuyubin/Lybrand_project/PurrTypos/backend/routers/memories.py)、[管理 DTO](/Users/liuyubin/Lybrand_project/PurrTypos/backend/schemas/memories.py)、[唯一应用操作](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/memory_operations.py)、[Agent 记忆工具](/Users/liuyubin/Lybrand_project/PurrTypos/backend/infrastructure/writing/tools/handlers/memory_tools.py)。
-- [来源沉淀策略](/Users/liuyubin/Lybrand_project/PurrTypos/backend/services/memory_deposition_service.py)、[业务来源仓储](/Users/liuyubin/Lybrand_project/PurrTypos/backend/infrastructure/persistence/writing/sqlite_writing_source_repository.py)、[持久交付](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/memory_delivery.py)、[当前 schema](/Users/liuyubin/Lybrand_project/PurrTypos/backend/database/schema.py)。旧 `long_term_memory_service.py`、`memory_intelligence_service.py`、重复的 `memory_service.py` 和两个 SQLite 通用记忆仓储已删除。
-- [Writing Profile](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/writing_agent_profile.py)、[当前 Retriever](/Users/liuyubin/Lybrand_project/PurrTypos/backend/infrastructure/writing/retrieval.py)、[上下文来源](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/writing_context_source.py)、[统一记忆上下文](/Users/liuyubin/Lybrand_project/PurrTypos/backend/domains/writing/unified_memory_context.py)。
-- [Story Memory 演化](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/story_memory_evolution.py)、[Story Memory 领域账本](/Users/liuyubin/Lybrand_project/PurrTypos/backend/domains/writing/story_memory_ledger.py)、[统一展示查询](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/unified_memory.py)。
-- [记忆中心](/Users/liuyubin/Lybrand_project/PurrTypos/src/Workspace/AiPanel/components/MemoryCenter/index.tsx)、[内联编辑调用](/Users/liuyubin/Lybrand_project/PurrTypos/src/Workspace/EditorPanel/inlineEditContext.ts)、[内联记忆应用入口](/Users/liuyubin/Lybrand_project/PurrTypos/backend/application/writing_memory_context.py)。
-- [人物删除入口](/Users/liuyubin/Lybrand_project/PurrTypos/backend/routers/characters.py)、[大纲恢复/删除](/Users/liuyubin/Lybrand_project/PurrTypos/backend/routers/outlines.py)、[整书删除](/Users/liuyubin/Lybrand_project/PurrTypos/backend/routers/books.py)、[当前备份/导入](/Users/liuyubin/Lybrand_project/PurrTypos/backend/routers/files.py)。
-- [浏览器备份入口](/Users/liuyubin/Lybrand_project/PurrTypos/src/platform/browser.ts)、[Electron 数据库 IPC](/Users/liuyubin/Lybrand_project/PurrTypos/electron/database_ipc.js)、[设置页备份操作](/Users/liuyubin/Lybrand_project/PurrTypos/src/SettingsPage/useDatabaseActions.ts)、[工具审批策略](/Users/liuyubin/Lybrand_project/PurrTypos/backend/domains/writing/policies.py)。
-- [宿主生命周期](/Users/liuyubin/Lybrand_project/PurrTypos/backend/main.py)、[分发资源准备](/Users/liuyubin/Lybrand_project/PurrTypos/scripts/prepare-backend-resources.cjs)、[现有包边界](/Users/liuyubin/Lybrand_project/PurrTypos/docs/design/purra-package-boundary.md)、[所有权章程](/Users/liuyubin/Lybrand_project/PurrTypos/docs/design/purra-screenplay-refactor-charter.md)。
+- PurrA 组件说明（外部仓库路径：`purra/integrations/mem0/README.md`）、Python 公共用法（外部仓库路径：`purra/integrations/mem0/python/README.md`）、组件实现（外部仓库路径：`purra/integrations/mem0/python/src/purra_mem0/memory.py`）、持久控制账本（外部仓库路径：`purra/integrations/mem0/python/src/purra_mem0/_journal.py`）、上下文组装（外部仓库路径：`purra/integrations/mem0/python/src/purra_mem0/context.py`）。
+- 框架记忆范围记录（外部仓库路径：`purra/docs/plans/2026-08-31-purra-mem0-integration-scope.md`）、中文效果验收（外部仓库路径：`purra/integrations/mem0/EVALUATION.md`）。
+- [管理路由](../../backend/routers/memories.py)、[管理 DTO](../../backend/schemas/memories.py)、[唯一应用操作](../../backend/application/memory_operations.py)、[Agent 记忆工具](../../backend/infrastructure/writing/tools/handlers/memory_tools.py)。
+- [来源沉淀策略](../../backend/services/memory_deposition_service.py)、[业务来源仓储](../../backend/infrastructure/persistence/writing/sqlite_writing_source_repository.py)、[持久交付](../../backend/application/memory_delivery.py)、[当前 schema](../../backend/database/schema.py)。旧 `long_term_memory_service.py`、`memory_intelligence_service.py`、重复的 `memory_service.py` 和两个 SQLite 通用记忆仓储已删除。
+- [Writing Profile](../../backend/application/writing_agent_profile.py)、[当前 Retriever](../../backend/infrastructure/writing/retrieval.py)、[上下文来源](../../backend/application/writing_context_source.py)、[统一记忆上下文](../../backend/domains/writing/unified_memory_context.py)。
+- [Story Memory 演化](../../backend/application/story_memory_evolution.py)、[Story Memory 领域账本](../../backend/domains/writing/story_memory_ledger.py)、[统一展示查询](../../backend/application/unified_memory.py)。
+- [记忆中心](../../src/Workspace/AiPanel/components/MemoryCenter/index.tsx)、[内联编辑调用](../../src/Workspace/EditorPanel/inlineEditContext.ts)、[内联记忆应用入口](../../backend/application/writing_memory_context.py)。
+- [人物删除入口](../../backend/routers/characters.py)、[大纲恢复/删除](../../backend/routers/outlines.py)、[整书删除](../../backend/routers/books.py)、[当前备份/导入](../../backend/routers/files.py)。
+- [浏览器备份入口](../../src/platform/browser.ts)、[Electron 数据库 IPC](../../electron/database_ipc.js)、[设置页备份操作](../../src/SettingsPage/useDatabaseActions.ts)、[工具审批策略](../../backend/domains/writing/policies.py)。
+- [宿主生命周期](../../backend/main.py)、[分发资源准备](../../scripts/prepare-backend-resources.cjs)、[现有包边界](purra-package-boundary.md)、[所有权章程](purra-screenplay-refactor-charter.md)。

@@ -17,7 +17,8 @@ import asyncio
 import os
 import shutil
 import sqlite3
-from contextlib import asynccontextmanager
+from uuid import uuid4
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -62,6 +63,7 @@ class DatabaseConnection:
         self._connection_lock = asyncio.Lock()
         self._tx_owner: asyncio.Task[Any] | None = None
         self._tx_depth = 0
+        self._file_participants = []
 
     async def init(self, *, initialize_schema: bool = True) -> None:
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -78,6 +80,8 @@ class DatabaseConnection:
         if initialize_schema:
             from database.schema import init_schema
             await init_schema(self)
+            from application.creation_material_service import recover_materials
+            await recover_materials(self)
 
     def _ensure_conn(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -118,6 +122,11 @@ class DatabaseConnection:
         # another Task from placing work between those two queue entries.
         async with self._connection_lock:
             yield self._ensure_conn(), False
+
+    def enlist_file_change(self, participant):
+        if not self.current_task_owns_transaction():
+            raise RuntimeError("file changes require a host transaction")
+        self._file_participants.append(participant)
 
     # ── Transactions ─────────────────────────────────────────────
 
@@ -161,12 +170,14 @@ class DatabaseConnection:
                 raise RuntimeError(
                     "cancellation-linearizable transaction cannot be nested"
                 )
+            participant_count = len(self._file_participants)
             sp_name = f"sp_{self._tx_depth}"
             await conn.execute(f"SAVEPOINT {sp_name}")
             self._tx_depth += 1
             try:
                 yield self
             except BaseException:
+                del self._file_participants[participant_count:]
                 try:
                     await conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
                     await conn.execute(f"RELEASE SAVEPOINT {sp_name}")
@@ -196,25 +207,30 @@ class DatabaseConnection:
                 raise
             self._tx_owner = task
             self._tx_depth = 1
+            self._file_participants = []
+            prepared = []
             try:
                 yield self
+                for participant in self._file_participants:
+                    prepared.append(participant)
+                    participant.prepare()
+                # Once files are published, resolve COMMIT before releasing the
+                # connection or acknowledging cancellation.
+                if cancellation_linearizable or prepared:
+                    await _await_task_uninterruptibly(asyncio.create_task(conn.commit()))
+                else:
+                    await conn.commit()
             except BaseException:
                 await _rollback_uninterruptibly(conn)
+                for participant in reversed(prepared):
+                    participant.rollback()
                 raise
             else:
-                if not cancellation_linearizable:
-                    await conn.commit()
-                    return
-                # COMMIT is the durable receipt boundary. If cancellation arrives
-                # while its acknowledgement is in flight, finish COMMIT and
-                # suppress that cancellation so the repository can return its
-                # receipt. Failures still roll back and propagate.
-                commit_task = asyncio.create_task(conn.commit())
-                try:
-                    await _await_task_uninterruptibly(commit_task)
-                except BaseException:
-                    await _rollback_uninterruptibly(conn)
-                    raise
+                for participant in prepared:
+                    participant.committed()
+            finally:
+                self._file_participants = []
+
         finally:
             if self._tx_owner is task:
                 self._tx_owner = None
@@ -276,17 +292,30 @@ class DatabaseConnection:
     def get_db_path(self) -> Path:
         return self._db_path
 
+    async def get_connected_db_path(self) -> Path:
+        databases = await self.fetch_all("PRAGMA database_list")
+        for database in databases:
+            if database["name"] == "main" and database["file"]:
+                return Path(database["file"]).resolve()
+        raise RuntimeError("当前数据库连接没有本地文件路径")
+
     async def export_to_buffer(self) -> bytes | None:
+        return await self.export_with_resources(lambda payload: payload)
+
+    async def export_with_resources(self, capture):
+        """Capture host state and its file resources under one connection barrier."""
         if self._conn is None:
             return None
-        async with self._connection_access() as (conn, _):
+        async with self._connection_access() as (conn, in_transaction):
+            if in_transaction:
+                raise RuntimeError("cannot export inside an active transaction")
             cursor = await conn.execute("PRAGMA wal_checkpoint(FULL)")
             await cursor.fetchall()
             await cursor.close()
             await conn.commit()
-        return self._db_path.read_bytes()
+            return await asyncio.to_thread(capture, self._db_path.read_bytes())
 
-    async def import_from_buffer(self, payload: bytes) -> None:
+    async def import_from_buffer(self, payload: bytes, *, resource_install=None) -> None:
         """Atomically replace the active SQLite database from an uploaded backup.
 
         The candidate is validated before the live connection is closed. The
@@ -296,7 +325,7 @@ class DatabaseConnection:
         if not payload:
             raise ValueError("数据库备份为空")
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        candidate = self._db_path.with_suffix(".db.importing")
+        candidate = self._db_path.with_name(f"{self._db_path.name}.{uuid4().hex}.importing")
         candidate.write_bytes(payload)
         try:
             try:
@@ -315,6 +344,11 @@ class DatabaseConnection:
                     if knowledge:
                         validation.execute("UPDATE novel_knowledge_bindings SET host_id='',state='reauthorization_required',semantic_config=NULL,generation=generation+1,version=version+1 WHERE state!='unbound'")
                         validation.commit()
+                    if resource_install is None and validation.execute("SELECT 1 FROM sqlite_master WHERE name='creation_material_books'").fetchone():
+                        validation.execute("UPDATE creation_material_books SET state='unavailable'")
+                        validation.commit()
+                    from database.writing_technique_retirement import prepare_import_schema
+                    await prepare_import_schema(validation)
                 finally:
                     validation.close()
             except sqlite3.DatabaseError as error:
@@ -330,7 +364,7 @@ class DatabaseConnection:
 
                 backup = self._db_path.with_name(
                     f"{self._db_path.name}.before-import-"
-                    f"{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
+                    f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}.bak"
                 )
                 if self._db_path.exists():
                     shutil.copy2(self._db_path, backup)
@@ -338,18 +372,34 @@ class DatabaseConnection:
                     sidecar = Path(f"{self._db_path}{suffix}")
                     if sidecar.exists():
                         sidecar.unlink()
-                os.replace(candidate, self._db_path)
-
-                self._conn = await aiosqlite.connect(self._db_path)
-                self._conn.row_factory = aiosqlite.Row
-                await self._conn.execute("PRAGMA journal_mode=WAL")
-                await self._conn.execute("PRAGMA busy_timeout=5000")
-                await self._conn.commit()
+                try:
+                    with resource_install() if resource_install else nullcontext():
+                        os.replace(candidate, self._db_path)
+                        await self._open_imported_connection()
+                except BaseException:
+                    async def restore_database():
+                        if self._conn is not None:
+                            await self._conn.close()
+                            self._conn = None
+                        for suffix in ("-wal", "-shm"):
+                            Path(f"{self._db_path}{suffix}").unlink(missing_ok=True)
+                        if backup.exists():
+                            shutil.copy2(backup, self._db_path)
+                        await self._open_imported_connection()
+                    await _await_task_uninterruptibly(asyncio.create_task(restore_database()))
+                    raise
                 self._tx_owner = None
                 self._tx_depth = 0
         finally:
             if candidate.exists():
                 candidate.unlink()
+
+    async def _open_imported_connection(self):
+        self._conn = await aiosqlite.connect(self._db_path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
+        await self._conn.commit()
 
     async def close(self) -> None:
         if self._conn is None:

@@ -333,6 +333,10 @@ export default function ConversationViewport({
     void onEditMessage(index, content)
   }, [editingTarget, messages, onEditMessage, sessionIdentity])
 
+  const handleOutputDetach = React.useCallback((value: boolean) => {
+    if (value) detachFromOutput()
+  }, [detachFromOutput])
+
   const renderMessage = React.useCallback((index: number, message: AgentConversationMessage) => {
     const isLast = index === messages.length - 1
     if (message.role === 'user') {
@@ -389,6 +393,7 @@ export default function ConversationViewport({
       isLastAssistant,
       loading,
       showPlaceholder,
+      deferPlainText: true,
     })
     if (!assistantMessageVisible({
       hasVisibleContent,
@@ -410,9 +415,7 @@ export default function ConversationViewport({
             loading={loading}
             isLastAssistant={isLastAssistant}
             showPlaceholder={showPlaceholder}
-            setScrolledUpByReason={(value) => {
-              if (value) detachFromOutput()
-            }}
+            setScrolledUpByReason={handleOutputDetach}
             onStructuredAnswer={onStructuredAnswer}
             onResolveToolApproval={onResolveToolApproval}
             onSubmitErrorReport={onSubmitErrorReport}
@@ -433,6 +436,7 @@ export default function ConversationViewport({
               {extraActions}
               {copyView.visible ? (
                 <AgentMessageCopyButton
+                  plainTextFromMarkdown
                   content={copyView.plainText}
                   markdownContent={copyView.markdown}
                   label="复制回复纯文本"
@@ -447,7 +451,7 @@ export default function ConversationViewport({
     afterAssistantMessage,
     afterAssistantMessageActions,
     cancelMessageEdit,
-    detachFromOutput,
+    handleOutputDetach,
     editingTarget,
     latestAssistantIndex,
     loading,
@@ -479,6 +483,7 @@ export default function ConversationViewport({
           ref={virtuosoRef}
           data={messages}
           initialTopMostItemIndex={{ index: messages.length - 1, align: 'end' }}
+          increaseViewportBy={{ top: 400, bottom: 400 }}
           alignToBottom={!userDetached}
           followOutput={userDetached ? false : 'auto'}
           scrollerRef={handleScrollerRef}

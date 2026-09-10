@@ -146,7 +146,8 @@ test('execution panel shows status while nested groups retain their execution he
     assert.doesNotMatch(outerTitle, /个步骤|读取剧本交付物/)
     assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /执行了9 个步骤/)
     assert.doesNotMatch(innerTitle, /正在进行|已完成/)
-    assert.match(markup, /读取剧本交付物/)
+    if (active) assert.match(markup, /读取剧本交付物/)
+    else assert.doesNotMatch(markup, /读取剧本交付物/)
   }
 })
 

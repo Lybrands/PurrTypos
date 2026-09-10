@@ -1,4 +1,5 @@
-import type { AiModelConfig, EntityId, WritingMethodOverrides } from "../../../types";
+import type { WritingTechniqueSelection } from '../../../services/writingTechniques';
+import type { AiModelConfig, EntityId } from "../../../types";
 
 export type ChatRunOutcome = "completed" | "paused" | "failed" | "canceled";
 
@@ -21,7 +22,8 @@ export interface QueuedChatSubmission {
   selectedLongTermMemoryIds: string[];
   selectedMemoryIds: (number | string)[];
   selectedForeshadowingIds: (number | string)[];
-  writingMethodOverrides: WritingMethodOverrides;
+  writingTechniqueSelection?: WritingTechniqueSelection;
+  writingTechniqueInputId?: string;
 }
 
 export type ChatSessionActivityState =

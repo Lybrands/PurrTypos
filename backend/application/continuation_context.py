@@ -44,15 +44,18 @@ class ContinuationContextService:
             "SELECT * FROM continuation_canon_records WHERE snapshot_id = ? ORDER BY id",
             [row["canon_snapshot_id"]],
         )
+        operation = await self._db.fetch_one("SELECT manifest_json FROM continuation_operations WHERE book_id=?", [book_id])
+        manifest = json.loads(operation["manifest_json"]) if operation else {}
         binding = {
+            "materialAuthority": "shared_markdown" if operation else "canon_snapshot",
             "id": str(row["id"]),
             "targetBookId": book_id,
             "sourceWorkId": str(row["source_work_id"]),
             "sourceRevisionId": str(row["source_revision_id"]),
             "sourceAnalysisId": str(row["source_analysis_id"]),
-            "sourceTitle": str(row["source_title"] or "已删除来源"),
+            "sourceTitle": str(row["source_title"] or manifest.get("sourceTitle", "已删除来源")),
             "forkSectionId": str(row["fork_section_id"]),
-            "forkSectionTitle": str(row["fork_section_title"] or "原分叉章节已删除"),
+            "forkSectionTitle": str(row["fork_section_title"] or manifest.get("forkSectionTitle", "原分叉章节已删除")),
             "forkOrdinal": int(row["fork_ordinal"]),
             "canonSnapshotId": str(row["canon_snapshot_id"]),
             "canonSnapshotDigest": str(row["canon_snapshot_digest"]),
@@ -75,18 +78,39 @@ class ContinuationContextService:
             ],
         }
 
+    async def list_source_sections(self, *, book_id: str, offset: int = 0, limit: int = 100):
+        context = await self.load_for_writing(book_id)
+        binding = context.get("binding")
+        if not binding:
+            return {"items": [], "total": 0, "chapterCount": 0, "nextOffset": None}
+        if offset < 0 or not 1 <= limit <= 200:
+            raise AppError("无效的目录分页范围", 422)
+        frozen = await self._db.fetch_one("SELECT book_id FROM continuation_operations WHERE book_id=?", [book_id])
+        table = "continuation_source_sections" if frozen else "novel_source_sections"
+        scope = "book_id=?" if frozen else "revision_id=? AND ordinal<=?"
+        params = [book_id] if frozen else [binding["sourceRevisionId"], binding["forkOrdinal"]]
+        rows = await self._db.fetch_all(f"SELECT id,title,ordinal,section_type,locator_json FROM {table} WHERE {scope} ORDER BY ordinal LIMIT ? OFFSET ?", [*params, limit, offset])
+        count = await self._db.fetch_one(f"SELECT COUNT(*) AS n FROM {table} WHERE {scope}", params)
+        chapters = await self._db.fetch_one(f"SELECT COUNT(*) AS n FROM {table} WHERE {scope} AND section_type='chapter'", params)
+        return {"items": [{"nodeKind": "source_section", "sectionId": row["id"], "title": row["title"], "ordinal": row["ordinal"], "sectionType": row["section_type"], "locator": json.loads(row["locator_json"]), "readOnly": True} for row in rows],
+                "total": count["n"], "chapterCount": chapters["n"], "nextOffset": offset + len(rows) if offset + len(rows) < count["n"] else None}
+
     async def read_source_section(self, *, book_id: str, section_id: str) -> dict:
         context = await self.load_for_writing(book_id)
         binding = context.get("binding")
         if context["creationMode"] != "continuation" or not isinstance(binding, dict):
             raise AppError("只有续写作品可以读取冻结来源", 409)
-        section = await self._db.fetch_one(
+        frozen = await self._db.fetch_one("SELECT book_id FROM continuation_operations WHERE book_id=?", [book_id])
+        if frozen:
+            section = await self._db.fetch_one("SELECT * FROM continuation_source_sections WHERE book_id=? AND id=?", [book_id, section_id])
+        else:
+            section = await self._db.fetch_one(
             "SELECT id, revision_id, ordinal, title, text_content, content_digest "
             "FROM novel_source_sections WHERE id = ? AND revision_id = ?",
             [section_id, binding["sourceRevisionId"]],
         )
         if section is None:
-            raise NotFoundError("来源章节不存在或不属于冻结来源版本")
+            raise NotFoundError("来源章节不存在、不属于冻结版本或位于分叉点后")
         if int(section["ordinal"]) > int(binding["forkOrdinal"]):
             raise AppError("分叉点后的来源章节禁止被续写运行读取", 403)
         return {

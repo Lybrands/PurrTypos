@@ -35,7 +35,10 @@ from purra.task_admission import (
     TaskAdmissionDecision,
 )
 
-from domains.writing_distillation import validate_report, render_skill, assessment_passed
+from domains.writing_technique_generation import validate_technique_result
+from application.writing_technique_service import WritingTechniqueService
+from domains.writing.techniques import TechniqueError
+import asyncio
 
 from application.agent_conversation_input import conversation_messages, conversation_input_metadata
 from infrastructure.persistence.agent_conversation_history import analysis_history
@@ -84,10 +87,11 @@ def _discard_active_analysis(
 class _NovelAnalysisContinuationLifecycle:
     """Start one continuation without leaving a resumed task orphaned."""
 
-    def __init__(self, repository, *, task_id: str, retry_failed: bool) -> None:
+    def __init__(self, repository, *, task_id: str, retry_failed: bool, prepare=None) -> None:
         self._repository = repository
         self._task_id = task_id
         self._retry_failed = retry_failed
+        self._prepare = prepare
 
     async def validate(self) -> None:
         task = await self._repository.load(self._task_id)
@@ -96,6 +100,8 @@ class _NovelAnalysisContinuationLifecycle:
             raise AppError("来源分析任务状态不允许恢复", 409)
 
     async def before_submit(self) -> None:
+        if self._prepare is not None:
+            await self._prepare()
         await self._repository.resume(
             self._task_id,
             additional_attempts=1 if self._retry_failed else 0,
@@ -140,7 +146,7 @@ class NovelAnalysisService:
         *,
         source_revision_id: str,
         command_id: str,
-        prompt: str = "分析这部小说的全局故事概览、事实脉络和写作技法。",
+        prompt: str = "提取人物、背景、设定与情节资料，并生成可执行的写作技法。",
         runtime,
     ) -> dict:
         sections = await self._source.list_bound_sections(source_revision_id)
@@ -176,30 +182,73 @@ class NovelAnalysisService:
             "dispatchActive": not task.done(),
         }
 
+    async def replace_turn(self, *, source_revision_id, command_id, target_run_id, prompt, runtime):
+        from application.novel_analysis_sessions import NovelAnalysisSessions
+        # Dispatch waits for this transaction before reading history. Rejection
+        # rolls back the branch change; original Runs and artifacts stay intact.
+        previous_dispatch = _ACTIVE_ANALYSES.get(source_revision_id)
+        try:
+            async with self._db.transaction():
+                target = await NovelAnalysisSessions(self._db).replace_suffix(
+                    source_revision_id, command_id, target_run_id)
+                existing = await self._db.fetch_one(
+                    "SELECT id FROM ai_agent_runs WHERE binding_namespace='novel_source_analysis' "
+                    "AND binding_aggregate_id=? AND binding_command_id=?", [source_revision_id, command_id])
+                if existing:
+                    return {'status': 'accepted', 'commandId': command_id, 'sourceRevisionId': source_revision_id}
+                kind = json.loads(target.get('binding_attributes_json') or '{}').get('interactionKind', 'analysis')
+                if kind != 'follow_up':
+                    return await self.start(source_revision_id=source_revision_id,
+                        command_id=command_id, prompt=prompt, runtime=runtime)
+                prefix = await self.list_for_revision(source_revision_id)
+                session = await self._db.fetch_one(
+                    'SELECT session_id FROM novel_analysis_session_commands WHERE command_id=?', [command_id])
+                artifact_ref = next((run.get('artifactRef') or run.get('analysisArtifactRef') for run in prefix
+                    if run['conversationId'] == session['session_id']
+                    and (run.get('artifactRef') or run.get('analysisArtifactRef'))), None)
+                return await self.follow_up(source_revision_id=source_revision_id,
+                    command_id=command_id, prompt=prompt, runtime=runtime,
+                    artifact_ref=artifact_ref, allow_resume=False)
+        except BaseException:
+            pending = _ACTIVE_ANALYSES.get(source_revision_id)
+            if pending and pending != previous_dispatch and pending[0] == command_id and not pending[1].done():
+                pending[1].cancel()
+            raise
+
     async def follow_up(
         self,
         *,
         source_revision_id: str,
-        artifact_ref: str,
+        artifact_ref: str | None,
         prompt: str,
         command_id: str,
         runtime,
+        allow_resume: bool = True,
     ) -> dict:
         question = str(prompt or "").strip()
         if not question:
             raise AppError("请输入要追问的内容", 422)
         if len(question) > 20_000:
             raise AppError("追问内容过长", 422)
+        from application.novel_analysis_progress import requests_resume, latest_conversation_task
+        if allow_resume and requests_resume(question):
+            previous = await latest_conversation_task(self._db, source_revision_id, command_id)
+            if previous and previous['status'] in {'failed', 'paused'}:
+                result = await self.resume(task_id=previous['id'], run_command_id=command_id,
+                    runtime=runtime, retry_failed=previous['status'] == 'failed', user_prompt=question)
+                return {**result, 'status': 'accepted', 'commandId': command_id,
+                    'sourceRevisionId': source_revision_id, 'interactionKind': 'resume'}
         active = await self._long_tasks.find_active(
             namespace=NOVEL_ANALYSIS_DOMAIN_NAMESPACE,
             owner_id=source_revision_id,
             kind="novel_source_analysis",
         )
-        if active is not None:
+        if active is not None and active.status.value != "paused":
             raise AppError("来源分析尚未结束，请先恢复或取消当前任务", 409)
-        artifact = await self._artifacts.require(artifact_ref)
-        if str(artifact.get("sourceRevisionId") or "") != source_revision_id:
-            raise AppError("追问所用分析结果不属于当前来源版本", 409)
+        if artifact_ref:
+            artifact = await self._artifacts.require(artifact_ref)
+            if str(artifact.get("sourceRevisionId") or "") != source_revision_id:
+                raise AppError("追问所用分析结果不属于当前来源版本", 409)
         sections = await self._source.list_bound_sections(source_revision_id)
         task = self._dispatch_follow_up(
             source_revision_id=source_revision_id,
@@ -268,7 +317,7 @@ class NovelAnalysisService:
         *,
         source_revision_id: str,
         section_ids: tuple[str, ...],
-        artifact_ref: str,
+        artifact_ref: str | None,
         prompt: str,
         command_id: str,
         runtime,
@@ -314,6 +363,10 @@ class NovelAnalysisService:
         durable_continuation: DurableTaskContinuation | None,
         run_binding_lifecycle,
     ) -> None:
+        await self._db.execute(
+            "INSERT OR IGNORE INTO novel_analysis_session_commands(command_id,session_id,revision_id) "
+            "SELECT ?,session_id,revision_id FROM novel_analysis_session_commands WHERE command_id=?",
+            [run_command_id, task_idempotency_key])
         context = NovelAnalysisDomainContext(
             source_revision_id=source_revision_id,
             command_id=task_idempotency_key,
@@ -327,7 +380,7 @@ class NovelAnalysisService:
             messages=conversation_messages((*await analysis_history(self._db, source_revision_id, run_command_id), AgentMessage(
                 role=MessageRole.USER,
                 content=(
-                    prompt or "分析这部小说的全局故事概览、事实脉络和写作技法。"
+                    prompt or "提取人物、背景、设定与情节资料，并生成可执行的写作技法。"
                 ),
             )), context_window=window),
             model=model_request,
@@ -387,7 +440,7 @@ class NovelAnalysisService:
         *,
         source_revision_id: str,
         section_ids: tuple[str, ...],
-        artifact_ref: str,
+        artifact_ref: str | None,
         prompt: str,
         command_id: str,
         runtime,
@@ -409,7 +462,7 @@ class NovelAnalysisService:
             mode="novel_source_analysis_follow_up",
             metadata=conversation_input_metadata(source="persisted_public_turns", scope=f"analysis:{source_revision_id}"),
             context_window=window,
-            tools_enabled=False,
+            tools_enabled=True,
             planning_mode=PlanningMode.REACTIVE,
         )
         try:
@@ -448,18 +501,20 @@ class NovelAnalysisService:
         rows = await self._db.fetch_all(
             "SELECT r.id AS run_id, r.status AS run_status, r.binding_command_id, "
             "r.binding_attributes_json, r.prompt, r.final_response, r.error, "
+            "COALESCE(sc.session_id, 'legacy:' || r.binding_aggregate_id) AS conversation_id, "
             "r.create_time, r.update_time, "
             "r.provider_output_events, "
             "t.id AS task_id, t.status AS task_status, t.revision AS task_revision, "
             "t.total_units, t.completed_units, t.failed_units, "
             "t.metadata_json AS task_metadata_json "
             "FROM ai_agent_runs AS r "
+            "LEFT JOIN novel_analysis_session_commands AS sc ON sc.command_id=r.binding_command_id "
             "LEFT JOIN ai_agent_long_task_runs AS ltr ON ltr.run_id = r.id "
             "LEFT JOIN ai_agent_long_tasks AS t ON t.id = ltr.task_id "
             "WHERE r.binding_namespace = 'novel_source_analysis' "
             "AND r.binding_aggregate_id = ? "
-            "ORDER BY CASE WHEN t.status IN ('pending', 'running', 'paused') "
-            "THEN 0 ELSE 1 END, r.create_time DESC, r.rowid DESC LIMIT 1",
+            "AND NOT EXISTS (SELECT 1 FROM novel_analysis_superseded_runs WHERE run_id=r.id) "
+            "ORDER BY r.create_time DESC, r.rowid DESC",
             [source_revision_id],
         )
         results: list[dict] = []
@@ -472,11 +527,11 @@ class NovelAnalysisService:
             except (TypeError, ValueError):
                 binding_attributes = {}
             task_id = str(row.get("task_id") or "")
-            key = task_id or str(row["run_id"])
-            if key in seen_tasks:
-                continue
-            seen_tasks.add(key)
+            latest_task_turn = task_id not in seen_tasks
+            if task_id:
+                seen_tasks.add(task_id)
             final = None
+            published_id = None
             units = ()
             analysis_plan = None
             related_runs = []
@@ -498,21 +553,43 @@ class NovelAnalysisService:
                     analysis_plan = thaw_json_mapping(raw_plan)
                 units = await self._long_tasks.list_units(task_id)
                 task_runs = await self._list_task_runs(task_id)
+                # Each root owns the unit Runs created before the next root
+                # continuation. Task recovery reuses outputs, not conversation turns.
+                owner = None
+                owned_runs = []
+                for item in task_runs:
+                    if item["binding_namespace"] == "novel_source_analysis":
+                        owner = item["id"]
+                    if owner == row["run_id"]:
+                        owned_runs.append(item)
                 related_runs = [
                     {"runId": item["id"], "status": item["status"]}
-                    for item in task_runs if item["id"] != row["run_id"]
+                    for item in owned_runs if item["id"] != row["run_id"]
                 ]
+                if not latest_task_turn:
+                    units = ()
                 provider_output_events = sum(
                     int(item.get("provider_output_events") or 0)
-                    for item in task_runs
+                    for item in owned_runs
                 )
                 unit = await self._db.fetch_one(
-                    "SELECT output_ref FROM ai_agent_long_task_units "
-                    "WHERE task_id = ? AND unit_id = 'artifact:review' "
-                    "AND status = 'completed'",
-                    [task_id],
+                    "SELECT u.output_ref FROM ai_agent_long_task_units u "
+                    "JOIN ai_agent_artifacts a ON u.output_ref='novel-analysis-artifact://' || a.id "
+                    "WHERE u.task_id = ? AND u.unit_id = 'artifact:review' "
+                    "AND u.status = 'completed' AND a.created_by_run_id=?",
+                    [task_id, row["run_id"]],
                 )
                 final = str((unit or {}).get("output_ref") or "") or None
+                if final:
+                    published = await self._db.fetch_one(
+                        "SELECT p.id, json_extract(p.summary_json, '$.artifactId') AS artifact_id "
+                        "FROM novel_source_analyses p JOIN ai_agent_artifacts a "
+                        "ON a.id=json_extract(p.summary_json, '$.artifactId') "
+                        "WHERE p.source_revision_id=? AND a.created_by_run_id=? "
+                        "ORDER BY p.version_no DESC LIMIT 1", [source_revision_id, row["run_id"]])
+                    if published:
+                        published_id = published['id']
+                        final = NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + published['artifact_id']
             unit_views = []
             for unit in units:
                 unit_views.append({
@@ -533,6 +610,7 @@ class NovelAnalysisService:
                 "runId": str(row["run_id"]),
                 "runStatus": str(row["run_status"]),
                 "commandId": str(row.get("binding_command_id") or ""),
+                "conversationId": row.get("conversation_id"),
                 "interactionKind": str(
                     binding_attributes.get("interactionKind") or "analysis"
                 ),
@@ -543,13 +621,14 @@ class NovelAnalysisService:
                 "prompt": str(row.get("prompt") or ""),
                 "finalResponse": str(row.get("final_response") or ""),
                 "taskId": task_id or None,
-                "taskStatus": str(row.get("task_status") or "") or None,
+                "taskStatus": (str(row.get("task_status") or "") or None) if latest_task_turn else None,
                 "taskRevision": row.get("task_revision"),
                 "totalUnits": int(row.get("total_units") or 0),
                 "completedUnits": int(row.get("completed_units") or 0),
                 "failedUnits": int(row.get("failed_units") or 0),
                 "error": row.get("error"),
                 "artifactRef": final,
+                "publishedAnalysisId": published_id,
                 "providerOutputEvents": provider_output_events,
                 "relatedRuns": related_runs,
                 "analysisPlan": analysis_plan,
@@ -566,7 +645,7 @@ class NovelAnalysisService:
         # Durable unit Runs are recorded on units (including retry history),
         # not in the task's root/continuation Run binding table.
         return await self._db.fetch_all(
-            "SELECT r.id, r.status, r.provider_output_events FROM ai_agent_runs AS r "
+            "SELECT r.id, r.status, r.binding_namespace, r.provider_output_events FROM ai_agent_runs AS r "
             "WHERE r.id IN ("
             "SELECT run_id FROM ai_agent_long_task_runs WHERE task_id = ? "
             "UNION SELECT run_id FROM ai_agent_long_task_units WHERE task_id = ? "
@@ -605,6 +684,37 @@ class NovelAnalysisService:
                     await self._cancellation.cancel(run["id"])
         return _task_mapping(task)
 
+    async def _prepare_recipe_recovery(self, task_id, recipe):
+        # Change only scheduling metadata; keep frozen inputs, successful unit
+        # outputs and Run bindings so durable execution can reuse prior work.
+        async with self._db.transaction():
+            task = await self._long_tasks.load(task_id)
+            if task is None or task.status.value not in {"paused", "failed"}:
+                raise AppError("任务状态已变化，请刷新后重试", 409)
+            units = await self._long_tasks.list_units(task_id)
+            if not units:
+                return
+            expected = {step.id: step for step in recipe.steps}
+            if {unit.id for unit in units} != set(expected):
+                raise AppError("任务执行单元与恢复方案不一致，不能自动恢复", 409)
+            active = await self._db.fetch_one(
+                "SELECT r.id FROM ai_agent_runs r JOIN ai_agent_long_task_units u ON u.run_id=r.id "
+                "WHERE u.task_id=? AND r.status='running' LIMIT 1", [task_id])
+            if active:
+                raise AppError("仍有子任务在运行，请等待其停止后恢复", 409)
+            for unit in units:
+                step = expected[unit.id]
+                metadata = {**thaw_json_mapping(unit.metadata), "plannerStepId": step.plan_step_id}
+                await self._db.execute(
+                    "UPDATE ai_agent_long_task_units SET dependencies_json=?, metadata_json=?, "
+                    "status=CASE WHEN status IN ('claimed','running') THEN 'pending' ELSE status END, "
+                    "max_attempts=max_attempts+CASE WHEN status IN ('claimed','running') THEN 1 ELSE 0 END, "
+                    "worker_id=NULL, lease_expires_at_ms=NULL WHERE task_id=? AND unit_id=?",
+                    [json.dumps(list(step.depends_on)), json.dumps(metadata, ensure_ascii=False), task_id, unit.id])
+            metadata = {**thaw_json_mapping(task.metadata), **thaw_json_mapping(recipe.metadata)}
+            await self._db.execute("UPDATE ai_agent_long_tasks SET metadata_json=?, revision=revision+1 WHERE id=?",
+                                   [json.dumps(metadata, ensure_ascii=False), task_id])
+
     async def resume(
         self,
         *,
@@ -612,6 +722,7 @@ class NovelAnalysisService:
         run_command_id: str,
         runtime,
         retry_failed: bool,
+        user_prompt: str | None = None,
     ) -> dict:
         task = await self._long_tasks.load(task_id)
         if task is None or task.namespace != NOVEL_ANALYSIS_DOMAIN_NAMESPACE:
@@ -619,6 +730,8 @@ class NovelAnalysisService:
         if task.status.value not in ({"failed"} if retry_failed else {"paused"}):
             raise AppError("来源分析任务状态不允许恢复", 409)
         metadata = dict(task.metadata)
+        if metadata.get("analysisSchemaVersion") != NOVEL_ANALYSIS_SCHEMA_VERSION:
+            raise AppError("旧版来源分析仅供查看，请重新发起分析", 409)
         source = await self._run_repository.get(task.created_by_run_id)
         plan = source.execution_plan
         if plan is None or plan.task_spec is None:
@@ -646,6 +759,15 @@ class NovelAnalysisService:
             segments=segments,
             plan_step_ids=tuple(step.id for step in plan.steps),
         )
+        units = await self._long_tasks.list_units(task.id)
+        if units:
+            completed_ids = {unit.id for unit in units if unit.status.value == "completed"}
+            plan = replace(plan, steps=tuple(
+                replace(step, status=(
+                    StepStatus.DONE if all(unit.id in completed_ids for unit in recipe.steps
+                                           if unit.plan_step_id == step.id)
+                    else StepStatus.PENDING), result_summary=None, error=None)
+                for step in plan.steps))
         model_call_count = novel_analysis_model_call_count(recipe)
         admission = TaskAdmissionDecision(
             mode=ExecutionMode.DURABLE,
@@ -673,16 +795,14 @@ class NovelAnalysisService:
             self._long_tasks,
             task_id=task.id,
             retry_failed=retry_failed,
+            prepare=lambda: self._prepare_recipe_recovery(task.id, recipe),
         )
         self.dispatch(
             source_revision_id=str(metadata["sourceRevisionId"]),
             section_ids=tuple(metadata["sectionIds"]),
             task_idempotency_key=str(metadata["idempotencyKey"]),
             run_command_id=run_command_id,
-            prompt=str(
-                metadata.get("prompt")
-                or "分析这部小说的全局故事概览、事实脉络和写作技法。"
-            ),
+            prompt=user_prompt or "继续分析",
             runtime=runtime,
             failed_resume_attempts=1 if retry_failed else 0,
             segments=segments,
@@ -699,7 +819,7 @@ class NovelAnalysisService:
     async def review(
         self,
         *,
-        artifact_ref: str,
+        artifact_ref: str | None,
         command_id: str,
         payload: Mapping[str, object],
     ) -> dict:
@@ -709,6 +829,8 @@ class NovelAnalysisService:
             NOVEL_ANALYSIS_REVIEW_ARTIFACT_KIND,
         }:
             raise AppError("不是可审核的来源分析 Artifact", 409)
+        if source.get("analysisSchemaVersion") != NOVEL_ANALYSIS_SCHEMA_VERSION:
+            raise AppError("旧版分析仅供查看，请重新发起分析以生成写作技法", 409)
         corrected = {
             "analysisSchemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
             "sourceRevisionId": str(source["sourceRevisionId"]),
@@ -727,7 +849,12 @@ class NovelAnalysisService:
             "coverage": dict(source.get("coverage") or {}),
             "conflicts": list(source.get("conflicts") or ()),
             "reviewStatus": "reviewed",
-            "distillation": source["distillation"],
+            "techniqueResult": (
+                dict(payload["techniqueResult"])
+                if isinstance(payload.get("techniqueResult"), Mapping)
+                else source["techniqueResult"]
+            ),
+            "generationPrompt": source.get("generationPrompt"),
         }
         validated = await self._validated_publish_payload(corrected)
         return await self._artifacts.write(
@@ -764,9 +891,12 @@ class NovelAnalysisService:
         )
 
     async def _validated_publish_payload(self, value: Mapping[str, object]):
+        if value.get("analysisSchemaVersion") != NOVEL_ANALYSIS_SCHEMA_VERSION:
+            raise AppError("旧版分析仅供查看，请重新发起分析", 409)
         revision_id = str(value.get("sourceRevisionId") or "")
         section_ids = tuple(value.get("sectionIds") or ())
         await self._source.list_bound_sections(revision_id, section_ids)
+        from application.analysis_provenance import validate_policy, validate_reference
         facts = []
         cards = []
         for key, target in (("facts", facts), ("craftCards", cards)):
@@ -777,22 +907,12 @@ class NovelAnalysisService:
                 if not isinstance(raw, Mapping):
                     raise AppError(f"{key} 条目无效", 422)
                 item = dict(raw)
+                validate_policy(item, craft=key == "craftCards")
                 evidence = []
                 for raw_evidence in item.get("evidence") or ():
                     if not isinstance(raw_evidence, Mapping):
                         raise AppError("分析证据无效", 422)
-                    evidence.append(await self._source.validate_excerpt(
-                        source_revision_id=revision_id,
-                        bound_section_ids=section_ids,
-                        section_id=str(raw_evidence.get("sectionId") or ""),
-                        excerpt=str(raw_evidence.get("excerpt") or ""),
-                        start_character=_optional_int(
-                            raw_evidence.get("segmentStartCharacter")
-                        ),
-                        end_character=_optional_int(
-                            raw_evidence.get("segmentEndCharacter")
-                        ),
-                    ))
+                    evidence.append(await validate_reference(self._source, revision_id, section_ids, raw_evidence))
                 if not evidence:
                     raise AppError("每条事实和技法卡必须至少有一条证据", 422)
                 item["evidence"] = evidence
@@ -812,18 +932,7 @@ class NovelAnalysisService:
             for raw_evidence in overview.get("evidence") or ():
                 if not isinstance(raw_evidence, Mapping):
                     raise AppError("故事概览证据无效", 422)
-                overview_evidence.append(await self._source.validate_excerpt(
-                    source_revision_id=revision_id,
-                    bound_section_ids=section_ids,
-                    section_id=str(raw_evidence.get("sectionId") or ""),
-                    excerpt=str(raw_evidence.get("excerpt") or ""),
-                    start_character=_optional_int(
-                        raw_evidence.get("segmentStartCharacter")
-                    ),
-                    end_character=_optional_int(
-                        raw_evidence.get("segmentEndCharacter")
-                    ),
-                ))
+                overview_evidence.append(await validate_reference(self._source, revision_id, section_ids, raw_evidence))
             if not overview_evidence:
                 raise AppError("故事概览至少需要一条原文证据", 422)
             validated_overview = {
@@ -834,15 +943,21 @@ class NovelAnalysisService:
                 validated_overview
             )
         try:
-            report = value["distillation"]
-            skill = validate_report(report, cards)
-        except (ValueError, KeyError, TypeError) as error:
-            raise AppError("写作方法蒸馏记录不完整或与已检验版本不一致", 422) from error
+            technique_result = validate_technique_result(value.get("techniqueResult"), cards)
+            if technique_result["status"] == "generated":
+                candidate = technique_result["candidate"]
+                store = WritingTechniqueService(self._db).techniques
+                draft = await asyncio.to_thread(store.get_draft, candidate["techniqueId"], candidate["draftId"])
+                ref = {"kind": "technique", "id": candidate["techniqueId"], "versionId": candidate["versionId"]}
+                if draft.get("sealedRef") != ref or draft["owner"].get("sourceRevisionId") != revision_id:
+                    raise TechniqueError("invalid_reference", "技法版本与来源分析不一致")
+                await asyncio.to_thread(store.get_version_manifest, ref, verify_files=True)
+        except (ValueError, KeyError, TypeError, TechniqueError) as error:
+            raise AppError("写作技法结果或来源引用无效：" + str(error), 422) from error
         return {
             "analysisSchemaVersion": NOVEL_ANALYSIS_SCHEMA_VERSION,
-            "distillation": report,
-            "writingSkill": {**skill, "markdown": render_skill(skill)},
-            "skillReviewStatus": "pending_review" if assessment_passed(report["assessment"]) else "needs_revision",
+            "techniqueResult": technique_result,
+            "generationPrompt": value.get("generationPrompt"),
             "sourceRevisionId": revision_id,
             "sectionIds": list(section_ids),
             "facts": facts,
@@ -888,9 +1003,9 @@ class NovelAnalysisService:
                     digest,
                     json.dumps({
                         "artifactId": artifact_id,
-                        "distillation": payload["distillation"],
-                        "writingSkill": payload["writingSkill"],
-                        "skillReviewStatus": payload["skillReviewStatus"],
+                        "sectionIds": list(payload["sectionIds"]),
+                        "techniqueResult": payload["techniqueResult"],
+                        "generationPrompt": payload.get("generationPrompt"),
                         "coverage": payload["coverage"],
                         "conflicts": payload["conflicts"],
                         **(
@@ -901,6 +1016,10 @@ class NovelAnalysisService:
                     }, ensure_ascii=False, separators=(",", ":")),
                 ],
             )
+            candidate = (payload.get("techniqueResult") or {}).get("candidate")
+            if candidate:
+                from application.source_analysis_techniques import register
+                await register(self._db, analysis_id, {"id": candidate["techniqueId"], "versionId": candidate["versionId"]}, "candidate")
             for fact in payload["facts"]:
                 fact_id = f"fact_{uuid4().hex}"
                 ordinals = [int(item["sectionOrdinal"]) for item in fact["evidence"]]
@@ -908,7 +1027,7 @@ class NovelAnalysisService:
                     "INSERT INTO novel_source_analysis_facts "
                     "(id, analysis_id, fact_kind, subject_key, predicate, value_json, "
                     "lifecycle_status, first_section_ordinal, last_section_ordinal, "
-                    "content_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "content_digest, claim_nature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
                         fact_id,
                         analysis_id,
@@ -920,6 +1039,7 @@ class NovelAnalysisService:
                         min(ordinals),
                         max(ordinals),
                         str(fact["contentDigest"]),
+                        str(fact.get("claimNature") or "fact"),
                     ],
                 )
                 await self._insert_evidence(
@@ -1010,6 +1130,7 @@ class NovelAnalysisService:
                 "sectionId": item["section_id"],
                 "sectionOrdinal": item.get("section_ordinal"),
                 "sectionTitle": item.get("section_title"),
+                "referenceKind": json.loads(str(item["locator_json"])).get("referenceKind", "quote"),
                 "excerpt": item["excerpt"],
                 "locator": json.loads(str(item["locator_json"])),
                 "excerptDigest": item["excerpt_digest"],
@@ -1021,6 +1142,8 @@ class NovelAnalysisService:
             "versionNo": analysis["version_no"],
             "coverageEndOrdinal": analysis["coverage_end_ordinal"],
             "schemaVersion": analysis["schema_version"],
+            "techniqueResult": summary.get("techniqueResult"),
+            "generationPrompt": summary.get("generationPrompt"),
             "contentDigest": analysis["content_digest"],
             "summary": summary,
             "storyOverview": summary.get("storyOverview"),
@@ -1030,6 +1153,7 @@ class NovelAnalysisService:
             "facts": [{
                 "id": item["id"],
                 "factKind": item["fact_kind"],
+                "claimNature": item.get("claim_nature") or "fact",
                 "subjectKey": item["subject_key"],
                 "predicate": item["predicate"],
                 "value": json.loads(str(item["value_json"])),

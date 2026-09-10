@@ -12,6 +12,18 @@
     align-items: flex-start;
   }
 
+  .memory-center-knowledge {
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  .memory-center-source-notice {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+  }
+
   .memory-center-heading-title {
     color: var(--text-primary);
     font-size: var(--font-size-lg);

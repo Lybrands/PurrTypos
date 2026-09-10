@@ -36,6 +36,12 @@ async def save_chapters(outlineId: str, body: SaveChaptersRequest):
         "SELECT id FROM outline_chapters WHERE outline_id = ?",
         [outlineId],
     )
+    from application.continuation_identity import require_editable_identity
+    for chapter in body.chapters:
+        if chapter.id is not None:
+            await require_editable_identity(db, chapter.id)
+        if chapter.parent_id is not None:
+            await require_editable_identity(db, chapter.parent_id)
     incoming_ids = {
         str(chapter.id)
         for chapter in body.chapters
@@ -100,6 +106,9 @@ async def save_chapters(outlineId: str, body: SaveChaptersRequest):
 @router.post("/chapters/{outlineId}/add")
 async def add_chapter(outlineId: str, body: AddChapterRequest):
     db = get_db()
+    from application.continuation_identity import require_editable_identity
+    if body.parentId:
+        await require_editable_identity(db, body.parentId)
     chapter_id = short_id8()
     max_row = await db.fetch_one(
         "SELECT COALESCE(MAX(sort), -1) AS max_sort FROM outline_chapters WHERE outline_id = ?",
@@ -121,6 +130,8 @@ async def add_chapter(outlineId: str, body: AddChapterRequest):
 @router.delete("/chapters/{chapterId}")
 async def delete_chapter(chapterId: str):
     db = get_db()
+    from application.continuation_identity import require_editable_identity
+    await require_editable_identity(db, chapterId)
     owner = await db.fetch_one(
         "SELECT o.book_id FROM outline_chapters AS c "
         "JOIN outlines AS o ON o.id = c.outline_id WHERE c.id = ?",
@@ -159,6 +170,8 @@ async def delete_chapter(chapterId: str):
 @router.put("/chapters/{chapterId}/rename")
 async def rename_chapter(chapterId: str, body: RenameChapterRequest):
     db = get_db()
+    from application.continuation_identity import require_editable_identity
+    await require_editable_identity(db, chapterId)
     await db.execute(
         "UPDATE outline_chapters SET title = ? WHERE id = ?",
         [body.title, chapterId],
@@ -174,6 +187,8 @@ async def rename_chapter(chapterId: str, body: RenameChapterRequest):
 @router.put("/chapters/{chapterId}/progress")
 async def update_chapter_progress(chapterId: str, body: UpdateChapterProgressRequest):
     db = get_db()
+    from application.continuation_identity import require_editable_identity
+    await require_editable_identity(db, chapterId)
     await db.execute(
         "UPDATE outline_chapters SET progress = ? WHERE id = ?",
         [body.progress, chapterId],

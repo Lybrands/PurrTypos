@@ -13,6 +13,7 @@ export function useDatabaseActions(active: boolean) {
   const { message } = useAppFeedback()
   const [exportingDb, setExportingDb] = React.useState(false)
   const [importingDb, setImportingDb] = React.useState(false)
+  const [openingDbDir, setOpeningDbDir] = React.useState(false)
   const [dbInfoLoading, setDbInfoLoading] = React.useState(false)
   const [dbInfo, setDbInfo] = React.useState<DatabaseInfo | null>(null)
 
@@ -77,12 +78,19 @@ export function useDatabaseActions(active: boolean) {
   }, [message])
 
   const handleOpenDbDir = React.useCallback(async () => {
-    const res = await services.database.openDatabaseDirectory()
-    if (!res.success) {
-      message.error(res.error || '打开目录失败')
-      return
+    setOpeningDbDir(true)
+    try {
+      const res = await services.database.openDatabaseDirectory()
+      if (!res.success) {
+        message.error(res.error || '打开目录失败')
+        return
+      }
+      message.success('已打开数据库目录')
+    } catch {
+      message.error('打开目录失败')
+    } finally {
+      setOpeningDbDir(false)
     }
-    message.success('已打开数据库目录')
   }, [message])
 
   return {
@@ -90,6 +98,7 @@ export function useDatabaseActions(active: boolean) {
     dbInfoLoading,
     exportingDb,
     importingDb,
+    openingDbDir,
     refreshDbInfo,
     handleExportDatabase,
     handleImportDatabase,

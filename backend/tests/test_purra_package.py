@@ -16,12 +16,12 @@ import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "0.5.0"
+PURRA_VERSION = "0.5.1"
 PURRA_REQUIREMENTS = (
-    "purra==0.5.0",
-    "purra-openai==0.5.0",
-    "purra-anthropic==0.5.0",
-    "purra-mem0[managed]==0.5.0",
+    "purra==0.5.1",
+    "purra-openai==0.5.1",
+    "purra-anthropic==0.5.1",
+    "purra-mem0[managed]==0.5.1",
 )
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",

@@ -17,6 +17,7 @@ from domains.writing.prompts import (
     derive_summary_max_characters,
 )
 from domains.writing.summary_validation import SummaryResponseValidator
+from domains.writing.paragraph_validation import requests_single_prose_paragraph, SingleProseParagraphValidator
 
 
 _CONTINUITY_DIFFERENCE_CUE = re.compile(
@@ -75,6 +76,7 @@ class WritingResponseContract:
     exact_review_item_count: int | None = None
     atomic_continuity_items: bool = False
     summary_max_characters: int | None = None
+    single_prose_paragraph: bool = False
 
     def __post_init__(self) -> None:
         count = self.exact_review_item_count
@@ -136,6 +138,7 @@ def derive_writing_response_contract(user_text: str) -> WritingResponseContract:
             and _MINIMAL_CHANGE_CUE.search(text)
         ),
         summary_max_characters=derive_summary_max_characters(text),
+        single_prose_paragraph=requests_single_prose_paragraph(text),
     )
 
 
@@ -187,6 +190,8 @@ def writing_response_validators(
     contract = writing_response_contract_for_request(request)
     context = WritingDomainContext.from_core_context(request.domain_context)
     validators: list[ResponseValidator] = []
+    if contract.single_prose_paragraph:
+        validators.append(SingleProseParagraphValidator())
     if contract.atomic_continuity_items:
         assert contract.exact_review_item_count is not None
         # Grounding validation parses the strict structure first, so a

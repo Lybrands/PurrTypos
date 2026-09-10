@@ -13,6 +13,7 @@ class CreateSettingEntityRequest(BaseModel):
 
 
 class UpdateSettingEntityRequest(BaseModel):
+    baseRevision: str | None = None
     entityType: Optional[str] = None
     name: Optional[str] = None
     tags: Optional[str] = None

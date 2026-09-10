@@ -7,6 +7,9 @@ import { createServer } from 'vite'
 let vite
 let Composer
 let composerCommandQuery
+let composerActionTrigger
+let composerActionDismissal
+let composerActionCloseValue
 
 before(async () => {
   vite = await createServer({
@@ -14,9 +17,19 @@ before(async () => {
     logLevel: 'silent',
     server: { middlewareMode: true },
   })
-  ;({ default: Composer, composerCommandQuery } = await vite.ssrLoadModule(
+  ;({ default: Composer, composerCommandQuery, composerActionTrigger, composerActionDismissal, composerActionCloseValue } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/Composer/index.tsx',
   ))
+})
+
+test('slash action menu distinguishes cancellation from literal slash input', () => {
+  const range = { start: 2, token: '/' }
+  assert.equal(composerActionDismissal('写作/', range), 'none')
+  assert.equal(composerActionDismissal('写作/ ', range), 'literal')
+  assert.equal(composerActionDismissal('写作', range), 'deleted')
+  assert.equal(composerActionDismissal('写作/技法', range), 'none')
+  assert.equal(composerActionCloseValue('写作/', range, false), '写作/')
+  assert.equal(composerActionCloseValue('写作/技法', range, true), '写作')
 })
 
 after(async () => { await vite?.close() })
@@ -40,4 +53,15 @@ test('shared composer opens only generic commands matching a lone slash query', 
   assert.match(markup, /悬念递进/)
   assert.doesNotMatch(markup, /对白节奏/)
   assert.match(markup, /role="listbox"/)
+})
+
+test('business-configured action triggers respect caret, IME and literal paths', () => {
+  assert.equal(composerActionTrigger('', '\\', 1, ['\\']), '\\')
+  assert.equal(composerActionTrigger('草稿 ', '草稿 \\', 4, ['\\']), '\\')
+  assert.equal(composerActionTrigger('草稿 尾文', '草稿 @@尾文', 5, ['@', '@@']), '@@')
+  assert.equal(composerActionTrigger('', '/', 1, ['\\']), undefined)
+  assert.equal(composerActionTrigger('', '/', 1, ['/']), '/')
+  assert.equal(composerActionTrigger('', '\\', 1, ['\\'], true), undefined)
+  assert.equal(composerActionTrigger('C:', 'C:\\', 3, ['\\']), undefined)
+  assert.equal(composerActionTrigger('xx', 'x', 1, ['x']), undefined)
 })

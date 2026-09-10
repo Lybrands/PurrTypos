@@ -115,16 +115,21 @@ export default function App() {
     services.settings.setSettings({ ai_model_configs: configs })
   }, [])
 
+  const memorySaveQueue = React.useRef(Promise.resolve())
   const saveMemoryConfiguration = React.useCallback((
-    modelId: string,
-    embedding: MemoryEmbeddingConfig | null,
-  ) => {
-    setMemoryModelId(modelId)
-    setMemoryEmbeddingConfig(embedding)
-    void services.settings.setSettings({
-      memory_model_id: modelId,
-      memory_embedding_config: embedding,
+    patch: import('./SettingsPage/useMemoryAutosave').MemoryConfigurationPatch,
+  ): Promise<void> => {
+    const request = memorySaveQueue.current.catch(() => undefined).then(async () => {
+      const result = await services.settings.setSettings({
+        ...(patch.modelId !== undefined ? { memory_model_id: patch.modelId } : {}),
+        ...(patch.embedding !== undefined ? { memory_embedding_config: patch.embedding } : {}),
+      })
+      if (!result.success) throw new Error('保存配置失败')
+      if (patch.modelId !== undefined) setMemoryModelId(patch.modelId)
+      if (patch.embedding !== undefined) setMemoryEmbeddingConfig(patch.embedding)
     })
+    memorySaveQueue.current = request
+    return request
   }, [])
 
   const updateModelConfig = React.useCallback((
@@ -267,9 +272,9 @@ export default function App() {
   return (
     <div className={`app-root app-root--${page} app-root--ambient-${ambientPage}`}>
       <div className="app-ambient-glow" aria-hidden="true" />
-      {page === 'home' && (
+      {page === 'home' && !showSettings && (
         <div className="app-global-actions">
-          <GlobalActions />
+          <GlobalActions onOpenSettings={handleOpenSettings} />
         </div>
       )}
       <main className="app-main">
@@ -303,11 +308,12 @@ export default function App() {
                 onContinuationCreated={loadBooks}
                 onOpenNovelSources={handleEnterNovelSources}
                 onOpenWritingMethods={handleEnterWritingMethods}
+                onOpenSettings={handleOpenSettings}
                 onBack={handleBackToHome}
               />
             )} />
             <Route path="/writing-methods" element={(
-              <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} />
+              <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} onOpenSettings={handleOpenSettings} />
             )} />
             <Route path="/novel-sources/:workId?" element={(
               <NovelSourcesPage
@@ -316,6 +322,7 @@ export default function App() {
                 onUpdateModelConfig={updateModelConfig}
                 onBack={handleEnterBookshelf}
                 onHome={handleBackToHome}
+                onOpenSettings={handleOpenSettings}
               />
             )} />
             <Route path="/books/:bookId" element={activeBook ? (
@@ -348,6 +355,7 @@ export default function App() {
               memoryEmbeddingConfig={memoryEmbeddingConfig}
               onSaveMemoryConfiguration={saveMemoryConfiguration}
               onClose={handleCloseSettings}
+              onHome={() => navigate('/', { replace: true })}
               syncOutlineChapter={syncOutlineChapter}
               onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
             />

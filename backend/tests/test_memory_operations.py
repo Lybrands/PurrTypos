@@ -293,3 +293,52 @@ async def test_book_bound_validator_rejects_other_memory_namespace(
         )
     assert caught.value.code == "memory_context_stale"
     await resource.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_model_follows_book_selection_and_explicit_override(temp_db):
+    import json
+
+    async def setting(key, value):
+        await temp_db.execute(
+            'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+            [key, json.dumps(value)],
+        )
+
+    models = [dict(id=name, name=name, apiKey='test-key') for name in ('a', 'b', 'review')]
+    await setting('ai_model_configs', models)
+    await setting('writing_current_model:book-a', 'a')
+    await setting('writing_current_model:book-b', 'b')
+    service = MemoryApplicationService(temp_db, None)
+    assert (await service._strict_memory_model(book_id='book-a'))['id'] == 'a'
+    assert (await service._strict_memory_model(book_id='book-b'))['id'] == 'b'
+    await setting('writing_current_model:book-a', 'b')
+    assert (await service._strict_memory_model(book_id='book-a'))['id'] == 'b'
+    await setting('memory_model_id', 'review')
+    assert (await service._strict_memory_model(book_id='book-a'))['id'] == 'review'
+    await setting('memory_model_id', '')
+    assert (await service._strict_memory_model(book_id='book-a'))['id'] == 'b'
+    # A missing selection must not silently choose an arbitrary configured model.
+    with pytest.raises(MemoryOperationError, match='memory_model_unconfigured'):
+        await service._strict_memory_model(book_id='unknown')
+    await setting('memory_model_id', 'deleted')
+    with pytest.raises(MemoryOperationError, match='memory_model_unconfigured'):
+        await service._strict_memory_model(book_id='book-a')
+
+
+@pytest.mark.asyncio
+async def test_memory_completion_keeps_book_scope_per_provider(temp_db, monkeypatch):
+    class Resource:
+        def providers(self, *, budget, complete):
+            return complete
+
+    service = MemoryApplicationService(temp_db, Resource())
+
+    async def complete(messages, result_capacity_target_tokens, signal, *, book_id):
+        return book_id
+
+    monkeypatch.setattr(service, '_complete', complete)
+    a = service._providers('a', inference=True, book_id='book-a')
+    b = service._providers('b', inference=True, book_id='book-b')
+    import asyncio
+    assert await asyncio.gather(a([], 100, None), b([], 100, None)) == ['book-a', 'book-b']

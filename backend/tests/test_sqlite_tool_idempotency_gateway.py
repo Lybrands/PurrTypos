@@ -241,3 +241,71 @@ async def test_foreign_executor_cannot_start_side_effect(db):
             operation,
         )
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_atomic_writing_creation_and_receipt_share_outer_commit(db):
+    from infrastructure.writing.tools.runtime import WritingToolDependencies, bind_writing_tool_handlers
+    from infrastructure.writing.tools.handlers.chapter_tools import _tool_create_writing_chapter
+    await db.execute("INSERT INTO books (id,title) VALUES ('continued','续写')")
+    repository = SqliteRunRepository(db, owner_id='worker-a')
+    run_id = await repository.create(RunCreateParams(session_id=None, prompt='create', mode='agent'))
+    gateway = SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id)
+    call = ToolCall(id='create-chapter', name='createWritingChapter', arguments_json='{}')
+    handler = bind_writing_tool_handlers(
+        {'createWritingChapter': _tool_create_writing_chapter},
+        WritingToolDependencies(db, None, None),
+        atomic_operation_names=frozenset({'createWritingChapter'}),
+    )['createWritingChapter']
+    async def operation():
+        result = await handler({'bookId':'continued','writingChapters':[]}, {}, None)
+        return ToolHandlerResult(result.content)
+    first = await gateway.execute_once(run_id, call, operation)
+    replay = await gateway.execute_once(run_id, call, operation)
+    import json
+    assert json.loads(first.content)['success']
+    assert replay.from_cache
+    assert len(await db.fetch_all('SELECT * FROM outline_chapters')) == 1
+    assert len(await db.fetch_all('SELECT * FROM ai_agent_tool_receipts')) == 1
+    from infrastructure.writing.tools.handlers.chapter_tools import _tool_get_chapter_content
+    chapter_id = json.loads(first.content)['chapter']['id']
+    empty = await _tool_get_chapter_content(WritingToolDependencies(db, None, None),
+        {'bookId':'continued','writingChapters':[]}, {'chapterId':chapter_id}, None)
+    assert json.loads(empty.content)['plainText'] == '（本章暂无正文内容）'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('cancel_at_commit', [False, True])
+async def test_gateway_cancellation_preserves_atomic_receipt_boundary(db, monkeypatch, cancel_at_commit):
+    repository = SqliteRunRepository(db, owner_id='worker-a')
+    run_id = await repository.create(RunCreateParams(session_id=None, prompt='cancel', mode='agent'))
+    gateway = SqliteToolIdempotencyGateway(db, owner_id=repository.owner_id)
+    call = ToolCall(id='cancel-call', name='increment', arguments_json='{}')
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_commit = db._conn.commit
+    async def delayed_commit():
+        entered.set()
+        await release.wait()
+        await original_commit()
+    if cancel_at_commit:
+        monkeypatch.setattr(db._conn, 'commit', delayed_commit)
+    async def operation():
+        await db.execute('UPDATE test_tool_counter SET value=1 WHERE id=1')
+        if not cancel_at_commit:
+            entered.set()
+            await release.wait()
+        return ToolHandlerResult('{"value":1}')
+    task = asyncio.create_task(gateway.execute_once(run_id, call, operation))
+    await entered.wait()
+    task.cancel()
+    release.set()
+    if cancel_at_commit:
+        assert (await task).content == '{"value":1}'
+        monkeypatch.setattr(db._conn, 'commit', original_commit)
+        assert (await gateway.execute_once(run_id, call, operation)).from_cache
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert (await db.fetch_one('SELECT value FROM test_tool_counter'))['value'] == int(cancel_at_commit)
+    assert len(await db.fetch_all('SELECT * FROM ai_agent_tool_receipts')) == int(cancel_at_commit)

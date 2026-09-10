@@ -27,8 +27,8 @@ class ConfirmSourceImportRequest(SourceFilePayload):
     workId: str | None = Field(default=None, max_length=200)
     expectedContentDigest: str = Field(min_length=64, max_length=64)
     confirmSingleSection: bool = False
-    rightsConfirmed: bool
-    modelDataBoundaryConfirmed: bool
+    rightsConfirmed: bool = False
+    modelDataBoundaryConfirmed: bool = False
     sections: list[SourceSectionLayoutRequest] | None = Field(default=None, max_length=100_000)
 
 
@@ -41,17 +41,20 @@ class ArchiveSourceWorkRequest(BaseModel):
 
 
 class StartNovelAnalysisRequest(BaseModel):
+    conversationId: str | None = Field(default=None, max_length=200)
     runtime: ScreenplayAgentRuntimeRequest
     prompt: str = Field(
-        default="保留故事概览与事实脉络，蒸馏可执行的写作方法并检验迁移效果。",
+        default="提取人物、世界背景、情节状态和未决线索等创作资料，并提炼可执行的写作技法。",
         min_length=1,
         max_length=20_000,
     )
 
 
 class FollowUpNovelAnalysisRequest(BaseModel):
+    replaceRunId: str | None = Field(default=None, min_length=1, max_length=200)
+    conversationId: str | None = Field(default=None, max_length=200)
     runtime: ScreenplayAgentRuntimeRequest
-    artifactId: str = Field(min_length=1, max_length=300)
+    artifactId: str | None = Field(default=None, min_length=1, max_length=300)
     prompt: str = Field(min_length=1, max_length=20_000)
 
 
@@ -87,12 +90,12 @@ class NovelAnalysisCraftCardRequest(BaseModel):
     evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
 
 
-class NovelAnalysisStoryOverviewRequest(BaseModel):
-    summaryMarkdown: str = Field(min_length=1, max_length=100_000)
-    evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
-
-
 class ReviewNovelAnalysisRequest(BaseModel):
     facts: list[NovelAnalysisFactRequest]
     craftCards: list[NovelAnalysisCraftCardRequest]
-    storyOverview: NovelAnalysisStoryOverviewRequest | None = None
+    techniqueResult: dict[str, Any] | None = None
+
+
+class AnalysisSessionUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    closed: bool | None = None

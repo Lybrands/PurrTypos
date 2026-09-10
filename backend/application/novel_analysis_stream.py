@@ -19,9 +19,10 @@ class NovelAnalysisStreamQuery:
         ) is None:
             raise NotFoundError("来源版本不存在")
         state = await self._db.fetch_all(
-            "SELECT r.id, r.status, r.binding_command_id, t.id AS task_id, "
+            "SELECT r.id, r.status, r.binding_command_id, sr.replacement_command_id, t.id AS task_id, "
             "t.status AS task_status, t.revision AS task_revision "
             "FROM ai_agent_runs r "
+            "LEFT JOIN novel_analysis_superseded_runs sr ON sr.run_id=r.id "
             "LEFT JOIN ai_agent_long_task_runs tr ON tr.run_id = r.id "
             "LEFT JOIN ai_agent_long_tasks t ON t.id = tr.task_id "
             "WHERE r.binding_aggregate_id = ? AND r.binding_namespace "
@@ -52,7 +53,15 @@ class NovelAnalysisStreamQuery:
         )
         page = rows[:limit]
         chunks = []
+        known_ids = {row['id'] for row in state}
+        visible_ids = {identity for run in self._runs
+                       for identity in [run['runId'], *(item['runId'] for item in run.get('relatedRuns', []))]}
         for cursor, event in page:
+            # Advance the cursor over archived outputs without replaying them.
+            # An event created after the state read remains available for the
+            # client's dynamic-membership catch-up.
+            if event.run_id in known_ids and event.run_id not in visible_ids:
+                continue
             chunk = canonical_output_to_sse_chunk(event)
             if chunk is not None:
                 chunks.append({"cursor": cursor, "runId": event.run_id,

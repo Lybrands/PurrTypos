@@ -1,3 +1,4 @@
+import { techniqueOperationId, type WritingTechniqueSelection } from '../../../services/writingTechniques'
 import { services } from '@/services'
 import React from "react";
 import { usePurrToast } from '@/purr-components';
@@ -44,7 +45,6 @@ import type {
   AiSession,
   EntityId,
   SettingDiffCardState,
-  WritingMethodOverrides,
 } from '../../../types'
 import {
   createDurableBookRunControl,
@@ -78,7 +78,9 @@ export interface UseChatSubmitParams {
   selectedLongTermMemoryIds?: string[]
   selectedMemoryIds?: (number | string)[]
   selectedForeshadowingIds?: (number | string)[]
-  writingMethodOverrides?: WritingMethodOverrides
+  writingTechniqueSelection?: WritingTechniqueSelection
+  writingTechniqueReady?: boolean
+  onWritingTechniqueAccepted?: (selection: WritingTechniqueSelection) => void
   /**
    * 会话作用域：setting = 全局会话（不绑章节），不要求选中章节即可发送；
    * 默认 chapter（必须先选章节）。
@@ -140,7 +142,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedLongTermMemoryIds,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    writingMethodOverrides,
+    writingTechniqueSelection,
+    writingTechniqueReady,
+    onWritingTechniqueAccepted,
     sessionScope = "chapter",
     onAssistantAttachment,
     associateAssistantIdentities,
@@ -161,7 +165,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   const queuedSubmissions = getChatRuntimeQueue();
   const dequeueInProgressRef = React.useRef(false);
   const handleSubmitRef = React.useRef<
-    ((override: ChatSubmitOverride) => SubmitResult) | null
+    ((override: ChatSubmitOverride) => Promise<SubmitResult>) | null
   >(null);
 
   const replaceQueuedSubmissions = React.useCallback(
@@ -274,7 +278,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
   /** 可选：从某条用户消息重新编辑并发送，或直接发送指定内容 */
   const handleSubmit = React.useCallback(
-    (submitOverride?: ChatSubmitOverride): SubmitResult => {
+    async (submitOverride?: ChatSubmitOverride): Promise<SubmitResult> => {
       const isResend = typeof submitOverride?.editIndex === "number";
       const rawUserText = (submitOverride?.content ?? prompt).trim();
       const queuedContext = submitOverride?.queuedContext;
@@ -373,7 +377,23 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       const sessionId = targetSessionId;
-      if ((sessionLoading || getChatRuntimeQueue().some(item => item.sessionId === sessionId && item.editing))
+      if (!queuedContext && writingTechniqueReady === false) {
+        appMessage.warning("写作技法配置仍在加载，请稍后发送");
+        return "rejected";
+      }
+      const requestTechniqueSelection = queuedContext?.writingTechniqueSelection
+        ?? writingTechniqueSelection ?? { mode: 'manual' as const, refs: [] };
+      let techniqueInputId = queuedContext?.writingTechniqueInputId;
+      if (!techniqueInputId) {
+        const reserved = await services.writingTechniques.reserveInput(String(requestBookId), String(sessionId), requestTechniqueSelection, techniqueOperationId());
+        if (!reserved.success || !reserved.data) {
+          appMessage.error(reserved.error || '无法确认本轮写作技法选择');
+          return "rejected";
+        }
+        techniqueInputId = reserved.data.inputId;
+      }
+
+      if (((getChatSessionRuntime(sessionId)?.loading ?? sessionLoading) || getChatRuntimeQueue().some(item => item.sessionId === sessionId && item.editing))
         && !submitOverride?.truncationCommitted) {
         const currentSessionTitle =
           sessions.find((session) => session.id === sessionId)?.title ?? ''
@@ -407,22 +427,13 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           selectedForeshadowingIds: [
             ...(queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds ?? []),
           ],
-          writingMethodOverrides: {
-            forceRevisionIds: [
-              ...(queuedContext?.writingMethodOverrides?.forceRevisionIds
-                ?? writingMethodOverrides?.forceRevisionIds
-                ?? []),
-            ],
-            excludeRevisionIds: [
-              ...(queuedContext?.writingMethodOverrides?.excludeRevisionIds
-                ?? writingMethodOverrides?.excludeRevisionIds
-                ?? []),
-            ],
-          },
+          writingTechniqueSelection: structuredClone(requestTechniqueSelection),
+          writingTechniqueInputId: techniqueInputId,
         };
         const nextQueue = [...getChatRuntimeQueue(), queuedItem];
         const queuedCount = countQueuedForSession(nextQueue, sessionId);
         replaceQueuedSubmissions(nextQueue);
+        onWritingTechniqueAccepted?.(requestTechniqueSelection);
         setChatRuntimeActivity(sessionId, {
           state: "running",
           queuedCount,
@@ -442,11 +453,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.selectedLongTermMemoryIds ?? selectedLongTermMemoryIds;
       const requestSelectedForeshadowingIds =
         queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds;
-      const requestWritingMethodOverrides =
-        queuedContext?.writingMethodOverrides ?? writingMethodOverrides ?? {
-          forceRevisionIds: [],
-          excludeRevisionIds: [],
-        };
+
 
     const baseConversations = submitOverride?.resendBaseMessages
       ?? getChatSessionRuntime(sessionId)?.messages
@@ -483,10 +490,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         selectedForeshadowingIds: [
           ...(requestSelectedForeshadowingIds ?? []),
         ],
-        writingMethodOverrides: {
-          forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
-          excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
-        },
+        writingTechniqueSelection: structuredClone(requestTechniqueSelection),
+        writingTechniqueInputId: techniqueInputId,
       };
       replaceChatRuntimeMessages(sessionId, baseConversations);
       setChatRuntimeLoading(sessionId, true);
@@ -803,6 +808,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           || terminalOwnership.rootRunId
           || chunk.runId
           || chunk.runResult?.runId
+        if (runId && !queuedContext) onWritingTechniqueAccepted?.(requestTechniqueSelection)
         durableControl?.observeRunId(runId)
         const authoritativeStatus = terminalOwnership.source === 'runResult'
           ? chunk.runResult?.status
@@ -890,10 +896,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         requestSelectedForeshadowingIds.length > 0
           ? requestSelectedForeshadowingIds
           : undefined,
-      writingMethodOverrides: {
-        forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
-        excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
-      },
+      writingTechniqueInputId: techniqueInputId,
       chatAgentMode: requestAgentEnabled ? "agent" : "ask",
       contextWindow: streamOptions.context_window,
       expectedConversationIds: requestAgentEnabled
@@ -923,7 +926,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedMemoryIds,
     selectedLongTermMemoryIds,
     selectedForeshadowingIds,
-    writingMethodOverrides,
+    writingTechniqueSelection,
+    writingTechniqueReady,
+    onWritingTechniqueAccepted,
     sessionScope,
     appMessage,
     replaceQueuedSubmissions,
@@ -952,27 +957,23 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     );
     dequeueInProgressRef.current = true;
     replaceQueuedSubmissions(remainingQueue);
-    const result = handleSubmit({
+    void handleSubmit({
       content: nextSubmission.content,
       queuedContext: nextSubmission,
       preservePrompt: true,
-    });
-    queueMicrotask(() => {
-      dequeueInProgressRef.current = false;
-    });
-    if (result !== "started") {
-      const queuedCount = countQueuedForSession(
-        getChatRuntimeQueue(),
-        nextSubmission.sessionId,
-      );
-      setChatRuntimeActivity(
-        nextSubmission.sessionId,
-        getSettledSessionActivity(
-          "failed",
-          queuedCount,
-        ),
-      );
-    }
+    }).then(result => {
+      if (result !== "started") {
+        setChatRuntimeActivity(nextSubmission.sessionId, getSettledSessionActivity(
+          "failed", countQueuedForSession(getChatRuntimeQueue(), nextSubmission.sessionId),
+        ));
+      }
+    }).catch(error => {
+      appMessage.error(error instanceof Error ? error.message : '发送排队请求失败');
+      setChatRuntimeActivity(nextSubmission.sessionId, getSettledSessionActivity(
+        "failed", countQueuedForSession(getChatRuntimeQueue(), nextSubmission.sessionId),
+      ));
+    }).finally(() => { dequeueInProgressRef.current = false });
+
   }, [
     handleSubmit,
     queuedSubmissions,

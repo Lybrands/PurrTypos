@@ -168,3 +168,71 @@ textarea.agent-composer__input.purr-input {
     background: var(--bg-active) !important;
   }
 }
+
+.agent-composer__footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  > .agent-conversation-panel__footer { flex: 1; min-width: 0; }
+}
+.agent-composer__action-content {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+
+  .agent-composer__action-label { font-weight: var(--font-weight-semibold); margin-top: 2px; }
+  .ai-agent-select { width: 100%; max-width: none; }
+  .ai-context-bar--expanded { display: flex; width: 100%; flex-direction: column; align-items: stretch; gap: 2px; }
+  .ai-context-bar--expanded .ai-context-icon-btn.purr-button {
+    width: 100%; height: auto; min-height: 30px; max-width: none;
+    padding: 5px 8px; justify-content: flex-start;
+  }
+  > .purr-button { width: 100%; min-height: 30px; padding-block: 4px; justify-content: flex-start; }
+  > .writing-technique-picker { width: 100%; }
+  .writing-method-turn-status { white-space: normal; }
+}
+
+.agent-composer__action-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 9;
+  width: min(420px, 100%);
+  max-height: min(380px, 50vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-lg);
+
+  .agent-composer__action-content { gap: 4px; }
+  .agent-composer__action-label { font-size: var(--font-size-sm); color: var(--text-muted); }
+  button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+}
+.agent-composer__action-menu-heading {
+  display: flex;
+  align-items: center;
+  margin-bottom: 5px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+.agent-composer__search-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  > span { color: var(--text-muted); font-size: var(--font-size-sm); }
+  &:hover, &:focus-visible { background: var(--bg-hover); }
+}

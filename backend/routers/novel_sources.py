@@ -11,6 +11,7 @@ from dependencies import get_db
 from domains.novel_sources import NovelSourceError
 from exceptions import AppError
 from schemas.novel_sources import (
+    AnalysisSessionUpdate,
     ArchiveSourceWorkRequest,
     ConfirmSourceImportRequest,
     FollowUpNovelAnalysisRequest,
@@ -155,6 +156,8 @@ async def start_analysis(
     body: StartNovelAnalysisRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
+    from application.novel_analysis_sessions import NovelAnalysisSessions
+    await NovelAnalysisSessions(get_db()).bind(revision_id, body.conversationId, idempotency_key)
     return _ok(await _analysis_service().start(
         source_revision_id=revision_id,
         command_id=idempotency_key,
@@ -172,9 +175,16 @@ async def follow_up_analysis(
     body: FollowUpNovelAnalysisRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
+    from application.novel_analysis_sessions import NovelAnalysisSessions
+    await NovelAnalysisSessions(get_db()).bind(revision_id, body.conversationId, idempotency_key)
+    if body.replaceRunId:
+        return _ok(await _analysis_service().replace_turn(
+            source_revision_id=revision_id, command_id=idempotency_key,
+            target_run_id=body.replaceRunId, prompt=body.prompt, runtime=body.runtime,
+        ))
     return _ok(await _analysis_service().follow_up(
         source_revision_id=revision_id,
-        artifact_ref=NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + body.artifactId,
+        artifact_ref=(NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + body.artifactId) if body.artifactId else None,
         prompt=body.prompt,
         command_id=idempotency_key,
         runtime=body.runtime,
@@ -279,3 +289,22 @@ async def list_published_analyses(revision_id: str):
 @router.get("/novel-source-analyses/{analysis_id}")
 async def get_published_analysis(analysis_id: str):
     return _ok(await _analysis_service().get_published(analysis_id))
+
+
+@router.get("/novel-source-revisions/{revision_id}/conversations")
+async def list_analysis_conversations(revision_id: str):
+    from application.novel_analysis_sessions import NovelAnalysisSessions
+    return _ok(await NovelAnalysisSessions(get_db()).list(revision_id))
+
+
+@router.post("/novel-source-revisions/{revision_id}/conversations")
+async def create_analysis_conversation(revision_id: str):
+    from application.novel_analysis_sessions import NovelAnalysisSessions
+    return _ok(await NovelAnalysisSessions(get_db()).create(revision_id))
+
+
+@router.patch("/novel-source-revisions/{revision_id}/conversations/{identity}")
+async def update_analysis_conversation(revision_id: str, identity: str, body: AnalysisSessionUpdate):
+    from application.novel_analysis_sessions import NovelAnalysisSessions
+    await NovelAnalysisSessions(get_db()).update(revision_id, identity, body.title, body.closed)
+    return _ok()

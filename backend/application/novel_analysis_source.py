@@ -9,6 +9,12 @@ from purra.context_budget import estimate_json_tokens
 from domains.novel_analysis import NovelAnalysisSegment, canonical_digest
 
 
+class AnalysisEvidenceInputError(ValueError):
+    """A model-supplied excerpt is invalid; source authorization is unchanged."""
+
+    code = "tool_input_invalid"
+
+
 def analysis_source_token_budget(context_window: int) -> int:
     window = max(8_000, int(context_window or 0))
     output_reserve = max(2_000, min(32_768, window // 4))
@@ -54,6 +60,18 @@ def split_source_text(text: str, token_budget: int) -> tuple[tuple[int, int], ..
 class NovelAnalysisSourceReader:
     def __init__(self, db) -> None:
         self._db = db
+
+    async def chapter_reference(self, revision_id, section_ids, section_id):
+        if section_id not in section_ids:
+            raise PermissionError("novel analysis source section is outside binding")
+        row = await self._db.fetch_one(
+            "SELECT id, ordinal, title, content_digest FROM novel_source_sections WHERE revision_id=? AND id=?",
+            [revision_id, section_id])
+        if row is None:
+            raise PermissionError("novel analysis source binding no longer resolves")
+        locator = {"referenceKind": "chapter", "sourceRevisionId": revision_id, "sectionDigest": row["content_digest"]}
+        return {"referenceKind": "chapter", "sectionId": section_id, "sectionOrdinal": row["ordinal"],
+            "sectionTitle": row["title"], "excerpt": "", "locator": locator, "excerptDigest": canonical_digest(locator)}
 
     async def list_bound_sections(
         self,
@@ -198,11 +216,19 @@ class NovelAnalysisSourceReader:
         start = 0 if start_character is None else int(start_character)
         end = len(text) if end_character is None else int(end_character)
         if start < 0 or end <= start or end > len(text):
-            raise ValueError("analysis evidence range is outside section")
-        relative_offset = text[start:end].find(normalized)
-        if not normalized or relative_offset < 0:
-            raise ValueError("analysis evidence excerpt does not exist in section")
-        offset = start + relative_offset
+            raise AnalysisEvidenceInputError("analysis evidence range is outside section")
+        # Keep source offsets while ignoring layout whitespace only. Never normalize words or punctuation.
+        positions = [index for index in range(start, end) if not text[index].isspace()]
+        searchable = "".join(text[index] for index in positions)
+        needle = "".join(character for character in normalized if not character.isspace())
+        relative_offset = searchable.find(needle)
+        if not needle or relative_offset < 0:
+            raise AnalysisEvidenceInputError("analysis evidence excerpt does not exist in section")
+        if searchable.find(needle, relative_offset + 1) >= 0:
+            raise AnalysisEvidenceInputError("analysis evidence excerpt is ambiguous within the bound range")
+        offset = positions[relative_offset]
+        match_end = positions[relative_offset + len(needle) - 1] + 1
+        normalized = text[offset:match_end]
         return {
             "sectionId": section["id"],
             "sectionOrdinal": section["ordinal"],

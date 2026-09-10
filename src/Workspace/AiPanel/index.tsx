@@ -9,10 +9,8 @@ import { usePurrToast, type PurrDropdownItem } from '@/purr-components'
 import type {
   AiModelConfig,
   AiSession,
-  BookWritingMethodBinding,
   Conversation,
   SettingDiffCardState,
-  WritingMethodOverrides,
 } from '../../types'
 import type { AgentConversationMessage } from '../../agent-runtime/contracts'
 import { getActiveTaskPlan } from '../../agent-runtime/taskPlan'
@@ -61,10 +59,7 @@ import {
 } from './bookAssistantAttachments'
 import { useBookConversationController } from './useBookConversationController'
 import { useBookConversationExtensions } from './BookConversationExtensions'
-import {
-  boundWritingMethodChoices,
-  cycleWritingMethodOverride,
-} from './writingMethodOverrides'
+import { useWritingTechniqueSelection } from './hooks/useWritingTechniqueSelection'
 import './index.scss'
 
 interface AiPanelProps {
@@ -123,12 +118,6 @@ export default function AiPanel({
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false)
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false)
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false)
-  const [writingMethodBindings, setWritingMethodBindings] = React.useState<
-    BookWritingMethodBinding[]
-  >([])
-  const [writingMethodOverrides, setWritingMethodOverrides] = React.useState<
-    WritingMethodOverrides
-  >({ forceRevisionIds: [], excludeRevisionIds: [] })
   const pendingSettingSessionRef = React.useRef(false)
   const pendingSettingPromptRef = React.useRef<string>()
   const conversationLifecycleRef = React.useRef(
@@ -138,47 +127,9 @@ export default function AiPanel({
   const effectiveChapterId = chatScope === 'setting' ? null : chapterId
   const scopeAvailable = bookId != null
     && (chatScope === 'setting' || chapterId != null)
-  const writingMethodChoices = React.useMemo(
-    () => boundWritingMethodChoices(writingMethodBindings),
-    [writingMethodBindings],
-  )
-
-  React.useEffect(() => {
-    let current = true
-    const load = () => {
-      if (bookId == null) return
-      void services.writingMethods.listBookBindings({ bookId }).then((result) => {
-        if (!current || !result.success) return
-        const nextBindings = result.data ?? []
-        const allowed = new Set(
-          boundWritingMethodChoices(nextBindings).map((item) => item.revisionId),
-        )
-        setWritingMethodBindings(nextBindings)
-        setWritingMethodOverrides((overrides) => ({
-          forceRevisionIds: overrides.forceRevisionIds.filter((id) => allowed.has(id)),
-          excludeRevisionIds: overrides.excludeRevisionIds.filter((id) => allowed.has(id)),
-        }))
-      })
-    }
-    const onChanged = (event: Event) => {
-      const changedBookId = (event as CustomEvent<{ bookId?: unknown }>).detail?.bookId
-      if (String(changedBookId) === String(bookId)) load()
-    }
-    setWritingMethodBindings([])
-    setWritingMethodOverrides({ forceRevisionIds: [], excludeRevisionIds: [] })
-    load()
-    window.addEventListener('writing-method-bindings-changed', onChanged)
-    return () => {
-      current = false
-      window.removeEventListener('writing-method-bindings-changed', onChanged)
-    }
-  }, [bookId])
-
   const {
     selectedModel,
     setSelectedModel,
-    chatAgentMode,
-    setChatAgentMode,
     selectedModelConfig,
   } = useAiModelPrefs(bookId, modelConfigs)
   const {
@@ -210,6 +161,7 @@ export default function AiPanel({
     setConversations,
     setLoading,
   })
+  const techniqueSelection = useWritingTechniqueSelection(bookId, activeSessionId)
   const activeSessionRef = React.useRef(activeSessionId)
   activeSessionRef.current = activeSessionId
   const attachmentManager = React.useMemo(
@@ -393,11 +345,13 @@ export default function AiPanel({
       ? undefined
       : activeChapterTitle || undefined,
     selectedModel,
-    agentEnabled: chatAgentMode !== 'ask',
+    agentEnabled: true,
     selectedLongTermMemoryIds,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    writingMethodOverrides,
+    writingTechniqueSelection: techniqueSelection.selection,
+    writingTechniqueReady: techniqueSelection.ready,
+    onWritingTechniqueAccepted: techniqueSelection.accepted,
     sessionScope: chatScope,
     onAssistantAttachment: addAssistantAttachment,
     associateAssistantIdentities: attachmentManager.associate,
@@ -414,23 +368,12 @@ export default function AiPanel({
     setSelectedLongTermMemoryIds([])
     setSelectedMemoryIds([])
     setSelectedForeshadowingIds([])
-    setWritingMethodOverrides({ forceRevisionIds: [], excludeRevisionIds: [] })
   }, [
     setSelectedForeshadowingIds,
     setSelectedLongTermMemoryIds,
     setSelectedMemoryIds,
   ])
 
-  const cycleWritingMethod = React.useCallback((revisionId: string) => {
-    setWritingMethodOverrides((current) => (
-      cycleWritingMethodOverride(current, revisionId)
-    ))
-  }, [])
-
-  const requestWritingMethodRecommendation = React.useCallback(() => {
-    setChatAgentMode('agent')
-    setPrompt('[写作方法推荐] 请根据我接下来描述的写作目标，检索方法目录并给出建议和理由：')
-  }, [setChatAgentMode, setPrompt])
 
   const handleSubmit = React.useCallback((content?: string) => {
     const token = conversationLifecycleRef.current.currentToken()
@@ -899,6 +842,7 @@ export default function AiPanel({
   })
   const combinedMessages = bookConversationController.conversation.messages
   const bookConversationExtensions = useBookConversationExtensions({
+    sessionId: activeSessionId,
     bookId,
     bookTitle,
     chapterId: effectiveChapterId,
@@ -907,8 +851,6 @@ export default function AiPanel({
       : undefined,
     scope: chatScope,
     setScope: setChatScope,
-    chatAgentMode,
-    setChatAgentMode,
     contextBar,
     prompt: activePrompt,
     onInsertPrompt: setPrompt,
@@ -917,10 +859,10 @@ export default function AiPanel({
     attachments,
     running: loading,
     onAddFavorite: handleAddFavorite,
-    writingMethodChoices,
-    writingMethodOverrides,
-    onCycleWritingMethod: cycleWritingMethod,
-    onRequestWritingMethodRecommendation: requestWritingMethodRecommendation,
+    writingTechniqueChoices: techniqueSelection.choices,
+    writingTechniqueSelection: techniqueSelection.selection,
+    onToggleWritingTechnique: techniqueSelection.toggle,
+    onSetWritingTechniqueMode: techniqueSelection.setMode,
   })
 
   const ellipsisMenuItems: PurrDropdownItem[] = [{

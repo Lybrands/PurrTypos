@@ -1,7 +1,9 @@
 import { backendApi } from './backendApi'
 import { platformApi } from '../platform'
+import { writingTechniques } from './writingTechniques'
 
 export const services = {
+  writingTechniques,
   database: {
     getDatabaseInfo: backendApi.getDatabaseInfo,
     exportDatabase: platformApi.exportDatabase,
@@ -114,30 +116,6 @@ export const services = {
     deleteStoryBackgroundAttachment: backendApi.deleteStoryBackgroundAttachment,
     pickStoryBackgroundAttachments: platformApi.pickStoryBackgroundAttachments,
     openStoryBackgroundAttachment: platformApi.openStoryBackgroundAttachment,
-  },
-  writingMethods: {
-    listMethods: backendApi.listWritingMethods,
-    getMethod: backendApi.getWritingMethod,
-    createMethod: backendApi.createWritingMethod,
-    updateMethodDraft: backendApi.updateWritingMethodDraft,
-    publishMethod: backendApi.publishWritingMethod,
-    publishBatch: backendApi.publishWritingMethodBatch,
-    copyMethod: backendApi.copyWritingMethod,
-    deleteMethod: backendApi.deleteWritingMethod,
-    createCandidates: backendApi.createWritingMethodCandidates,
-    publishCandidateBatch: backendApi.publishWritingMethodCandidateBatch,
-    listSchemes: backendApi.listWritingSchemes,
-    getScheme: backendApi.getWritingScheme,
-    createScheme: backendApi.createWritingScheme,
-    updateSchemeDraft: backendApi.updateWritingSchemeDraft,
-    publishScheme: backendApi.publishWritingScheme,
-    copyScheme: backendApi.copyWritingScheme,
-    deleteScheme: backendApi.deleteWritingScheme,
-    listBookBindings: backendApi.listBookWritingMethodBindings,
-    bindBook: backendApi.bindBookWritingMethod,
-    reorderBookBindings: backendApi.reorderBookWritingMethodBindings,
-    upgradeBookBinding: backendApi.upgradeBookWritingMethodBinding,
-    unbindBook: backendApi.unbindBookWritingMethod,
   },
   novelSources: {
     previewImport: backendApi.previewNovelSourceImport,

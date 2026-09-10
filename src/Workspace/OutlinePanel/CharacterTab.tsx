@@ -1,11 +1,12 @@
+import Markdown from '../../components/Markdown'
 import { services } from '@/services'
 import React from 'react'
+import { useMaterialRefresh } from './useMaterialRefresh'
 import { AiChatIcon, PlusIcon, UserIcon, DeleteIcon, EditIcon, SettingsIcon, HistoryIcon } from '@/purr-components'
-import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
+import { PurrCollapse, PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
 import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
 import type { Character, CharacterOption, EntityId } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
-import { getBookCharacters } from '../utils'
 import CharacterOptionsModal from './CharacterOptionsModal'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
@@ -61,6 +62,7 @@ export default function CharacterTab({
   onFocusCharacterHandled,
 }: CharacterTabProps) {
   const { message } = useAppFeedback()
+  const [loadError, setLoadError] = React.useState('')
   const [characters, setCharacters] = React.useState<Character[]>([])
   const [editModalOpen, setEditModalOpen] = React.useState(false)
   const [editTarget, setEditTarget] = React.useState<Character | null>(null)
@@ -81,14 +83,17 @@ export default function CharacterTab({
 
   const loadCharacters = React.useCallback(async () => {
     if (bookId == null) return
-    const list = await getBookCharacters(bookId)
-    setCharacters(list)
+    const res = await services.characters.getCharacters({ bookId })
+    setLoadError(res.success ? '' : res.error || '无法读取资料')
+    setCharacters(res.success ? res.data || [] : [])
   }, [bookId])
 
   const loadOptions = React.useCallback(async () => {
     const res = await services.characters.getCharacterOptions({ category: 'tag' })
     if (res.success && res.data) setTagOptions(res.data)
   }, [])
+
+  useMaterialRefresh(loadCharacters)
 
   React.useEffect(() => {
     loadCharacters()
@@ -151,6 +156,7 @@ export default function CharacterTab({
       name,
       tags: draftTags.join(', '),
       profile_md: draftProfileMd,
+      baseRevision: editTarget?.baseRevision,
     }
     setSaving(true)
     try {
@@ -179,7 +185,7 @@ export default function CharacterTab({
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
-    const res = await services.characters.deleteCharacter({ id: deleteTarget.id })
+    const res = await services.characters.deleteCharacter({ id: deleteTarget.id, baseRevision: deleteTarget.baseRevision })
     if (res.success) {
       message.success('已删除')
       setDeleteTarget(null)
@@ -196,6 +202,8 @@ export default function CharacterTab({
       </div>
     )
   }
+
+  if (loadError && !editModalOpen) return <p role="alert">{loadError} <PurrButton onClick={() => void loadCharacters()}>重新读取</PurrButton></p>
 
   return (
     <div className="character-tab">
@@ -231,7 +239,7 @@ export default function CharacterTab({
           </div>
         ) : (
           characters.map((c, index) => {
-            const preview = profilePreview(c.profile_md)
+            const preview = profilePreview([c.inheritedBaseline, c.profile_md].filter(Boolean).join("\n"))
             const isFocus = focusCharacterId === c.id
             const hasDiff = diff.hasSession(settingSessionKey('character', c.id))
             return (
@@ -261,6 +269,7 @@ export default function CharacterTab({
                     </div>
                   )}
                 </div>
+
                 <div className="character-card-actions">
                   <PurrButton
                     type="text"
@@ -345,6 +354,7 @@ export default function CharacterTab({
             className="character-edit-tags"
           />
         </div>
+        {editTarget?.inheritedBaseline && <><PurrCollapse size="small" defaultActiveKeys={["baseline"]} items={[{key: "baseline", label: "原作资料 · 只读", children: <Markdown>{editTarget.inheritedBaseline}</Markdown>}]} /><p>本书后续发展</p></>}
         <KnowledgeMarkdownEditor
           documentKey={`character:${editTarget?.id ?? 'new'}`}
           value={draftProfileMd}

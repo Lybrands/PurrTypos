@@ -1,5 +1,7 @@
 import { createPurrIcon } from './PurrIcon'
 
+export const FolderIcon = createPurrIcon('FolderIcon', <path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z" />)
+
 export const AimIcon = createPurrIcon('AimIcon', <>
   <circle cx="12" cy="12" r="7.25" />
   <circle cx="12" cy="12" r="2.5" />
@@ -25,6 +27,12 @@ export const ArrowUpIcon = createPurrIcon('ArrowUpIcon', <>
 export const BookIcon = createPurrIcon('BookIcon', <>
   <path d="M6.5 3h12.25A1.25 1.25 0 0 1 20 4.25V21H6.5A2.5 2.5 0 0 1 4 18.5v-13A2.5 2.5 0 0 1 6.5 3Z" />
   <path d="M7.75 3v14M6.5 17H20M6.5 17a2 2 0 0 0 0 4" />
+</>)
+
+export const LibraryIcon = createPurrIcon('LibraryIcon', <>
+  <rect x="3" y="4" width="4" height="16" rx="1" />
+  <rect x="9" y="4" width="4" height="16" rx="1" />
+  <path d="m15 5 3-1 4 15-3 1zM3 8h4M9 8h4" />
 </>)
 
 export const BulbIcon = createPurrIcon('BulbIcon', <>
@@ -360,4 +368,9 @@ export const AlignBottomIcon = createPurrIcon('AlignBottomIcon', <>
 export const VideoCameraIcon = createPurrIcon('VideoCameraIcon', <>
   <rect x="3" y="6" width="13" height="12" rx="2.5" />
   <path d="m16 10 5-3v10l-5-3Z" />
+</>)
+
+export const InfoIcon = createPurrIcon('InfoIcon', <>
+  <circle cx="12" cy="12" r="9" />
+  <path d="M12 11v6M12 7h.01" />
 </>)

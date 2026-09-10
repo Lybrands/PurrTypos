@@ -55,7 +55,7 @@ async def update_setting_entity(id: str, body: UpdateSettingEntityRequest):
     if not before:
         return {"success": False, "error": "实体不存在"}
 
-    data: dict = {}
+    data: dict = {"baseRevision": body.baseRevision}
     if body.entityType is not None:
         data["entity_type"] = body.entityType
     if body.name is not None:
@@ -88,7 +88,7 @@ async def update_setting_entity(id: str, body: UpdateSettingEntityRequest):
 
 
 @router.delete("/setting-entities/{id}")
-async def delete_setting_entity(id: str):
+async def delete_setting_entity(id: str, baseRevision: str | None = Query(None)):
     db = get_db()
     try:
         eid = int(id)
@@ -100,7 +100,7 @@ async def delete_setting_entity(id: str):
     if row is None:
         return {"success": False, "error": "实体不存在"}
     async with db.transaction(cancellation_linearizable=True):
-        await entities_crud.delete_setting_entity(db, eid)
+        await entities_crud.delete_setting_entity(db, eid, base_revision=baseRevision)
         delivery_keys = await memory_deposition_service.record_deleted_source(
             db,
             book_id=str(row["book_id"]),

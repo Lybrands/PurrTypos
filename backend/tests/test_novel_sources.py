@@ -107,18 +107,27 @@ async def test_preview_writes_nothing_and_confirmation_creates_one_immutable_rev
     assert matches[0]["id"] == section["id"]
 
 
-async def test_single_section_and_changed_content_require_explicit_reconfirmation(db):
+async def test_import_without_checkboxes_preserves_content_digest_guard(db):
     service = NovelSourceService(db)
     preview = service.preview_external_import(
         file_name="source.txt", extension=".txt", content="完整单节正文"
     )
-    with pytest.raises(NovelSourceConflictError, match="按单节"):
-        await service.confirm_external_import(
-            title="单节", file_name="source.txt", extension=".txt",
-            content="完整单节正文", expected_content_digest=preview["contentDigest"],
-            confirm_single_section=False, rights_confirmed=True,
-            model_data_boundary_confirmed=True,
-        )
+    from schemas.novel_sources import ConfirmSourceImportRequest
+
+    request = ConfirmSourceImportRequest(
+        title="单节", fileName="source.txt", extension=".txt",
+        content="完整单节正文", expectedContentDigest=preview["contentDigest"],
+    )
+    revision = await service.confirm_external_import(
+        title=request.title, file_name=request.fileName, extension=request.extension,
+        content=request.content, expected_content_digest=request.expectedContentDigest,
+    )
+    assert len(revision["sections"]) == 1
+    metadata = revision["source_metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    assert metadata["rightsConfirmed"] is False
+    assert metadata["modelDataBoundaryConfirmed"] is False
     with pytest.raises(NovelSourceConflictError, match="已变化"):
         await service.confirm_external_import(
             title="单节", file_name="source.txt", extension=".txt",
@@ -302,14 +311,10 @@ async def test_source_work_with_writing_method_evidence_reference_must_be_archiv
         "('analysis-evidence', ?, 1, 0, 1, 'digest', '{}')",
         [revision["id"]],
     )
-    await db.execute(
-        "INSERT INTO writing_methods "
-        "(id, name, method_type, source_type, source_ref_json) VALUES "
-        "('method-evidence', '证据方法', 'technique', 'analysis_candidate', ?)",
-        [json.dumps({"analysisId": "analysis-evidence", "craftCardId": "craft-1"})],
-    )
+    from application.writing_technique_service import WritingTechniqueService
+    await WritingTechniqueService(db).create_draft(operation_id="source-evidence", owner={"sourceRevisionId": revision["id"], "analysisId": "analysis-evidence"})
 
-    with pytest.raises(NovelSourceConflictError, match="写作方法或方案引用"):
+    with pytest.raises(NovelSourceConflictError, match="写作技法引用"):
         await service.delete_work(revision["work_id"])
 
     archived = await service.archive_work(revision["work_id"])

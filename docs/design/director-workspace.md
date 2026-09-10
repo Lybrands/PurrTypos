@@ -8,7 +8,7 @@
 
 ## 一句话定位
 
-> **你做导演给意图，AI 主笔出正文。** 工作台默认以 AI 为中心，但任意一栏（大纲 / AI / 写作）都能一键提升为主区域。
+> **作者确定创作意图，AI 提供正文提案。** 工作台默认以 AI 为中心，但任意一栏（大纲 / AI / 写作）都能一键提升为主区域。
 
 ---
 
@@ -276,7 +276,7 @@ book_style (
 
 > **MVP 实现说明**：本期不做 Lexical 内嵌渲染，而是用全屏覆盖层显示段落对比。
 > 优点：实现简单可控；中文段落上下并排对比天然清晰；不动 Lexical 内部状态。
-> 后续若用户希望「边写边看 diff」，再考虑升级为 Lexical 内嵌节点。
+> Lexical 内嵌 diff 节点不在该设计范围内。
 >
 > **回滚机制**：`POST /chapter-diff/by-id/{id}/rollback` 把指定历史的 `before_text` 写回 articles，
 > 同时插入一条 `source='rollback_of:N'` 的新历史，所以**回滚也会被记录**，可继续往前回滚或再次回滚回去。
@@ -340,24 +340,3 @@ book_style (
 > - Worker 失败或创建失败时全部 fallback 同步，保持功能可用性。
 
 ---
-
-## 决策日志（本轮提问汇总）
-
-| 决策点 | 选项 | 决定 |
-|---|---|---|
-| 整体方向 | A/B/C/D/open | A + D + open |
-| 用户角色 | writer/copilot/director | director |
-| AI 输出落地 | diff/insert/canvas/copy | diff + insert + canvas |
-| 预算 | small/medium/large | large |
-| open 想法 | 多种 | "主 AI，轻大纲和写作区，但是可以随时切换这两个区域为主区域" → v3 三栏可换主 |
-| Canvas | 砍/留/再说 | 留 |
-| 主区域切换触发 | 点击/图标/双击/快捷键/多种 | ⤢ 显式图标 |
-| Canvas 用法 | 多种 | ai_drafts + merge_with_diff + persist |
-| 笔记本整合策略 | A/B/C/B 渐进 | B（全内联） |
-| OutlinePanel 命运 | 删/留大纲/全留 | 完全删除 |
-| 风格字段范围 | minimal/more/less/free | minimal |
-| 参考章节选取 | 手动/最近 N/AI 智能/混合 | 手动 + AI 调 skill |
-| diff 颗粒度 | 句/段/块/自适应 | 段落 |
-| 拒绝默认 | 多种 | 直接再生成（下拉藏 reason / 放弃） |
-| diff 其他 | 多选 | 全部接受 / 锁其他段 / diff 历史 |
-| chatAgentMode | ask/agent | 只保留 `ask` / `agent` |

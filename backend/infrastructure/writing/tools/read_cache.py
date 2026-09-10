@@ -56,7 +56,7 @@ class WritingReadCache:
                 separators=(",", ":"),
             )
             key = hashlib.sha256(
-                f"{name}:{scope_key}:{arguments_json}".encode()
+                f"continuation-history-v1:{name}:{scope_key}:{arguments_json}".encode()
             ).hexdigest()
             async with self._db.transaction():
                 row = await self._db.fetch_one(

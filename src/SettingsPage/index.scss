@@ -5,25 +5,6 @@
   background: var(--bg-panel);
 }
 
-.settings-header {
-  display: flex;
-  height: var(--header-height);
-  padding: 0 18px;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
-  backdrop-filter: blur(18px);
-}
-
-.settings-back { gap: var(--spacing-xs); }
-.settings-title {
-  color: var(--text-primary);
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-semibold);
-}
-
 .settings-body {
   display: flex;
   min-height: 0;
@@ -192,6 +173,28 @@
   font-size: var(--font-size-sm);
   white-space: nowrap;
 }
+.settings-database-location {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+
+  > .purr-button {
+    flex-shrink: 0;
+  }
+}
+.settings-database-path {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  word-break: break-all;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
 .settings-data-actions {
   display: flex;
   flex-wrap: wrap;
@@ -212,6 +215,15 @@
     color: var(--text-primary);
     font-size: var(--font-size-lg);
   }
+}
+.settings-memory-review {
+  margin: 24px 0;
+  padding-top: 24px;
+  border-top: 1px solid var(--border-light);
+}
+.settings-memory-review-select {
+  width: 100%;
+  max-width: 480px;
 }
 .settings-memory-embedding-grid {
   display: grid;
@@ -244,9 +256,9 @@
   display: flex;
   margin: -7px 0 22px;
   padding: 15px 16px;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
@@ -261,18 +273,21 @@
   strong {
     color: var(--text-primary);
     font-size: var(--font-size);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
   }
 
-  span {
+  > div:first-child > span {
     color: var(--text-muted);
     font-size: var(--font-size-sm);
+    line-height: 1.6;
   }
 }
 .settings-model-preset-meta {
   display: flex;
-  flex: 0 0 auto;
+  min-width: 0;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 5px;
 
   .purr-tag { margin: 0; }

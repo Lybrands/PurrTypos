@@ -116,6 +116,13 @@
     }
   }
 
+  &--knowledge {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
+  }
+
   &--writing-methods {
     padding: var(--spacing-sm);
   }

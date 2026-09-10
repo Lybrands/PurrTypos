@@ -1,5 +1,5 @@
 import React from 'react'
-import { SunIcon, MoonIcon, SettingsIcon } from '@/purr-components'
+import { ArrowLeftIcon, HomeIcon, SunIcon, MoonIcon, SettingsIcon } from '@/purr-components'
 import { PurrButton, PurrTooltip } from '@/purr-components'
 import { useTheme } from '../../contexts/ThemeContext'
 import homeLogoLight from '../../imgs/home_logo_light.png'
@@ -18,8 +18,21 @@ export interface HeaderPanelToggle {
   onClick?: () => void
 }
 
+export interface HeaderNavigationAction {
+  label: string
+  onClick: () => void
+}
+
+export interface HeaderNavigation {
+  home?: HeaderNavigationAction
+  back?: HeaderNavigationAction
+}
+
 interface AppHeaderProps {
   title?: React.ReactNode
+  /** 系统级首页/返回导航：图标、尺寸与顺序由 AppHeader 统一控制。 */
+  navigation?: HeaderNavigation
+  /** 仅放置页面专属的左侧内容，不放系统导航按钮。 */
   left?: React.ReactNode
   /** 工作台搜索栏等，插在右侧操作区最前 */
   searchSlot?: React.ReactNode
@@ -27,12 +40,13 @@ interface AppHeaderProps {
   showActions?: boolean
   /** 工作台专属：面板可见性 toggle 按钮组 */
   panelToggles?: HeaderPanelToggle[]
-  /** 打开设置页 */
+  /** 提供回调时显示设置入口。 */
   onOpenSettings?: () => void
 }
 
 export default function AppHeader({
   title,
+  navigation,
   left,
   searchSlot,
   right,
@@ -47,6 +61,34 @@ export default function AppHeader({
   return (
     <header className="app-header">
       <div className="app-header-left">
+        {navigation && (navigation.home || navigation.back) && (
+          <div className="app-header-navigation" aria-label="页面导航">
+            {navigation.home && (
+              <PurrTooltip title={navigation.home.label}>
+                <PurrButton
+                  type="text"
+                  size="small"
+                  icon={<HomeIcon size={14} />}
+                  aria-label={navigation.home.label}
+                  onClick={navigation.home.onClick}
+                  className="app-header-navigation-button"
+                />
+              </PurrTooltip>
+            )}
+            {navigation.back && (
+              <PurrTooltip title={navigation.back.label}>
+                <PurrButton
+                  type="text"
+                  size="small"
+                  icon={<ArrowLeftIcon size={14} />}
+                  aria-label={navigation.back.label}
+                  onClick={navigation.back.onClick}
+                  className="app-header-navigation-button"
+                />
+              </PurrTooltip>
+            )}
+          </div>
+        )}
         {left}
         {title != null && (
           typeof title === 'string'
@@ -70,6 +112,7 @@ export default function AppHeader({
                   type="text"
                   size="small"
                   icon={t.icon}
+                  aria-label={t.tooltip}
                   onClick={t.disabled ? undefined : t.onClick}
                   className={`app-header-action-btn panel-toggle-btn${t.active ? ' panel-toggle-active' : ''}${t.disabled ? ' panel-toggle-static' : ''}`}
                   aria-pressed={!!t.active}
@@ -94,18 +137,16 @@ export default function AppHeader({
           </PurrTooltip>
         )}
 
-        {onOpenSettings && (
-          <PurrTooltip title="设置">
-            <PurrButton
-              type="text"
-              size="small"
-              icon={<SettingsIcon style={{ fontSize: 16 }} />}
-              onClick={onOpenSettings}
-              className="app-header-action-btn"
-              aria-label="打开设置"
-            />
-          </PurrTooltip>
-        )}
+        {onOpenSettings && <PurrTooltip title="设置">
+          <PurrButton
+            type="text"
+            size="small"
+            icon={<SettingsIcon style={{ fontSize: 16 }} />}
+            onClick={onOpenSettings}
+            className="app-header-action-btn"
+            aria-label="打开设置"
+          />
+        </PurrTooltip>}
       </div>
     </header>
   )

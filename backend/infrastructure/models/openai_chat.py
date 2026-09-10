@@ -42,7 +42,7 @@ def _compile_chat(messages, opts, profile, *, stream):
     require_supported_reasoning_mode(opts, profile.protocol_capabilities())
     params = {"model": str(opts.get("model") or ""), "messages": messages, "stream": stream}
     params["extra_body"] = profile.build_openai_extra_body(normalize_thinking_enabled(opts))
-    for key in ("temperature", "reasoning_effort", "top_p", "response_format", "tools", "tool_choice"):
+    for key in ("temperature", "reasoning_effort", "top_p", "response_format", "tools", "tool_choice", "parallel_tool_calls"):
         if opts.get(key) is not None:
             params[key] = opts[key]
     if opts.get("top_k") is not None:

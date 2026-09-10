@@ -1,25 +1,128 @@
 .novel-knowledge-panel {
-  padding: 20px;
+  box-sizing: border-box;
+  container-type: inline-size;
+  width: 100%;
+  min-width: 0;
+  min-height: 100%;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   color: var(--text-primary);
   font-size: 13px;
-  line-height: 1.7;
-  header, .knowledge-actions, .knowledge-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-  header { justify-content: space-between; }
+  line-height: 1.6;
+
+  > header, .knowledge-actions, .knowledge-controls, .knowledge-list-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+  }
+  > header, .knowledge-list-heading { justify-content: space-between; }
   h2, h3, p { margin: 0; }
-  h2 { font-size: 20px; }
-  h3 { font-size: 15px; }
-  article, details { padding: 14px; border: 1px solid var(--border-color, #dedbd5); border-radius: 10px; }
-  details[open] > :not(summary) { margin-top: 12px; }
-  summary { cursor: pointer; font-weight: 600; }
-  .knowledge-note, footer, small { color: var(--text-secondary); }
-  .knowledge-notice { padding: 10px; border-inline-start: 3px solid var(--color-primary, #a48561); }
-  .knowledge-document-list { display: grid; gap: 8px; }
-  .knowledge-document-list small { display: block; overflow-wrap: anywhere; }
-  .knowledge-controls > .purr-input { flex: 1; min-width: 150px; }
-  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; background: var(--bg-secondary, #f6f5f2); padding: 12px; border-radius: 6px; }
-  .knowledge-source-text { line-height: 1.9; }
-  footer { border-top: 1px solid var(--border-color, #dedbd5); padding-top: 12px; }
+  h2 { font-size: 16px; font-weight: 600; }
+  h3 { font-size: 13px; font-weight: 600; }
+  article { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); }
+  .knowledge-note, small { color: var(--text-secondary); }
+  .knowledge-notice { padding: 10px 12px; border-inline-start: 2px solid var(--accent); background: var(--bg-surface); overflow-wrap: anywhere; }
+  .knowledge-controls > .purr-input { flex: 1; min-width: 120px; }
+  .knowledge-controls > .purr-select { min-width: 0; max-width: 100%; }
+  pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; background: var(--bg-surface); padding: 12px; border-radius: var(--radius-md); }
+
+  .knowledge-search {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    > .purr-input { grid-column: 1 / -1; min-width: 0; width: 100%; }
+    > .purr-select { width: 150px; max-width: 100%; }
+  }
+  .knowledge-list-heading {
+    padding-top: 4px;
+    h3 { display: flex; gap: 6px; align-items: baseline; }
+    h3 span { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+  }
+  .knowledge-document-list { display: grid; gap: 2px; margin-top: -6px; }
+  .knowledge-empty { padding: 24px 12px; text-align: center; color: var(--text-muted); }
+}
+
+.knowledge-document-row.purr-button {
+  width: 100%;
+  min-height: 42px;
+  font-size: 13px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  // PurrButton wraps children: the row layout belongs on its label.
+  > .purr-button__label { display: flex; align-items: center; width: 100%; gap: 10px; }
+  &:hover:not(:disabled), &:active:not(:disabled) { transform: none; }
+}
+.knowledge-document-row__copy {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  small { flex-shrink: 0; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
+}
+.knowledge-document-row__issue { flex-shrink: 0; font-size: 11px; color: var(--warning); }
+.knowledge-document-row__arrow { flex-shrink: 0; color: var(--text-muted); font-size: 18px; line-height: 1; }
+
+.knowledge-shared-materials {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  code { display: block; min-width: 0; overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+}
+.knowledge-shared-materials__heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  p { flex: 1; min-width: 180px; color: var(--text-secondary); font-size: 12px; }
+}
+.knowledge-library-status { color: var(--text-muted); font-size: 11px; }
+
+.novel-knowledge-panel .purr-collapse__content,
+.knowledge-reader .purr-collapse__content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 12px 12px;
+  p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+}
+.novel-knowledge-panel .purr-collapse__content .knowledge-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  > .purr-input, > .purr-select { width: 100%; min-width: 0; }
+  > .purr-button { justify-self: start; }
+}
+.knowledge-reader__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  > span { min-width: 0; overflow-wrap: anywhere; }
+  > button { flex-shrink: 0; }
+}
+.knowledge-reader__body { padding: 18px 0 4px; font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; }
+.knowledge-reader__notice { color: var(--warning); font-size: 12px; }
+.knowledge-reader pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.knowledge-reader .knowledge-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+@container (min-width: 560px) {
+  .novel-knowledge-panel .knowledge-search {
+    grid-template-columns: minmax(0, 1fr) 150px auto;
+    > .purr-input { grid-column: auto; }
+  }
 }

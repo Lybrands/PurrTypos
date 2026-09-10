@@ -107,6 +107,36 @@ def _legacy_replay_is_proven(
     return bool(history and expected is not None and current == expected and final == expected)
 
 
+async def _check_file_proposal(db, resolution, expected):
+    if resolution is None or expected is None:
+        return
+    from application.writing_proposal_read_model import SqliteWritingProposalReadModel
+    events = await SqliteWritingProposalReadModel(db).list_for_run(resolution.agentRunId)
+    proposal = next((event['payload'] for event in events if event['proposalId'] == resolution.proposalId), {})
+    if proposal.get('baseRevision') != expected:
+        raise HTTPException(status_code=409, detail="提案文件版本与原始提案不一致，请重新生成提案")
+
+
+def _atomic_history(function):
+    from functools import wraps
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        async with get_db().transaction():
+            return await function(*args, **kwargs)
+    return wrapped
+
+
+async def _rollback_revision(db, kind, identity):
+    from application.creation_material_service import materials, TABLES
+    table, key = TABLES[kind]
+    row = await db.fetch_one(f'SELECT book_id FROM {table} WHERE {key}=?', [identity])
+    if not row:
+        return None
+    await materials(db).synchronize(row['book_id'])
+    mapping = await db.fetch_one('SELECT revision FROM creation_material_files WHERE book_id=? AND kind=? AND entity_id=?', [row['book_id'], kind, str(identity)])
+    return mapping['revision'] if mapping else None
+
+
 @router.post("/setting-diff/character/{characterId}/commit")
 async def commit_character_diff(characterId: str, body: CommitCharacterDiffRequest):
     db = get_db()
@@ -210,6 +240,7 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
                 },
                 final=final,
             )
+        await _check_file_proposal(db, body.resolution, body.baseRevision)
         row = await characters_crud.update_character(
             db,
             cid,
@@ -217,6 +248,7 @@ async def commit_character_diff(characterId: str, body: CommitCharacterDiffReque
                 "name": body.name,
                 "tags": body.tags,
                 "profile_md": body.profileMd,
+                "baseRevision": body.baseRevision,
             },
         )
         if not row:
@@ -279,6 +311,7 @@ async def get_character_history(historyId: int):
 
 
 @router.post("/setting-diff/character/history/{historyId}/rollback")
+@_atomic_history
 async def rollback_character_history(historyId: int):
     db = get_db()
     target = await char_hist_crud.get_character_history(db, historyId)
@@ -297,7 +330,7 @@ async def rollback_character_history(historyId: int):
         "profile_md": target.get("after_profile_md") or "",
     }
 
-    row = await characters_crud.update_character(db, cid, rollback_to)
+    row = await characters_crud.update_character(db, cid, rollback_to, base_revision=await _rollback_revision(db, "character", cid))
     if not row:
         return {"success": False, "error": "人物不存在"}
 
@@ -420,6 +453,7 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
                 },
                 final=final,
             )
+        await _check_file_proposal(db, body.resolution, body.baseRevision)
         row = await entities_crud.update_setting_entity(
             db,
             eid,
@@ -427,6 +461,7 @@ async def commit_entity_diff(entityId: str, body: CommitEntityDiffRequest):
                 "name": body.name,
                 "tags": body.tags,
                 "profile_md": body.profileMd,
+                "baseRevision": body.baseRevision,
             },
         )
         if not row:
@@ -489,6 +524,7 @@ async def get_entity_history(historyId: int):
 
 
 @router.post("/setting-diff/entity/history/{historyId}/rollback")
+@_atomic_history
 async def rollback_entity_history(historyId: int):
     db = get_db()
     target = await ent_hist_crud.get_entity_history(db, historyId)
@@ -507,7 +543,7 @@ async def rollback_entity_history(historyId: int):
         "profile_md": target.get("after_profile_md") or "",
     }
 
-    row = await entities_crud.update_setting_entity(db, eid, rollback_to)
+    row = await entities_crud.update_setting_entity(db, eid, rollback_to, base_revision=await _rollback_revision(db, "entity", eid))
     if not row:
         return {"success": False, "error": "实体不存在"}
 
@@ -608,7 +644,8 @@ async def commit_background_diff(bookId: str, body: CommitBackgroundDiffRequest)
                 current={"content": str((current or {}).get("content") or "")},
                 final=final,
             )
-        await bg_crud.save_story_background(db, bookId, body.content)
+        await _check_file_proposal(db, body.resolution, body.baseRevision)
+        await bg_crud.save_story_background(db, bookId, body.content, base_revision=body.baseRevision)
         hist_id = await bg_hist_crud.insert_story_background_history(
             db,
             book_id=bookId,
@@ -659,6 +696,7 @@ async def get_background_history(historyId: int):
 
 
 @router.post("/setting-diff/background/history/{historyId}/rollback")
+@_atomic_history
 async def rollback_background_history(historyId: int):
     db = get_db()
     target = await bg_hist_crud.get_story_background_history(db, historyId)
@@ -669,7 +707,7 @@ async def rollback_background_history(historyId: int):
     rollback_to = target.get("before_content") or ""
     rollback_from = target.get("after_content") or ""
 
-    await bg_crud.save_story_background(db, book_id, rollback_to)
+    await bg_crud.save_story_background(db, book_id, rollback_to, base_revision=await _rollback_revision(db, "background", book_id))
     new_id = await bg_hist_crud.insert_story_background_history(
         db,
         book_id=book_id,

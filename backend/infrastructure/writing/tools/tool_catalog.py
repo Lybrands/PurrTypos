@@ -12,10 +12,8 @@ from domains.writing.tools.display_names import WRITING_TOOL_DISPLAY_NAMES
 from domains.writing.policies import WRITING_TOOL_POLICIES
 from infrastructure.writing.retrieval import (
     MEMORY_RETRIEVAL_LIMIT,
-    METHOD_RETRIEVAL_LIMIT,
     RETRIEVAL_QUERY_CHAR_LIMIT,
     WritingMemoryRetriever,
-    WritingMethodRetriever,
 )
 from infrastructure.writing.tools.handlers import WRITING_TOOL_OPERATIONS
 from infrastructure.writing.tools.read_cache import WritingReadCache
@@ -65,9 +63,6 @@ def build_writing_tool_catalog(
             WritingMemoryRetriever(dependencies.db, dependencies.memories),
             MEMORY_RETRIEVAL_LIMIT,
         ),
-        "searchWritingMethods": (
-            WritingMethodRetriever(dependencies.db), METHOD_RETRIEVAL_LIMIT,
-        ),
     }
     from application.novel_knowledge_service import get_novel_knowledge_service
     from infrastructure.writing.knowledge_retrieval import NovelKnowledgeRetriever
@@ -89,6 +84,8 @@ def build_writing_tool_catalog(
         for name, (retriever, limit) in retrievers.items()
     }
     from infrastructure.writing.knowledge_retrieval import read_knowledge_registration
+    from infrastructure.writing.technique_tools import technique_registrations, guard_technique_registration
+    native_registrations.update(technique_registrations(dependencies.db, skills_by_name))
     native_registrations['readNovelKnowledge'] = read_knowledge_registration(
         native_registrations['readNovelKnowledge'], skills_by_name['readNovelKnowledge']['parameters'],
     )
@@ -105,7 +102,7 @@ def build_writing_tool_catalog(
     from domains.writing.tools.catalog import enabled_writing_tools
     from infrastructure.writing.knowledge_retrieval import guard_legacy_registration
     return InMemoryToolCatalog(tuple(
-        guard_legacy_registration(registration, dependencies.db, knowledge)
+        guard_technique_registration(guard_legacy_registration(registration, dependencies.db, knowledge), dependencies.db)
         for registration in catalog.registrations()
     ), enabled_writing_tools)
 

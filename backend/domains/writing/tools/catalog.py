@@ -289,8 +289,11 @@ def enabled_writing_tools(request: AgentRunRequest) -> frozenset[str]:
             "queryOutline", "listOutlines", "getStoryHealthDashboard", "updateCharacter",
             "updateSettingEntity", "editStoryBackground", "updateOutline", "editGlobalOutline",
         })
-    if not context.writing_method_recommendation_requested:
-        names.discard("searchWritingMethods")
+    technique_snapshot = dict(context.writing_technique_snapshot or {})
+    if technique_snapshot.get("mode") != "auto":
+        names.discard("searchWritingTechniques")
+    if not technique_snapshot.get("manual") and not technique_snapshot.get("candidates"):
+        names.discard("readWritingTechnique")
     if context.creation_mode != "continuation" or not context.continuation_binding:
         names.discard("readContinuationSourceSection")
     return frozenset(names)

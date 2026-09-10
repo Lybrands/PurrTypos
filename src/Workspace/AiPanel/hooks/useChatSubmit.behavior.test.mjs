@@ -41,6 +41,7 @@ after(async () => {
 })
 
 beforeEach(() => {
+  services.writingTechniques.reserveInput = async (bookId, sessionId, selection) => ({ success: true, data: { inputId: `input-${bookId}-${sessionId}`, mode: selection.mode } })
   runtime.clearChatRuntime(7)
   runtime.clearChatRuntime(8)
   runtime.replaceChatRuntimeQueue([])
@@ -72,10 +73,7 @@ function renderHook(overrides = {}) {
     agentEnabled: true,
     selectedMemoryIds: ['memory-a'],
     selectedForeshadowingIds: ['foreshadowing-a'],
-    writingMethodOverrides: {
-      forceRevisionIds: ['method-force-a'],
-      excludeRevisionIds: ['method-exclude-a'],
-    },
+    writingTechniqueSelection: { mode: 'manual', refs: [{kind: 'technique', id: 'technique-a', versionId: 'a'.repeat(64)}] },
     sessionScope: 'chapter',
     ...overrides,
     setConversations,
@@ -423,7 +421,7 @@ test('bound chat ignores foreign terminal envelopes until Root settles', async (
   }
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '继续 Root' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '继续 Root' }), 'started')
     onChunk({
       requestReceipt: {
         requestId: 'chat-root-terminal',
@@ -549,7 +547,7 @@ test('stop before the first Run id still request-cancels exactly once', async ()
   services.ai.aiChatStream = () => undefined
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '启动慢 Agent' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '启动慢 Agent' }), 'started')
     await result.handleAbort()
     await result.handleAbort()
     assert.equal(cancelCalls, 1)
@@ -561,12 +559,12 @@ test('stop before the first Run id still request-cancels exactly once', async ()
   }
 })
 
-test('the actual missing-key submission keeps Assistant content empty', () => {
+test('the actual missing-key submission keeps Assistant content empty', async () => {
   const { result, readMessages } = renderHook({
     selectedModelConfig: model('model-a', ''),
   })
 
-  assert.equal(result.handleSubmit({ content: '继续写作' }), 'rejected')
+  assert.equal(await result.handleSubmit({ content: '继续写作' }), 'rejected')
   const assistant = readMessages().at(-1)
   assert.equal(assistant.role, 'assistant')
   assert.equal(assistant.content, '')
@@ -574,12 +572,12 @@ test('the actual missing-key submission keeps Assistant content empty', () => {
   assert.match(assistant.error, /API Key/)
 })
 
-test('queued request drains the frozen A envelope after the UI switches to B', () => {
+test('queued request drains the frozen A envelope after the UI switches to B', async () => {
   globalThis.document = { documentElement: { lang: 'locale-A' } }
   runtime.replaceChatRuntimeMessages(7, [])
   runtime.setChatRuntimeLoading(7, true)
   const first = renderHook({ loading: true })
-  assert.equal(first.result.handleSubmit({ content: '冻结 A 请求' }), 'queued')
+  assert.equal(await first.result.handleSubmit({ content: '冻结 A 请求' }), 'queued')
   let queued = runtime.getChatRuntimeQueue()[0]
   assert.ok(queued)
   assert.ok(queued.id)
@@ -588,7 +586,7 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   assert.equal(first.result.updateQueuedSubmission(queued.id, { content: '修改后的 A 请求', editing: false }), true)
   queued = runtime.getChatRuntimeQueue()[0]
   assert.equal(queued.content, '修改后的 A 请求')
-  assert.equal(first.result.handleSubmit({ content: '应被删除的消息' }), 'queued')
+  assert.equal(await first.result.handleSubmit({ content: '应被删除的消息' }), 'queued')
   const deleted = runtime.getChatRuntimeQueue()[1].id
   assert.equal(first.result.updateQueuedSubmission(deleted, null), true)
   assert.equal(first.result.updateQueuedSubmission(deleted, { content: 'stale' }), false)
@@ -614,13 +612,10 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
       agentEnabled: false,
       selectedMemoryIds: ['memory-b'],
       selectedForeshadowingIds: ['foreshadowing-b'],
-      writingMethodOverrides: {
-        forceRevisionIds: ['method-force-b'],
-        excludeRevisionIds: ['method-exclude-b'],
-      },
+      writingTechniqueSelection: { mode: 'auto', refs: [] },
       sessionScope: 'setting',
     })
-    assert.equal(second.result.handleSubmit({
+    assert.equal(await second.result.handleSubmit({
       content: queued.content,
       queuedContext: queued,
       preservePrompt: true,
@@ -640,10 +635,9 @@ test('queued request drains the frozen A envelope after the UI switches to B', (
   assert.deepEqual(streamRequest.associatedOutlineIds, ['outline-a'])
   assert.deepEqual(streamRequest.selectedMemoryIds, ['memory-a'])
   assert.deepEqual(streamRequest.selectedForeshadowingIds, ['foreshadowing-a'])
-  assert.deepEqual(streamRequest.writingMethodOverrides, {
-    forceRevisionIds: ['method-force-a'],
-    excludeRevisionIds: ['method-exclude-a'],
-  })
+  assert.equal(streamRequest.writingTechniqueInputId, 'input-book-a-7')
+  assert.equal(queued.writingTechniqueSelection.mode, 'manual')
+  assert.equal(queued.writingTechniqueSelection.refs[0].id, 'technique-a')
   assert.equal(streamRequest.chatAgentMode, 'agent')
   assert.equal(streamRequest.options.model, 'model-a-name')
 })
@@ -682,7 +676,7 @@ test('stop before Run identity cancels once and only the authoritative terminal 
   }
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '启动慢 Agent' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '启动慢 Agent' }), 'started')
     await result.handleAbort()
     await result.handleAbort()
     assert.equal(cancelCalls, 1)
@@ -824,7 +818,7 @@ test('production-shaped tool completion hydrates proposal identity before termin
         },
       }),
     })
-    assert.equal(result.handleSubmit({ content: '更新人物' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '更新人物' }), 'started')
     visibleSessionId = 8
 
     // The private legacy effect has no occurrence identity and is inert.
@@ -898,7 +892,7 @@ test('terminal keeps editing disabled until durable conversation persistence set
   })
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '等待持久化' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '等待持久化' }), 'started')
     onChunk({
       done: true,
       finalResponse: '权威终稿',
@@ -907,7 +901,7 @@ test('terminal keeps editing disabled until durable conversation persistence set
     await Promise.resolve()
 
     assert.equal(runtime.getChatSessionRuntime(7).loading, true)
-    assert.equal(result.handleSubmit({ editIndex: 0, content: '不能抢跑' }), 'rejected')
+    assert.equal(await result.handleSubmit({ editIndex: 0, content: '不能抢跑' }), 'rejected')
 
     finishSave({ success: true, data: { id: 99 } })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -948,8 +942,8 @@ test('queued turn freezes the persisted conversation frontier after terminal sav
         associatedTarget = target
       },
     })
-    assert.equal(result.handleSubmit({ content: '第一轮' }), 'started')
-    assert.equal(result.handleSubmit({ content: '第二轮' }), 'queued')
+    assert.equal(await result.handleSubmit({ content: '第一轮' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '第二轮' }), 'queued')
     callbacks[0]({
       done: true,
       finalResponse: '第一轮终稿',
@@ -1000,8 +994,8 @@ test('ambiguous terminal save failure replays idempotently before draining queue
   }
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '第一轮' }), 'started')
-    assert.equal(result.handleSubmit({ content: '第二轮' }), 'queued')
+    assert.equal(await result.handleSubmit({ content: '第一轮' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '第二轮' }), 'queued')
     onChunk({
       done: true,
       finalResponse: '第一轮终稿',
@@ -1049,8 +1043,8 @@ test('authoritative terminal save conflict unlocks without draining stale queued
     const { result } = renderHook({
       onPersistenceConflict: (sessionId) => conflicts.push(sessionId),
     })
-    assert.equal(result.handleSubmit({ content: '第一轮' }), 'started')
-    assert.equal(result.handleSubmit({ content: '过期队列' }), 'queued')
+    assert.equal(await result.handleSubmit({ content: '第一轮' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '过期队列' }), 'queued')
     onChunk({
       done: true,
       finalResponse: '第一轮终稿',
@@ -1094,8 +1088,8 @@ test('Stop exits an ambiguous terminal persistence retry without another save', 
   }
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '第一轮' }), 'started')
-    assert.equal(result.handleSubmit({ content: '不应发送' }), 'queued')
+    assert.equal(await result.handleSubmit({ content: '第一轮' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '不应发送' }), 'queued')
     onChunk({
       done: true,
       finalResponse: '第一轮终稿',
@@ -1118,7 +1112,7 @@ test('Stop exits an ambiguous terminal persistence retry without another save', 
   }
 })
 
-test('live user and assistant rows share the production client turn identity', () => {
+test('live user and assistant rows share the production client turn identity', async () => {
   globalThis.document = { documentElement: { lang: 'zh-CN' } }
   const originalSubscribe = services.ai.onAiChunk
   const originalStream = services.ai.aiChatStream
@@ -1126,7 +1120,7 @@ test('live user and assistant rows share the production client turn identity', (
   services.ai.aiChatStream = () => undefined
   try {
     const { result } = renderHook()
-    assert.equal(result.handleSubmit({ content: '稳定编辑目标' }), 'started')
+    assert.equal(await result.handleSubmit({ content: '稳定编辑目标' }), 'started')
     const [user, assistant] = runtime.getChatSessionRuntime(7).messages
 
     assert.ok(user.clientTurnId)
@@ -1161,7 +1155,7 @@ test('edit waits for durable truncation and sends the edited user exactly once',
     const { result } = renderHook({
       conversations: runtime.getChatSessionRuntime(7).messages,
     })
-    assert.equal(result.handleSubmit({ editIndex: 2, content: '新问题' }), 'started')
+    assert.equal(await result.handleSubmit({ editIndex: 2, content: '新问题' }), 'started')
     assert.equal(streamRequest, undefined)
     assert.equal(runtime.getChatSessionRuntime(7).loading, true)
     assert.deepEqual(deleteRequest.expectedConversationIds, [10, 11])
@@ -1209,7 +1203,7 @@ test('authoritative edit truncation conflict reloads instead of retrying stale h
       conversations: runtime.getChatSessionRuntime(7).messages,
       onPersistenceConflict: (sessionId) => conflicts.push(sessionId),
     })
-    assert.equal(result.handleSubmit({ editIndex: 0, content: '新问题' }), 'started')
+    assert.equal(await result.handleSubmit({ editIndex: 0, content: '新问题' }), 'started')
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     assert.equal(streamCalls, 0)
@@ -1241,10 +1235,10 @@ test('Stop during edit truncation prevents the replacement Run from starting', a
   services.ai.aiChatStream = () => { streamCalls += 1 }
   try {
     const { result } = renderHook({ conversations: history })
-    assert.equal(result.handleSubmit({ editIndex: 0, content: '新问题' }), 'started')
+    assert.equal(await result.handleSubmit({ editIndex: 0, content: '新问题' }), 'started')
     await result.handleAbort()
     assert.equal(runtime.getChatSessionRuntime(7).loading, true)
-    assert.equal(result.handleSubmit({ content: '不可抢跑' }), 'rejected')
+    assert.equal(await result.handleSubmit({ content: '不可抢跑' }), 'rejected')
     finishTruncation({ success: true })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
@@ -1277,7 +1271,7 @@ test('Stop plus failed truncation restores a settled retryable session', async (
   services.ai.aiChatStream = () => undefined
   try {
     const { result } = renderHook({ conversations: history })
-    assert.equal(result.handleSubmit({ editIndex: 0, content: '新问题' }), 'started')
+    assert.equal(await result.handleSubmit({ editIndex: 0, content: '新问题' }), 'started')
     await result.handleAbort()
     finishTruncation({ success: false, error: 'history changed' })
     await new Promise((resolve) => setTimeout(resolve, 0))

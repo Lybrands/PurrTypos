@@ -32,7 +32,7 @@ export function NovelAnalysisEvidenceList({
     {evidence.map((item, index) => <article key={`${item.sectionId}:${item.locator?.start ?? index}`}>
       <header>
         <div>
-          <span>原文证据 {index + 1}</span>
+          <span>{item.referenceKind === 'chapter' ? '来源章节' : '原文证据'} {index + 1}</span>
           <strong>{item.sectionTitle || (item.sectionOrdinal != null ? `第 ${item.sectionOrdinal + 1} 节` : '原文章节')}</strong>
         </div>
         {onLocate && sourceRevisionId ? <PurrButton
@@ -46,7 +46,7 @@ export function NovelAnalysisEvidenceList({
           })}
         >定位原文</PurrButton> : null}
       </header>
-      <blockquote>{item.excerpt}</blockquote>
+      {item.referenceKind !== 'chapter' && <blockquote>{item.excerpt}</blockquote>}
     </article>)}
   </div>
 }

@@ -14,12 +14,12 @@ export interface CommitScheduler {
   flushCommits: () => void;
 }
 
-/** Commit each received chunk without a timer or a pending batch. */
+/** Preserve updater order while allowing React to batch one incoming event burst. */
 export function createCommitScheduler(
   setConversations: ConversationMessageSetter,
 ): CommitScheduler {
   return {
-    scheduleCommit: updater => commitAgentChunk(() => setConversations(updater)),
+    scheduleCommit: updater => setConversations(updater),
     flushCommits: () => undefined,
   }
 }

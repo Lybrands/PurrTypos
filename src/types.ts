@@ -563,6 +563,8 @@ export interface CharacterOption {
 }
 
 export interface Character {
+  inheritedBaseline?: string;
+  baseRevision?: string;
   id: number;
   book_id: EntityId;
   name: string;
@@ -652,13 +654,6 @@ export interface Article {
   update_time?: string;
 }
 
-export type WritingMethodType = 'primary' | 'technique';
-
-export interface WritingMethodOverrides {
-  forceRevisionIds: string[];
-  excludeRevisionIds: string[];
-}
-
 export interface NovelSourcePickedFile {
   fileName: string;
   extension: '.txt' | '.md' | '.markdown';
@@ -713,6 +708,8 @@ export interface NovelSourceWork {
   metadata: Record<string, unknown>;
   revision_count?: number;
   analysis_count?: number;
+  unsaved_analysis_artifact_id?: string | null;
+  unsaved_analysis_revision_id?: string | null;
   latest_revision_id?: string | null;
   revisions?: NovelSourceRevision[];
   create_time: string;
@@ -746,6 +743,7 @@ export interface NovelSourceImportPreview {
 }
 
 export interface NovelAnalysisEvidence {
+  referenceKind?: 'quote' | 'chapter';
   sectionId: string;
   excerpt: string;
   segmentStartCharacter?: number;
@@ -757,6 +755,7 @@ export interface NovelAnalysisEvidence {
 }
 
 export interface NovelAnalysisFact {
+  claimNature?: 'fact' | 'summary' | 'inference';
   id?: string;
   factKind: string;
   subjectKey: string;
@@ -795,7 +794,15 @@ export interface WritingSkillDistillation {
   assessment: { checks: Array<{ dimension: string; passed: boolean; reason: string }> };
 }
 
+export interface WritingTechniqueResult {
+  status: 'generated' | 'insufficient_material';
+  candidate: {techniqueId: string; draftId: string; versionId: string} | null;
+  evidenceRefs: string[]; scopeNotes: string[]; reason: string;
+}
+
 export interface NovelAnalysisArtifact {
+  analysisSchemaVersion?: number;
+  techniqueResult?: WritingTechniqueResult;
   writingSkill?: DistilledWritingSkill;
   distillation?: WritingSkillDistillation;
   skillReviewStatus?: "pending_review" | "needs_revision";
@@ -816,6 +823,7 @@ export interface NovelAnalysisRun {
   runStatus: string;
   commandId: string;
   interactionKind?: 'analysis' | 'follow_up';
+  conversationId?: string;
   analysisArtifactRef?: string | null;
   prompt?: string;
   finalResponse?: string;
@@ -859,11 +867,13 @@ export interface NovelAnalysisRun {
   }>;
   error?: string | null;
   artifactRef?: string | null;
+  publishedAnalysisId?: string | null;
   createTime?: string | null;
   updateTime?: string | null;
 }
 
 export interface PublishedNovelAnalysis {
+  techniqueResult?: WritingTechniqueResult;
   writingSkill?: DistilledWritingSkill;
   distillation?: WritingSkillDistillation;
   skillReviewStatus?: "pending_review" | "needs_revision";
@@ -881,6 +891,10 @@ export interface PublishedNovelAnalysis {
 }
 
 export interface ContinuationCanonPreview {
+  sections: Array<{id: string; title: string; ordinal: number}>;
+  defaultTechniques: import('./services/writingTechniques').TechniqueRef[];
+  techniques: Array<{ref: import('./services/writingTechniques').TechniqueRef; available: boolean; name?: string; reason?: string; stage: string}>;
+  materialMapping: Array<{sourceFactId: string; sourceKey: string; kind: string}>;
   sourceRevisionId: string;
   sourceAnalysisId: string;
   forkSectionId: string;
@@ -916,94 +930,6 @@ export interface ContinuationWorkspace {
     bindingDigest: string;
   };
   canonRecords: ContinuationCanonPreview['records'];
-}
-
-export interface WritingMethodRevision {
-  id: string;
-  method_id: string;
-  version_no: number;
-  name: string;
-  description: string;
-  method_type: WritingMethodType;
-  tags: string[];
-  markdown_body: string;
-  metadata: Record<string, unknown>;
-  content_digest: string;
-  published_at: string;
-}
-
-export interface WritingMethod {
-  id: string;
-  name: string;
-  description: string;
-  method_type: WritingMethodType;
-  tags: string[];
-  source_type: string;
-  source_ref: Record<string, unknown>;
-  is_builtin: number;
-  status: 'active' | 'archived' | 'disabled';
-  draft_markdown: string;
-  draft_metadata: Record<string, unknown>;
-  draft_revision: number;
-  current_published_revision_id: string | null;
-  revisions?: WritingMethodRevision[];
-  create_time: string;
-  update_time: string;
-}
-
-export interface WritingSchemeRevisionMember {
-  ordinal: number;
-  method_revision_id: string;
-  method_id: string;
-  name: string;
-  method_type: WritingMethodType;
-  version_no: number;
-  content_digest: string;
-}
-
-export interface WritingSchemeRevision {
-  id: string;
-  scheme_id: string;
-  version_no: number;
-  name: string;
-  description: string;
-  members_digest: string;
-  members: WritingSchemeRevisionMember[];
-  published_at: string;
-}
-
-export interface WritingScheme {
-  id: string;
-  name: string;
-  description: string;
-  draft_member_revision_ids: string[];
-  draft_revision: number;
-  source_type: string;
-  source_ref: Record<string, unknown>;
-  is_builtin: number;
-  status: 'active' | 'archived' | 'disabled';
-  current_published_revision_id: string | null;
-  revisions?: WritingSchemeRevision[];
-  create_time: string;
-  update_time: string;
-}
-
-export interface WritingMethodCandidateBatch {
-  analysisId: string;
-  scheme: WritingScheme;
-  methods: WritingMethod[];
-  bindingChanged: false;
-}
-
-export interface BookWritingMethodBinding {
-  id: string;
-  book_id: EntityId;
-  binding_type: 'method' | 'scheme';
-  method_revision_id: string | null;
-  scheme_revision_id: string | null;
-  priority: number;
-  source: string;
-  revision: WritingMethodRevision | WritingSchemeRevision;
 }
 
 export interface ChapterDiffHistory {
@@ -1106,6 +1032,8 @@ export interface StoryBackgroundSettingHistory {
 export type SettingEntityType = "location" | "faction" | "item" | "other";
 
 export interface SettingEntity {
+  inheritedBaseline?: string;
+  baseRevision?: string;
   id: number;
   book_id: EntityId;
   entity_type: SettingEntityType;
@@ -1132,6 +1060,7 @@ export interface SettingEntityHistory {
 
 /** AI 工具提交的设定 diff 提议（人物 / 故事背景 / 世界设定实体） */
 export interface ProposedSettingDiff {
+  baseRevision?: string;
   /** Durable occurrence identity; entity sessionKey remains only an editor route. */
   proposalId?: string;
   kind: "character" | "background" | "entity";
@@ -1652,6 +1581,7 @@ export interface UnifiedMemoryPage {
   items: UnifiedMemoryItem[];
   total: number;
   suppressedDuplicates: number;
+  unavailableSources?: Partial<Record<UnifiedMemorySource, string>>;
 }
 
 export interface MemoryContextBlock {
@@ -1996,7 +1926,7 @@ export interface ElectronAPI {
     id: number;
     data: Partial<Character>;
   }) => Promise<ApiResult<Character>>;
-  deleteCharacter: (data: { id: number }) => Promise<ApiResult<void>>;
+  deleteCharacter: (data: { id: number; baseRevision?: string }) => Promise<ApiResult<void>>;
   /** 对一个正在等待中的 Agent 高风险工具调用作出一次性决定。 */
   resolveAiToolApproval: (data: {
     approvalId: string;
@@ -2030,13 +1960,14 @@ export interface ElectronAPI {
   updateSettingEntity: (data: {
     id: number;
     data: {
+      baseRevision?: string;
       entityType?: SettingEntityType;
       name?: string;
       tags?: string;
       profileMd?: string;
     };
   }) => Promise<ApiResult<SettingEntity>>;
-  deleteSettingEntity: (data: { id: number }) => Promise<ApiResult<void>>;
+  deleteSettingEntity: (data: { id: number; baseRevision?: string }) => Promise<ApiResult<void>>;
   // 仪表盘（故事健康度 / 写作统计）
   getStoryHealth: (data: {
     bookId: EntityId;
@@ -2127,44 +2058,22 @@ export interface ElectronAPI {
     deltaId: string;
     resolutions: Record<string, 'accepted' | 'rejected'>;
   }) => Promise<ApiResult<StoryMemoryEvolutionResolutionReceipt>>;
-  getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string } | null>>;
-  saveStoryBackground: (data: { bookId: EntityId; content: string }) => Promise<ApiResult<void>>;
+  getStoryBackground: (data: { bookId: EntityId }) => Promise<ApiResult<{ book_id: EntityId; content: string; update_time?: string; inheritedBaseline?: string; baseRevision?: string } | null>>;
+  saveStoryBackground: (data: { bookId: EntityId; content: string; baseRevision?: string }) => Promise<ApiResult<void>>;
   openAndReadTextFile: () => Promise<ApiResult<string>>;
   pickNovelSourceTextFile: (options?: { mode?: 'file' | 'folder' }) => Promise<ApiResult<NovelSourcePickedFile>>;
   pickStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   getStoryBackgroundAttachments: (data: { bookId: EntityId }) => Promise<ApiResult<StoryBackgroundAttachment[]>>;
   deleteStoryBackgroundAttachment: (data: { id: number }) => Promise<ApiResult<void>>;
   openStoryBackgroundAttachment: (data: { storedPath: string }) => Promise<string>;
-  listWritingMethods: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingMethod[]>>;
-  getWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
-  createWritingMethod: (data: { name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
-  updateWritingMethodDraft: (data: { methodId: string; expectedDraftRevision: number; name: string; description?: string; methodType: WritingMethodType; tags?: string[]; markdown?: string; metadata?: Record<string, unknown> }) => Promise<ApiResult<WritingMethod>>;
-  publishWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethodRevision>>;
-  publishWritingMethodBatch: (data: { methodIds: string[]; schemeIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevisions: WritingSchemeRevision[] }>>;
-  copyWritingMethod: (data: { methodId: string }) => Promise<ApiResult<WritingMethod>>;
-  deleteWritingMethod: (data: { methodId: string }) => Promise<ApiResult<void>>;
-  listWritingSchemes: (data?: { includeArchived?: boolean }) => Promise<ApiResult<WritingScheme[]>>;
-  getWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
-  createWritingScheme: (data: { name: string; description?: string; memberRevisionIds?: string[] }) => Promise<ApiResult<WritingScheme>>;
-  updateWritingSchemeDraft: (data: { schemeId: string; expectedDraftRevision: number; name: string; description?: string; memberRevisionIds: string[] }) => Promise<ApiResult<WritingScheme>>;
-  publishWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingSchemeRevision>>;
-  copyWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<WritingScheme>>;
-  deleteWritingScheme: (data: { schemeId: string }) => Promise<ApiResult<void>>;
-  listBookWritingMethodBindings: (data: { bookId: EntityId }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
-  bindBookWritingMethod: (data: { bookId: EntityId; bindingType: 'method' | 'scheme'; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
-  reorderBookWritingMethodBindings: (data: { bookId: EntityId; bindingIds: string[] }) => Promise<ApiResult<BookWritingMethodBinding[]>>;
-  upgradeBookWritingMethodBinding: (data: { bookId: EntityId; bindingId: string; revisionId: string }) => Promise<ApiResult<BookWritingMethodBinding>>;
-  unbindBookWritingMethod: (data: { bookId: EntityId; bindingId: string }) => Promise<ApiResult<void>>;
-  createWritingMethodCandidates: (data: { analysisId: string }) => Promise<ApiResult<WritingMethodCandidateBatch>>;
-  publishWritingMethodCandidateBatch: (data: { schemeId: string; methodIds: string[] }) => Promise<ApiResult<{ methodRevisions: WritingMethodRevision[]; schemeRevision: WritingSchemeRevision; bindingChanged: false }>>;
   previewNovelSourceImport: (data: NovelSourcePickedFile) => Promise<ApiResult<NovelSourceImportPreview>>;
   confirmNovelSourceImport: (data: NovelSourcePickedFile & {
     title: string;
     workId?: string;
     expectedContentDigest: string;
-    confirmSingleSection: boolean;
-    rightsConfirmed: boolean;
-    modelDataBoundaryConfirmed: boolean;
+    confirmSingleSection?: boolean;
+    rightsConfirmed?: boolean;
+    modelDataBoundaryConfirmed?: boolean;
     sections?: Array<{ title: string; startCharacter: number; endCharacter: number }>;
   }) => Promise<ApiResult<NovelSourceRevision>>;
   freezeBookAsNovelSource: (data: { bookId: EntityId }) => Promise<ApiResult<NovelSourceRevision>>;
@@ -2174,19 +2083,19 @@ export interface ElectronAPI {
   getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
   getNovelSourceSection: (data: { revisionId: string; sectionId: string; startCharacter?: number; characterLimit?: number }) => Promise<ApiResult<NovelSourceSection>>;
   searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<NovelSourceSearchResult[]>>;
-  startNovelAnalysis: (data: { commandId: string; revisionId: string; prompt?: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
-  followUpNovelAnalysis: (data: { commandId: string; revisionId: string; artifactId: string; prompt: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
+  startNovelAnalysis: (data: { conversationId?: string; commandId: string; revisionId: string; prompt?: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
+  followUpNovelAnalysis: (data: { replaceRunId?: string; commandId: string; revisionId: string; conversationId?: string; artifactId?: string; prompt: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
   listNovelAnalysisRuns: (data: { revisionId: string }) => Promise<ApiResult<NovelAnalysisRun[]>>;
   pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisRun>>;
   resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; taskId: string; commandId: string }>>;
   cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisRun>>;
   getNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<NovelAnalysisArtifact>>;
-  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null; techniqueResult?: WritingTechniqueResult }) => Promise<ApiResult<NovelAnalysisArtifact>>;
   publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
   getPublishedNovelAnalysis: (data: { analysisId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   previewContinuationCanon: (data: { sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string }) => Promise<ApiResult<ContinuationCanonPreview>>;
-  createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; enableVolume?: boolean; writingMethodBindings?: Array<{ bindingType: 'method' | 'scheme'; revisionId: string }> }) => Promise<ApiResult<ContinuationWorkspace>>;
+  createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; operationId: string; allowWithoutTechniques?: boolean; useSourceTechniques?: boolean; enableVolume?: boolean }) => Promise<ApiResult<ContinuationWorkspace>>;
   getContinuation: (data: { bookId: string }) => Promise<ApiResult<ContinuationWorkspace>>;
   // Chapter diff history
   commitChapterDiff: (data: {
@@ -2202,6 +2111,7 @@ export interface ElectronAPI {
   rollbackChapterDiff: (data: { diffId: number }) => Promise<ApiResult<{ id: number; chapterId: EntityId } | null>>;
   // Setting diff history (character / story background)
   commitCharacterSettingDiff: (data: {
+    baseRevision?: string;
     characterId: number;
     name: string;
     tags: string;
@@ -2214,6 +2124,7 @@ export interface ElectronAPI {
     resolution?: SettingDiffResolutionCommand;
   }) => Promise<ApiResult<{ id: number; characterId: number } | null>>;
   commitBackgroundSettingDiff: (data: {
+    baseRevision?: string;
     bookId: EntityId;
     content: string;
     beforeContent?: string;
@@ -2244,6 +2155,7 @@ export interface ElectronAPI {
     historyId: number;
   }) => Promise<ApiResult<{ id: number; bookId: EntityId } | null>>;
   commitEntitySettingDiff: (data: {
+    baseRevision?: string;
     entityId: number;
     name: string;
     tags: string;
@@ -2531,7 +2443,7 @@ export interface ElectronAPI {
     selectedLongTermMemoryIds?: string[];
     selectedMemoryIds?: (number | string)[];
     selectedForeshadowingIds?: (number | string)[];
-    writingMethodOverrides?: WritingMethodOverrides;
+    writingTechniqueInputId?: string;
     chatAgentMode?: ChatAgentMode;
     planningMode?: 'reactive' | 'planned';
     contextWindow?: AiContextWindow;

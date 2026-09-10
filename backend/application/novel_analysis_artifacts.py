@@ -30,10 +30,10 @@ from infrastructure.persistence.sqlite_artifact_repository import (
 
 
 class NovelAnalysisArtifactStore:
-    def __init__(self, db) -> None:
-        self._repository = SqliteArtifactRepository(db)
+    def __init__(self, db, *, join_ambient_transaction: bool = False) -> None:
+        self._repository = SqliteArtifactRepository(db, join_ambient_transaction=join_ambient_transaction)
         self._lifecycle = ArtifactLifecycle(self._repository)
-        self._claims = SqliteArtifactClaimRepository(db)
+        self._claims = SqliteArtifactClaimRepository(db, join_ambient_transaction=join_ambient_transaction)
 
     async def write(
         self,

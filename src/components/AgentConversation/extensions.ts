@@ -11,7 +11,15 @@ export interface AgentComposerCommand {
   onSelect(): void
 }
 
+export interface AgentComposerActionMenu {
+  triggers: string[]
+  title?: string
+  buttonLabel?: string
+  render(context: { close(): void }): React.ReactNode
+}
+
 export interface AgentConversationExtensions {
+  composerActionMenu?: AgentComposerActionMenu
   renderSessionContext?(): React.ReactNode
   renderComposerLeading?(): React.ReactNode
   composerCommands?: AgentComposerCommand[]

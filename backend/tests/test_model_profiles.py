@@ -340,3 +340,11 @@ def test_custom_runtime_does_not_reinterpret_user_ceiling_as_profile_capability(
         match="custom model requires profile_max_generation_tokens",
     ):
         model_request_from_runtime(runtime)
+
+
+def test_chat_compiler_preserves_serial_tool_call_option():
+    from infrastructure.models.openai_chat import _compile_chat
+    from infrastructure.models.profiles.glm5_3_flash import GLM5_3_FLASH_PROFILE
+    params = _compile_chat([], {'model': 'glm-5.3-flash', 'thinking_enabled': True,
+                                'parallel_tool_calls': False}, GLM5_3_FLASH_PROFILE, stream=True)
+    assert params['parallel_tool_calls'] is False

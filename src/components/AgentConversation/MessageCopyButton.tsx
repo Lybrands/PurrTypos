@@ -7,10 +7,12 @@ import {
   PurrTooltip,
 } from '@/purr-components'
 import './MessageActionButton.scss'
+import { markdownToPlainText } from '../../utils/markdown'
 
 export interface AgentMessageCopyButtonProps {
   content: string
   markdownContent?: string
+  plainTextFromMarkdown?: boolean
   label?: string
 }
 
@@ -18,6 +20,7 @@ export interface AgentMessageCopyButtonProps {
 export default function AgentMessageCopyButton({
   content,
   markdownContent,
+  plainTextFromMarkdown = false,
   label = '复制消息',
 }: AgentMessageCopyButtonProps) {
   const [copiedFormat, setCopiedFormat] = React.useState<'plain' | 'markdown' | null>(null)
@@ -32,14 +35,14 @@ export default function AgentMessageCopyButton({
     format: 'plain' | 'markdown',
   ) => {
     try {
-      await navigator.clipboard.writeText(value)
+      await navigator.clipboard.writeText(format === 'plain' && plainTextFromMarkdown ? markdownToPlainText(value) : value)
       setCopiedFormat(format)
       if (timerRef.current) clearTimeout(timerRef.current)
       timerRef.current = setTimeout(() => setCopiedFormat(null), 1400)
     } catch {
       setCopiedFormat(null)
     }
-  }, [])
+  }, [plainTextFromMarkdown])
 
   const copied = copiedFormat != null
   const feedbackLabel = copiedFormat

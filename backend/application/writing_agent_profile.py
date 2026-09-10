@@ -9,7 +9,7 @@ from purra.contracts import AgentRunRequest
 from application.memory_reranking import ModelBackedMemoryReranker
 from application.memory_operations import MemoryApplicationService
 from application.memory_evidence import BookMemoryEvidenceValidator
-from application.writing_method_service import WritingMethodService
+from application.writing_technique_access import WritingTechniqueAccess, TechniqueEvidenceValidator
 from application.continuation_context import ContinuationContextService
 from domains.writing.adapter import WritingDomainAdapter
 from domains.writing.context import WritingContextProvider, writing_context_claims
@@ -19,10 +19,6 @@ from domains.writing.contracts import (
     WritingDomainContext,
 )
 from domains.writing.response import writing_atomic_continuity_judge_policy
-from domains.writing.method_resolution import (
-    build_writing_method_binding_snapshot,
-    public_binding_snapshot,
-)
 from infrastructure.persistence.writing import (
     SqliteAssociatedContextRepository,
     SqliteStoryMemoryRecallRepository,
@@ -47,14 +43,15 @@ class WritingAgentProfile:
         memory_operations = MemoryApplicationService(db, memory_resource)
         self._memory_operations = memory_operations
         source_repository = SqliteWritingSourceRepository(db)
+        self._technique_access = WritingTechniqueAccess(db)
         self._context_source = RepositoryWritingContextSource(
             SqliteAssociatedContextRepository(db),
             memory_operations,
             source_repository,
             SqliteStoryMemoryRecallRepository(db),
             knowledge=self._knowledge,
+            technique_access=self._technique_access,
         )
-        self._writing_methods = WritingMethodService(db)
         self._continuations = ContinuationContextService(db)
         skill_catalog = WritingSkillCatalog(skills_dir)
         self._adapter = WritingDomainAdapter.build(
@@ -82,23 +79,11 @@ class WritingAgentProfile:
             request.domain_context
         )
         book_id = str(context.book_id or "").strip()
-        overrides = dict(context.writing_method_overrides or {})
-        force_revision_ids = tuple(overrides.get("forceRevisionIds") or ())
-        exclude_revision_ids = tuple(overrides.get("excludeRevisionIds") or ())
-        method_snapshot = (
-            await self._writing_methods.resolve_book_binding_snapshot(
-                book_id,
-                force_revision_ids=force_revision_ids,
-                exclude_revision_ids=exclude_revision_ids,
-            )
-            if book_id
-            else build_writing_method_binding_snapshot(
-                "",
-                (),
-                force_revision_ids=force_revision_ids,
-                exclude_revision_ids=exclude_revision_ids,
-            )
-        )
+        technique_snapshot = (await self._technique_access.load_input(
+            context.writing_technique_input_id, book_id, str(request.session_id)
+        ) if context.writing_technique_input_id else
+            await self._technique_access.freeze(book_id=book_id,
+                manual=await self._technique_access.library.get_selection("session", str(request.session_id)) if request.session_id else await self._technique_access.library.get_selection("book", book_id)))
         continuation = (
             await self._continuations.load_for_writing(book_id)
             if book_id
@@ -115,23 +100,20 @@ class WritingAgentProfile:
                 await self._catalog_repository.load_available_outlines(book_id)
                 if book_id else ()
             ),
-            writing_method_binding_snapshot=method_snapshot,
+            writing_technique_snapshot=technique_snapshot,
             creation_mode=str(continuation["creationMode"]),
             continuation_binding=continuation.get("binding"),
-            inherited_canon_records=tuple(continuation.get("canonRecords") or ()),
+            inherited_canon_records=tuple(record for record in continuation.get("canonRecords") or ()
+                if (continuation.get("binding") or {}).get("materialAuthority") != "shared_markdown"
+                or record.get("factKind") in {"event", "timeline", "unresolved_plot", "foreshadowing"}),
         )
         return replace(request, domain_context=hydrated.to_core_context())
 
     def run_binding_attributes(self, request: AgentRunRequest):
         context = WritingDomainContext.from_core_context(request.domain_context)
-        snapshot = public_binding_snapshot(
-            context.writing_method_binding_snapshot or {}
-        )
         attributes = {
+            **({"writingTechniqueSnapshot": dict(context.writing_technique_snapshot)} if context.writing_technique_snapshot else {}),
             **({"bookId": context.book_id} if context.book_id else {}),
-            **({"writingMethodRecommendationRequested": True}
-               if context.writing_method_recommendation_requested else {}),
-            **({"writingMethodBindingSnapshot": snapshot} if snapshot else {}),
         }
         if context.knowledge_scope:
             attributes["novelKnowledgeScope"] = dict(context.knowledge_scope)
@@ -154,10 +136,11 @@ class WritingAgentProfile:
         context = WritingDomainContext.from_core_context(request.domain_context)
         book_id = str(context.book_id or "").strip()
         from application.novel_knowledge_evidence import NovelKnowledgeEvidenceValidator
-        return (NovelKnowledgeEvidenceValidator(
+        delegate = (NovelKnowledgeEvidenceValidator(
             self._knowledge, BookMemoryEvidenceValidator(self._memory_operations, book_id), book_id,
             scope=context.knowledge_scope,
         ) if book_id else None)
+        return TechniqueEvidenceValidator(self._technique_access, dict(context.writing_technique_snapshot or {}), delegate)
 
     def response_judge_policies(
         self,

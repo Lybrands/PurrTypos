@@ -6,6 +6,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('purrDesktop', {
   selectNovelKnowledge: (bookId) => ipcRenderer.invoke('novel-knowledge-select', bookId),
   openNovelKnowledge: (args) => ipcRenderer.invoke('novel-knowledge-open', args),
+  openNovelKnowledgeLibrary: (bookId) => ipcRenderer.invoke('novel-knowledge-open-library', bookId),
   openFilePath: (filePath) => ipcRenderer.invoke('open-file-path', filePath),
   writeExportFiles: (data) => ipcRenderer.invoke('write-export-files', data),
   writeSingleTextFile: (data) => ipcRenderer.invoke('write-single-text-file', data),

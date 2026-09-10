@@ -7,6 +7,9 @@ import re
 from dataclasses import asdict
 from typing import Any, Mapping, Sequence
 
+from application.memory_operations import MemoryOperationError
+from services.model_settings_service import get_setting_value
+
 from domains.writing.unified_memory import (
     UnifiedMemoryItem,
     UnifiedMemoryPage,
@@ -49,19 +52,38 @@ class UnifiedMemoryQueryService:
         clean_book_id = str(book_id or "").strip()
         if not clean_book_id:
             raise ValueError("book_id is required")
+        if not await self._db.fetch_one("SELECT id FROM books WHERE id = ?", [clean_book_id]):
+            raise MemoryOperationError("memory_book_not_found")
         semantic_states = tuple(dict.fromkeys(
             "disabled" if value in {"archived", "rejected", "conflict", "stale"}
             else value
             for value in statuses
             if value in {"active", "pending", "archived", "rejected", "conflict", "stale"}
         ))
-        semantic_rows = await self._memory.list_records(
-            book_id=clean_book_id,
-            states=semantic_states,
-            kinds=kinds,
-            query=query,
-            limit=500,
-        )
+        semantic_rows = ()
+        unavailable_sources = {}
+        if not sources or UnifiedMemorySource.SEMANTIC.value in sources:
+            try:
+                semantic_rows = await self._memory.list_records(
+                    book_id=clean_book_id,
+                    states=semantic_states,
+                    kinds=kinds,
+                    query=query,
+                    limit=500,
+                )
+            except MemoryOperationError as error:
+                if error.code not in {
+                    "memory_component_unavailable",
+                    "memory_component_closed",
+                    "memory_embedding_unconfigured",
+                }:
+                    raise
+                code = error.code
+                if code == "memory_component_unavailable":
+                    config = await get_setting_value(self._db, "memory_embedding_config")
+                    if config is None or config == "":
+                        code = "memory_embedding_unconfigured"
+                unavailable_sources[UnifiedMemorySource.SEMANTIC.value] = code
         story_rows, review_rows, character_rows = await _gather(
             self._db,
             clean_book_id,
@@ -183,6 +205,7 @@ class UnifiedMemoryQueryService:
             items=tuple(selected),
             total=len(filtered),
             suppressed_duplicates=suppressed,
+            unavailable_sources=unavailable_sources,
         )
 
 
@@ -438,6 +461,7 @@ def page_to_response(page: UnifiedMemoryPage) -> dict[str, Any]:
         "items": [asdict(item) for item in page.items],
         "total": page.total,
         "suppressedDuplicates": page.suppressed_duplicates,
+        "unavailableSources": dict(page.unavailable_sources),
     }
 
 

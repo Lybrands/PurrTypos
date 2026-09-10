@@ -8,6 +8,22 @@
   overflow: hidden;
 }
 
+.writing-technique-editor { display: flex; height: 100%; min-height: 0; flex-direction: column; gap: 12px; }
+.purr-dialog.writing-technique-modal { height: min(820px, calc(100dvh - 48px)); max-height: min(820px, calc(100dvh - 48px)); }
+.writing-technique-modal > .purr-dialog__body { flex: 1; min-height: 0; }
+.writing-technique-editor-toolbar { display: flex; align-items: center; gap: 16px; }
+.writing-technique-editor-toolbar > span { color: var(--text-muted); font-size: 12px; }
+.writing-technique-files { display: grid; grid-template-columns: minmax(170px, 24%) minmax(0, 1fr); min-height: 0; flex: 1; gap: 16px; }
+.writing-technique-files > nav { display: flex; min-height: 0; overflow: auto; flex-direction: column; align-items: stretch; border-right: 1px solid var(--border); padding-right: 10px; gap: 4px; }
+.technique-file-tree { flex: 1; min-width: 0; }
+.writing-technique-file-content { display: flex; min-height: 0; min-width: 0; flex-direction: column; gap: 10px; }
+.writing-technique-file-content > div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.writing-technique-file-content > div strong { flex: 1; overflow-wrap: anywhere; }
+.writing-technique-file-content .purr-textarea { flex: 1; min-height: 0; width: 100%; resize: none; font: 14px/1.7 var(--font-mono, monospace); }
+@media (max-width: 700px) {
+  .writing-technique-files { grid-template-columns: minmax(100px, 30%) minmax(0, 1fr); gap: 8px; }
+}
+
 .library-header-nav { display: flex; align-items: center; gap: 2px; }
 
 .writing-methods-main {
@@ -20,7 +36,7 @@
 }
 
 .writing-methods-toolbar,
-.writing-methods-tabs,
+.writing-methods-filter-row,
 .writing-methods-batch-toolbar,
 .writing-library-stage {
   width: 100%;
@@ -39,31 +55,9 @@
 }
 
 .writing-methods-toolbar h1 { margin: 3px 0 5px; font-size: clamp(24px, 3vw, 32px); font-weight: var(--font-weight-semibold); letter-spacing: -0.03em; }
-.writing-methods-toolbar p { margin: 0; color: var(--text-muted); }
+.writing-methods-toolbar p { margin: 8px 0 0; color: var(--text-secondary); font-size: 14px; line-height: 1.7; }
 .writing-methods-eyebrow { color: var(--accent); font-size: 10px; font-weight: var(--font-weight-semibold); letter-spacing: 0.18em; }
 .writing-methods-header-actions { display: flex; gap: 8px; }
-
-.writing-methods-tabs {
-  display: flex;
-  padding: 4px;
-  margin-bottom: 14px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg-surface);
-  flex-shrink: 0;
-}
-
-.writing-methods-tabs button {
-  min-width: 108px;
-  padding: 8px 18px;
-  color: var(--text-secondary);
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-}
-
-.writing-methods-tabs button.active { color: var(--text-primary); background: var(--bg-elevated); box-shadow: 0 2px 8px rgb(30 34 48 / 8%); }
 
 .writing-methods-batch-toolbar {
   display: flex;
@@ -90,7 +84,7 @@
 
 .writing-method-card-grid,
 .writing-scheme-card-grid { display: grid; gap: 10px; }
-.writing-method-card-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.writing-method-card-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .writing-scheme-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .writing-library-card-shell { position: relative; min-width: 0; }
 .writing-library-card-shell > .writing-method-card,
@@ -223,7 +217,7 @@
 .writing-scheme-binding-note { padding: 10px 12px; margin-bottom: 12px; color: var(--text-secondary); border-radius: var(--radius-sm); background: var(--accent-light); font-size: 12px; }
 
 @media (max-width: 980px) {
-  .writing-method-card-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
   .writing-scheme-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -237,4 +231,98 @@
   .writing-create-members-toolbar { grid-template-columns: 1fr; }
   .writing-method-editor-meta { align-items: flex-start; flex-direction: column; }
   .writing-method-editor-meta input { width: 100%; }
+}
+
+.writing-methods-filter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 0 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+}
+.writing-methods-count { color: var(--text-muted); font-size: 12px; white-space: nowrap; }
+.writing-methods-header-actions { flex-shrink: 0; }
+.writing-methods-filter-row .purr-segmented__item { min-width: 100px; }
+.writing-library-empty.purr-empty {
+  min-height: clamp(300px, 48vh, 460px);
+  box-sizing: border-box;
+  padding: 48px 24px;
+  align-content: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  gap: 18px;
+}
+.writing-library-empty .purr-empty__icon {
+  width: 60px;
+  height: 60px;
+  color: var(--accent);
+  background: var(--accent-light);
+  border-color: transparent;
+  border-radius: var(--radius-lg);
+  font-size: 26px;
+}
+.writing-library-empty h2 { margin: 0 0 10px; color: var(--text-primary); font-size: 18px; font-weight: var(--font-weight-semibold); }
+.writing-library-empty p { max-width: 360px; margin: 0; color: var(--text-secondary); line-height: 1.8; }
+.writing-library-empty .purr-empty__footer { display: flex; align-items: center; flex-direction: column; gap: 8px; }
+.writing-methods-loading { align-content: center; gap: 16px; min-height: 300px; font-size: 13px; }
+.writing-technique-card.purr-button {
+  min-width: 0;
+  width: 100%;
+  height: auto;
+  padding: 22px;
+  text-align: left;
+  white-space: normal;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-xs);
+  transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+.writing-technique-card.purr-button:hover { border-color: var(--accent); background: var(--bg-elevated); box-shadow: var(--shadow-sm); }
+.writing-technique-card > .purr-button__label { display: flex; flex-direction: column; width: 100%; min-width: 0; align-items: stretch; gap: 14px; }
+.writing-technique-card-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.writing-technique-card-icon { display: grid; width: 34px; height: 34px; place-items: center; color: var(--accent); border-radius: var(--radius-sm); background: var(--accent-light); font-size: 18px; }
+.writing-technique-card-status { padding: 3px 9px; color: var(--text-muted); background: var(--bg-hover); border-radius: 999px; font-size: 11px; font-weight: normal; }
+.writing-technique-card-status.is-published { color: var(--accent); background: var(--accent-light); }
+.writing-technique-card strong { color: var(--text-primary); font-size: 17px; line-height: 1.5; overflow-wrap: anywhere; }
+.writing-technique-card-description { display: -webkit-box; min-height: 44px; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--text-secondary); font-size: 13px; font-weight: normal; line-height: 1.7; overflow-wrap: anywhere; }
+.writing-technique-card-footer { display: flex; align-items: center; justify-content: space-between; padding-top: 14px; margin-top: auto; border-top: 1px solid var(--border-light); color: var(--text-muted); font-size: 12px; font-weight: normal; }
+.writing-technique-card.is-archived .writing-technique-card-icon { color: var(--text-muted); background: var(--bg-hover); }
+@media (max-width: 700px) {
+  .writing-methods-toolbar h1 { font-size: 26px; }
+  .writing-methods-header-actions { width: 100%; }
+  .writing-methods-header-actions > .purr-button { flex: 1; }
+  .writing-methods-filter-row { gap: 8px; padding-bottom: 16px; margin-bottom: 16px; }
+  .writing-methods-filter-row .purr-segmented__item { min-width: 88px; }
+  .writing-library-empty.purr-empty { padding: 32px 20px; }
+}
+
+.writing-technique-files > nav { overflow: hidden; }
+.writing-technique-files > nav > .technique-file-tree { min-height: 0; overflow: auto; }
+.writing-technique-folder-content { min-width: 0; overflow: auto; padding: 20px; }
+.writing-technique-folder-content > .purr-icon { color: var(--accent); font-size: 32px; }
+.writing-technique-folder-content h3 { margin: 12px 0; overflow-wrap: anywhere; }
+.writing-technique-folder-content p { color: var(--text-secondary); line-height: 1.7; }
+.writing-technique-folder-content ul { list-style: none; padding: 0; }
+.writing-scheme-member-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.writing-scheme-choice-hint { color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+.writing-scheme-choices { display: grid; gap: 10px; margin-top: 16px; }
+.writing-scheme-choice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); }
+.writing-scheme-choice > div { min-width: 0; }
+.writing-scheme-choice p { color: var(--text-secondary); font-size: 13px; margin: 6px 0; overflow-wrap: anywhere; }
+.writing-scheme-choice span { color: var(--text-muted); font-size: 12px; }
+.writing-scheme-choice > .purr-button { flex-shrink: 0; }
+.writing-scheme-member-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 0; border-top: 1px solid var(--border-light); }
+.writing-scheme-member-row > strong { flex: 1; min-width: 100px; font-size: 14px; }
+.writing-methods-status-filter { display: flex; align-items: center; gap: 16px; }
+@media (max-width: 700px) { .writing-methods-filter-row { flex-wrap: wrap; gap: 12px; } }
+
+.writing-technique-card.is-located {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }

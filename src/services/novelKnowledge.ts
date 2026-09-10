@@ -6,6 +6,7 @@ export interface KnowledgeScope {
   characterId?: string
 }
 export interface KnowledgeStatus {
+  sharedStorage?: boolean
   id?: string
   state: string
   directory?: string

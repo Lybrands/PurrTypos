@@ -116,7 +116,7 @@ async def test_public_request_adapters_share_history_contract(domain):
         from application.novel_analysis_service import NovelAnalysisService
         class Database:
             async def fetch_all(self, sql, params):
-                assert params == ['r', 'c', 'r', 'c']
+                assert params == ['r', 'c', 'c', 'r', 'c']
                 return [{'prompt': 'old', 'response': 'answer'}]
         class Runs:
             async def run(self, **kwargs):

@@ -1,5 +1,6 @@
 'use strict'
 const crypto = require('node:crypto')
+const { createObsidianConnection } = require('./obsidian_connection')
 
 function selectionToken({ bookId, root, secret, now = Date.now() }) {
   const payload = Buffer.from(JSON.stringify({ bookId, root, issuedAt: Math.floor(now / 1000), nonce: crypto.randomUUID() })).toString('base64url')
@@ -15,7 +16,8 @@ function assertOpenUri(uri) {
   return value.href
 }
 
-function registerNovelKnowledgeIpc({ ipcMain, dialog, shell, clipboard, getWindow, backendUrl, secret, fetchImpl = fetch }) {
+function registerNovelKnowledgeIpc({ ipcMain, dialog, shell, clipboard, getWindow, backendUrl, secret, fetchImpl = fetch, obsidianConnection }) {
+  const connection = obsidianConnection || createObsidianConnection({ shell, dialog, getWindow })
   const trusted = (event) => {
     const window = getWindow()
     if (!window || event.sender !== window.webContents || event.senderFrame !== window.webContents.mainFrame) throw new Error('窗口无权访问资料目录')
@@ -48,9 +50,23 @@ function registerNovelKnowledgeIpc({ ipcMain, dialog, shell, clipboard, getWindo
         shell.showItemInFolder(source.path)
         return { success: true, data: { status: 'dispatched' } }
       }
-      try { await shell.openExternal(assertOpenUri(source.uri)) }
-      catch { return { success: false, error: '无法派发 Obsidian 跳转。请先安装并打开 Obsidian、注册 Vault，或使用复制路径。' } }
+      assertOpenUri(source.uri)
+      const opened = await connection.open(source)
+      if (opened.status === 'canceled') return { success: true, data: opened }
       return { success: true, data: { status: 'dispatched', currentMatches: source.currentMatches, anchorFallback: source.anchorFallback } }
+    } catch (error) { return { success: false, error: error.message } }
+  })
+  ipcMain.handle('novel-knowledge-open-library', async (event, bookId) => {
+    try {
+      trusted(event)
+      if (typeof bookId !== 'string' || !bookId.trim()) throw new Error('作品不能为空')
+      const response = await fetchImpl(`${backendUrl}/api/books/${encodeURIComponent(bookId)}/knowledge/materials/navigation`, {
+        method: 'POST', headers: { 'X-Knowledge-Host': secret },
+      })
+      const result = await response.json()
+      if (!response.ok || !result.success) throw new Error(result.error || '创作资料库不可用')
+      assertOpenUri(result.data.uri)
+      return { success: true, data: await connection.open(result.data) }
     } catch (error) { return { success: false, error: error.message } }
   })
 }

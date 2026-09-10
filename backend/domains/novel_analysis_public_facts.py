@@ -49,6 +49,13 @@ class NovelAnalysisPublicFactsProvider:
             binding["task_id"]
         ):
             raise ValueError("novel analysis review Artifact task binding conflicts")
+        candidate = (artifact.get("techniqueResult") or {}).get("candidate")
+        if candidate:
+            import asyncio
+            from application.writing_technique_service import WritingTechniqueService
+            manifest = await asyncio.to_thread(WritingTechniqueService(self.db).techniques.get_version_manifest,
+                {"kind": "technique", "id": candidate["techniqueId"], "versionId": candidate["versionId"]})
+            artifact = {**artifact, "techniqueMetadata": manifest["metadata"]}
         return _public_bundle(
             artifact,
             user_request=str(binding.get("prompt") or "").strip(),
@@ -72,9 +79,8 @@ def _public_bundle(
             PublicFact("userRequest", _clip(user_request, 1_000)),
             PublicFact("presentationRequirements", (
                 build_agent_final_response_policy()
-                + "\n根据已保存结果简要介绍故事概览和写作方法的用途、适用边界及迁移检验结论。"
-                "不要另行生成或改写一套方法，完整方法与两轮试写在结果面板中供审核。"
-                "复核不通过时明确说明需要修订；通过也只代表模型复核，不能声称普遍有效或已经成熟。"
+                + "\n根据已保存结果简要介绍来源概览和写作技法。完整技法文件在结果面板中查看。"
+                "材料不足时说明原因，不另行生成方法，不声称已经完成独立质量验证。"
                 "区分正文事实、角色认知和分析推断，不暴露内部标识。"
             )),
             PublicFact(
@@ -85,12 +91,12 @@ def _public_bundle(
                 "factThreads",
                 [_fact_projection(item, text_limit) for item in facts[:fact_limit]],
             ),
-            PublicFact("writingSkill", {
-                "name": (artifact.get("writingSkill") or {}).get("name"),
-                "purpose": (artifact.get("writingSkill") or {}).get("purpose"),
-                "limitations": (artifact.get("writingSkill") or {}).get("limitations", []),
-                "reviewStatus": artifact.get("skillReviewStatus"),
-                "assessment": (artifact.get("distillation") or {}).get("assessment"),
+            PublicFact("writingTechnique", {
+                "name": (artifact.get("techniqueMetadata") or {}).get("name", ""),
+                "purpose": (artifact.get("techniqueMetadata") or {}).get("description", ""),
+                "available": (artifact.get("techniqueResult") or {}).get("status") == "generated",
+                "scopeNotes": (artifact.get("techniqueResult") or {}).get("scopeNotes", []),
+                "reason": (artifact.get("techniqueResult") or {}).get("reason", ""),
             }),
             PublicFact("coverage", _coverage_projection(artifact.get("coverage"))),
             PublicFact(

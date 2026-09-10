@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import type { ApiResult, StoryBackgroundAttachment } from '../types'
-import { backendBaseUrl } from '../services/httpClient'
+import { apiPost, backendBaseUrl } from '../services/httpClient'
 import type { PlatformApi } from './types'
 
 function failure<T>(error: string): ApiResult<T> {
@@ -205,7 +205,7 @@ export const browserPlatformApi: PlatformApi = {
   },
 
   openDatabaseDirectory: async () =>
-    failure<void>('浏览器无法打开数据目录，可以使用“导出完整备份”下载数据'),
+    apiPost<void>('/database/open-directory', {}),
 
   openAndReadTextFile: async () => {
     const [file] = await chooseFiles('.txt,.md,.markdown,text/plain,text/markdown')

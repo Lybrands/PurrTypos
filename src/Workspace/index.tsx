@@ -1,13 +1,12 @@
 import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
 import {
-  ArrowLeftIcon,
   DashboardIcon,
-  HomeIcon,
+  LibraryIcon,
   StoryMemoryIcon,
   StorySettingIcon,
 } from '@/purr-components'
-import { PurrButton, PurrSpin, PurrTooltip } from '@/purr-components'
+import { PurrSpin } from '@/purr-components'
 import type { LexicalEditor } from 'lexical'
 import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
 import type { Chapter, AiModelConfig, EntityId } from '../types'
@@ -329,7 +328,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       active: panelState.right.open && activeUtilityTabKey === CANON_TAB.key,
       onClick: () => toggleUtilityTab(CANON_TAB),
     }] : []),
-    { key: 'knowledge', icon: <StoryMemoryIcon style={{ fontSize: 16 }} />, tooltip: '创作资料库', active: activeUtilityTabKey === KNOWLEDGE_TAB.key, onClick: () => toggleUtilityTab(KNOWLEDGE_TAB) },
+    { key: 'knowledge', icon: <LibraryIcon style={{ fontSize: 16 }} />, tooltip: '创作资料库', active: activeUtilityTabKey === KNOWLEDGE_TAB.key, onClick: () => toggleUtilityTab(KNOWLEDGE_TAB) },
     {
       key: 'setting',
       icon: <StorySettingIcon style={{ fontSize: 16 }} />,
@@ -390,30 +389,10 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             (bookTitle || 'PurrTypos')
           )
         }
-        left={
-          <>
-            {onGoHome && (
-              <PurrTooltip title="返回首页">
-                <PurrButton
-                  type="text"
-                  size="small"
-                  icon={<HomeIcon style={{ fontSize: 14 }} />}
-                  onClick={onGoHome}
-                />
-              </PurrTooltip>
-            )}
-            {onBack && (
-              <PurrTooltip title="返回书架">
-                <PurrButton
-                  type="text"
-                  size="small"
-                  icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
-                  onClick={onBack}
-                />
-              </PurrTooltip>
-            )}
-          </>
-        }
+        navigation={{
+          home: onGoHome ? { label: '返回首页', onClick: onGoHome } : undefined,
+          back: onBack ? { label: '返回书架', onClick: onBack } : undefined,
+        }}
         showActions
         right={<NotebookToolbar />}
         panelToggles={headerPanelToggles}

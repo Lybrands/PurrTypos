@@ -14,13 +14,16 @@ from typing import Any, Mapping
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile, ZipInfo
 
 
-BACKUP_FORMAT = "purrtypos.full-backup/v1"
+BACKUP_FORMAT = "purrtypos.full-backup/v2"
+LEGACY_BACKUP_FORMAT = "purrtypos.full-backup/v1"
 BACKUP_EXTENSION = ".purrbackup"
 MAX_ARCHIVE_ENTRIES = 100_000
 MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
 _MANIFEST_NAME = "backup-manifest.json"
 _DATABASE_NAME = "purrtypos.db"
 _MEMORY_PREFIX = "memory-component-v1/"
+_TECHNIQUE_PREFIX = "writing-library/"
+_MATERIAL_PREFIX = "creation-materials/"
 
 
 class ProjectBackupError(ValueError):
@@ -34,9 +37,11 @@ class ExtractedProjectBackup:
     database_path: Path
     component_path: Path | None
     manifest: Mapping[str, Any]
+    technique_path: Path | None = None
+    material_path: Path | None = None
 
 
-def build_project_backup(database_bytes: bytes, component_root: Path) -> bytes:
+def build_project_backup(database_bytes: bytes, component_root: Path, technique_root: Path | None = None, material_root: Path | None = None) -> bytes:
     database = _redact_database_credentials(database_bytes)
     with tempfile.TemporaryDirectory(prefix="purrtypos-backup-build-") as raw:
         database_path = Path(raw) / _DATABASE_NAME
@@ -52,6 +57,37 @@ def build_project_backup(database_bytes: bytes, component_root: Path) -> bytes:
                     continue
                 relative = path.relative_to(component_root).as_posix()
                 files[f"{_MEMORY_PREFIX}{relative}"] = path.read_bytes()
+        if technique_root is not None:
+            from infrastructure.persistence.writing.technique_file_store import TechniqueFileStore
+            store = TechniqueFileStore(technique_root)
+            with store.barrier():
+                for path in sorted(technique_root.rglob("*")):
+                    if path.is_symlink():
+                        raise ProjectBackupError("backup_technique_symlink_unsupported")
+                    if path.is_file():
+                        relative = path.relative_to(technique_root).as_posix()
+                        files[_TECHNIQUE_PREFIX + relative] = path.read_bytes()
+            snapshot = Path(raw) / "writing-library"
+            snapshot.mkdir()
+            for name, data in files.items():
+                if name.startswith(_TECHNIQUE_PREFIX):
+                    path = Path(raw) / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+            _validate_techniques(database_path, snapshot)
+        material_snapshot = Path(raw) / 'creation-materials'
+        if material_root is not None and material_root.exists():
+            for path in sorted(material_root.rglob('*')):
+                if path.is_symlink():
+                    raise ProjectBackupError('backup_material_symlink_unsupported')
+                if path.is_file():
+                    relative = path.relative_to(material_root).as_posix()
+                    data = path.read_bytes()
+                    files[_MATERIAL_PREFIX + relative] = data
+                    target = material_snapshot / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+        _validate_materials(database_path, material_snapshot)
         component_dimensions = _validate_component_files(files, component_present)
         database_dimensions = _database_embedding_dimensions(database_path)
         if component_present and database_dimensions != component_dimensions:
@@ -65,6 +101,7 @@ def build_project_backup(database_bytes: bytes, component_root: Path) -> bytes:
         "format": BACKUP_FORMAT,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "componentPresent": component_present,
+        "techniquesPresent": technique_root is not None,
         "embeddingDimensions": component_dimensions,
         "credentialsIncluded": False,
         "files": file_manifest,
@@ -139,7 +176,15 @@ def extract_project_backup(
         _database_embedding_dimensions(database_path) != component_dimensions
     ):
         raise ProjectBackupError("backup_component_configuration_mismatch")
+    technique_present = bool(manifest.get("techniquesPresent"))
+    if not technique_present and any(name.startswith(_TECHNIQUE_PREFIX) for name in expected):
+        raise ProjectBackupError("backup_technique_unexpected")
+    technique_path = destination / "writing-library"
+    _validate_techniques(database_path, technique_path)
+    _validate_materials(database_path, destination / "creation-materials")
     return ExtractedProjectBackup(
+        material_path=(destination / "creation-materials") if (destination / "creation-materials").is_dir() else None,
+        technique_path=technique_path,
         database_path=database_path,
         component_path=(destination / "memory-component-v1") if component_present else None,
         manifest=manifest,
@@ -295,8 +340,10 @@ def _validate_component_database(payload: bytes) -> None:
 
 
 def _validate_backup_manifest(value: Any) -> dict[str, dict[str, Any]]:
-    if not isinstance(value, dict) or value.get("format") != BACKUP_FORMAT:
+    if not isinstance(value, dict) or value.get("format") not in {BACKUP_FORMAT, LEGACY_BACKUP_FORMAT}:
         raise ProjectBackupError("backup_format_unsupported")
+    if value.get("format") == BACKUP_FORMAT and not isinstance(value.get("techniquesPresent"), bool):
+        raise ProjectBackupError("backup_manifest_invalid")
     if value.get("credentialsIncluded") is not False:
         raise ProjectBackupError("backup_credentials_policy_invalid")
     if not isinstance(value.get("componentPresent"), bool):
@@ -325,6 +372,8 @@ def _validate_backup_manifest(value: Any) -> dict[str, dict[str, Any]]:
 def _safe_archive_name(info: ZipInfo) -> str:
     if info.flag_bits & 0x1:
         raise ProjectBackupError("backup_encrypted_file_unsupported")
+    if (info.external_attr >> 16) & 0o170000 == 0o120000:
+        raise ProjectBackupError("backup_symlink_unsupported")
     if info.is_dir():
         raise ProjectBackupError("backup_directory_entry_unsupported")
     return _safe_relative_name(info.filename)
@@ -334,9 +383,9 @@ def _safe_relative_name(value: Any) -> str:
     if not isinstance(value, str) or not value or "\\" in value:
         raise ProjectBackupError("backup_path_invalid")
     path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in value.split("/")):
         raise ProjectBackupError("backup_path_invalid")
-    if value != _MANIFEST_NAME and value != _DATABASE_NAME and not value.startswith(_MEMORY_PREFIX):
+    if value != _MANIFEST_NAME and value != _DATABASE_NAME and not value.startswith((_MEMORY_PREFIX, _TECHNIQUE_PREFIX, _MATERIAL_PREFIX)):
         raise ProjectBackupError("backup_file_unsupported")
     return value
 
@@ -399,3 +448,21 @@ __all__ = [
     "extract_project_backup",
     "merge_local_credentials",
 ]
+
+
+def _validate_techniques(database_path, root):
+    from application.writing_technique_backup import validate_technique_backup
+    from domains.writing.techniques import TechniqueError
+    try:
+        validate_technique_backup(database_path, root)
+    except (TechniqueError, ValueError, KeyError, OSError) as exc:
+        raise ProjectBackupError("backup_technique_integrity_failed") from exc
+
+
+def _validate_materials(database_path, root):
+    from application.creation_material_backup import validate_material_backup
+    from domains.writing.knowledge import KnowledgeError
+    try:
+        validate_material_backup(database_path, root)
+    except (ValueError, OSError, KnowledgeError) as exc:
+        raise ProjectBackupError("backup_material_integrity_failed") from exc

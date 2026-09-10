@@ -1,5 +1,7 @@
 # 写作方法与小说续写实施计划（当前架构重基线）
 
+2026-09-07 更新：写作技法、写作方案、蒸馏生成及技法使用的后续开发以 [1.0.0 写作技法改造计划](2026-09-07-writing-techniques-1.0.0-plan.md) 为准，生成规范和当前提示词草案统一维护在该计划第 5 节。本文相关内容保留为历史记录；原作只读、正史快照和小说续写的独立设计不因此重做。
+
 状态：待实施；本文替代 2026-08-10 的旧执行计划，但保留已经确认的产品决策
 
 日期：2026-08-27
@@ -749,47 +751,3 @@ npm run check
 ```
 
 同时满足：旧 `book_style` 及 `readSourceStyle` 已完全退役；原创作品路径无行为回归；通用 PurrA 不包含续写或写作方法业务规则。
-
-## 16. 新对话启动提示词
-
-下面的提示词用于另开开发对话。执行者仍需以启动时的代码为准，不能把本文日期当成免审计依据。
-
-```text
-请在当前 PurrTypos 项目中实施“写作方法”和“小说续写”两个需求。工作目录是：
-/Users/liuyubin/Lybrand_project/PurrTypos
-
-这次是实施任务，不是重新泛化讨论。开始前请完整阅读：
-1. docs/design/2026-08-27-writing-methods-and-novel-continuation-implementation-plan.md
-2. docs/superpowers/specs/2026-08-12-writing-method-library-design.md（只作为已确认产品语义；实际拓扑以第 1 份当前计划为准）
-3. docs/agent-architecture-final.md
-4. docs/purra-baseline.md
-5. 与当前 Writing Profile、Story Memory、Agent Run binding、共享 Composer 和数据库初始化直接相关的代码与测试
-
-先执行 Phase 0：检查分支和 git status，记录本需求外的未提交改动并保持不动；核对计划中的文件接缝；运行相关基线测试。不要清理、覆盖或顺手重构用户现有改动。若当前代码已经再次漂移，先用证据更新计划中的具体接缝，再继续实现。
-
-按当前计划 Phase 1 到 Phase 10 顺序推进。每阶段只做该阶段的最小纵向切片，完成 focused tests 和阶段门禁后再进入下一阶段，并同步更新计划 checkbox。遇到真实契约冲突时说明事实、影响和最小修订，不要静默发明兼容层。
-
-必须坚持这些边界：
-- 产品名称使用“写作方法库 / 写作方法 / 写作方案”，不把用户内容称为 Skill。
-- 续写创作复用现有 WritingAgentProfile，以服务器校验的 creation_mode 和 continuation binding 增加宿主能力；首版不复制一个 Continuation Profile。
-- 只有跨来源逐章蒸馏使用独立、可恢复的 NovelAnalysisAgentProfile。
-- 通用 PurrA 不查询写作方法、来源或续写业务表；如果确实缺少扩展点，只增加最小、产品中立的宿主钩子。
-- Run binding 冻结可用方法版本栈和本轮强制/排除；TaskSpec 后实际注入的方法用现有 Context Evidence Receipt 持久化。不要新增 writing_method_run_receipts 平行真相。
-- 方案绑定保持原子；作品和历史 Run 都不自动跟随方法/方案新版。
-- 来源 revision、分析 revision 和 canon snapshot 不可变；首版只允许章末分叉，分叉点后来源默认不可见。
-- 来源事实不写入目标书普通 Story Memory；组合召回可以读取继承正史，但章节分析只向目标 book 写 delta。
-- 来源正文、方法 Markdown 和分析文本均按不可信内容处理，不能获得工具权限或扩大作用域。
-- 首版外部来源只实现单个或文件夹/ZIP 中的 TXT/Markdown，以及从现有作品冻结；不要加入 EPUB、Obsidian、在线市场、向量库或自动版本清理。
-- 彻底删除旧 book_style、getBookStyle、saveBookStyle、readSourceStyle 及现有数据，不迁移；但不要误删 Memory Center 的通用 style 记忆类型。
-- Screenplay 删除 readSourceStyle 后从实际来源文本分析风格，不自动读取作品绑定的写作方法。
-- 用户明确导入/冻结时才创建来源 revision；显示存储体积和向外部模型发送所需片段的数据边界，未确认前不得发送原文。
-
-验证时分别报告：focused tests、前端 typecheck/unit、后端完整 pytest、Agent/PurrA 边界、Web/Electron 实机、数据库重启/导入恢复，以及测试进程与端口清理。不要把缺失凭据的真实 Provider E2E 写成通过，也不要只通过增加超时来掩盖运行问题。
-
-完成标准不是“建了表和页面”，而是两条独立闭环和集成闭环均真实可用：
-1. 方法草稿→发布→方案→作品绑定→本轮 / 选择→实际版本可追溯且不自动升级；
-2. 来源导入/冻结→证据化分析→章末正史快照→独立续写→受限召回→只更新目标书；
-3. 已验证技法卡→候选方法/方案→用户审核发布→用户明确绑定，且原文证据不复制进方法正文。
-
-现在从 Phase 0 开始，先给出当前代码证据和基线结果，然后继续实施；除非遇到需要用户决定的真实产品冲突或外部凭据阻塞，不要停在再次写计划。
-```

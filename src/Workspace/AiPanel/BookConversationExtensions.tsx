@@ -2,7 +2,6 @@ import React from 'react'
 import {
   PurrButton,
   PurrSegmented,
-  PurrSelect,
   PurrTooltip,
   ReadIcon,
   StarIcon,
@@ -11,12 +10,11 @@ import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
 import type { AgentConversationExtensions } from '../../components/AgentConversation/extensions.ts'
 import { getAssistantRenderableMarkdown } from '../../components/AgentConversation/assistantCopy.ts'
 import type {
-  ChatAgentMode,
   EntityId,
-  WritingMethodOverrides,
 } from '../../types.ts'
-import type { BoundWritingMethodChoice } from './writingMethodOverrides'
-import { writingMethodOverrideMode } from './writingMethodOverrides'
+import type { WritingTechniqueChoice, WritingTechniqueSelection } from '../../services/writingTechniques'
+import WritingTechniquePicker from './components/WritingTechniquePicker'
+import WritingTechniqueUsage from './components/WritingTechniqueUsage'
 import AiContextBar, {
   type AiContextBarBindings,
 } from './components/AiContextBar'
@@ -29,14 +27,13 @@ import {
 import type { ChatSessionScope } from './hooks/useAiSessions'
 
 interface BookConversationExtensionBindings {
+  sessionId: number | null
   bookId: EntityId | null | undefined
   bookTitle: string
   chapterId: EntityId | null | undefined
   chapterTitle?: string
   scope: ChatSessionScope
   setScope(scope: ChatSessionScope): void
-  chatAgentMode: ChatAgentMode
-  setChatAgentMode(mode: ChatAgentMode): void
   contextBar: AiContextBarBindings
   prompt: string
   onInsertPrompt(text: string): void
@@ -45,21 +42,20 @@ interface BookConversationExtensionBindings {
   attachments: BookAssistantAttachmentStore
   running: boolean
   onAddFavorite(prompt: string, content: string): void
-  writingMethodChoices: BoundWritingMethodChoice[]
-  writingMethodOverrides: WritingMethodOverrides
-  onCycleWritingMethod(revisionId: string): void
-  onRequestWritingMethodRecommendation(): void
+  writingTechniqueChoices: WritingTechniqueChoice[]
+  writingTechniqueSelection: WritingTechniqueSelection
+  onToggleWritingTechnique(id: string): void
+  onSetWritingTechniqueMode(mode: 'manual' | 'auto'): void
 }
 
 export function useBookConversationExtensions({
+  sessionId,
   bookId,
   bookTitle,
   chapterId,
   chapterTitle,
   scope,
   setScope,
-  chatAgentMode,
-  setChatAgentMode,
   contextBar,
   prompt,
   onInsertPrompt,
@@ -68,26 +64,19 @@ export function useBookConversationExtensions({
   attachments,
   running,
   onAddFavorite,
-  writingMethodChoices,
-  writingMethodOverrides,
-  onCycleWritingMethod,
-  onRequestWritingMethodRecommendation,
+  writingTechniqueChoices,
+  writingTechniqueSelection,
+  onToggleWritingTechnique,
+  onSetWritingTechniqueMode,
 }: BookConversationExtensionBindings): AgentConversationExtensions {
   return React.useMemo(() => ({
-    composerCommands: writingMethodChoices.map((method) => {
-      const mode = writingMethodOverrideMode(
-        writingMethodOverrides,
-        method.revisionId,
-      )
-      return {
-        id: `writing-method:${method.revisionId}`,
-        label: method.name,
-        description: `${mode === 'force' ? '本轮强制' : mode === 'exclude' ? '本轮排除' : '按任务自动选择'} · v${method.versionNo} · ${method.source === 'scheme' ? '来自写作方案' : '直接绑定'}`,
-        keywords: [method.methodType === 'primary' ? '主方法' : '专项技法'],
-        active: mode !== 'default',
-        onSelect: () => onCycleWritingMethod(method.revisionId),
-      }
-    }),
+    composerCommands: writingTechniqueChoices.map(choice => ({
+      id: `writing-technique:${choice.ref.id}`, label: choice.name,
+      description: `${choice.ref.kind === 'scheme' ? '写作方案' : '写作技法'} · ${choice.description}`,
+      keywords: ['写作技法', '写作方案'],
+      active: writingTechniqueSelection.refs.some(ref => ref.id === choice.ref.id),
+      onSelect: () => onToggleWritingTechnique(choice.ref.id),
+    })),
     renderSessionContext: () => (
       <>
         <div className="conversation-book-card">
@@ -117,19 +106,10 @@ export function useBookConversationExtensions({
         />
       </>
     ),
-    renderComposerLeading: () => (
+    composerActionMenu: { triggers: ['/'], title: '对话操作', render: () => (
       <>
-        <PurrSelect
-          className={`ai-agent-select ${chatAgentMode === 'agent' ? 'ai-agent-select--on' : ''}`}
-          size="small"
-          value={chatAgentMode}
-          onChange={setChatAgentMode}
-          options={[
-            { value: 'agent', label: '智能体' },
-            { value: 'ask', label: '问答' },
-          ]}
-        />
         <AiContextBar
+          expanded
           bookId={bookId ?? null}
           chapterId={chapterId ?? null}
           {...contextBar}
@@ -138,30 +118,23 @@ export function useBookConversationExtensions({
           promptTemplateContext={promptTemplateContext}
           promptTemplateDisabled={false}
         />
-        <PurrButton
-          type="text"
-          size="small"
-          disabled={running}
-          onClick={onRequestWritingMethodRecommendation}
-        >
-          推荐方法
-        </PurrButton>
-        {(writingMethodOverrides.forceRevisionIds.length > 0
-          || writingMethodOverrides.excludeRevisionIds.length > 0) ? (
-          <span className="writing-method-turn-status">
-            本轮方法 · 强制 {writingMethodOverrides.forceRevisionIds.length}
-            {' · '}排除 {writingMethodOverrides.excludeRevisionIds.length}
-          </span>
-        ) : null}
+        <WritingTechniquePicker
+          sessionId={sessionId}
+          choices={writingTechniqueChoices}
+          selection={writingTechniqueSelection}
+          onSetMode={onSetWritingTechniqueMode}
+          onToggle={onToggleWritingTechnique}
+        />
       </>
     ),
+    },
     renderAssistantAttachment: (message) => {
       const cards = message.isError
         ? []
         : getBookAssistantAttachmentsForMessage(attachments, message)
-      if (cards.length === 0) return null
       return (
         <div className="book-assistant-attachments">
+          <WritingTechniqueUsage runId={message.agentRunId} running={running} />
           {cards.map((card) => (
             <SettingDiffCard key={card.proposalId} card={card} />
           ))}
@@ -192,25 +165,24 @@ export function useBookConversationExtensions({
       )
     },
   }), [
+    sessionId,
     attachments,
     bookId,
     bookTitle,
     chapterId,
     chapterTitle,
-    chatAgentMode,
     contextBar,
     messages,
     onAddFavorite,
     onInsertPrompt,
-    onCycleWritingMethod,
-    onRequestWritingMethodRecommendation,
+    onToggleWritingTechnique,
+    onSetWritingTechniqueMode,
     prompt,
     promptTemplateContext,
     running,
     scope,
-    setChatAgentMode,
     setScope,
-    writingMethodChoices,
-    writingMethodOverrides,
+    writingTechniqueChoices,
+    writingTechniqueSelection,
   ])
 }

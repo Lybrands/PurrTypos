@@ -8,6 +8,7 @@ export type WorkspaceUtilityTabKind =
   | 'memory'
   | 'writingMethods'
   | 'canon'
+  | 'source'
   | 'knowledge'
   | 'setting'
   | 'dashboard'
@@ -16,6 +17,7 @@ export interface WorkspaceUtilityTab {
   key: string
   kind: WorkspaceUtilityTabKind
   title: string
+  sourceSectionId?: string
   outlineTarget?: ChapterOutlineTarget
 }
 
@@ -35,7 +37,7 @@ export const MEMORY_TAB: WorkspaceUtilityTab = {
 export const WRITING_METHODS_TAB: WorkspaceUtilityTab = {
   key: 'writing-methods',
   kind: 'writingMethods',
-  title: '写作方法',
+  title: '写作技法',
 }
 
 export const CANON_TAB: WorkspaceUtilityTab = {

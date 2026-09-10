@@ -1,0 +1,357 @@
+{
+  "fixtureVersion": "writing-techniques-p0-sources-v1",
+  "provenance": "synthetic：本轮专为开发验收原创，不是用户原文，也不是已运行的模型产物。",
+  "hashRule": "sha256 为 text 字符串按 UTF-8 编码后的 SHA-256，不做空白或换行规范化；观察定位使用解码后 Unicode 字符索引，start 含、end 不含。",
+  "sources": [
+    {
+      "id": "S01",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "缆绳绷紧。叶珂攥住吊篮边沿。铁钩响了一声。还不能松手。\n吊篮蹭过墙面。她缩回手指。墙缝里落下碎灰。先护住指节。\n篮底终于贴住平台，她解开腰带，扶着栏杆站稳。脚下是几块颜色深浅不同的旧木板，靠墙一侧铺着粗布，布角压了一只缺耳的茶杯；越过护栏，可以看见晾衣绳从这幢楼牵到对面，几件衬衫在清晨的光里缓慢翻面。",
+      "observations": [
+        {
+          "id": "O01a",
+          "status": "supported_local",
+          "statement": "同一场景的两处危险接近段落使用短句，内容集中于手部动作、声响或落灰等局部感官信息、即时判断。",
+          "sourceId": "S01",
+          "sourceVersion": 1,
+          "sourceSha256": "415f9f84df779b60b972fef1c00d47d75638fe646e5a5e128fa852f952ed808f",
+          "evidence": [
+            {
+              "start": 0,
+              "end": 27,
+              "quote": "缆绳绷紧。叶珂攥住吊篮边沿。铁钩响了一声。还不能松手。"
+            },
+            {
+              "start": 28,
+              "end": 55,
+              "quote": "吊篮蹭过墙面。她缩回手指。墙缝里落下碎灰。先护住指节。"
+            }
+          ]
+        },
+        {
+          "id": "O01b",
+          "status": "supported_local",
+          "statement": "确认站稳后，才展开木板、布、茶杯及远处晾衣绳的较长环境描写。",
+          "sourceId": "S01",
+          "sourceVersion": 1,
+          "sourceSha256": "415f9f84df779b60b972fef1c00d47d75638fe646e5a5e128fa852f952ed808f",
+          "evidence": [
+            {
+              "start": 56,
+              "end": 78,
+              "quote": "篮底终于贴住平台，她解开腰带，扶着栏杆站稳。"
+            },
+            {
+              "start": 78,
+              "end": 151,
+              "quote": "脚下是几块颜色深浅不同的旧木板，靠墙一侧铺着粗布，布角压了一只缺耳的茶杯；越过护栏，可以看见晾衣绳从这幢楼牵到对面，几件衬衫在清晨的光里缓慢翻面。"
+            }
+          ]
+        },
+        {
+          "id": "O01c",
+          "status": "supported_local_duplicate",
+          "statement": "危险仍在眼前时，文字没有展开完整环境，而先写人物手上的应对和当下判断。与 O01a 的核心机制重叠，不是第三处独立样本。",
+          "sourceId": "S01",
+          "sourceVersion": 1,
+          "sourceSha256": "415f9f84df779b60b972fef1c00d47d75638fe646e5a5e128fa852f952ed808f",
+          "evidence": [
+            {
+              "start": 28,
+              "end": 55,
+              "quote": "吊篮蹭过墙面。她缩回手指。墙缝里落下碎灰。先护住指节。"
+            }
+          ]
+        }
+      ],
+      "sha256": "415f9f84df779b60b972fef1c00d47d75638fe646e5a5e128fa852f952ed808f",
+      "characterCount": 151
+    },
+    {
+      "id": "S02",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "顾遥在箱底摸到那枚铜扣时，窗外正有人收雨棚，铜扣的小孔里还塞着一线褪色的蓝布，像许多年前母亲坐在窗下替她缝外套时，顺手留在指间的线头。她把铜扣放在掌心，想起母亲总说扣子要留一枚备用，后来外套小了，柜子搬走了，这枚铜扣却始终没有派上用场。直到灯亮起来，她才承认，自己想念的不是那件外套。\n她合上箱盖，又把铜扣拿出来，沿着扣背那条浅痕摸了一遍，那是她小时候拿剪刀乱刻的，母亲当年没有责备，只替她把剪刀合好。掌心留下了一圈汗印，她终于觉得羞愧。\n巷口传来急促的车铃。另一边，守夜人岑野冲下台阶。左脚滑了一下。他扶住墙。前面只剩一道窄缝。\n他侧身挤过。衣袖扯住了。布料裂开一声。后面的灯照到了脚跟。往右。门还开着。\n门轴叫了一声。他钻进屋，踢上门，肩膀抵住木板。外头的脚步停了。屏住气。",
+      "observations": [
+        {
+          "id": "O02a",
+          "status": "supported_local",
+          "statement": "安静回忆段落使用长句，同一物件反复出现，明确的想念与羞愧分别置于段落末尾。",
+          "sourceId": "S02",
+          "sourceVersion": 1,
+          "sourceSha256": "4bb14707dfc2f0e78ca92e118df559e9c76fd2470148f585153633dd9dbc3882",
+          "evidence": [
+            {
+              "start": 104,
+              "end": 142,
+              "quote": "这枚铜扣却始终没有派上用场。直到灯亮起来，她才承认，自己想念的不是那件外套。"
+            },
+            {
+              "start": 143,
+              "end": 219,
+              "quote": "她合上箱盖，又把铜扣拿出来，沿着扣背那条浅痕摸了一遍，那是她小时候拿剪刀乱刻的，母亲当年没有责备，只替她把剪刀合好。掌心留下了一圈汗印，她终于觉得羞愧。"
+            }
+          ]
+        },
+        {
+          "id": "O02b",
+          "status": "supported_local",
+          "statement": "另一人物的追逐段落以短句写动作、局部感官和即时方向判断，没有解释追逐的长远原因。",
+          "sourceId": "S02",
+          "sourceVersion": 1,
+          "sourceSha256": "4bb14707dfc2f0e78ca92e118df559e9c76fd2470148f585153633dd9dbc3882",
+          "evidence": [
+            {
+              "start": 266,
+              "end": 303,
+              "quote": "他侧身挤过。衣袖扯住了。布料裂开一声。后面的灯照到了脚跟。往右。门还开着。"
+            },
+            {
+              "start": 304,
+              "end": 339,
+              "quote": "门轴叫了一声。他钻进屋，踢上门，肩膀抵住木板。外头的脚步停了。屏住气。"
+            }
+          ]
+        }
+      ],
+      "sha256": "4bb14707dfc2f0e78ca92e118df559e9c76fd2470148f585153633dd9dbc3882",
+      "characterCount": 339
+    },
+    {
+      "id": "S03",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "门后响了两下。孟荷停住脚，那节拍像父亲敲桌子催她吃饭。她差点应声。可父亲已经出海三天了。\n又响了两下。她把油灯举高，光越过门槛，一根松脱的竹帘绳正敲着门板。风停时，声音也停了。她放下油灯，刚才含在嘴里的那个称呼没有说出来。",
+      "observations": [
+        {
+          "id": "O03a",
+          "status": "supported_local",
+          "statement": "先呈现声音，再写人物基于相似节拍作出的联想；叙述没有把门后是父亲确认为事实。",
+          "sourceId": "S03",
+          "sourceVersion": 1,
+          "sourceSha256": "0f2841e1dd18d7dbf3a93e0b16d9b8885166fb9a172ea236db84e0a2bd536025",
+          "evidence": [
+            {
+              "start": 0,
+              "end": 44,
+              "quote": "门后响了两下。孟荷停住脚，那节拍像父亲敲桌子催她吃饭。她差点应声。可父亲已经出海三天了。"
+            }
+          ]
+        },
+        {
+          "id": "O03b",
+          "status": "supported_local",
+          "statement": "人物举灯获得可见信息后，叙述才明确声音来自帘绳，并以风停声停补足判断依据。这个澄清与此前的联想构成同一处理。",
+          "sourceId": "S03",
+          "sourceVersion": 1,
+          "sourceSha256": "0f2841e1dd18d7dbf3a93e0b16d9b8885166fb9a172ea236db84e0a2bd536025",
+          "evidence": [
+            {
+              "start": 51,
+              "end": 88,
+              "quote": "她把油灯举高，光越过门槛，一根松脱的竹帘绳正敲着门板。风停时，声音也停了。"
+            }
+          ]
+        }
+      ],
+      "sha256": "0f2841e1dd18d7dbf3a93e0b16d9b8885166fb9a172ea236db84e0a2bd536025",
+      "characterCount": 111
+    },
+    {
+      "id": "S04",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "“明天交钥匙的时候，你会来吗？”姐姐问。\n阿澄把空花盆搬到窗边：“这盆先别扔。”\n“我问的是你来不来。”\n他擦掉盆底的一圈泥：“车票我还留着。”姐姐没有再催，把装钥匙的信封往桌里推了推。",
+      "observations": [
+        {
+          "id": "O04a",
+          "status": "supported_local",
+          "statement": "被问是否到场的人没有直接给出是或否，而以保留物品和车票回应离开的压力；动作插入对白，下一轮追问仍承接未回答的问题。",
+          "sourceId": "S04",
+          "sourceVersion": 1,
+          "sourceSha256": "53e0a830bc54c8b4ec31e505fae6cc216520a2c8d91643435fab203762dec184",
+          "evidence": [
+            {
+              "start": 0,
+              "end": 20,
+              "quote": "“明天交钥匙的时候，你会来吗？”姐姐问。"
+            },
+            {
+              "start": 21,
+              "end": 40,
+              "quote": "阿澄把空花盆搬到窗边：“这盆先别扔。”"
+            },
+            {
+              "start": 41,
+              "end": 52,
+              "quote": "“我问的是你来不来。”"
+            },
+            {
+              "start": 53,
+              "end": 72,
+              "quote": "他擦掉盆底的一圈泥：“车票我还留着。”"
+            }
+          ]
+        },
+        {
+          "id": "O04b",
+          "status": "unsupported",
+          "statement": "这位作者全书每段对白都幽默，而且每位人物都有固定口头禅。",
+          "rejectionReason": "只有此片段；未提供全书对白和口头禅证据，片段也不支持这个判断。",
+          "sourceId": "S04",
+          "sourceVersion": 1,
+          "sourceSha256": "53e0a830bc54c8b4ec31e505fae6cc216520a2c8d91643435fab203762dec184",
+          "evidence": []
+        }
+      ],
+      "sha256": "53e0a830bc54c8b4ec31e505fae6cc216520a2c8d91643435fab203762dec184",
+      "characterCount": 93
+    },
+    {
+      "id": "S05",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "车到了。他提着袋子下车，沿着路往家走。进门以后，他放下袋子，洗手吃饭。第二天，他又出了门。",
+      "observations": [
+        {
+          "id": "O05a",
+          "status": "unsupported_for_focus",
+          "statement": "这段语言优美、节奏紧凑，说明全书善于多视角转换与对白潜台词。",
+          "rejectionReason": "前半句是无具体机制的评价；本片段没有对白或视角切换，不能支持关注点及全书结论。",
+          "sourceId": "S05",
+          "sourceVersion": 1,
+          "sourceSha256": "3e2e63bf4d559fe568a8f1611cfe945a1215bca76b875a84c46953e632f260c1",
+          "evidence": []
+        }
+      ],
+      "sha256": "3e2e63bf4d559fe568a8f1611cfe945a1215bca76b875a84c46953e632f260c1",
+      "characterCount": 45
+    },
+    {
+      "id": "S06",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "许檐发现柜门开着一条缝。他记得离开时上过锁。锁舌没有断，柜边多了一道湿鞋印。他摸了摸印边，水还没干。隔壁传来椅子拖动的声音。他先收起钥匙，走向隔壁，没有急着翻柜里的东西。",
+      "observations": [
+        {
+          "id": "O06a",
+          "status": "supported_local",
+          "statement": "人物与读者一起获得柜门、锁舌、湿鞋印等局部线索，暂未知道是谁动过柜子；新的声音使人物改变下一步检查方向。",
+          "sourceId": "S06",
+          "sourceVersion": 1,
+          "sourceSha256": "33a6c856156f84034e4feb11532105a2001f015fe45b427a753b3e62871110b1",
+          "evidence": [
+            {
+              "start": 22,
+              "end": 62,
+              "quote": "锁舌没有断，柜边多了一道湿鞋印。他摸了摸印边，水还没干。隔壁传来椅子拖动的声音。"
+            },
+            {
+              "start": 62,
+              "end": 85,
+              "quote": "他先收起钥匙，走向隔壁，没有急着翻柜里的东西。"
+            }
+          ]
+        }
+      ],
+      "sha256": "33a6c856156f84034e4feb11532105a2001f015fe45b427a753b3e62871110b1",
+      "characterCount": 85
+    },
+    {
+      "id": "S07",
+      "version": 1,
+      "kind": "synthetic-fiction",
+      "text": "岑默离开排练室后，墙上的置物架又向下滑了一寸。最右边那颗螺丝落进纸箱，发出很轻的一声。\n他在走廊接完电话，推门回来，把椅子搬到架子下面。剧本摊开了，他还想再练一遍。架上的玻璃瓶贴着边沿，随着他的台词轻轻震动。",
+      "observations": [
+        {
+          "id": "O07a",
+          "status": "supported_local",
+          "statement": "先向读者写明人物离开后置物架松动，再写不知情人物回到架下；后续以瓶子震动延续已经公开的危险，没有把危险本身藏到最后。",
+          "sourceId": "S07",
+          "sourceVersion": 1,
+          "sourceSha256": "43191786e3f917996a01dbc04a44bb84a55832e86d110e960dcff9244a87d647",
+          "evidence": [
+            {
+              "start": 0,
+              "end": 43,
+              "quote": "岑默离开排练室后，墙上的置物架又向下滑了一寸。最右边那颗螺丝落进纸箱，发出很轻的一声。"
+            },
+            {
+              "start": 44,
+              "end": 68,
+              "quote": "他在走廊接完电话，推门回来，把椅子搬到架子下面。"
+            },
+            {
+              "start": 82,
+              "end": 104,
+              "quote": "架上的玻璃瓶贴着边沿，随着他的台词轻轻震动。"
+            }
+          ]
+        }
+      ],
+      "sha256": "43191786e3f917996a01dbc04a44bb84a55832e86d110e960dcff9244a87d647",
+      "characterCount": 104
+    },
+    {
+      "id": "S08",
+      "version": 1,
+      "kind": "synthetic-copywriting",
+      "text": "给怕湿包的通勤者\n水杯倒在包里，电脑外壳和纸质收据都可能沾水。这款内袋把水杯放在侧边独立隔层；隔层底部封合，泼入的少量水可暂留在隔层内，取出后能单独擦干。外层拉链不防水，不适合雨中外背。\n给怕翻找的通勤者\n进闸机时，卡片总容易沉到包底。这款内袋把卡位放在开口旁，伸手可直接拿到；浅袋只装一张常用卡，备用卡另放。卡位没有扣件，倒置时卡片可能滑出。",
+      "observations": [
+        {
+          "id": "O08a",
+          "status": "supported_local",
+          "statement": "两段分别从具体使用麻烦进入，紧接对应的结构与操作，再交代限制；需要先明确使用者要避免什么，读者才能判断特性是否有用。",
+          "sourceId": "S08",
+          "sourceVersion": 1,
+          "sourceSha256": "bcebdcfa8baf43778ccd03151d5c905f5a6d266f8e424e3d40af40611c488a57",
+          "evidence": [
+            {
+              "start": 9,
+              "end": 93,
+              "quote": "水杯倒在包里，电脑外壳和纸质收据都可能沾水。这款内袋把水杯放在侧边独立隔层；隔层底部封合，泼入的少量水可暂留在隔层内，取出后能单独擦干。外层拉链不防水，不适合雨中外背。"
+            },
+            {
+              "start": 103,
+              "end": 172,
+              "quote": "进闸机时，卡片总容易沉到包底。这款内袋把卡位放在开口旁，伸手可直接拿到；浅袋只装一张常用卡，备用卡另放。卡位没有扣件，倒置时卡片可能滑出。"
+            }
+          ]
+        },
+        {
+          "id": "O08b",
+          "status": "supported_local",
+          "statement": "使用者问题、产品特性与使用限制都是这个文案写法的执行前提；本样本的产品和性能为虚构，不能迁移成真实商品事实。",
+          "sourceId": "S08",
+          "sourceVersion": 1,
+          "sourceSha256": "bcebdcfa8baf43778ccd03151d5c905f5a6d266f8e424e3d40af40611c488a57",
+          "evidence": [
+            {
+              "start": 0,
+              "end": 8,
+              "quote": "给怕湿包的通勤者"
+            },
+            {
+              "start": 77,
+              "end": 93,
+              "quote": "外层拉链不防水，不适合雨中外背。"
+            },
+            {
+              "start": 94,
+              "end": 102,
+              "quote": "给怕翻找的通勤者"
+            },
+            {
+              "start": 155,
+              "end": 172,
+              "quote": "卡位没有扣件，倒置时卡片可能滑出。"
+            }
+          ]
+        }
+      ],
+      "sha256": "bcebdcfa8baf43778ccd03151d5c905f5a6d266f8e424e3d40af40611c488a57",
+      "characterCount": 172
+    }
+  ]
+}

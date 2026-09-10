@@ -81,4 +81,5 @@ export {
   AgentRunSnapshotHydrationError,
   loadCompleteAgentRunSnapshot,
   replayAgentRunSnapshot,
+  replayAgentRunSnapshotAsync,
 } from './runSnapshotHydration'

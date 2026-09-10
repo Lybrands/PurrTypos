@@ -44,7 +44,7 @@ async def save_story_background(bookId: str, body: SaveStoryBackgroundRequest):
     from services import memory_deposition_service
 
     async with db.transaction(cancellation_linearizable=True):
-        await story_background_crud.save_story_background(db, bookId, body.content)
+        await story_background_crud.save_story_background(db, bookId, body.content, base_revision=body.baseRevision)
         await bg_hist_crud.insert_story_background_history(
             db,
             book_id=bookId,
@@ -58,6 +58,7 @@ async def save_story_background(bookId: str, body: SaveStoryBackgroundRequest):
     deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
     return {
         "success": True,
+        "data": await story_background_crud.get_story_background(db, bookId),
         "memoryDelivery": [item.to_dict() for item in deliveries],
     }
 

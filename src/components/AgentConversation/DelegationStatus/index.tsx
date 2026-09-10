@@ -5,6 +5,7 @@ import type {
   AiSubAgentActivity,
 } from "../../../agent-runtime/contracts";
 import Markdown from "../../Markdown";
+import ViewportBlock from "../../ViewportBlock";
 import { ExecutionLogStepGroup } from "../ExecutionLog";
 import ToolCallStatus from "../ToolCallStatus";
 import { buildAssistantTimeline } from "../AssistantOutput/timeline";
@@ -38,6 +39,7 @@ export default function DelegationStatus({
   items: AiAgentDelegation[];
   activities?: AiSubAgentActivity[];
 }) {
+  const byId = React.useMemo(() => new Map(activities.map(activity => [activity.delegationId, activity])), [activities]);
   const completed = items.filter((item) => item.status === "done").length;
   return (
     <div className="work-log__subagents">
@@ -49,10 +51,21 @@ export default function DelegationStatus({
       </div>
       <div className="work-log__subagent-list">
         {items.map((item, itemIndex) => {
+          return <ViewportBlock key={item.delegationId} id={`delegation:${item.delegationId}`}>
+            <DelegationItem item={item} itemIndex={itemIndex}
+              activity={byId.get(item.delegationId)} />
+          </ViewportBlock>;
+
+        })}
+      </div>
+    </div>
+  );
+}
+
+const DelegationItem = React.memo(function DelegationItem({ item, itemIndex, activity }: {
+  item: AiAgentDelegation; itemIndex: number; activity?: AiSubAgentActivity
+}) {
           const active = ["queued", "claimed", "running"].includes(item.status);
-          const activity = activities.find(
-            (candidate) => candidate.delegationId === item.delegationId,
-          );
           const activityMessage = activity?.message
             ? presentableChildMessage(activity.message)
             : undefined;
@@ -193,8 +206,4 @@ export default function DelegationStatus({
               </div>
             </div>
           );
-        })}
-      </div>
-    </div>
-  );
-}
+});
