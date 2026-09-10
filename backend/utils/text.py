@@ -35,9 +35,13 @@ def format_characters_as_text(characters: list[dict]) -> str:
     parts: list[str] = []
     for c in characters:
         lines = [f"### {c.get('name', '未命名')}（人物ID:{c.get('id', '')}）"]
+        if c.get("materialLink"):
+            lines.append("资料链接：" + c["materialLink"])
         tags = str(c.get("tags") or "").strip()
         if tags:
             lines.append(f"标签：{tags}")
+        if c.get("inheritedBaseline"):
+            lines.append("原作继承基线（只读历史事实）：\n" + c["inheritedBaseline"] + "\n\n本书后续发展：")
         profile = str(c.get("profile_md") or "").strip()
         if profile:
             lines.append(profile)
@@ -58,9 +62,13 @@ def format_setting_entities_as_text(
         lines = [
             f"### [{type_label}] {e.get('name', '未命名')}（实体ID:{e.get('id', '')}）"
         ]
+        if e.get("materialLink"):
+            lines.append("资料链接：" + e["materialLink"])
         tags = str(e.get("tags") or "").strip()
         if tags:
             lines.append(f"标签：{tags}")
+        if e.get("inheritedBaseline"):
+            lines.append("原作继承基线（只读历史事实）：\n" + e["inheritedBaseline"] + "\n\n本书后续发展：")
         profile = str(e.get("profile_md") or "").strip()
         if profile:
             lines.append(profile)

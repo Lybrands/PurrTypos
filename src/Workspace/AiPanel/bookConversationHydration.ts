@@ -1,7 +1,7 @@
 import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
 import {
   loadCompleteAgentRunSnapshot,
-  replayAgentRunSnapshot,
+  replayAgentRunSnapshotAsync,
 } from '../../agent-runtime/runSnapshotHydration.ts'
 import type {
   AiAgentRunSnapshot,
@@ -199,13 +199,13 @@ async function hydrateTurn(
   }
 
   const model = loaded.run.provenance.modelName || row.model || ''
-  const replayed = replayAgentRunSnapshot({
+  const replayed = await replayAgentRunSnapshotAsync({
     snapshot: loaded,
     prompt: row.prompt,
     turnId: `book-conversation:${row.id}:run:${runId}`,
     sessionId: row.session_id,
     model,
-  })
+  }, isCurrent)
   const content = replayed.content || ''
   const assistant: AgentConversationMessage = {
     ...storedAssistant,

@@ -2,7 +2,7 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const test = require('node:test')
 const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.cjs')
-const { buildNovelAnalysisMessages, NovelAnalysisConversationStream } = loadTypeScriptModule(
+const { buildNovelAnalysisMessages, hydrateNovelAnalysisHistory, NovelAnalysisConversationStream } = loadTypeScriptModule(
   path.join(__dirname, 'analysisConversation.ts'),
 )
 
@@ -38,6 +38,59 @@ const replayAnalysisEvents = (run, events) => new NovelAnalysisConversationStrea
     cursor: index + 1, runId: event.chunk.runId, createdAt: '', chunk: event.chunk,
   })),
 }).message
+
+const snapshot = (runId, overrides = {}) => {
+  const { run: runOverrides = {}, ...rest } = overrides
+  return {
+    version: 2,
+    run: {
+      runId,
+      status: 'done',
+      finalResponse: '',
+      execution: { attempt: 1, cancellationRequested: false },
+      provenance: { modelName: 'model' },
+      ...runOverrides,
+    },
+    events: [],
+    nextCursor: 1,
+    hasMore: false,
+    ...rest,
+  }
+}
+
+test('history hydration reads every root and related Run page before exposing its replay', async () => {
+  const calls = []
+  const root = run({
+    runStatus: 'done',
+    finalResponse: '完整恢复的公开答复',
+    relatedRuns: [{ runId: 'analysis-unit', status: 'done' }],
+  })
+  const hydrated = await hydrateNovelAnalysisHistory({
+    run: root,
+    model: { id: 'model', name: 'model', apiKey: '', baseUrl: '' },
+    isCurrent: () => true,
+    getRunSnapshot: async ({ runId, after }) => {
+      calls.push(`${runId}:${after ?? 0}`)
+      if (runId === root.runId && after == null) {
+        return { success: true, data: snapshot(runId, {
+          nextCursor: 1, hasMore: true,
+          run: { finalResponse: root.finalResponse },
+        }) }
+      }
+      if (runId === root.runId) {
+        return { success: true, data: snapshot(runId, {
+          nextCursor: 2,
+          run: { finalResponse: root.finalResponse },
+          events: [event(2, { payload: { delta: '不应覆盖最终答复' } })],
+        }) }
+      }
+      return { success: true, data: snapshot(runId) }
+    },
+  })
+  assert.deepEqual(calls, ['analysis-run:0', 'analysis-unit:0', 'analysis-run:1'])
+  assert.equal(hydrated.runId, root.runId)
+  assert.equal(hydrated.message.content, '完整恢复的公开答复')
+})
 
 test('one analysis stream catches up dynamic units without re-reading snapshots', () => {
   const stream = new NovelAnalysisConversationStream()
@@ -238,4 +291,63 @@ test('completed analysis units do not hide a failed root public presentation', (
   const assistant = buildNovelAnalysisMessages(input, 'model').at(-1)
   assert.equal(assistant.isError, true)
   assert.match(assistant.error, /推理配置发生冲突/)
+})
+
+test('adding a child Run does not replay already delivered root history', () => {
+  const stream = new NovelAnalysisConversationStream()
+  const page = {kind:'analysis_events', nextCursor:1, hasMore:false, projectionVersion:'v1',
+    runs:[run()], chunks:[{cursor:1, runId:'analysis-run', createdAt:'', chunk:event(1).chunk}]}
+  let deliveries = 0
+  stream.apply(page, undefined, () => deliveries++)
+  const previous = deliveries
+  stream.apply({...page, chunks:[], runs:[run({relatedRuns:[{runId:'new-child',status:'running'}]})]},
+    undefined, () => deliveries++)
+  assert.equal(deliveries, previous)
+})
+
+test('large history bounds simultaneous snapshot requests without dropping Runs', async () => {
+  let active = 0, maximum = 0, completed = 0
+  const relatedRuns = Array.from({length:24}, (_,i)=>({runId:`child-${i}`, status:'done'}))
+  const result = await hydrateNovelAnalysisHistory({run:run({relatedRuns}),
+    model:{id:'test',name:'test',apiKey:'',baseUrl:''}, isCurrent:()=>true,
+    getRunSnapshot:async ({runId})=>{
+      active++; maximum=Math.max(maximum,active)
+      await new Promise(resolve=>setTimeout(resolve,1))
+      active--;completed++
+      return {success:true,data:snapshot(runId)}
+    }})
+  assert.ok(result)
+  assert.equal(completed,25)
+  assert.equal(maximum,4)
+})
+
+test('time-sliced history replay yields to interaction and preserves the synchronous result', async () => {
+  const {replayAgentRunSnapshot,replayAgentRunSnapshotAsync} = loadTypeScriptModule(
+    path.join(__dirname, '../agent-runtime/runSnapshotHydration.ts'))
+  const input = {snapshot:snapshot('analysis-run', {run:{status:'running'},
+    events:Array.from({length:2500},(_,i)=>event(i+1))}), prompt:'test',turnId:'time-slice'}
+  let responded=false
+  const timer=setTimeout(()=>{responded=true},0)
+  const actual=await replayAgentRunSnapshotAsync(input)
+  clearTimeout(timer)
+  assert.equal(responded,true,'history replay must allow a queued interaction before completing')
+  const expected=replayAgentRunSnapshot(input)
+  assert.equal(actual.streamingContent,expected.streamingContent)
+  assert.equal(actual.content,expected.content)
+  assert.equal(actual.canonicalOutput.finalText,expected.canonicalOutput.finalText)
+})
+
+test('new turns and full reload retain every previous public answer', () => {
+  const stream = new NovelAnalysisConversationStream()
+  const first = run({runStatus: 'done', finalResponse: '第一轮回答'})
+  const next = run({runId: 'followup', commandId: 'next', interactionKind: 'follow_up', taskId: null})
+  const page = {kind: 'analysis_events', nextCursor: 1, hasMore: false, projectionVersion: 'v1', runs: [first],
+    chunks: [{cursor: 1, runId: first.runId, createdAt: '', chunk: event(1).chunk}]}
+  stream.apply(page)
+  const result = stream.apply({...page, runs: [next, first], nextCursor: 2, chunks: [{cursor: 2, runId: next.runId, createdAt: '',
+    chunk: event(2, {runId: next.runId, eventId: 'next-event', payload: {delta: '追问回答'}}).chunk}]})
+  assert.ok(result.history[first.runId])
+  const fresh = new NovelAnalysisConversationStream().apply({...page, runs: [next, first], chunks: page.chunks})
+  assert.deepEqual(fresh.history[first.runId].canonicalOutput, result.history[first.runId].canonicalOutput)
+  assert.ok(result.history[next.runId])
 })

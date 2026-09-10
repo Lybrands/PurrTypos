@@ -27,7 +27,6 @@ import {
   ExportIcon,
   FileTextIcon,
   HistoryIcon,
-  HomeIcon,
   InboxIcon,
   PurrInput,
   PurrInputNumber,
@@ -3148,6 +3147,11 @@ export default function ScreenplayAgentPage({
     messages: agentConversationState?.messages,
     artifacts: agentTurnArtifacts,
     renderArtifact: renderAgentArtifact,
+    renderActions: ({ close }) => <>
+      <PurrButton onClick={() => { close(); openRevisionLibrary(null) }}>查看版本与文档</PurrButton>
+      {showStageStartAction && <PurrButton disabled={stageStartActionDisabled} onClick={() => { close(); handleStageStartAction() }}>开始当前阶段任务</PurrButton>}
+      <PurrButton onClick={() => { close(); onOpenSettings() }}>模型与应用设置</PurrButton>
+    </>,
   })
   const hasPendingAgentProposal = Boolean(
     projectWorkspace?.candidates.some((revision) => revision.agentTaskId),
@@ -3321,42 +3325,10 @@ export default function ScreenplayAgentPage({
             )}
           </span>
         )}
-        left={(
-          <>
-            {stage === 'source' && screenplayRoute.kind !== 'new' ? (
-              <PurrTooltip title="返回首页">
-                <PurrButton
-                  type="text"
-                  size="small"
-                  icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
-                  onClick={onBack}
-                  aria-label="返回首页"
-                />
-              </PurrTooltip>
-            ) : (
-              <>
-                <PurrTooltip title="返回首页">
-                  <PurrButton
-                    type="text"
-                    size="small"
-                    icon={<HomeIcon style={{ fontSize: 14 }} />}
-                    onClick={onBack}
-                    aria-label="返回首页"
-                  />
-                </PurrTooltip>
-                <PurrTooltip title={headerBackLabel}>
-                  <PurrButton
-                    type="text"
-                    size="small"
-                    icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
-                    onClick={handleHeaderBack}
-                    aria-label={headerBackLabel}
-                  />
-                </PurrTooltip>
-              </>
-            )}
-          </>
-        )}
+        navigation={{
+          home: { label: '返回首页', onClick: onBack },
+          back: { label: headerBackLabel, onClick: handleHeaderBack },
+        }}
         showActions
         onOpenSettings={onOpenSettings}
       />

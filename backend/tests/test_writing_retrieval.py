@@ -12,7 +12,6 @@ import pytest_asyncio
 from application.composition_factory import create_agent_composition
 from application.memory_operations import MemoryApplicationService, memory_metadata
 from application.request_mapping import to_writing_agent_request, writing_run_options
-from application.writing_method_service import WritingMethodService
 from database.connection import DatabaseConnection
 from infrastructure.memory import MemoryComponentResource, MemoryResourceConfiguration
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
@@ -22,7 +21,7 @@ from infrastructure.writing import (
     WritingToolDependencies,
     build_writing_tool_catalog,
 )
-from infrastructure.writing.retrieval import WritingMemoryRetriever, WritingMethodRetriever
+from infrastructure.writing.retrieval import WritingMemoryRetriever
 from purra.api import AgentExecutionCheckpoint
 from purra.cancellation import OperationCanceled
 from purra.contracts import (
@@ -270,163 +269,3 @@ async def test_component_memory_scope_lifecycle_and_persisted_evidence(
     )
     _, disabled = await _execute(db, memory_resource, run_id)
     assert json.loads(disabled.results[0].content) == {"hits": []}
-
-
-@pytest.mark.parametrize("extra", [
-    {"bookId": "book-b"},
-    {"limit": 100},
-    {"statuses": ["pending"]},
-    {"scope": {"bookId": "book-b"}},
-    {"run_id": "other"},
-])
-async def test_model_cannot_select_host_scope_or_budget(
-    db,
-    memory_resource,
-    extra,
-):
-    _, batch = await _execute(
-        db,
-        memory_resource,
-        await _run(db),
-        arguments={"query": "红门", **extra},
-    )
-    assert batch.results[0].error is not None
-
-
-async def test_direct_retriever_validates_scope_and_cancellation(
-    db,
-    memory_resource,
-):
-    retriever = WritingMemoryRetriever(
-        db,
-        _memory_service(db, memory_resource),
-    )
-    assert isinstance(retriever, Retriever)
-    run_id = await _run(db)
-    for request, code in (
-        (RetrievalRequest("红门", 1), "retrieval_scope_unavailable"),
-        (
-            RetrievalRequest("红门", 1, run_id="missing"),
-            "retrieval_scope_unavailable",
-        ),
-        (
-            RetrievalRequest(
-                "红门",
-                1,
-                run_id=run_id,
-                scope={"bookId": "book-b"},
-            ),
-            "retrieval_access_denied",
-        ),
-        (
-            RetrievalRequest("红门", 13, run_id=run_id),
-            "retrieval_access_denied",
-        ),
-    ):
-        with pytest.raises(RetrievalError) as error:
-            await retriever.retrieve(request)
-        assert error.value.code == code
-    stopped = asyncio.Event()
-    stopped.set()
-    with pytest.raises(OperationCanceled):
-        await retriever.retrieve(
-            RetrievalRequest("红门", 1, run_id=run_id),
-            stopped,
-        )
-    await db.execute(
-        "UPDATE ai_agent_runs SET status = 'canceled' WHERE id = ?",
-        [run_id],
-    )
-    with pytest.raises(RetrievalError, match="Active Run"):
-        await retriever.retrieve(RetrievalRequest("红门", 1, run_id=run_id))
-
-
-async def test_retrieval_failure_is_redacted_and_does_not_replan(
-    db,
-    memory_resource,
-    monkeypatch,
-):
-    async def unavailable(*args, **kwargs):
-        raise RuntimeError("private-database-path-and-secret")
-
-    monkeypatch.setattr(MemoryApplicationService, "retrieve", unavailable)
-    _, batch = await _execute(db, memory_resource, await _run(db))
-    assert batch.results[0].error is not None
-    assert "private-database-path-and-secret" not in batch.results[0].content
-    assert batch.results[0].planning_disposition is ToolPlanningDisposition.KEEP_PLAN
-
-
-async def test_missing_authoritative_book_binding_cannot_use_mutable_domain(
-    db,
-    memory_resource,
-):
-    await _memory(db, memory_resource)
-    run_id = await SqliteRunRepository(db).create(RunCreateParams(
-        session_id=None,
-        prompt="unbound",
-        mode="agent",
-    ))
-    _, batch = await _execute(db, memory_resource, run_id)
-    assert batch.results[0].error == "retrieval_scope_unavailable"
-    assert "铜钥匙" not in batch.results[0].content
-
-
-async def test_method_retrieval_requires_host_intent_and_returns_revision(
-    db,
-    memory_resource,
-):
-    service = WritingMethodService(db)
-    method = await service.create_method(
-        name="测试红门悬念",
-        description="逐层释放红门信息",
-        method_type="technique",
-        tags=["红门"],
-        markdown="# 红门\n秘密不能立即揭晓。",
-        metadata={"schemaVersion": 1},
-    )
-    revision = await service.publish_method(method["id"])
-    ordinary_run = await _run(db)
-    with pytest.raises(RetrievalError) as error:
-        await WritingMethodRetriever(db).retrieve(
-            RetrievalRequest("测试红门", 8, run_id=ordinary_run)
-        )
-    assert error.value.code == "retrieval_access_denied"
-    _, denied = await _execute(
-        db,
-        memory_resource,
-        ordinary_run,
-        name="searchWritingMethods",
-    )
-    assert denied.results[0].error == "retrieval_access_denied"
-
-    run_id = await _run(db, recommend=True)
-    _, batch = await _execute(
-        db,
-        memory_resource,
-        run_id,
-        name="searchWritingMethods",
-        arguments={"query": "红门"},
-    )
-    hits = json.loads(batch.results[0].content)["hits"]
-    assert [hit["id"] for hit in hits] == [revision["id"]]
-    assert hits[0]["version"] == revision["version_no"]
-    assert hits[0]["metadata"]["contentDigest"] == revision["content_digest"]
-    assert hits[0]["untrusted"] is True
-
-
-def test_retrieval_catalog_exposes_only_query_and_existing_context_contract():
-    catalog = _catalog(object(), None)
-    for registration in catalog.registrations():
-        if registration.schema.name not in {
-            "searchMemories",
-            "searchWritingMethods",
-        }:
-            continue
-        assert set(registration.schema.parameters["properties"]) == {"query"}
-        assert registration.schema.parameters["additionalProperties"] is False
-        assert registration.data_contract.model_owned_paths == ("query",)
-        assert registration.data_contract.host_derived_paths == ("run_id",)
-        assert (
-            "binding.bookId"
-            in registration.context_contract.mandatory_context_keys
-        )

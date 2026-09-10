@@ -21,10 +21,13 @@ router = APIRouter(tags=["sessions"])
 async def create_session(body: CreateSessionRequest):
     db = get_db()
     scope = "setting" if body.scope == "setting" else "chapter"
-    session_id = await db.execute_and_get_id(
-        "INSERT INTO ai_sessions (book_id, chapter_id, scope) VALUES (?, ?, ?)",
-        [body.bookId, None if scope == "setting" else body.chapterId, scope],
-    )
+    async with db.transaction():
+        session_id = await db.execute_and_get_id(
+            "INSERT INTO ai_sessions (book_id, chapter_id, scope) VALUES (?, ?, ?)",
+            [body.bookId, None if scope == "setting" else body.chapterId, scope],
+        )
+        from application.writing_technique_service import WritingTechniqueService
+        await WritingTechniqueService(db).initialize_session(str(session_id), str(body.bookId))
     row = await db.fetch_one("SELECT * FROM ai_sessions WHERE id = ?", [session_id])
     return {"success": True, "data": row}
 
@@ -88,6 +91,7 @@ async def delete_session(sessionId: int):
             "DELETE FROM ai_conversations WHERE session_id = ?",
             [sessionId],
         )
+        await db.execute("DELETE FROM writing_technique_selections WHERE scope_kind='session' AND scope_id=?", [str(sessionId)])
         await db.execute("DELETE FROM ai_sessions WHERE id = ?", [sessionId])
     from services.memory_deposition_service import deliver_recorded
 

@@ -20,10 +20,7 @@ router = APIRouter(tags=["characters"])
 @router.get("/books/{bookId}/characters")
 async def get_characters(bookId: str):
     db = get_db()
-    rows = await db.fetch_all(
-        "SELECT * FROM characters WHERE book_id = ? ORDER BY create_time ASC",
-        [bookId],
-    )
+    rows = await characters_crud.get_characters(db, bookId)
     return {"success": True, "data": rows}
 
 
@@ -82,7 +79,7 @@ async def update_character(id: str, body: UpdateCharacterRequest):
 
 
 @router.delete("/characters/{id}")
-async def delete_character(id: str):
+async def delete_character(id: str, baseRevision: str | None = Query(None)):
     db = get_db()
     try:
         cid = int(id)
@@ -94,7 +91,7 @@ async def delete_character(id: str):
     if row is None:
         return {"success": False, "error": "人物不存在"}
     async with db.transaction(cancellation_linearizable=True):
-        await characters_crud.delete_character(db, cid)
+        await characters_crud.delete_character(db, cid, base_revision=baseRevision)
         delivery_keys = await memory_deposition_service.record_deleted_source(
             db,
             book_id=str(row["book_id"]),

@@ -39,7 +39,9 @@ async def _tool_get_book_characters(
     char_ids = args.get("characterIds")
     name_queries = args.get("names")
     # None means this is a filtered read, which intentionally bypasses cache.
-    cache_key = build_read_cache_key("getBookCharacters", ctx, args)
+    from application.creation_material_service import materials
+    from application.creation_material_service import materials
+    cache_key = None if await materials(dependencies.db).binding(str(bid)) else build_read_cache_key("listBookCharacters", ctx, args) if await materials(dependencies.db).binding(str(bid)) else build_read_cache_key("getBookCharacters", ctx, args)
 
     if cache_key is not None:
         hit = _read_tool_cache_get(ctx, cache_key)
@@ -63,7 +65,7 @@ async def _tool_list_book_characters(
     send_chunk: Callable | None,
 ) -> ToolResult:
     bid = resolve_book_id_for_tools(ctx, args)
-    cache_key = build_read_cache_key("listBookCharacters", ctx, args)
+    cache_key = None
     hit = _read_tool_cache_get(ctx, cache_key) if cache_key else None
     if hit is not None:
         return ToolResult(hit, from_cache=True)
@@ -72,6 +74,7 @@ async def _tool_list_book_characters(
     summary = [
         {
             "id": character.get("id"),
+            **({"materialLink": character["materialLink"]} if character.get("materialLink") else {}),
             "name": re.sub(
                 r"\r?\n", " ", str(character.get("name") or "未命名"),
             ).strip() or "未命名",
@@ -152,6 +155,8 @@ async def _tool_update_character(
                 "characterId": character_id,
             })
 
+        from application.creation_material_service import materials
+        data = await materials(dependencies.db).normalize_links(str(bid), data)
         before = setting_snapshot(current)
         proposed = merge_setting_proposal(current, data)
         if before == proposed:
@@ -173,6 +178,7 @@ async def _tool_update_character(
                     "before": before,
                     "proposed": proposed,
                     "source": "ai_tool_edit",
+                    "baseRevision": current.get("baseRevision"),
                 },
             })
         return ToolResult(json.dumps({
@@ -219,14 +225,14 @@ async def _tool_delete_character(
             })
 
         name = str(target.get("name") or "")
-        await delete_character(db, character_id)
+        await delete_character(db, character_id, base_revision=target.get("baseRevision"))
         _invalidate_read_tool_cache(ctx)
         send_setting_updated(
             send_chunk, "character", action="delete", id=character_id, name=name,
         )
         return ToolResult(json.dumps({
             "success": True,
-            "message": f"已删除人物「{name}」（不可恢复）",
+            "message": f"已删除人物「{name}」",
             "characterId": character_id,
             "name": name,
         }, ensure_ascii=False))

@@ -23,6 +23,29 @@
   -webkit-app-region: no-drag;
 }
 
+.app-header-navigation {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.app-header-navigation-button.purr-button {
+  color: var(--text-secondary);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+
+  &:hover:not(:disabled) {
+    color: var(--text-primary);
+    border-color: transparent;
+    background: var(--bg-hover-zone);
+    box-shadow: none;
+  }
+
+  .purr-icon { font-size: 14px; }
+}
+
 .app-header-center {
   display: flex;
   align-items: center;

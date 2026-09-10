@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+import asyncio
+from ipaddress import ip_address
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 
@@ -11,6 +16,7 @@ from fastapi import APIRouter, Query, Request, Response
 
 from application.project_backup import (
     BACKUP_EXTENSION,
+    BACKUP_FORMAT,
     ProjectBackupError,
     build_project_backup,
     database_stats,
@@ -22,10 +28,50 @@ from dependencies import get_db
 router = APIRouter(tags=["files"])
 
 
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _open_database_directory(directory: Path) -> None:
+    if sys.platform == "win32":
+        os.startfile(str(directory))
+    else:
+        command = "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.run(
+            [command, str(directory)],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+
+@router.post("/database/open-directory")
+async def open_database_directory(request: Request):
+    if (
+        not request.client
+        or not _is_loopback(request.client.host)
+        or not _is_loopback(request.url.hostname or "")
+    ):
+        return {"success": False, "error": "仅支持在后端所在电脑上打开数据库目录"}
+    try:
+        directory = (await get_db().get_connected_db_path()).parent
+        if not directory.is_dir():
+            return {"success": False, "error": "数据库目录不存在"}
+        await asyncio.to_thread(_open_database_directory, directory)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return {"success": False, "error": "无法打开数据库目录，请确认本机文件管理器可用"}
+    return {"success": True}
+
+
 @router.get("/database/info")
 async def get_database_info():
     db = get_db()
-    db_path = str(db.get_db_path())
+    db_path = str(await db.get_connected_db_path())
 
     books = await db.fetch_all("SELECT id FROM books")
     book_count = len(books)
@@ -73,10 +119,9 @@ async def export_database():
     resource = _memory_resource()
     try:
         async with _memory_storage(resource, db.get_db_path().parent) as root:
-            database = await db.export_to_buffer()
-            if not database:
+            buf = await db.export_with_resources(lambda database: build_project_backup(database, root, db.get_db_path().parent / "writing-library", db.get_db_path().parent / "creation-materials"))
+            if not buf:
                 return {"success": False, "error": "database_unavailable"}
-            buf = build_project_backup(database, root)
     except ProjectBackupError as error:
         return {"success": False, "error": error.code}
     db_path = str(db.get_db_path())
@@ -88,7 +133,7 @@ async def export_database():
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-PurrTypos-Db-Path": db_path,
             "X-PurrTypos-Backup-Size": str(len(buf)),
-            "X-PurrTypos-Backup-Format": "purrtypos.full-backup/v1",
+            "X-PurrTypos-Backup-Format": BACKUP_FORMAT,
         },
     )
 
@@ -137,6 +182,8 @@ async def import_database(
                     db,
                     database_path=extracted.database_path,
                     component_path=extracted.component_path,
+                    technique_path=extracted.technique_path,
+                    material_path=extracted.material_path,
                     data_dir=data_dir,
                 )
         if resource is not None:
@@ -194,24 +241,34 @@ async def _replace_project_data(
     database_path: Path,
     component_path: Path | None,
     data_dir: Path,
+    technique_path: Path | None = None,
+    material_path: Path | None = None,
 ) -> None:
-    component_root = data_dir / "memory-component-v1"
-    previous_root = data_dir / (
-        f"memory-component-v1.before-import-{time.time_ns()}"
-    )
-    moved_previous = False
-    installed_component = False
-    try:
-        if component_root.exists():
-            component_root.replace(previous_root)
-            moved_previous = True
-        if component_path is not None:
-            shutil.copytree(component_path, component_root)
-            installed_component = True
-        await db.import_from_buffer(database_path.read_bytes())
-    except BaseException:
-        if installed_component and component_root.exists():
-            shutil.rmtree(component_root)
-        if moved_previous and previous_root.exists():
-            previous_root.replace(component_root)
-        raise
+    from infrastructure.persistence.writing.technique_file_store import TechniqueFileStore
+    store = TechniqueFileStore(data_dir / "writing-library")
+
+    @contextmanager
+    def install():
+        with store.barrier():
+            moved = []
+            installed = []
+            try:
+                for name, incoming in [("memory-component-v1", component_path), ("writing-library", technique_path), ("creation-materials", material_path)]:
+                    active = data_dir / name
+                    previous = data_dir / f"{name}.before-import-{time.time_ns()}"
+                    if active.exists():
+                        active.replace(previous)
+                        moved.append((active, previous))
+                    if incoming is not None:
+                        incoming.replace(active)
+                        installed.append(active)
+                yield
+            except BaseException:
+                for active in reversed(installed):
+                    if active.exists():
+                        shutil.rmtree(active)
+                for active, previous in reversed(moved):
+                    previous.replace(active)
+                raise
+
+    await db.import_from_buffer(database_path.read_bytes(), resource_install=install)

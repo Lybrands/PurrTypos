@@ -456,7 +456,7 @@ export default function EditorPanel({
         )}
         {!chapterId ? (
           <PurrEmpty image={false} description={
-            <><p>从导演笔记本选择章节</p><small>点击左侧「章节」分组中的章节可切换，输入 <kbd>\</kbd> 可唤起 AI 助手</small></>
+            <><p>从导演笔记本选择章节</p><small>点击左侧「章节」分组中的章节可切换，输入 <kbd>/</kbd> 可唤起 AI 助手</small></>
           } className="editor-empty" />
         ) : (
           <>
@@ -466,7 +466,7 @@ export default function EditorPanel({
               value={content}
               onChange={handleContentChange}
               onKeyTrigger={handleKeyTrigger}
-              placeholder={`开始写作「${chapterTitle}」... 提示：输入 \\ 可唤起 AI 助手`}
+              placeholder={`开始写作「${chapterTitle}」... 提示：输入 / 可唤起 AI 助手`}
               className="editor-lexical-wrap"
               onLexicalEditor={onLexicalEditor}
               onSelectionChange={inlineEditEnabled ? handleSelectionChange : undefined}

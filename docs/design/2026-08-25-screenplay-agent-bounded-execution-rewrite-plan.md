@@ -835,7 +835,7 @@ version 在持久化数据中对应多套提示词、工具或 DAG 语义。
 
 最初 PurrTypos SQLite 宿主没有持久化上述 Run lineage 和 Root journal sequence，且
 `SqliteRunRepository` 没有兑现 `requested_run_id`，完整检查因此在共享宿主适配测试中失败。
-经用户明确批准扩展数据库边界后，已完成以下独立兼容迁移：
+已完成以下独立兼容迁移：
 
 - `ai_agent_runs` 持久化并冻结 Root/Agent/Parent identity 与 Agent Tree lease receipt；
 - 历史 Root Run 回填为自有 scope，已有合法 Child lineage 保留，旧 delegation/role/depth
@@ -906,7 +906,7 @@ Review 的单维度 issue 数量上限确定为当前集唯一 scene ID 数量�
 ### Phase 7：完整回归与发布前验收
 
 - 运行目标测试、剧本验收、架构门禁和后端完整测试；
-- 再次审计活动 recipe v5 Task，并得到用户明确确认后重启当前无 reload 的后端；
+- 部署前检查活动 recipe v5 Task；无 reload 的后端需要重启以加载代码；
 - 使用真实 Provider 手工执行一个十章改编到结构 Candidate 的完整流程；
 - 检查 Run/Unit/Artifact/Revision/source receipt/canonical output；
 - 不自动接受 Candidate，不修改用户现有 Head。
@@ -1132,49 +1132,17 @@ git diff --check
 | Fragment 一致性 | 并行输出可能命名不一致 | index 冻结身份，fragment 不得改 key/title，最终 validator 校验 |
 | 摘要损失细节 | 逐章 digest 可能丢失后续需要的信息 | 保存 source refs，允许按精确引用再次调用短读取工具 |
 | 活动 v5 Task | 新 executor 不能安全猜测旧 recipe 语义 | 上线前审计并通过应用接口完成或明确取消，不保留静默 fallback |
-| 工作区已有改动 | 后续对话可能覆盖用户现有修改 | 实施前重读 diff，按 Phase 小步 patch，不清理无关文件 |
 | Provider 差异 | reasoning/token/工具行为不同 | scripted 合同测试 + 用户配置的真实 Provider 手工验收 |
 
-## 18. 反证审查结果
-
-本文已经逐项排除以下错误：
-
-- 没有把 `run_609...` 误判为网络静默或无输出；
-- 没有把 PurrA deadline 误写为根因；
-- 没有声称 Planner 当前生成了十几个公开步骤；
-- 没有依赖 `delegateToAgents` 自动触发；
-- 没有把只读 delegate 当成正式 Candidate writer；
-- 没有重写已经按集、场景、维度正确拆分的后半程 DAG；
-- 没有直接删除历史结构中的 `hooks` section；
-- 没有把未校准的 token 数字写成已验证结论；
-- 没有把“每章一个 Run”误当成整个 Operation 已经有界；
-- 没有要求修改 PurrA、数据库 Schema 或前端状态机；
-- 没有把 fake gateway 当成真实 Provider 证明；
-- 本文最初制定时没有授权生产代码修改、依赖安装、进程重启或数据库写入；后续 Phase 均在
-  用户逐阶段确认后实施，Phase 7 真实 Provider 验收也在明确授权后执行。
+## 18. 验收限制
 
 Phase 0 至 Phase 7 执行后仍未关闭的变量：
 
 1. 本地 PurrA 0.4.0 的 `RunSnapshot` 稳定导出，以及正式发布版本与
    `backend/requirements-purra.txt` 的版本对齐；
-2. 后续对话或发布验收开始时 PurrA 的实际导入路径、版本和活动任务状态；
+2. 发布验收时 PurrA 的实际导入路径、版本和活动任务状态；
 3. 当前一次真实项目通过不能替代更广泛模型/项目样本的质量评估；本次结构正文只完成了
    schema、来源、持久化和流程验收，没有由自动指标证明其文学质量。
 
 `series_arc:index` cap、structure reasoning、后续 index/fragment 工具选择、source receipts、
 完整 deliverable 和 token 分布已由本次真实 Turn 实测关闭，不再列为 Phase 7 阻断。
-
-## 19. 后续对话启动清单
-
-后续对话执行本文时，应先：
-
-1. 阅读本文全文；
-2. 读取 `AGENTS.md` 和当时适用的 skills；
-3. 查看 `git status --short` 和所有相关文件 diff；
-4. 验证 PurrA 实际导入路径；
-5. 查询活动 screenplay Long Task 和当前后端进程；
-6. 从 Phase 0 开始，不跳过事故回放和 cap 测量；
-7. 每个 Phase 结束先运行目标测试和 `git diff --check`；
-8. 只有用户明确确认后才进入下一 Phase、重启后端或运行真实 Provider 手工验收；
-9. 不自动接受生成的 Candidate，不修改现有 Head；
-10. 所有实现结论必须区分确定性测试、持久化证据和真实 Provider 证据。

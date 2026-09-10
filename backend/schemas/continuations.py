@@ -11,23 +11,16 @@ class CanonPreviewRequest(BaseModel):
     forkSectionId: str = Field(min_length=1, max_length=200)
 
 
-class ContinuationMethodBindingRequest(BaseModel):
-    bindingType: Literal["method", "scheme"]
-    revisionId: str = Field(min_length=1, max_length=200)
-
-
 class CreateContinuationRequest(CanonPreviewRequest):
     title: str = Field(min_length=1, max_length=200)
     expectedSnapshotDigest: str = Field(min_length=71, max_length=71)
     enableVolume: bool = False
-    writingMethodBindings: list[ContinuationMethodBindingRequest] = Field(
-        default_factory=list,
-        max_length=100,
-    )
+    operationId: str = Field(min_length=1, max_length=200)
+    allowWithoutTechniques: bool = False
+    useSourceTechniques: bool = True
 
 
 __all__ = [
     "CanonPreviewRequest",
-    "ContinuationMethodBindingRequest",
     "CreateContinuationRequest",
 ]

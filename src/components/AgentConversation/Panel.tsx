@@ -238,6 +238,7 @@ export default function AgentConversationPanel({
           ) : null}
           supplementaryContent={<QueuedSubmissions controller={controller} />}
           commands={extensions?.composerCommands}
+          actionMenu={extensions?.composerActionMenu}
           footer={(
             <ComposerFooter
               controller={controller}

@@ -1,14 +1,14 @@
 import { services } from '@/services'
 import React from 'react'
+import { useMaterialRefresh } from './useMaterialRefresh'
 import { AiChatIcon, EditIcon, HistoryIcon, ImportIcon, PaperclipIcon, PlusIcon } from '@/purr-components'
-import { PurrButton, PurrModal, PurrPopconfirm, PurrSpace, PurrTooltip, PurrTypography } from '@/purr-components'
+import { PurrCollapse, PurrButton, PurrModal, PurrPopconfirm, PurrSpace, PurrTooltip, PurrTypography } from '@/purr-components'
 import KnowledgeMarkdownEditor, {
   appendImportedMarkdown,
 } from '@/components/KnowledgeMarkdownEditor'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import { useWorkspace } from '../WorkspaceContext'
 import type { EntityId, StoryBackgroundAttachment } from '../../types'
-import { getStoryBackground } from '../utils'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
@@ -20,7 +20,10 @@ interface StoryBackgroundTabProps {
 
 export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) {
   const { message } = useAppFeedback()
+  const [loadError, setLoadError] = React.useState('')
   const { workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
+  const [baseRevision, setBaseRevision] = React.useState<string>()
+  const [inheritedBaseline, setInheritedBaseline] = React.useState('')
   const [content, setContent] = React.useState('')
   const [attachments, setAttachments] = React.useState<StoryBackgroundAttachment[]>([])
   const [editing, setEditing] = React.useState(false)
@@ -37,15 +40,20 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     setLoading(true)
     try {
       const [bg, attRes] = await Promise.all([
-        getStoryBackground(bookId),
+        services.storyBackground.getStoryBackground({ bookId }),
         services.storyBackground.getStoryBackgroundAttachments({ bookId }),
       ])
-      setContent(bg?.content ?? '')
+      setLoadError(bg.success ? '' : bg.error || '无法读取资料')
+      setContent(bg.success ? bg.data?.content ?? '' : '')
+      setBaseRevision(bg.data?.baseRevision)
+      setInheritedBaseline(bg.success ? bg.data?.inheritedBaseline || '' : '')
       setAttachments(attRes.success && Array.isArray(attRes.data) ? attRes.data : [])
     } finally {
       setLoading(false)
     }
   }, [bookId])
+
+  useMaterialRefresh(loadContent, editing)
 
   React.useEffect(() => {
     loadContent()
@@ -80,10 +88,11 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     const md = draftContent
     setLoading(true)
     try {
-      const res = await services.storyBackground.saveStoryBackground({ bookId, content: md })
+      const res = await services.storyBackground.saveStoryBackground({ bookId, content: md, baseRevision })
       if (res.success) {
         setContent(md)
         setEditing(false)
+        await loadContent()
         message.success('已保存')
       } else {
         message.error(res.error || '保存失败')
@@ -91,7 +100,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     } finally {
       setLoading(false)
     }
-  }, [bookId, draftContent, message])
+  }, [bookId, draftContent, message, baseRevision, loadContent])
 
   const handleCancel = React.useCallback(() => {
     setEditing(false)
@@ -190,6 +199,8 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     )
   }
 
+  if (loadError && !editing) return <p role="alert">{loadError} <PurrButton onClick={() => void loadContent()}>重新读取</PurrButton></p>
+
   if (activeDiffSession) {
     return (
       <div className="story-background-tab story-background-diff-wrap">
@@ -272,7 +283,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
     )
   }
 
-  if (!content.trim()) {
+  if (!content.trim() && !inheritedBaseline) {
     return (
       <div className="story-background-tab">
         <div
@@ -323,6 +334,8 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
           </div>
         </div>
         <div className="story-background-content story-background-markdown">
+          {inheritedBaseline && <PurrCollapse size="small" defaultActiveKeys={["baseline"]} items={[{key: "baseline", label: "原作背景 · 只读", children: <MarkdownWithSearch content={inheritedBaseline} searchQuery={workspaceSearchQuery} />}]} />}
+          {inheritedBaseline && <h3>本书后续发展</h3>}
           <MarkdownWithSearch content={content || ''} searchQuery={workspaceSearchQuery} />
         </div>
         <PurrModal

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, replace
 from uuid import uuid4
 
+from purra.json_values import thaw_json_mapping
 from purra.context_budget import estimate_json_tokens
 from purra.context_strategies import ContextStrategy
 from purra.contracts import (
@@ -36,6 +38,7 @@ from purra.long_tasks import (
 )
 from purra.ports import CancellationSignal
 from purra.recovery import RecoveryPolicy
+from purra.recovery import RecoveryCause
 from purra.task_admission import (
     ExecutionMode,
     LongTaskExecutionStatus,
@@ -114,6 +117,8 @@ class _NovelAnalysisExecutionStateFactory:
             "analysisSchemaVersion": context.schema_version,
             "toolAccess": "source_read_only",
             "interactionKind": context.interaction_kind,
+            "analysisArtifactRef": context.analysis_artifact_ref,
+            "commandId": context.command_id,
             "unitInput": context.unit_input,
             "analysisInputProvided": context.interaction_kind == "unit",
         })
@@ -121,6 +126,7 @@ class _NovelAnalysisExecutionStateFactory:
 
 class _NovelAnalysisContextProvider:
     def __init__(self, db=None) -> None:
+        self._db = db
         self._artifacts = NovelAnalysisArtifactStore(db) if db is not None else None
 
     async def build_context(
@@ -166,6 +172,12 @@ class _NovelAnalysisContextProvider:
                 "TaskSpec.operation 必须为 analyze，target 必须为空",
             ],
         }
+        if context.interaction_kind == "follow_up":
+            policy["rules"] = policy["rules"][:3] + [
+                "这是普通追问，只回答当前问题，不启动完整分析、不生成或修改正式分析结果。",
+                "可用 listAnalysisSourceSections 查看目录，再用 readAnalysisSourceSection 按位置读取原文。",
+                "没有完整分析结果时根据原文回答，区分证据和推测，不声称已有分析结论。",
+            ]
         text = json.dumps(policy, ensure_ascii=False, separators=(",", ":"))
         blocks.append(
             ContextBlock(
@@ -175,8 +187,13 @@ class _NovelAnalysisContextProvider:
                 untrusted=False,
             )
         )
-        if context.interaction_kind == "follow_up":
-            if self._artifacts is None or not context.analysis_artifact_ref:
+        if context.interaction_kind == "follow_up" and self._db is not None:
+            from application.novel_analysis_progress import progress_context
+            progress = await progress_context(self._db, context.source_revision_id, context.command_id)
+            blocks.append(ContextBlock(name="novel_analysis_saved_progress", content=json.dumps(progress, ensure_ascii=False),
+                token_count=estimate_json_tokens(progress), untrusted=False))
+        if context.interaction_kind == "follow_up" and context.analysis_artifact_ref:
+            if self._artifacts is None:
                 raise ValueError("novel analysis follow-up context is unavailable")
             artifact = await self._artifacts.require(
                 context.analysis_artifact_ref
@@ -243,19 +260,65 @@ class NovelAnalysisDomainAdapter:
     )
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_run_generation_tokens=None,
-        max_model_rounds=6,
+        max_model_rounds=16,
         max_progress_rounds=8,
         provider_invocation_timeout_ms=600_000,
         root_run_timeout_ms=7_200_000,
     )
-    recovery_policy: RecoveryPolicy = RecoveryPolicy()
+    recovery_policy: RecoveryPolicy = RecoveryPolicy().with_overrides({
+        RecoveryCause.TOOL_INPUT_INVALID: 3,
+    })
 
 
 class _NovelAnalysisDispatcher(RecipeLongTaskDispatcher):
+    _execution_failure_handler = None
+
+    def set_execution_failure_handler(self, handler):
+        self._execution_failure_handler = handler
+
     async def execute(self, task_id, *, run_id, observer, signal=None):
-        result = await super().execute(
-            task_id, run_id=run_id, observer=observer, signal=signal,
-        )
+        from purra.cancellation import ExecutionStopSignal
+        stop = ExecutionStopSignal(signal)
+        failure_recorded = False
+
+        async def record_failure(error):
+            nonlocal failure_recorded
+            if failure_recorded:
+                return
+            failure_recorded = True
+            stop.set("novel_analysis_dispatch_failed")
+            async def settle():
+                task = await self._long_tasks.load(task_id)
+                if task is not None and task.status.value in {"pending", "running"}:
+                    await self._long_tasks.pause(task_id, reason_code="novel_analysis_dispatch_failed")
+                if self._execution_failure_handler is not None:
+                    await self._execution_failure_handler(run_id, error)
+
+            # The consumer cancels the producer after a failed acknowledgement.
+            # Finish the checkpoint before allowing that cancellation to unwind.
+            settlement = asyncio.create_task(settle())
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError:
+                await settlement
+                raise
+
+        async def guarded_observer(update):
+            try:
+                await observer(update)
+            except Exception as error:
+                await record_failure(error)
+                raise
+
+        try:
+            result = await super().execute(
+                task_id, run_id=run_id, observer=guarded_observer, signal=stop,
+            )
+        except Exception as error:
+            await record_failure(error)
+            raise
+        finally:
+            stop.close()
         if result.status is not LongTaskExecutionStatus.COMPLETED:
             return result
         units = await self._long_tasks.list_units(task_id)
@@ -296,7 +359,9 @@ class NovelAnalysisAgentProfile:
             request.domain_context
         )
         if context.interaction_kind == "unit":
-            return request
+            return replace(request, model=replace(request.model, options={
+                **thaw_json_mapping(request.model.options), "parallel_tool_calls": False,
+            }))
         sections = await self._source.list_bound_sections(
             context.source_revision_id,
             context.section_ids,
@@ -499,9 +564,9 @@ def _bounded_follow_up_projection(artifact, token_budget: int) -> dict:
         "facts": facts,
         "craftCards": cards,
         **({"storyOverview": story_overview} if story_overview else {}),
+        "techniqueResult": artifact.get("techniqueResult"),
         "writingSkill": clipped((artifact.get("writingSkill") or {}).get("markdown", ""), min(8000, budget)),
-        "skillReviewStatus": artifact.get("skillReviewStatus"),
-        "scopeNotice": "这是当前分析及写作方法的只读快照，不是完整来源正文。追问不修改保存的方法。",
+        "scopeNotice": "这是当前分析的只读摘要及技法引用。回答技法正文问题时，先用 readAnalysisTechniqueFile 读取 SKILL.md，再按入口条件读取必要辅助文件。材料不足时没有技法文件。追问不修改已保存技法。",
     }
     while estimate_json_tokens(result) > budget and (len(facts) > 1 or len(cards) > 1):
         if len(facts) >= len(cards) and len(facts) > 1:

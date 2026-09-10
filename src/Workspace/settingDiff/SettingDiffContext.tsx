@@ -33,6 +33,7 @@ export interface MetaDiffOp {
 }
 
 export interface SettingDiffSession {
+  baseRevision?: string
   proposalId: string
   sessionKey: string
   kind: SettingKind
@@ -233,6 +234,7 @@ export function SettingDiffProvider({
         source,
         startedAt,
         resolutionTarget: proposal.resolutionTarget,
+        baseRevision: proposal.baseRevision,
       }
 
       if (totalLen < DIFF_ASYNC_THRESHOLD) {
@@ -280,6 +282,7 @@ export function SettingDiffProvider({
           source,
           startedAt,
           resolutionTarget: proposal.resolutionTarget,
+        baseRevision: proposal.baseRevision,
         },
       }))
       if (!proposal.restoreOnly) {
@@ -305,6 +308,7 @@ export function SettingDiffProvider({
           source,
           startedAt,
           resolutionTarget: proposal.resolutionTarget,
+        baseRevision: proposal.baseRevision,
         },
       }))
       diffParagraphsAsync(beforeContent, proposedContent).then((ops) => {
@@ -607,6 +611,7 @@ export function SettingDiffProvider({
         before,
         after: proposed,
         source: cur.source,
+        baseRevision: cur.baseRevision,
         acceptedSegments: accepted,
         rejectedSegments: rejected,
         resolution,
@@ -627,6 +632,7 @@ export function SettingDiffProvider({
         before,
         after: proposed,
         source: cur.source,
+        baseRevision: cur.baseRevision,
         acceptedSegments: accepted,
         rejectedSegments: rejected,
         resolution,
@@ -645,6 +651,7 @@ export function SettingDiffProvider({
         beforeContent,
         afterContent: proposedContent,
         source: cur.source,
+        baseRevision: cur.baseRevision,
         acceptedSegments: accepted,
         rejectedSegments: rejected,
         resolution,

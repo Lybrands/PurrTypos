@@ -3,6 +3,7 @@ import { PurrButton } from "@/purr-components";
 import type { AiTaskPlan } from "../../agent-runtime";
 import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
 import ToolDiagnosticsCard from "./ToolDiagnosticsCard";
+import ViewportBlock from "../ViewportBlock";
 import DiagnosticText, { characterCount } from "./DiagnosticText";
 import type {
   AiErrorReport,
@@ -204,10 +205,10 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
           </>
         )}
         {tool.argumentsValue !== undefined && (
-          <DiagnosticText label="参数" text={formatJson(tool.argumentsValue)} />
+          <DiagnosticText label="参数" value={tool.argumentsValue} />
         )}
         {tool.result !== undefined && (
-          <DiagnosticText label="结果" text={formatJson(tool.result)} />
+          <DiagnosticText label="结果" value={tool.result} />
         )}
         {tool.argumentsValue === undefined && tool.result === undefined && (
           <div className="ai-dev-inspector__notice">
@@ -414,10 +415,7 @@ function ModelCallRow({
           : <span>未传入工具</span>}
       </div>
       {call.parameters ? (
-        <details className="ai-dev-inspector__model-parameters">
-          <summary>调用前请求配置（已脱敏） <small>{characterCount(formatJson(call.parameters)).toLocaleString()} 字符</small></summary>
-          <pre>{formatJson(call.parameters)}</pre>
-        </details>
+        <DiagnosticText label="调用前请求配置（已脱敏）" value={call.parameters} />
       ) : null}
     </details>
   );
@@ -730,15 +728,15 @@ export function ModelInputDiagnosticsCard({
               {call.round != null ? <span>round {call.round}</span> : null}
               {call.attempt != null ? <span>attempt {call.attempt}</span> : null}
               {call.revision != null ? <span>revision {call.revision}</span> : null}
-              <span>{call.messages.length} 条消息 · {call.messages.reduce((sum, message) => sum + characterCount(formatJson(message)), 0).toLocaleString()} 字符（诊断序列化）</span>
+              <span>{call.messages.length} 条消息</span>
             </summary>
             {call.novelKnowledge?.length ? <details><summary>创作资料输入凭据 · {call.novelKnowledge.length} 个片段</summary>{call.novelKnowledge.map((receipt) => <div key={receipt.evidenceId}>
               <strong>{receipt.metadata.title}</strong> · 修订 {receipt.metadata.revision.slice(0, 12)} · {receipt.metadata.reasons.join(' / ')}
-              <DiagnosticText label="适用章节与知情范围" text={formatJson(receipt.metadata.scope)} />
+              <DiagnosticText label="适用章节与知情范围" value={receipt.metadata.scope} />
               <PurrButton onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))}>查看资料来源</PurrButton>
             </div>)}</details> : null}
             {call.sdkRequest ? (
-              <DiagnosticText label="SDK 参数核验（已脱敏）" text={formatJson(call.sdkRequest)} />
+              <DiagnosticText label="SDK 参数核验（已脱敏）" value={call.sdkRequest} />
             ) : null}
             {call.captured ? (
               <div className="ai-dev-inspector__messages">
@@ -748,7 +746,7 @@ export function ModelInputDiagnosticsCard({
                     <DiagnosticText
                       key={`${call.eventRowId}:${messageIndex}`}
                       label={`#${messageIndex + 1} · ${role}`}
-                      text={formatJson(message)}
+                      value={message}
                     />
                   );
                 })}
@@ -885,23 +883,14 @@ function RunTechnicalDetails({
           </details>
         ) : null}
 
-        <details className="ai-dev-inspector__text-block">
-          <summary>请求参数 <small>{characterCount(formatJson(run.request.meta)).toLocaleString()} 字符</small></summary>
-          <pre>{formatJson(run.request.meta)}</pre>
-        </details>
+        <DiagnosticText label="请求参数" value={run.request.meta} />
 
         {run.request.messages.length > 0 ? (
           <details className="ai-dev-inspector__text-block">
             <summary>入口请求消息 <small>{run.request.messages.length} 条 · 后端处理前</small></summary>
             <div className="ai-dev-inspector__messages">
               {run.request.messages.map((message, index) => (
-                <details
-                  className={`ai-dev-inspector__message ai-dev-inspector__message--${message.role}`}
-                  key={`${message.role}-${index}`}
-                >
-                  <summary><span>{message.role}</span><small>#{index + 1} · {characterCount(formatJson(message.content)).toLocaleString()} 字符</small></summary>
-                  <pre>{formatJson(message.content)}</pre>
-                </details>
+                <DiagnosticText key={`${message.role}-${index}`} label={`#${index + 1} · ${message.role}`} value={message.content} />
               ))}
             </div>
           </details>
@@ -1168,8 +1157,8 @@ function ConversationTimeline({
       </div>
       <div className="ai-dev-inspector__timeline">
         {runs.map((run, index) => (
+          <ViewportBlock key={run.id} id={`diagnostic:${run.id}`} estimate={100} keepMounted>
           <RunTimelineItem
-            key={run.id}
             run={run}
             index={index}
             total={runs.length}
@@ -1177,6 +1166,7 @@ function ConversationTimeline({
             isCurrent={run.id === currentRunId}
             now={isAiDebugRunActive(run) ? now : run.finishedAt ?? run.updatedAt}
           />
+          </ViewportBlock>
         ))}
       </div>
     </div>
@@ -1192,8 +1182,8 @@ export default function AiDevInspector() {
   );
   return visible ? <VisibleAiDevInspector /> : (
     <button type="button" className="ai-dev-inspector-launcher"
-      aria-label="打开 AI 诊断" onClick={() => setAiDebugInspectorVisible(true)}>
-      AI 诊断
+      aria-label="打开 AI 对话诊断" onClick={() => setAiDebugInspectorVisible(true)}>
+      AI 对话诊断
     </button>
   );
 }
@@ -1284,7 +1274,7 @@ function VisibleAiDevInspector() {
     <aside
       className={`ai-dev-inspector ${collapsed ? "ai-dev-inspector--collapsed" : ""}`}
       style={{ left: position.x, top: position.y }}
-      aria-label="当前 AI 任务诊断"
+      aria-label="当前 AI 对话诊断"
     >
       <header
         className="ai-dev-inspector__header"
@@ -1296,7 +1286,7 @@ function VisibleAiDevInspector() {
         <div className="ai-dev-inspector__title">
           <span className={`ai-dev-inspector__live-dot ai-dev-inspector__live-dot--${status}`} />
           <div>
-            <strong>{collapsed ? "AI 诊断" : "当前任务诊断"}</strong>
+            <strong>{collapsed ? "AI 对话诊断" : "当前 AI 对话诊断"}</strong>
             <small>{currentTurn?.source ?? "等待任务"} · {STATUS_LABELS[status]}</small>
           </div>
         </div>
@@ -1315,7 +1305,7 @@ function VisibleAiDevInspector() {
             {collapsed ? "▣" : "—"}
           </button>
           {!collapsed ? (
-            <button type="button" onClick={() => setAiDebugInspectorVisible(false)} aria-label="关闭调试面板" title="下次提交新任务时打开">
+            <button type="button" onClick={() => setAiDebugInspectorVisible(false)} aria-label="关闭 AI 对话诊断" title="下次提交新任务时打开">
               ×
             </button>
           ) : null}

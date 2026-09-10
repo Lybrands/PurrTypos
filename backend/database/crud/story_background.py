@@ -5,11 +5,13 @@ Story background & attachments CRUD – port from database.js.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from database.crud.material_authority import material_crud
 
 if TYPE_CHECKING:
     from database.connection import DatabaseConnection
 
 
+@material_crud("background", "read")
 async def get_story_background(
     db: DatabaseConnection, book_id: str
 ) -> dict[str, Any] | None:
@@ -18,6 +20,7 @@ async def get_story_background(
     )
 
 
+@material_crud("background", "update")
 async def save_story_background(
     db: DatabaseConnection, book_id: str, content: str
 ) -> None:

@@ -42,8 +42,10 @@ class RepositoryWritingContextSource:
         memory_reranker: MemoryCandidateReranker | None = None,
         run_id: str | None = None,
         knowledge=None,
+        technique_access=None,
     ):
         self._knowledge = knowledge
+        self._technique_access = technique_access
         self._associated_repository = associated_repository
         self._memory_operations = memory_operations
         self._source_repository = source_repository
@@ -68,7 +70,45 @@ class RepositoryWritingContextSource:
             memory_reranker=reranker,
             run_id=run_id,
             knowledge=self._knowledge,
+            technique_access=self._technique_access,
         )
+
+    async def build_techniques(self, context, token_budget):
+        from application.writing_technique_runs import WritingTechniqueRuns
+        from domains.writing.techniques import TechniqueError
+        from purra.context_budget import estimate_json_tokens
+        from purra.evidence import ContextEvidenceReceipt
+        import json
+
+        snapshot = dict(context.writing_technique_snapshot or {})
+        if not self._technique_access or not snapshot:
+            return {"content": "", "tokens": 0, "receipts": []}
+        access = self._technique_access
+        runs = WritingTechniqueRuns(access.db)
+        state = await runs.state(self._run_id) if self._run_id else {"automaticRefs": []}
+        resolution = access.resolve(snapshot, state["automaticRefs"])
+        await access.validate(snapshot, selected=resolution["selected"])
+        if self._run_id:
+            await runs.record_budget(self._run_id, token_budget)
+        entries, receipts = [], []
+        for member in resolution["members"]:
+            ref = member["ref"]
+            file = await access.library.read_version_file(ref, "SKILL.md")
+            entries.append({"ref": ref, "path": "SKILL.md", "content": file["content"], "sources": member["sources"]})
+            receipts.append(ContextEvidenceReceipt(evidence_id=f"technique:{ref['id']}:{ref['versionId']}:SKILL.md",
+                context_block="writing_techniques",
+                source="writing_technique/v1", item_id=ref["id"],
+                metadata={"ref": ref, "path": "SKILL.md", "sha256": file["sha256"], "selections": member["sources"]}))
+        if not entries:
+            return {"content": "", "tokens": 0, "receipts": []}
+        content = json.dumps({"entries": entries, "schemes": [{"ref": c["ref"], "composition": c["composition"]}
+            for c in resolution["selected"] if c["ref"]["kind"] == "scheme"]}, ensure_ascii=False)
+        tokens = estimate_json_tokens(content)
+        if tokens > token_budget:
+            raise TechniqueError("file_exceeds_budget", "所选写作技法入口无法完整放入当前上下文，请减少选择")
+        if self._run_id:
+            await runs.mark_entries(self._run_id, [m["ref"] for m in resolution["members"]])
+        return {"content": content, "tokens": tokens, "receipts": receipts}
 
     async def build_memory(
         self,

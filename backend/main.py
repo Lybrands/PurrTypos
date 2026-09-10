@@ -278,7 +278,7 @@ async def lifespan(application: FastAPI):
             setting_entities,
             settings,
             story_memory,
-            writing_methods,
+            writing_techniques,
             novel_sources,
             novel_knowledge,
             story_background,
@@ -302,7 +302,7 @@ async def lifespan(application: FastAPI):
         application.include_router(setting_diff.router, prefix="/api")
         application.include_router(setting_entities.router, prefix="/api")
         application.include_router(story_memory.router, prefix="/api")
-        application.include_router(writing_methods.router, prefix="/api")
+        application.include_router(writing_techniques.router, prefix="/api")
         application.include_router(novel_sources.router, prefix="/api")
         application.include_router(novel_knowledge.router, prefix="/api")
         application.include_router(continuations.router, prefix="/api")

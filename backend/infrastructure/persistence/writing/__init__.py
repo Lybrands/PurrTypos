@@ -9,9 +9,6 @@ from infrastructure.persistence.writing.sqlite_catalog_repository import (
 from infrastructure.persistence.writing.sqlite_story_memory_repository import (
     SqliteStoryMemoryRepository,
 )
-from infrastructure.persistence.writing.sqlite_writing_method_repository import (
-    SqliteWritingMethodRepository,
-)
 from infrastructure.persistence.writing.sqlite_story_memory_recall_repository import (
     SqliteStoryMemoryRecallRepository,
 )
@@ -29,5 +26,4 @@ __all__ = [
     "SqliteStoryMemoryRecallRepository",
     "SqliteStoryMemoryEvolutionRepository",
     "SqliteWritingSourceRepository",
-    "SqliteWritingMethodRepository",
 ]

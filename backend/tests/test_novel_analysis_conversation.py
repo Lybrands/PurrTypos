@@ -24,6 +24,28 @@ from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 from tests.test_novel_analysis import _source
 
 
+async def test_follow_up_reads_only_its_analysis_technique_version(tmp_path):
+    from tests.test_novel_analysis import _candidate_artifact
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        revision = await _source(db)
+        artifact_ref, payload = await _candidate_artifact(db, revision)
+        tool = build_novel_analysis_tool_catalog(db).get('readAnalysisTechniqueFile')
+        state = ExecutionState(domain={'interactionKind': 'follow_up', 'analysisArtifactRef': artifact_ref,
+            'sourceRevisionId': revision['id']})
+        result = await tool.handler(state, {'path': 'SKILL.md'}, asyncio.Event())
+        assert not result.error_code
+        assert json.loads(result.content)['ref']['versionId'] == payload['techniqueResult']['candidate']['versionId']
+        assert result.context_evidence[0].metadata['path'] == 'SKILL.md'
+        denied = await tool.handler(state, {'path': '../SKILL.md'}, asyncio.Event())
+        assert denied.error_code
+        wrong = ExecutionState(domain={**state.domain, 'sourceRevisionId': 'another-source'})
+        assert (await tool.handler(wrong, {}, asyncio.Event())).error_code == 'invalid_reference'
+    finally:
+        await db.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("submit", "invalid_first"),
@@ -43,6 +65,12 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
         "value": "PRIVATE_FACT_MARKER", "lifecycleStatus": "active",
         "evidence": [{"sectionId": "section-1", "excerpt": "PRIVATE_SOURCE_MARKER"}],
     }], "craftCards": []}
+
+    from application.novel_analysis_source import NovelAnalysisSourceReader
+    async def fixture_section(self, **kwargs):
+        assert kwargs['section_id'] == 'section-1'
+        return {'id': 'section-1', 'ordinal': 0, 'text': 'PRIVATE_SOURCE_MARKER', 'contentDigest': 'fixture'}
+    monkeypatch.setattr(NovelAnalysisSourceReader, 'read_section', fixture_section)
 
     async def bind(run_id):
         bindings.append(run_id)
@@ -113,7 +141,8 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
             context=context, instruction="提取有依据的事实", payload=input_payload,
             signal=asyncio.Event(),
         )
-        assert result == candidate
+        assert result["facts"][0]["value"] == candidate["facts"][0]["value"]
+        assert result["facts"][0]["evidence"][0]["excerpt"] == "PRIVATE_SOURCE_MARKER"
         assert bindings == [run_id]
         assert len(calls) == 2 + int(invalid_first)
         events = await composition.output_repository.list_events(run_id, after_sequence=0, limit=500)
@@ -133,7 +162,7 @@ async def test_analysis_unit_uses_real_tools_and_public_journal_without_json(
         repeated = await models.run_json(
             context=context, instruction="提取有依据的事实", payload=input_payload,
         )
-        assert repeated == (run_id, candidate)
+        assert repeated == (run_id, result)
         assert len(calls) == 2 + int(invalid_first)
     finally:
         await composition.shutdown()
@@ -293,15 +322,16 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
         if not history:
             source = json.loads(next(m["content"].split("\n", 1)[1] for m in messages
                 if m.get("content", "").startswith("Untrusted context block 'novel_analysis_unit_input'")))
-            if source.get("stage"):
-                from tests.support.writing_distillation import stage_result
-                if source["stage"] == "trial_skill":
-                    assert set(source) == {"stage", "writingSkill", "submissionContract"}
-                    assert source["submissionContract"]["tool"] == "submitWritingSkillTrials"
-                    assert "甲" not in json.dumps(source, ensure_ascii=False)
-                candidate = stage_result(source)
+            if source.get("stage") == "aggregate_story":
+                assert "analysisFocus" not in source
+                candidate = {"storyOverview": {"summaryMarkdown": "人物围绕红门行动", "evidence": source["normalizedCandidates"]["facts"][0]["evidence"]}}
+            elif source.get("stage") == "distill_skill":
+                assert source["analysisFocus"] == "核对事实脉络"
+                candidate = {"status": "insufficient_material", "expectedDraftRevision": 0, "expectedTreeDigest": "",
+                    "evidenceRefs": [], "scopeNotes": [], "reason": "测试夹具：该调用仅验证材料不足时仍可正常交付。"}
             elif "sourceEvidence" in source:
-                excerpt = "甲看见一扇红门" if "甲看见" in source["sourceEvidence"]["text"] else "乙关上红门"
+                assert "analysisFocus" not in source
+                excerpt = "甲看见一扇红门" if "甲看见" in "".join(item["excerpt"] for item in source["sourceEvidence"]["excerpts"]) else "乙关上红门"
                 candidate = {"facts": [{
                     "factKind": "event", "subjectKey": "人物", "predicate": "行动", "value": excerpt,
                     "evidence": [{"sectionId": source["sourceBinding"]["sectionId"], "excerpt": excerpt}],
@@ -310,7 +340,7 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
                     candidate["storyOverview"] = {"summaryMarkdown": "人物围绕红门行动", "evidence": candidate["facts"][0]["evidence"]}
             else:
                 candidate = source.get("normalizedCandidates") or source["sectionCandidates"][0]
-                candidate = {"facts": candidate["facts"], "craftCards": candidate["craftCards"]}
+                candidate = {"facts": candidate["facts"], "craftCards": []}
                 if "normalizedCandidates" in source:
                     candidate["storyOverview"] = {"summaryMarkdown": "人物围绕红门行动", "evidence": candidate["facts"][0]["evidence"]}
             tool, args, title = next(name for name in available_tools if name.startswith("submit")), {"result": candidate}, "核对事实的原文依据"
@@ -375,6 +405,14 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
             await service.cancel(active["taskId"])
         await asyncio.wait_for(task, 10)
         view = (await service.list_for_revision(revision["id"]))[0]
+        if cancel:
+            async def wait_for_cancellation_drain():
+                while True:
+                    current = (await service.list_for_revision(revision["id"]))[0]
+                    if all(run["status"] != "running" for run in current["relatedRuns"]):
+                        return current
+                    await asyncio.sleep(0.01)
+            view = await asyncio.wait_for(wait_for_cancellation_drain(), 5)
         assert view["prompt"] == "核对事实脉络"
         recorded_calls = await db.fetch_all(
             "SELECT payload_json FROM ai_agent_run_events "
@@ -444,16 +482,16 @@ async def test_durable_analysis_binds_unit_runs_and_recovers_public_process(
             child = await db.fetch_one("SELECT model_attempt_count FROM ai_agent_runs WHERE binding_namespace='novel_source_analysis.unit'")
             assert child["model_attempt_count"] == 2
         if not cancel and not stream_failure:
-            assert len(view["relatedRuns"]) == (6 if single_source else 9)
+            assert len(view["relatedRuns"]) == (2 if single_source else 4)
             assert view["completedUnits"] == view["totalUnits"]
             if single_source:
-                assert view["totalUnits"] == 9
+                assert view["totalUnits"] == 5
                 counts = await db.fetch_all("SELECT model_attempt_count FROM ai_agent_runs")
-                assert sum(row["model_attempt_count"] for row in counts) == 14
+                assert sum(row["model_attempt_count"] for row in counts) == 6
             assert view["artifactRef"]
             assert view["providerOutputEvents"] > 0
             artifact = await service.get_artifact(view["artifactRef"])
-            assert artifact["storyOverview"]["summaryMarkdown"] == "人物围绕红门行动"
+            assert not artifact.get("storyOverview")
             assert all(item["evidence"] for item in artifact["facts"])
             final_events = [
                 row["chunk"] for row in restored["chunks"]
@@ -500,12 +538,13 @@ async def test_analysis_profile_preserves_resolved_effort_without_model_defaults
             section_ids=('s',), interaction_kind='unit', unit_input={}).to_core_context())
     prepared = await NovelAnalysisAgentProfile(None).prepare_request(request)
     assert prepared.model.options.get('reasoning_effort') == effort
+    assert prepared.model.options['parallel_tool_calls'] is False
 
 
-@pytest.mark.parametrize('stage', ['distill_skill', 'trial_skill', 'revise_skill', 'assess_skill'])
+@pytest.mark.parametrize('stage', ['distill_skill'])
 def test_analysis_unit_exposes_only_current_stage_result_schema(stage):
     from application.novel_analysis_tools import build_novel_analysis_tool_catalog, analysis_submit_tool
-    from domains.writing_distillation import DISTILLATION_STAGES
+    from domains.writing_technique_generation import TECHNIQUE_SUBMISSION_SCHEMA
     from purra.contracts import AgentRunRequest, AgentMessage, ModelRequest
     from purra.json_values import thaw_json_mapping
     catalog = build_novel_analysis_tool_catalog(None)
@@ -514,9 +553,9 @@ def test_analysis_unit_exposes_only_current_stage_result_schema(stage):
         domain_context=NovelAnalysisDomainContext(source_revision_id='r', command_id='c',
             section_ids=('s',), interaction_kind='unit', unit_input={'stage': stage}).to_core_context())
     submit = analysis_submit_tool({'stage': stage})
-    assert catalog.enabled_names(request) == {submit}
+    assert catalog.enabled_names(request) == {submit, 'getTechniqueDraft', 'readTechniqueDraftFile', 'applyTechniqueDraftChanges', 'listAnalysisObservations', 'readAnalysisObservations', 'readAnalysisEvidence', 'listAnalysisEvidence', 'readTechniqueSource'}
     schema = thaw_json_mapping(catalog.get(submit).schema.parameters)
-    assert schema['properties']['result'] == DISTILLATION_STAGES[stage]
+    assert schema['properties']['result'] == TECHNIQUE_SUBMISSION_SCHEMA
 
 
 @pytest.mark.asyncio
@@ -531,7 +570,7 @@ async def test_merged_candidate_rejects_unbound_quote_before_persistence(tmp_pat
         state.run_id = 'test-unit'
         result = await tools['submitNovelAnalysisResult'].handler(state, {'result':{'facts':[], 'craftCards':[],
             'storyOverview':{'summaryMarkdown':'概览','evidence':[{'sectionId':'s1','excerpt':'改写引文'}]}}}, None)
-        assert result.error_code == 'novel_analysis_structured_output_invalid'
+        assert result.error_code == 'tool_input_invalid'
         assert await db.fetch_all('SELECT id FROM ai_agent_artifacts') == []
     finally:
         await db.close()
@@ -539,13 +578,11 @@ async def test_merged_candidate_rejects_unbound_quote_before_persistence(tmp_pat
 
 def test_submission_contract_exposes_complete_nested_fields_from_same_schema():
     from application.novel_analysis_tools import analysis_submission_contract
-    from domains.writing_distillation import SKILL_SCHEMA
+    from domains.writing_technique_generation import TECHNIQUE_SUBMISSION_SCHEMA
     contract = analysis_submission_contract('distill_skill')
     assert contract['completeReplacement'] is True
-    assert contract['requiredFields']['result'] == ['writingSkill','revisionNotes']
-    assert contract['requiredFields']['result.writingSkill'] == list(SKILL_SCHEMA['properties'])
-    assert contract['requiredFields']['result.writingSkill.procedure[]'] == ['action','rationale','check']
-    assert 'result.writingSkill.revisionNotes' not in contract['requiredFields']
+    assert contract['requiredFields']['result'] == TECHNIQUE_SUBMISSION_SCHEMA['required']
+    assert set(contract['requiredFields']) == {'result'}
     assert analysis_submission_contract(None) is None
 
 
@@ -605,4 +642,78 @@ async def test_silent_stage_cannot_submit_until_real_public_chunks_arrive(tmp_pa
         assert 'PRIVATE_' not in json.dumps(public)
     finally:
         await composition.shutdown()
+        await db.close()
+
+
+def test_overview_tool_rejects_rewriting_upstream_analysis():
+    from purra.tools.security import validate_tool_arguments_schema
+    def valid(arguments, schema):
+        return validate_tool_arguments_schema(SimpleNamespace(arguments=arguments, call=SimpleNamespace(name="submitAnalysisOverview")), schema) is None
+    from purra.contracts import AgentRunRequest, AgentMessage, ModelRequest
+    from purra.json_values import thaw_json_mapping
+    from application.novel_analysis_tools import analysis_unit_input_text
+    catalog = build_novel_analysis_tool_catalog(None)
+    request = AgentRunRequest(messages=(AgentMessage(role='user', content='test'),),
+        model=ModelRequest(provider='test', model='test'),
+        domain_context=NovelAnalysisDomainContext(source_revision_id='r', command_id='c',
+            section_ids=('s',), interaction_kind='unit', unit_input={'stage': 'aggregate_story'}).to_core_context())
+    assert catalog.enabled_names(request) == {'submitAnalysisOverview'}
+    schema = thaw_json_mapping(catalog.get('submitAnalysisOverview').schema.parameters)
+    result = {'storyOverview': {'summaryMarkdown': '概览', 'evidence': [{'sectionId': 's', 'excerpt': '原文'}]}}
+    assert valid({'result': result}, schema)
+    for unwanted in ['facts', 'craftCards']:
+        assert not valid({'result': {**result, unwanted: []}}, schema)
+    assert not valid({'result': {}}, schema)
+    contract = json.loads(analysis_unit_input_text({'stage': 'aggregate_story'}))['submissionContract']
+    assert contract['tool'] == 'submitAnalysisOverview'
+    assert contract['requiredFields']['result'] == ['storyOverview']
+
+
+async def test_follow_up_without_artifact_reads_bound_source_only(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        revision = await _source(db)
+        from application.novel_analysis_source import NovelAnalysisSourceReader
+        rows = await NovelAnalysisSourceReader(db).list_bound_sections(revision['id'])
+        context = NovelAnalysisDomainContext(source_revision_id=revision['id'], command_id='question',
+            section_ids=tuple(row['id'] for row in rows), interaction_kind='follow_up')
+        state = ExecutionState(domain={'interactionKind': context.interaction_kind,
+            'sourceRevisionId': context.source_revision_id, 'sectionIds': context.section_ids})
+        catalog = build_novel_analysis_tool_catalog(db)
+        listing = await catalog.get('listAnalysisSourceSections').handler(state, {}, asyncio.Event())
+        assert json.loads(listing.content)[0]['sectionId'] == rows[0]['id']
+        tool = catalog.get('readAnalysisSourceSection')
+        result = await tool.handler(state, {'sectionId': rows[0]['id']}, asyncio.Event())
+        assert json.loads(result.content)['text'] == rows[0]['text_content'][:8000]
+        denied = await tool.handler(state, {'sectionId': 'other-source-section'}, asyncio.Event())
+        assert denied.error_code == 'invalid_reference'
+    finally:
+        await db.close()
+
+
+async def test_final_submission_binds_scope_and_returns_repairable_evidence_error(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        revision = await _source(db)
+        section = revision['sections'][0]
+        row = await db.fetch_one('SELECT text_content FROM novel_source_sections WHERE id=?', [section['id']])
+        state = ExecutionState(domain={'sourceRevisionId': revision['id'], 'sectionIds': [section['id']],
+            'interactionKind': 'unit', 'analysisInputProvided': True, 'unitInput': {'sourceBinding': {
+                'sectionId': section['id'], 'segmentId': 'host', 'startCharacter': 0, 'endCharacter': len(row['text_content'])}}})
+        state.run_id = 'final-scope-test'
+        tool = build_novel_analysis_tool_catalog(db).get('submitNovelAnalysisResult')
+        value = {'facts': [{'factKind': 'event', 'subjectKey': '甲', 'predicate': '看见', 'value': '门',
+            'evidence': [{'excerpt': '错误引文', 'segmentStartCharacter': 100}]}], 'craftCards': []}
+        result = await tool.handler(state, {'result': value}, None)
+        from purra.contracts import ToolEffectState
+        assert result.error_code == 'tool_input_invalid'
+        assert result.effect_state == ToolEffectState.NOT_STARTED
+        assert 'facts[0].evidence[0]' in result.content
+        assert await db.fetch_all('SELECT id FROM ai_agent_artifacts') == []
+        value['facts'][0]['evidence'][0]['excerpt'] = '甲看见一扇红门。'
+        result = await tool.handler(state, {'result': value}, None)
+        assert result.error_code is None
+    finally:
         await db.close()

@@ -1,5 +1,7 @@
+import Markdown from '../../components/Markdown'
 import { services } from '@/services'
 import React from 'react'
+import { useMaterialRefresh } from './useMaterialRefresh'
 import {
   PlusIcon,
   DeleteIcon,
@@ -8,7 +10,7 @@ import {
   AiChatIcon,
   CompassIcon,
 } from '@/purr-components'
-import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSegmented, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
+import { PurrCollapse, PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSegmented, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
 import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
 import type { EntityId, SettingEntity, SettingEntityType } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
@@ -66,6 +68,7 @@ export default function WorldEntityTab({
   onFocusEntityHandled,
 }: WorldEntityTabProps) {
   const { message } = useAppFeedback()
+  const [loadError, setLoadError] = React.useState('')
   const [entities, setEntities] = React.useState<SettingEntity[]>([])
   const [typeFilter, setTypeFilter] = React.useState<SettingEntityType | 'all'>('all')
   const [editModalOpen, setEditModalOpen] = React.useState(false)
@@ -87,8 +90,11 @@ export default function WorldEntityTab({
   const loadEntities = React.useCallback(async () => {
     if (bookId == null) return
     const res = await services.settingEntities.getSettingEntities({ bookId })
-    if (res.success) setEntities(res.data ?? [])
+    setLoadError(res.success ? '' : res.error || '无法读取资料')
+    setEntities(res.success ? res.data || [] : [])
   }, [bookId])
+
+  useMaterialRefresh(loadEntities)
 
   React.useEffect(() => {
     loadEntities()
@@ -149,7 +155,7 @@ export default function WorldEntityTab({
       const res = editTarget
         ? await services.settingEntities.updateSettingEntity({
             id: editTarget.id,
-            data: { entityType: draftType, name, tags: draftTags.join(', '), profileMd: draftProfileMd },
+            data: { baseRevision: editTarget.baseRevision, entityType: draftType, name, tags: draftTags.join(', '), profileMd: draftProfileMd },
           })
         : await services.settingEntities.createSettingEntity({
             bookId,
@@ -180,7 +186,7 @@ export default function WorldEntityTab({
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
-    const res = await services.settingEntities.deleteSettingEntity({ id: deleteTarget.id })
+    const res = await services.settingEntities.deleteSettingEntity({ id: deleteTarget.id, baseRevision: deleteTarget.baseRevision })
     if (res.success) {
       message.success('已删除')
       setDeleteTarget(null)
@@ -202,6 +208,8 @@ export default function WorldEntityTab({
       </div>
     )
   }
+
+  if (loadError && !editModalOpen) return <p role="alert">{loadError} <PurrButton onClick={() => void loadEntities()}>重新读取</PurrButton></p>
 
   return (
     <div className="character-tab world-entity-tab">
@@ -231,7 +239,7 @@ export default function WorldEntityTab({
           </div>
         ) : (
           visibleEntities.map((ent, index) => {
-            const preview = profilePreview(ent.profile_md)
+            const preview = profilePreview([ent.inheritedBaseline, ent.profile_md].filter(Boolean).join("\n"))
             const isFocus = focusEntityId === ent.id
             const hasDiff = diff.hasSession(settingSessionKey('entity', ent.id))
             return (
@@ -264,6 +272,7 @@ export default function WorldEntityTab({
                     </div>
                   )}
                 </div>
+
                 <div className="character-card-actions">
                   <PurrButton
                     type="text"
@@ -356,6 +365,7 @@ export default function WorldEntityTab({
             className="character-edit-tags"
           />
         </div>
+        {editTarget?.inheritedBaseline && <><PurrCollapse size="small" defaultActiveKeys={["baseline"]} items={[{key: "baseline", label: "原作资料 · 只读", children: <Markdown>{editTarget.inheritedBaseline}</Markdown>}]} /><p>本书后续发展</p></>}
         <KnowledgeMarkdownEditor
           documentKey={`world-entity:${editTarget?.id ?? 'new'}`}
           value={draftProfileMd}

@@ -768,10 +768,42 @@ class AgentComposition:
 
     def create_long_task_dispatcher(self, profile_id: str, *, executor=None):
         profile = self.profile(profile_id)
-        return profile.create_long_task_dispatcher(
+        dispatcher = profile.create_long_task_dispatcher(
             long_task_repository=self._long_task_repository,
             executor=executor,
         )
+        configure = getattr(dispatcher, "set_execution_failure_handler", None)
+        if callable(configure):
+            configure(self._settle_dispatch_failure)
+        return dispatcher
+
+    async def _settle_dispatch_failure(self, run_id, error):
+        from datetime import datetime, timezone
+        from purra.run_state import RunStateMachine
+        from purra.ports import RunCommit
+        from purra.output import RunLifecycleOutputDraft
+
+        snapshot = await self._repository.get(run_id)
+        if snapshot.terminal:
+            return
+        transition = RunStateMachine.fail(
+            snapshot, "novel_analysis_dispatch_failed: " + str(error)[:500])
+        event = AgentEvent(type=CoreEventType.RUN_FAILED, run_id=run_id,
+                           payload={"status": "failed", "error": transition.after.error})
+        identity = await self._db.fetch_one(
+            "SELECT turn_id FROM ai_agent_run_events WHERE run_id=? "
+            "AND source_event_key=? AND kind='run.lifecycle' ORDER BY sequence LIMIT 1",
+            [run_id, f"run:{run_id}:running"])
+        await self._output_repository.commit_run_lifecycle(
+            run_id,
+            RunCommit(step_updates=transition.step_updates,
+                      terminal_status=transition.after.status,
+                      error=transition.after.error, events=(event,)),
+            RunLifecycleOutputDraft(source_event_key=f"run:{run_id}:failed",
+                status=transition.after.status,
+                turn_id=identity.get("turn_id") if identity else None,
+                payload=event.payload, occurred_at=datetime.now(timezone.utc)))
+        self.observe_event(event)
 
     async def shutdown(self) -> None:
         """Fail closed and release all lifespan-owned live approval state."""

@@ -122,6 +122,7 @@ export async function getBookCharacters(bookId: EntityId): Promise<Character[]> 
 // ─── 小说背景 ────────────────────────────────────────────────
 
 export interface StoryBackground {
+  baseRevision?: string
   content: string
   updateTime?: string
 }
@@ -132,5 +133,5 @@ export interface StoryBackground {
 export async function getStoryBackground(bookId: EntityId): Promise<StoryBackground | null> {
   const res = await services.storyBackground.getStoryBackground({ bookId })
   if (!res.success || !res.data) return null
-  return { content: res.data.content, updateTime: res.data.update_time }
+  return { content: res.data.content, updateTime: res.data.update_time, baseRevision: res.data.baseRevision }
 }

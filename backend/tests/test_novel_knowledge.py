@@ -206,6 +206,7 @@ async def test_budget_no_partial_receipts_and_stable_rename(env):
     result = await search(svc)
     assert result['items'][0]['documentId'] == document['id']
     navigation = await svc.navigation('a', document['id'], anchor='^块')
+    assert Path(navigation['vaultPath']).is_dir()
     assert navigation['uri'].startswith('obsidian://open?path=')
     assert '%23%26' in navigation['uri'] and navigation['anchorFallback']
 
@@ -467,3 +468,20 @@ async def test_fulltext_admission_precedes_candidate_limit(env):
     result = await svc.search('a', '铜钥匙', mode='fulltext')
     assert result['items']
     assert all(item['title'] == '红门' for item in result['items'])
+
+
+@pytest.mark.asyncio
+async def test_author_scope_survives_new_chapter_without_loosening_prose_or_source_revision(env):
+    db, svc, root = env
+    prose = await svc.scope_snapshot('a')
+    await db.execute("INSERT INTO outline_chapters(id,outline_id,title,sort) VALUES ('new-1','outline-a','新章',4)")
+    with pytest.raises(KnowledgeError, match='chapter_order_changed'):
+        await svc.check_scope('a', prose)
+    result = await search(svc, purpose='discussion')
+    discussion = await svc.scope_snapshot('a')
+    await db.execute("INSERT INTO outline_chapters(id,outline_id,title,sort) VALUES ('new-2','outline-a','下一章',5)")
+    await svc.check_scope('a', discussion)
+    await svc.validate('a', result['receipts'])
+    (root / '红门.md').write_text(note('红门改用银钥匙。'))
+    with pytest.raises(KnowledgeError, match='stale'):
+        await svc.validate('a', result['receipts'])

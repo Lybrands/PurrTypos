@@ -19,14 +19,16 @@ export function buildAssistantCopyView({
   isLastAssistant,
   loading,
   showPlaceholder,
+  deferPlainText = false,
 }: {
   message: AgentConversationMessage
   isLastAssistant: boolean
   loading: boolean
   showPlaceholder: boolean
+  deferPlainText?: boolean
 }): AssistantCopyView {
   const markdown = getAssistantRenderableMarkdown(message).trim()
-  const plainText = markdownToPlainText(markdown)
+  const plainText = deferPlainText ? markdown : markdownToPlainText(markdown)
   return {
     visible: Boolean(
       message.role === 'assistant'

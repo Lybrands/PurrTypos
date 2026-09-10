@@ -158,7 +158,7 @@ def _edit_request(
                 else ToolPlanningDisposition.KEEP_PLAN
             ),
         )
-        for name in sorted(WRITING_TOOL_POLICIES)
+        for name in sorted(WRITING_TOOL_POLICIES) if name not in {"searchWritingTechniques", "readWritingTechnique"}
     ],
 )
 async def test_catalog_replans_only_after_explicit_evidence_reads(
@@ -166,7 +166,7 @@ async def test_catalog_replans_only_after_explicit_evidence_reads(
     expected: ToolPlanningDisposition,
     monkeypatch,
 ):
-    from infrastructure.writing.retrieval import WritingMemoryRetriever, WritingMethodRetriever
+    from infrastructure.writing.retrieval import WritingMemoryRetriever
 
     from infrastructure.writing.knowledge_retrieval import NovelKnowledgeRetriever
 
@@ -178,7 +178,6 @@ async def test_catalog_replans_only_after_explicit_evidence_reads(
 
     retriever = {
         "searchMemories": WritingMemoryRetriever,
-        "searchWritingMethods": WritingMethodRetriever,
         "searchNovelKnowledge": NovelKnowledgeRetriever,
         "readNovelKnowledge": NovelKnowledgeRetriever,
     }.get(tool_name)
@@ -331,7 +330,7 @@ def test_all_bound_handlers_keep_the_writing_operation_call_signature():
     )
 
     assert set(bound) == set(WRITING_TOOL_POLICIES) - {
-        "searchMemories", "searchWritingMethods", "searchNovelKnowledge", "readNovelKnowledge",
+        "searchMemories", "searchWritingTechniques", "readWritingTechnique", "searchNovelKnowledge", "readNovelKnowledge",
     }
     for name, handler in bound.items():
         assert isinstance(handler, partial)

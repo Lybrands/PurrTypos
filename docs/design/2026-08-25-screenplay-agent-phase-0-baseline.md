@@ -195,5 +195,4 @@ Phase 1 的入口条件：
 1. 事故回放和现有正确拆分测试通过；
 2. PurrA 本地导入路径仍成立；
 3. 没有活跃 recipe v5 Task；
-4. 用户确认开始 Phase 1；
-5. Phase 1 先实现 usage settlement，再启用非空 Long Task budgets。
+4. Phase 1 先实现 usage settlement，再启用非空 Long Task budgets。

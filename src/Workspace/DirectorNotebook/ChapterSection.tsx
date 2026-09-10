@@ -1,3 +1,4 @@
+import ContinuationHistory from '../ContinuationHistory'
 import React from 'react'
 import {
   CheckSquareIcon,
@@ -56,6 +57,7 @@ export default function ChapterSection({
     workspaceSearchQuery,
   } = useWorkspace()
 
+  const [historyCount, setHistoryCount] = React.useState(0)
   const [editingChapterId, setEditingChapterId] = React.useState<EntityId | null>(null)
   const [editingTitle, setEditingTitle] = React.useState('')
   const [showAddInput, setShowAddInput] = React.useState(false)
@@ -112,7 +114,7 @@ export default function ChapterSection({
   }, [openUtilityTab])
 
   const handleAddChapter = () => createItem({
-    title: numberedChapterTitle('章', writableChapters.length + 1, newTitle),
+    title: numberedChapterTitle('章', historyCount + writableChapters.length + 1, newTitle),
     resetInput: () => {
       setNewTitle('')
       setShowAddInput(false)
@@ -120,7 +122,7 @@ export default function ChapterSection({
   })
 
   const handleQuickAddChapter = () => createItem({
-    title: numberedChapterTitle('章', writableChapters.length + 1),
+    title: numberedChapterTitle('章', historyCount + writableChapters.length + 1),
   })
 
   const handleQuickAddChapterToVolume = (volumeId: EntityId) => createItem({
@@ -242,6 +244,7 @@ export default function ChapterSection({
 
   return (
     <>
+      <ContinuationHistory onCount={setHistoryCount} />
       {deleteModal && (
         <ConfirmModal
           title={enableVolume && deleteModal.chapter.parent_id == null ? '删除卷' : '删除章节'}
@@ -261,7 +264,7 @@ export default function ChapterSection({
       )}
 
       <ExportModal
-        title="导出章节"
+        title={historyCount ? "导出所选续写章节" : "导出章节"}
         open={exportModalOpen}
         onCancel={closeExportModal}
         items={exportItems}
@@ -275,9 +278,9 @@ export default function ChapterSection({
       />
 
       <div className="chapter-list-actionbar">
-        <span className="chapter-list-count">共 {writableChapters.length} 章</span>
+        <span className="chapter-list-count">{historyCount ? `历史 ${historyCount} 章 · 续写 ${writableChapters.length} 章` : `共 ${writableChapters.length} 章`}</span>
         <div className="chapter-list-actionbar-actions">
-          <PurrTooltip title="导出章节">
+          <PurrTooltip title={historyCount ? "导出所选续写章节" : "导出章节"}>
             <PurrButton
               type="text"
               size="small"
@@ -355,7 +358,7 @@ export default function ChapterSection({
           chapters={chapters}
           volumes={volumes}
           chaptersByVolumeId={chaptersByVolumeId}
-          writableChapterCount={writableChapters.length}
+          writableChapterCount={historyCount + writableChapters.length}
           activeChapterId={chapterId}
           searchQuery={workspaceSearchQuery}
           editingChapterId={editingChapterId}

@@ -10,6 +10,7 @@ from application.memory_operations import MemoryApplicationService, memory_metad
 from application.unified_memory import UnifiedMemoryQueryService
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
+from domains.writing.unified_memory import UnifiedMemorySource
 from domains.writing.story_memory import SourceReference, StoryMemoryStatus
 from domains.writing.story_memory_ledger import StoryMemoryLedger
 from domains.writing.story_settings import (
@@ -205,3 +206,67 @@ async def test_unified_review_filters_and_limit_preserve_atomic_delta(db, memory
         "world_fact",
         "character_state",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [False, True])
+async def test_optional_semantic_component_does_not_hide_story_sources(db, monkeypatch, configured):
+    await _seed_book(db)
+    if configured:
+        await db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+                         ["memory_embedding_config", '{"model":"configured-placeholder"}'])
+    ledger = StoryMemoryLedger(SqliteStoryMemoryRepository(db))
+    current = await ledger.stage_settings(
+        book_id="book-1", chapter_id="chapter-1", source_revision="revision-1",
+        changes=(_change(CharacterState("7", "location", "旧城区")),),
+    )
+    await SqliteStoryMemoryRepository(db).apply_delta(current.id)
+    candidate = await ledger.stage_settings(
+        book_id="book-1", chapter_id="chapter-1", source_revision="revision-1",
+        changes=(_change(WorldFact("moon-law", "月光会令魔法失效"), status=StoryMemoryStatus.INFERRED),),
+    )
+    await StoryMemoryEvolutionService(db).review_delta(candidate.id)
+    monkeypatch.setattr("routers.memories._memory_operations", lambda: MemoryApplicationService(db, None))
+    response = await list_unified_memories("book-1", q="", status=[], kind=[], source=[], limit=200)
+    assert response["success"] is True
+    assert {item["source"] for item in response["data"]["items"]} == {"story_state", "story_candidate"}
+    assert response["data"]["unavailableSources"] == {
+        "semantic": "memory_component_unavailable" if configured else "memory_embedding_unconfigured",
+    }
+    semantic = await list_unified_memories("book-1", q="", status=[], kind=[], source=[UnifiedMemorySource.SEMANTIC], limit=200)
+    assert semantic["success"] is True
+    assert semantic["data"]["items"] == []
+    assert semantic["data"]["unavailableSources"]
+
+
+@pytest.mark.asyncio
+async def test_story_only_filter_does_not_read_semantic_component(db):
+    await _seed_book(db)
+    class UnexpectedSemantic:
+        async def list_records(self, **kwargs):
+            raise AssertionError("Semantic source was not requested")
+    page = await UnifiedMemoryQueryService(db, UnexpectedSemantic()).list_items(
+        "book-1", sources=("story_state",),
+    )
+    assert not page.unavailable_sources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["memory_access_denied", "memory_book_not_found"])
+async def test_unified_page_preserves_authority_failures(db, code):
+    from application.memory_operations import MemoryOperationError
+    await _seed_book(db)
+    class DeniedSemantic:
+        async def list_records(self, **kwargs):
+            raise MemoryOperationError(code)
+    with pytest.raises(MemoryOperationError, match=code):
+        await UnifiedMemoryQueryService(db, DeniedSemantic()).list_items("book-1")
+
+
+@pytest.mark.asyncio
+async def test_story_only_filter_still_requires_existing_book(db):
+    from application.memory_operations import MemoryOperationError
+    with pytest.raises(MemoryOperationError, match="memory_book_not_found"):
+        await UnifiedMemoryQueryService(db, MemoryApplicationService(db, None)).list_items(
+            "missing-book", sources=("story_state",),
+        )

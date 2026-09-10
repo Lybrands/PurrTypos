@@ -21,12 +21,11 @@ async def _tool_read_continuation_source_section(
     del send_chunk
     book_id = str(ctx.get("bookId") or "").strip()
     section_id = str(args.get("sectionId") or "").strip()
-    if not book_id or not section_id:
+    if not book_id:
         return _err({"error": "缺少宿主作品绑定或来源章节 ID"})
     try:
-        payload = await ContinuationContextService(
-            dependencies.db
-        ).read_source_section(book_id=book_id, section_id=section_id)
+        service = ContinuationContextService(dependencies.db)
+        payload = await service.read_source_section(book_id=book_id, section_id=section_id) if section_id else await service.list_source_sections(book_id=book_id, offset=int(args.get("offset") or 0), limit=int(args.get("limit") or 100))
     except Exception as error:
         return _err({"error": str(error)})
     return ToolResult(json.dumps({

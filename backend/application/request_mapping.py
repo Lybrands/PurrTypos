@@ -91,6 +91,7 @@ def to_writing_agent_request(
                               baseURL=options.get("baseURL") or body.baseURL,
                               apiProvider=body.apiProvider)
     context = WritingDomainContext(
+        writing_technique_input_id=body.writingTechniqueInputId,
         book_id=body.bookId,
         chapter_id=body.chapterId,
         current_chapter_title=body.currentChapterTitle,
@@ -102,14 +103,6 @@ def to_writing_agent_request(
         ),
         selected_foreshadowing_ids=tuple(body.selectedForeshadowingIds or ()),
         context_window_label=str(window_label) if window_label else None,
-        writing_method_overrides=(
-            body.writingMethodOverrides.model_dump()
-            if body.writingMethodOverrides is not None
-            else {}
-        ),
-        writing_method_recommendation_requested=(
-            _is_writing_method_recommendation_request(body.messages)
-        ),
     )
     model_request = model_request_from_runtime(runtime, requirements=TaskCapabilityRequirements(
         reasoning_mode=reasoning_mode_from_options(options),
@@ -149,15 +142,6 @@ def validate_writing_request_contract(
     """Application facade for product preflight without leaking assembly to HTTP."""
 
     to_writing_agent_request(body, provider_options)
-
-
-def _is_writing_method_recommendation_request(messages: Sequence[Mapping[str, Any]]) -> bool:
-    latest_user = next((
-        str(message.get("content") or "").strip()
-        for message in reversed(messages)
-        if str(message.get("role") or "").strip().lower() == "user"
-    ), "")
-    return latest_user.startswith("[写作方法推荐]")
 
 
 def writing_run_options(

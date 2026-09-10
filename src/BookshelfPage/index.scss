@@ -127,20 +127,18 @@
   display: grid;
   gap: 14px;
 
-  label {
+  .continuation-field {
     display: grid;
+    min-width: 0;
     gap: 6px;
     color: var(--text-secondary);
   }
 
-  select {
-    min-height: 36px;
-    padding: 6px 9px;
+  .continuation-source-name {
     color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-surface);
+    overflow-wrap: anywhere;
   }
+
 }
 
 .continuation-create-main {
@@ -428,4 +426,28 @@
   .bookshelf-toolbar { align-items: flex-start; flex-direction: column; }
   .bookshelf-toolbar-actions { justify-content: flex-start; }
   .bookshelf-list { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}
+
+.continuation-field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.continuation-field-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: help;
+  font-size: 14px;
+
+  &:hover { color: var(--text-primary); background: var(--bg-hover); }
+  &:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 }

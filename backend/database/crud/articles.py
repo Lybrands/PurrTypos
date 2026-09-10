@@ -13,6 +13,8 @@ if TYPE_CHECKING:
 async def save_article(
     db: DatabaseConnection, chapter_id: str, content: str
 ) -> None:
+    from application.continuation_identity import require_editable_identity
+    await require_editable_identity(db, chapter_id)
     existing = await db.fetch_one(
         "SELECT id, content FROM articles WHERE chapter_id = ?", [chapter_id]
     )

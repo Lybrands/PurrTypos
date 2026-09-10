@@ -59,6 +59,7 @@ class UnifiedMemoryPage:
     items: tuple[UnifiedMemoryItem, ...]
     total: int
     suppressed_duplicates: int = 0
+    unavailable_sources: Mapping[str, str] = field(default_factory=dict)
 
 
 __all__ = [

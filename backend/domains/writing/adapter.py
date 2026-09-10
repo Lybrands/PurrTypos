@@ -21,7 +21,9 @@ class WritingDomainAdapter:
     tool_catalog: ToolCatalog
     context_strategy: ContextStrategy = ContextStrategy.STAGED
     context_provider: ContextProvider | None = None
-    runtime_limits: RuntimeLimits = RuntimeLimits(max_run_generation_tokens=None)
+    # History discovery, source/material reads, chapter creation and the final
+    # content proposal can require more than the Core's six model rounds.
+    runtime_limits: RuntimeLimits = RuntimeLimits(max_run_generation_tokens=None, max_model_rounds=12)
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
     @classmethod

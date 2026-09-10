@@ -1,4 +1,5 @@
 import React from "react";
+import { services } from "../../../services";
 import type { AiModelConfig, EntityId } from "../../../types";
 import { loadModelPrefs, saveModelPrefs } from "../utils";
 
@@ -14,9 +15,17 @@ export function useAiModelPrefs(
     () => loadModelPrefs(prefBookId, ids),
     [prefBookId, ids.join(",")],
   );
-  const [selectedModel, setSelectedModel] = React.useState<string>(
-    initialPrefs.model,
-  );
+  const [selection, setSelection] = React.useState({ bookId: prefBookId, model: initialPrefs.model });
+  const selectedModel = selection.bookId === prefBookId && ids.includes(selection.model)
+    ? selection.model : initialPrefs.model;
+  const setSelectedModel = React.useCallback((value: React.SetStateAction<string>) => {
+    setSelection((previous) => ({
+      bookId: prefBookId,
+      model: typeof value === 'function'
+        ? value(previous.bookId === prefBookId ? previous.model : initialPrefs.model) : value,
+    }));
+  }, [prefBookId, initialPrefs.model]);
+  const modelSaveQueue = React.useRef(Promise.resolve());
   const [chatAgentMode, setChatAgentMode] = React.useState(
     initialPrefs.chatAgentMode,
   );
@@ -25,19 +34,19 @@ export function useAiModelPrefs(
     [modelConfigs, selectedModel],
   );
   React.useEffect(() => {
-    const prefs = loadModelPrefs(prefBookId, ids);
-    setSelectedModel(prefs.model);
-    setChatAgentMode(prefs.chatAgentMode);
-  }, [prefBookId, ids.join(",")]);
+    setChatAgentMode(initialPrefs.chatAgentMode);
+  }, [prefBookId]);
 
   React.useEffect(() => {
-    if (ids.length && !ids.includes(selectedModel)) {
-      setSelectedModel(ids[0]);
-    }
-    if (ids.length === 0 && selectedModel) {
-      setSelectedModel("");
-    }
-  }, [ids, selectedModel]);
+    if (prefBookId == null || !selectedModel) return;
+    const bookModel = { [`writing_current_model:${prefBookId}`]: selectedModel };
+    modelSaveQueue.current = modelSaveQueue.current
+      .then(async () => {
+        const result = await services.settings.setSettings(bookModel);
+        if (!result.success) throw new Error('保存当前作品模型失败');
+      })
+      .catch((error) => console.error('保存当前作品模型失败', error));
+  }, [prefBookId, selectedModel]);
 
   React.useEffect(() => {
     saveModelPrefs(prefBookId, selectedModel, chatAgentMode);

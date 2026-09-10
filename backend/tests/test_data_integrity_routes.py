@@ -72,7 +72,7 @@ async def test_database_export_returns_complete_archive_without_component(
             "purrtypos.db",
         }
         manifest = json.loads(archive.read("backup-manifest.json"))
-        assert manifest["format"] == "purrtypos.full-backup/v1"
+        assert manifest["format"] == "purrtypos.full-backup/v2"
         assert manifest["componentPresent"] is False
         assert manifest["credentialsIncluded"] is False
         assert archive.read("purrtypos.db").startswith(b"SQLite format 3\x00")

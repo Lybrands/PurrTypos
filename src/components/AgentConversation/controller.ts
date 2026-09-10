@@ -72,6 +72,7 @@ export interface AgentConversationController {
     updateQueuedSubmission?(id: string, patch: QueuedSubmissionEdit | null): boolean
     abort(): void | Promise<void>
     resume?(): void | Promise<void>
+    /** Regenerate at this user message using the preceding history. Do not append as a follow-up. */
     editMessage(index: number, content: string): void | Promise<void>
     resolveToolApproval(
       approvalId: string,

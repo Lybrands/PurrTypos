@@ -42,7 +42,9 @@ async def _tool_list_setting_entities(
     send_chunk: Callable | None,
 ) -> ToolResult:
     bid = resolve_book_id_for_tools(ctx, args)
-    cache_key = build_read_cache_key("listSettingEntities", ctx, args)
+    from application.creation_material_service import materials
+    from application.creation_material_service import materials
+    cache_key = None if await materials(dependencies.db).binding(str(bid)) else build_read_cache_key("getSettingEntities", ctx, args) if await materials(dependencies.db).binding(str(bid)) else build_read_cache_key("listSettingEntities", ctx, args)
     hit = _read_tool_cache_get(ctx, cache_key) if cache_key else None
     if hit is not None:
         return ToolResult(hit, from_cache=True)
@@ -51,6 +53,7 @@ async def _tool_list_setting_entities(
     summary = [
         {
             "id": entity.get("id"),
+            **({"materialLink": entity["materialLink"]} if entity.get("materialLink") else {}),
             "type": entity.get("entity_type"),
             "typeLabel": ENTITY_TYPE_LABELS.get(
                 str(entity.get("entity_type") or ""), "其他",
@@ -77,7 +80,7 @@ async def _tool_get_setting_entities(
     entity_ids = args.get("entityIds")
     name_queries = args.get("names")
     type_filter = str(args.get("entityType") or "").strip()
-    cache_key = build_read_cache_key("getSettingEntities", ctx, args)
+    cache_key = None
 
     if cache_key is not None:
         hit = _read_tool_cache_get(ctx, cache_key)
@@ -178,6 +181,8 @@ async def _tool_update_setting_entity(
                 "entityId": entity_id,
             })
 
+        from application.creation_material_service import materials
+        data = await materials(dependencies.db).normalize_links(str(bid), data)
         before = setting_snapshot(current)
         proposed = merge_setting_proposal(current, data)
         if before == proposed:
@@ -200,6 +205,7 @@ async def _tool_update_setting_entity(
                     "before": before,
                     "proposed": proposed,
                     "source": "ai_tool_edit",
+                    "baseRevision": current.get("baseRevision"),
                 },
             })
         return ToolResult(json.dumps({
@@ -249,14 +255,14 @@ async def _tool_delete_setting_entity(
         type_label = ENTITY_TYPE_LABELS.get(
             str(target.get("entity_type") or ""), "其他",
         )
-        await delete_setting_entity(db, entity_id)
+        await delete_setting_entity(db, entity_id, base_revision=target.get("baseRevision"))
         _invalidate_read_tool_cache(ctx)
         send_setting_updated(
             send_chunk, "entity", action="delete", id=entity_id, name=name,
         )
         return ToolResult(json.dumps({
             "success": True,
-            "message": f"已删除{type_label}设定「{name}」（不可恢复）",
+            "message": f"已删除{type_label}设定「{name}」",
             "entityId": entity_id,
             "name": name,
         }, ensure_ascii=False))

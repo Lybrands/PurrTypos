@@ -100,9 +100,6 @@ async def _tool_get_chapter_content(
         }
         return ToolResult(json.dumps(payload, ensure_ascii=False), from_cache=True)
 
-    if not chapter.get("articleExists"):
-        return _err({"error": CATALOG_TOOL_FAIL_MSG, "chapterId": chapter_id})
-
     title_resolved = (
         title
         or _title_from_writing_catalog(chapter_id, writing_chapters)
@@ -142,6 +139,10 @@ async def _tool_list_writing_chapters(
         return ToolResult(hit, from_cache=True)
 
     result = await _list_writing_chapters(dependencies.db, str(book_id))
+    from application.continuation_context import ContinuationContextService
+    history = await ContinuationContextService(dependencies.db).list_source_sections(book_id=str(book_id), limit=50)
+    if history["total"]:
+        result["sourceHistory"] = {**history, "readTool": "readContinuationSourceSection", "readOnly": True}
     payload = json.dumps(result, ensure_ascii=False)[:24000]
     if cache_key:
         _read_tool_cache_set(ctx, cache_key, payload)
@@ -247,7 +248,8 @@ async def _tool_create_writing_chapter(
             })
 
         effective_parent_id = parent_id or None
-        max_number = 0
+        inherited_count = await db.fetch_one("SELECT COUNT(*) AS n FROM continuation_source_sections WHERE book_id=? AND section_type='chapter'", [str(book_id)])
+        max_number = int((inherited_count or {}).get("n") or 0)
         for chapter in authoritative_chapters:
             row_parent_id = (
                 None

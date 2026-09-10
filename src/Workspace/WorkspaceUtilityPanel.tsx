@@ -1,3 +1,4 @@
+import { SourceSectionReader } from './ContinuationHistory'
 import React, { Suspense, lazy } from 'react'
 import {
   DashboardIcon,
@@ -8,6 +9,7 @@ import {
   MasterOutlineIcon,
   OutlineIcon,
   PanelToggleIcon,
+  LibraryIcon,
   StoryMemoryIcon,
   StorySettingIcon,
 } from '@/purr-components'
@@ -34,7 +36,8 @@ const TAB_ICONS: Record<WorkspaceUtilityTabKind, React.ReactNode> = {
   memory: <StoryMemoryIcon />,
   writingMethods: <HighlightIcon />,
   canon: <StoryMemoryIcon />,
-  knowledge: <StoryMemoryIcon />,
+  source: <ManuscriptIcon />,
+  knowledge: <LibraryIcon />,
   setting: <StorySettingIcon />,
   dashboard: <DashboardIcon />,
 }
@@ -125,7 +128,8 @@ export default function WorkspaceUtilityPanel({
             <WritingMethodBindingsPanel bookId={bookId} />
           </div>
         ) : null}
-        {tab.kind === 'knowledge' ? <KnowledgePanel key={String(bookId)} bookId={bookId} /> : null}
+        {tab.kind === 'knowledge' ? <div className="workspace-utility-content workspace-utility-content--knowledge"><KnowledgePanel key={String(bookId)} bookId={bookId} /></div> : null}
+        {tab.kind === 'source' && tab.sourceSectionId && bookId != null ? <SourceSectionReader bookId={String(bookId)} sectionId={tab.sourceSectionId} /> : null}
         {tab.kind === 'canon' ? (
           <div className="workspace-utility-content workspace-utility-content--canon">
             <ContinuationCanonPanel bookId={bookId} />

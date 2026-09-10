@@ -26,13 +26,18 @@ async def _tool_get_story_background(
     send_chunk: Callable | None,
 ) -> ToolResult:
     bid = resolve_book_id_for_tools(ctx, args)
-    cache_key = build_read_cache_key("getStoryBackground", ctx, args)
+    from application.creation_material_service import materials
+    cache_key = None if await materials(dependencies.db).binding(str(bid)) else build_read_cache_key("getStoryBackground", ctx, args)
     hit = _read_tool_cache_get(ctx, cache_key) if cache_key else None
     if hit is not None:
         return ToolResult(hit, from_cache=True)
 
     row = await get_story_background(dependencies.db, bid)
     content = (row.get("content") if row else None) or "（暂无小说背景）"
+    if row and row.get("materialLink"):
+        content = "资料链接：" + row["materialLink"] + "\n" + content
+    if row and row.get("inheritedBaseline"):
+        content = "原作继承基线（只读历史事实）：\n" + row["inheritedBaseline"] + "\n\n本书后续发展：\n" + content
     if cache_key:
         _read_tool_cache_set(ctx, cache_key, content)
     return ToolResult(content)
@@ -57,6 +62,8 @@ async def _tool_edit_story_background(
 
     try:
         row = await get_story_background(dependencies.db, str(bid))
+        from application.creation_material_service import materials
+        content = (await materials(dependencies.db).normalize_links(str(bid), {"content": content}))["content"]
         before_content = (row.get("content") if row else None) or ""
         if content.strip() == before_content.strip() and before_content.strip():
             return ToolResult(json.dumps({
@@ -75,6 +82,7 @@ async def _tool_edit_story_background(
                     "before": {"content": before_content},
                     "proposed": {"content": content},
                     "source": "ai_tool_edit",
+                    "baseRevision": row.get("baseRevision") if row else None,
                 },
             })
         return ToolResult(json.dumps({

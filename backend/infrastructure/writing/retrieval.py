@@ -14,9 +14,6 @@ from purra.cancellation import raise_if_stopped
 from purra.ports import CancellationSignal
 from purra.retrieval import RetrievalError, RetrievalHit, RetrievalRequest
 
-from infrastructure.persistence.writing.sqlite_writing_method_repository import (
-    SqliteWritingMethodRepository,
-)
 
 if TYPE_CHECKING:
     from application.memory_operations import MemoryApplicationService
@@ -24,7 +21,6 @@ if TYPE_CHECKING:
 
 
 MEMORY_RETRIEVAL_LIMIT = 12
-METHOD_RETRIEVAL_LIMIT = 8
 RETRIEVAL_QUERY_CHAR_LIMIT = 4_000
 
 
@@ -34,7 +30,6 @@ async def _authorized_book(
     signal: CancellationSignal | None,
     *,
     limit: int,
-    methods: bool = False,
 ) -> str:
     raise_if_stopped(signal)
     if request.scope:
@@ -68,10 +63,6 @@ async def _authorized_book(
         or not book_id.strip()
     ):
         raise RetrievalError("Writing scope required", code="retrieval_scope_unavailable")
-    if methods and attributes.get("writingMethodRecommendationRequested") is not True:
-        raise RetrievalError(
-            "Method recommendations were not requested", code="retrieval_access_denied",
-        )
     return book_id
 
 
@@ -97,34 +88,3 @@ class WritingMemoryRetriever:
             raise RetrievalError("Memory retrieval failed", code=code) from error
         raise_if_stopped(signal)
         return tuple(hits)
-
-
-@dataclass(frozen=True, slots=True)
-class WritingMethodRetriever:
-    db: DatabaseConnection
-
-    async def retrieve(
-        self, request: RetrievalRequest, signal: CancellationSignal | None = None,
-    ) -> tuple[RetrievalHit, ...]:
-        await _authorized_book(
-            self.db, request, signal, limit=METHOD_RETRIEVAL_LIMIT, methods=True,
-        )
-        rows = await SqliteWritingMethodRepository(self.db).search_published_methods(
-            request.query, limit=request.limit,
-        )
-        raise_if_stopped(signal)
-        return tuple(RetrievalHit(
-            id=row["id"],
-            content=f"{row['name']}\n{row.get('description') or ''}",
-            source="writing_method_catalog",
-            version=row["version_no"],
-            metadata={
-                "evidenceId": f"writing-method-catalog:{row['id']}",
-                "revisionId": row["id"],
-                "methodId": row["method_id"],
-                "methodType": row["method_type"],
-                "tags": row.get("tags") or [],
-                "contentDigest": row["content_digest"],
-                "bindingChanged": False,
-            },
-        ) for row in rows)

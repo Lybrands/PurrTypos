@@ -85,7 +85,9 @@ async def _run_atomically(
         buffered_chunks.append(deepcopy(chunk))
 
     try:
-        async with dependencies.db.transaction(cancellation_linearizable=True):
+        async with dependencies.db.transaction(
+            cancellation_linearizable=not dependencies.db.current_task_owns_transaction(),
+        ):
             result = await operation(
                 dependencies,
                 ctx,

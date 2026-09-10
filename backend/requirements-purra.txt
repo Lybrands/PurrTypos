@@ -1,4 +1,4 @@
-purra==0.5.0
-purra-openai==0.5.0
-purra-anthropic==0.5.0
-purra-mem0[managed]==0.5.0
+purra==0.5.1
+purra-openai==0.5.1
+purra-anthropic==0.5.1
+purra-mem0[managed]==0.5.1

@@ -1,21 +1,150 @@
 import type { AgentConversationMessage } from '../agent-runtime/contracts.ts'
-import type { AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
+import type { AiAgentRunSnapshot, AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
 import { AgentChunkReplay } from '../agent-runtime/chunkReplay.ts'
 import type { AiStreamChunk } from '../agent-runtime/chunkHandlers/types.ts'
+import {
+  loadCompleteAgentRunSnapshot,
+  replayAgentRunSnapshotAsync,
+} from '../agent-runtime/runSnapshotHydration.ts'
 import { buildNovelAnalysisTaskPlan, buildNovelAnalysisTiming } from './analysisTaskPlan.ts'
 
 const historyModel: AiModelConfig = {
   id: '', name: '', apiKey: '', baseUrl: '', supportsThinking: false, thinkingOnly: false,
 }
 
-/** One revision subscription; dynamic unit membership can catch up from memory. */
+/**
+ * Load every persisted page before a saved analysis is projected back into
+ * the conversation. The analysis event stream then takes over for live
+ * updates, but it must not be mistaken for a complete history after its first
+ * page arrives.
+ */
+export async function hydrateNovelAnalysisHistory(input: {
+  run: NovelAnalysisRun
+  model: AiModelConfig
+  getRunSnapshot(input: { runId: string; after?: number; limit?: number }): Promise<{
+    success: boolean
+    data?: AiAgentRunSnapshot
+    error?: string
+  }>
+  isCurrent(): boolean
+}): Promise<{ runId: string; message: AgentConversationMessage } | undefined> {
+  const runIds = [...new Set([
+    input.run.runId,
+    ...(input.run.relatedRuns ?? []).map((related) => related.runId),
+  ].filter(Boolean))]
+  const snapshots: (AiAgentRunSnapshot | undefined)[] = new Array(runIds.length)
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(4, runIds.length) }, async () => {
+    while (input.isCurrent()) {
+      const index = next++
+      if (index >= runIds.length) break
+      snapshots[index] = await loadCompleteAgentRunSnapshot(runIds[index], {
+        getRunSnapshot: input.getRunSnapshot, isCurrent: input.isCurrent,
+      })
+    }
+  }))
+  const [snapshot, ...relatedSnapshots] = snapshots
+  if (!snapshot || !input.isCurrent()) return undefined
+  return {
+    runId: input.run.runId,
+    message: await replayAgentRunSnapshotAsync({
+      snapshot,
+      relatedSnapshots: relatedSnapshots.filter((item): item is AiAgentRunSnapshot => Boolean(item)),
+      prompt: input.run.prompt || '',
+      turnId: `novel-analysis:${input.run.commandId || input.run.runId}`,
+      model: input.model.name,
+    }, input.isCurrent),
+  }
+}
+
 export class NovelAnalysisConversationStream {
+  private runs: NovelAnalysisRun[] = []
+  private streams = new Map<string, NovelAnalysisRunStream>()
+  private history: Record<string, AgentConversationMessage> = {}
+  private pendingEvents = new Map<number, NovelAnalysisStreamPage['chunks'][number]>()
+
+  private targets(page: NovelAnalysisStreamPage) {
+    if (page.runs) this.runs = page.runs
+    for (const event of page.chunks) this.pendingEvents.set(event.cursor, event)
+    return this.runs.map(run => {
+      let stream = this.streams.get(run.runId)
+      if (!stream) { stream = new NovelAnalysisRunStream(); this.streams.set(run.runId, stream) }
+      const ids = new Set([run.runId, ...(run.relatedRuns ?? []).map(item => item.runId)])
+      const chunks = [...this.pendingEvents.values()].filter(event => ids.has(event.runId))
+      for (const event of chunks) this.pendingEvents.delete(event.cursor)
+      return { stream, page: { ...page, runs: [run], chunks } }
+    })
+  }
+
+  private snapshot() {
+    const latest = this.runs[0]
+    return latest && this.history[latest.runId]
+      ? { runId: latest.runId, message: this.history[latest.runId], history: { ...this.history } } : undefined
+  }
+
+  apply(page: NovelAnalysisStreamPage, cfg: AiModelConfig = historyModel,
+    onChunk?: (value: { runId: string; message: AgentConversationMessage; history: Record<string, AgentConversationMessage> }) => void) {
+    for (const target of this.targets(page)) {
+      const result = target.stream.apply(target.page, cfg, value => {
+        this.history[value.runId] = value.message
+        const snapshot = this.snapshot()
+        if (snapshot) onChunk?.(snapshot)
+      })
+      if (result) this.history[result.runId] = result.message
+    }
+    return this.snapshot()
+  }
+
+  async applyAsync(page: NovelAnalysisStreamPage, cfg: AiModelConfig | undefined,
+    onChunk: (value: { runId: string; message: AgentConversationMessage; history: Record<string, AgentConversationMessage> }) => void,
+    isCurrent: () => boolean) {
+    for (const target of this.targets(page)) {
+      if (!isCurrent()) return undefined
+      const result = await target.stream.applyAsync(target.page, cfg, value => {
+        this.history[value.runId] = value.message
+        const snapshot = this.snapshot()
+        if (snapshot) onChunk(snapshot)
+      }, isCurrent)
+      if (result) this.history[result.runId] = result.message
+    }
+    const snapshot = this.snapshot()
+    if (snapshot && isCurrent()) onChunk(snapshot)
+    return snapshot
+  }
+}
+
+/** One revision subscription; dynamic unit membership can catch up from memory. */
+class NovelAnalysisRunStream {
   private events = new Map<number, NovelAnalysisStreamPage['chunks'][number]>()
   private replay = new AgentChunkReplay()
-  private membership = ''
+  private members = new Set<string>()
+  private rootRunId = ''
   private run?: NovelAnalysisRun
 
-  apply(
+  apply(...args: Parameters<NovelAnalysisRunStream['steps']>) {
+    const iterator = this.steps(...args)
+    let result = iterator.next()
+    while (!result.done) result = iterator.next()
+    return result.value
+  }
+
+  async applyAsync(page: NovelAnalysisStreamPage, cfg: AiModelConfig | undefined,
+    onChunk: (value: {runId: string; message: AgentConversationMessage}) => void,
+    isCurrent: () => boolean) {
+    let pending: {runId: string; message: AgentConversationMessage} | undefined
+    const iterator = this.steps(page, cfg, value => { pending = value })
+    let result = iterator.next()
+    while (!result.done) {
+      if (isCurrent() && pending) { onChunk(pending); pending = undefined }
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
+      if (!isCurrent()) { iterator.return(undefined); return undefined }
+      result = iterator.next()
+    }
+    if (isCurrent() && pending) onChunk(pending)
+    return result.value
+  }
+
+  private *steps(
     page: NovelAnalysisStreamPage,
     cfg: AiModelConfig = historyModel,
     onChunk?: (value: { runId: string; message: AgentConversationMessage }) => void,
@@ -26,13 +155,18 @@ export class NovelAnalysisConversationStream {
     const run = this.run
     if (!run) return undefined
     const ids = new Set([run.runId, ...(run.relatedRuns ?? []).map(item => item.runId)])
-    const membership = [...ids].join('|')
-    const rebuild = this.membership !== membership
+    const rebuild = this.rootRunId !== run.runId || [...this.members].some(id => !ids.has(id))
+    const added = new Set([...ids].filter(id => !this.members.has(id)))
     if (rebuild) this.replay.reset()
-    this.membership = membership
+    this.members = ids
+    this.rootRunId = run.runId
     const turnId = `novel-analysis:${run.commandId || run.runId}`
     const createdAt = Date.parse(run.createTime || '')
-    const events = rebuild ? [...this.events.values()].sort((a, b) => a.cursor - b.cursor) : fresh
+    const freshCursors = new Set(fresh.map(event => event.cursor))
+    const events = rebuild ? [...this.events.values()].sort((a, b) => a.cursor - b.cursor)
+      : added.size === 0 ? fresh : [...this.events.values()].filter(event => added.has(event.runId) || freshCursors.has(event.cursor))
+        .sort((a, b) => a.cursor - b.cursor)
+    let sliceStarted = performance.now()
     for (const event of events) {
       if (!ids.has(event.runId)) continue
       this.replay.dispatch({
@@ -43,6 +177,10 @@ export class NovelAnalysisConversationStream {
       }, event.chunk as AiStreamChunk, { cfg })
       const message = this.replay.assistant(turnId)
       if (message) onChunk?.({ runId: run.runId, message })
+      if (performance.now() - sliceStarted >= 8) {
+        yield
+        sliceStarted = performance.now()
+      }
     }
     return { runId: run.runId, message: this.replay.assistant(turnId) ?? {
       role: 'assistant' as const, content: '', agentRunId: run.runId,

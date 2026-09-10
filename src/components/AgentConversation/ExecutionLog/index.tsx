@@ -138,7 +138,7 @@ export default function ExecutionLog({
           className="work-log__collapsible"
           hidden={!openState.open}
         >
-          <div className="work-log__body">{children}</div>
+          <div className="work-log__body">{openState.open ? children : null}</div>
         </div>
       ) : null}
     </section>
@@ -223,7 +223,7 @@ export function ExecutionLogStepGroup({
         className="work-log-step-group__collapsible"
         hidden={!open}
       >
-        <div className="work-log-step-group__body">{children}</div>
+        <div className="work-log-step-group__body">{open ? children : null}</div>
       </div>
     </div>
   );

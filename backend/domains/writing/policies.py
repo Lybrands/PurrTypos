@@ -36,7 +36,8 @@ WRITING_TOOL_POLICIES: dict[str, ToolPolicy] = {
     "listSettingEntities": ToolPolicy(ToolExecutionMode.READ, "查看世界设定列表"),
     "getSettingEntities": ToolPolicy(ToolExecutionMode.READ, "读取世界设定"),
     "getStoryBackground": ToolPolicy(ToolExecutionMode.READ, "读取故事背景"),
-    "searchWritingMethods": ToolPolicy(ToolExecutionMode.READ, "检索写作方法目录"),
+    "searchWritingTechniques": ToolPolicy(ToolExecutionMode.READ, "检索已授权写作技法"),
+    "readWritingTechnique": ToolPolicy(ToolExecutionMode.READ, "读取写作技法文件"),
     "readContinuationSourceSection": ToolPolicy(
         ToolExecutionMode.READ, "读取冻结来源章节"
     ),
