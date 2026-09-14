@@ -10,7 +10,8 @@ from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["allow", "wait", "fail"])
-async def test_claim_admission_is_atomic_and_preserves_guard_failures(tmp_path, decision):
+@pytest.mark.parametrize("targeted", [False, True])
+async def test_claim_admission_is_atomic_and_preserves_guard_failures(tmp_path, decision, targeted):
     db = DatabaseConnection(tmp_path)
     await db.init()
     calls = []
@@ -37,16 +38,17 @@ async def test_claim_admission_is_atomic_and_preserves_guard_failures(tmp_path, 
             units=(LongTaskUnitSpec(id="unit-1", position=0),),
         ))
         await repository.start(task.id, expected_revision=task.revision)
+        async def claim():
+            if targeted:
+                return await repository.claim_unit(task.id, "unit-1", worker_id="worker", lease_duration_ms=30_000)
+            return await repository.claim_ready_unit(task.id, worker_id="worker", lease_duration_ms=30_000)
+
         if decision == "fail":
             with pytest.raises(ContractViolationError) as failure:
-                await repository.claim_ready_unit(
-                    task.id, worker_id="worker", lease_duration_ms=30_000,
-                )
+                await claim()
             assert failure.value is original_error
         else:
-            claimed = await repository.claim_ready_unit(
-                task.id, worker_id="worker", lease_duration_ms=30_000,
-            )
+            claimed = await claim()
             assert (claimed is not None) is (decision == "allow")
         assert calls == [(task.id, "unit-1")]
         row = await db.fetch_one(

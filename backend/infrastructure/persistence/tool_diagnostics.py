@@ -78,6 +78,13 @@ def _preview(value: Any) -> dict[str, Any]:
     }
 
 
+def _presentation_group(value: Any) -> dict[str, str] | None:
+    group = _mapping(value)
+    key = str(group.get("key") or "").strip()
+    label = str(group.get("label") or "").strip()
+    return {"key": key, "label": label} if key and label else None
+
+
 async def read_tool_diagnostics(db, run_id: str, *, after: int = 0) -> dict[str, Any]:
     """Return partial call records; consumers merge pages by (runId, toolCallId).
 
@@ -144,6 +151,11 @@ async def read_tool_diagnostics(db, run_id: str, *, after: int = 0) -> dict[str,
                 display_name = display_names.get("zh-CN")
                 if isinstance(display_name, str) and display_name.strip():
                     call["displayName"] = display_name.strip()
+                presentation_group = _presentation_group(
+                    label_params.get("presentationGroup")
+                )
+                if presentation_group is not None:
+                    call["presentationGroup"] = presentation_group
                 if item.get("operationId"):
                     call["operationId"] = str(item["operationId"])
             elif event_type == "tool.calls_started":

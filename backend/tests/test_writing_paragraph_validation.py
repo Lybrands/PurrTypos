@@ -25,7 +25,17 @@ def test_multiline_wrap_is_allowed_but_blank_line_paragraphs_require_repair():
 
 
 def test_production_response_contract_installs_paragraph_validation():
-    from domains.writing.response import writing_response_validators
-    from tests.test_writing_domain_adapter import _request
-    request = _request(user_text="写一段安静回忆，直到段末才承认不甘心。")
+    from agents.writing.response_contract import writing_response_validators
+    from agents.writing.request_contract import WritingRequestContext
+    from purra.contracts import AgentMessage, AgentRunRequest, ModelRequest
+
+    request = AgentRunRequest(
+        messages=(AgentMessage(
+            role="user",
+            content="写一段安静回忆，直到段末才承认不甘心。",
+        ),),
+        model=ModelRequest(provider="fixture", model="model"),
+        domain_context=WritingRequestContext(book_id="book-1").to_core_context(),
+        tools_enabled=True,
+    )
     assert any(isinstance(item, SingleProseParagraphValidator) for item in writing_response_validators(request))

@@ -18,8 +18,8 @@ from domains.writing.continuity_validation import (
     parse_atomic_continuity_items,
     render_atomic_continuity_item,
 )
-from domains.writing.contracts import WritingDomainContext
-from domains.writing.response import writing_response_validators
+from agents.writing.request_contract import WritingRequestContext
+from agents.writing.response_contract import writing_response_validators
 from domains.writing.summary_validation import SummaryResponseValidator
 
 
@@ -27,7 +27,7 @@ def _request(user_text: str) -> AgentRunRequest:
     return AgentRunRequest(
         messages=(AgentMessage(role="user", content=user_text),),
         model=ModelRequest(provider="fixture", model="model"),
-        domain_context=WritingDomainContext(
+        domain_context=WritingRequestContext(
             book_id="book-1",
             chapter_id="chapter-1",
             associated_outline_ids=("outline-1",),

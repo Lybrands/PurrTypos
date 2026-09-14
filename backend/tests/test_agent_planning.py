@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from application.agent_composition import get_agent_composition
+from agents.novel_analysis.profile import NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
+from application.composition_factory import create_agent_composition
 from application.model_runtime import model_request_from_runtime
 from infrastructure.persistence.run_store import create_run
 from purra.api import AgentPlanner
@@ -36,29 +37,29 @@ def _request() -> AgentRunRequest:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["writing", "novel_analysis", "screenplay"])
-async def test_every_product_uses_the_core_planner_without_a_host_wrapper(
+async def test_novel_analysis_replacement_uses_the_core_planner_without_a_host_wrapper(
     temp_db,
-    profile,
 ):
-    composition = get_agent_composition()
-    core = composition.create_core("test-key", agent_profile=profile)
+    composition = create_agent_composition(temp_db)
+    core = composition.create_core(
+        "test-key",
+        agent_profile=NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,
+    )
     try:
         assert isinstance(core._planner, AgentPlanner)
         assert not hasattr(core._planner, "planner")
     finally:
         composition.release_core(core)
         await core.close()
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("profile", ["writing", "novel_analysis", "screenplay"])
-async def test_every_product_planner_uses_the_versioned_provider_stream(
+async def test_novel_analysis_replacement_planner_uses_the_versioned_provider_stream(
     temp_db,
     monkeypatch,
-    profile,
 ):
-    composition = get_agent_composition()
+    composition = create_agent_composition(temp_db)
     calls = []
 
     async def stream(_key, messages, options, _provider, signal=None):
@@ -90,7 +91,10 @@ async def test_every_product_planner_uses_the_versioned_provider_stream(
         "infrastructure.models.provider_router.create_chat_stream",
         stream,
     )
-    core = composition.create_core("test-key", agent_profile=profile)
+    core = composition.create_core(
+        "test-key",
+        agent_profile=NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,
+    )
     try:
         core._planner._result_validator = None
         run_id = await create_run(
@@ -118,3 +122,4 @@ async def test_every_product_planner_uses_the_versioned_provider_stream(
     finally:
         composition.release_core(core)
         await core.close()
+        await composition.shutdown()

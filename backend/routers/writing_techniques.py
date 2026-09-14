@@ -28,8 +28,18 @@ def _service():
 
 @router.get("/runs/{run_id}/usage")
 async def run_usage(run_id: str):
+    from agents.writing.technique_usage import (
+        project_replacement_writing_technique_usage,
+    )
     from application.writing_technique_runs import WritingTechniqueRuns
-    return await _call(WritingTechniqueRuns(get_db()).usage(run_id))
+
+    db = get_db()
+    replacement = await project_replacement_writing_technique_usage(
+        db, run_id
+    )
+    if replacement is not None:
+        return {"success": True, "data": replacement}
+    return await _call(WritingTechniqueRuns(db).usage(run_id))
 
 
 @router.post("/analyses/{analysis_id}/save")

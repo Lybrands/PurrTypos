@@ -2,7 +2,7 @@ import React from 'react'
 import AppHeader from '../components/AppHeader'
 import { CheckIcon, CopyIcon, DeleteIcon, EditIcon, ExportIcon, ImportIcon, PlusIcon } from '@/purr-components'
 import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrInputNumber, PurrModal, PurrRadio, PurrSelect, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
-import type { AiModelConfig, MemoryEmbeddingConfig } from '../types'
+import type { AiModelConfig, AiProviderCapacityPolicy, MemoryEmbeddingConfig } from '../types'
 import {
   AI_CONTEXT_WINDOW_LABELS,
   AI_REASONING_EFFORT_LABELS,
@@ -32,9 +32,15 @@ const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
   { key: 'data', label: '数据' },
 ]
 
+const normalizePolicyEndpoint = (endpoint: string | undefined): string => (
+  endpoint?.trim().replace(/\/+$/, '') || ''
+)
+
 interface SettingsPageProps {
   modelConfigs: AiModelConfig[]
   onSaveModelConfigs: (configs: AiModelConfig[]) => void
+  providerCapacityPolicies: AiProviderCapacityPolicy[]
+  onSaveProviderCapacityPolicies: (policies: AiProviderCapacityPolicy[]) => Promise<void>
   memoryModelId: string
   memoryEmbeddingConfig: MemoryEmbeddingConfig | null
   onSaveMemoryConfiguration: (
@@ -49,6 +55,8 @@ interface SettingsPageProps {
 export default function SettingsPage({
   modelConfigs,
   onSaveModelConfigs,
+  providerCapacityPolicies,
+  onSaveProviderCapacityPolicies,
   memoryModelId,
   memoryEmbeddingConfig,
   onSaveMemoryConfiguration,
@@ -75,6 +83,74 @@ export default function SettingsPage({
   const displayModelOutputCapability = (c: AiModelConfig) => {
     const maximum = getModelProfileMaxGenerationTokens(c)
     return maximum ? `${Math.round(maximum / 1024)}K` : '未登记'
+  }
+  const providerEndpointGroups = React.useMemo(() => {
+    const groups = new Map<string, {
+      provider: AiProviderCapacityPolicy['provider']
+      endpoint: string
+      modelNames: string[]
+    }>()
+    for (const config of modelConfigList) {
+      const provider = config.apiProvider ?? 'openai'
+      const endpoint = normalizePolicyEndpoint(
+        config.baseUrl || getBuiltinProvider(config.providerId)?.baseUrl,
+      )
+      if (!endpoint) continue
+      const modelName = (config.nickname?.trim() || config.name) || '未命名'
+      const key = `${provider}\u001f${endpoint}`
+      const existing = groups.get(key)
+      if (existing) {
+        existing.modelNames.push(modelName)
+      } else {
+        groups.set(key, { provider, endpoint, modelNames: [modelName] })
+      }
+    }
+    for (const policy of providerCapacityPolicies) {
+      const endpoint = normalizePolicyEndpoint(policy.endpoint)
+      if (!endpoint) continue
+      const key = `${policy.provider}\u001f${endpoint}`
+      if (!groups.has(key)) {
+        groups.set(key, {
+          provider: policy.provider,
+          endpoint,
+          modelNames: [],
+        })
+      }
+    }
+    return [...groups.values()]
+  }, [modelConfigList, providerCapacityPolicies])
+
+  const capacityForEndpoint = (provider: AiProviderCapacityPolicy['provider'], endpoint: string) => (
+    providerCapacityPolicies.find((policy) => (
+      policy.provider === provider && policy.endpoint === endpoint
+    ))?.maxConcurrentCalls ?? 2
+  )
+
+  const updateEndpointCapacity = (
+    provider: AiProviderCapacityPolicy['provider'],
+    endpoint: string,
+    maxConcurrentCalls: number,
+  ) => {
+    if (!Number.isInteger(maxConcurrentCalls) || maxConcurrentCalls < 1 || maxConcurrentCalls > 16) {
+      message.warning('端点并发上限必须是 1 到 16 的整数')
+      return
+    }
+    const remaining = providerCapacityPolicies.filter((policy) => (
+      policy.provider !== provider || policy.endpoint !== endpoint
+    ))
+    void onSaveProviderCapacityPolicies([
+      ...remaining,
+      { provider, endpoint, maxConcurrentCalls },
+    ]).catch(() => message.error('端点并发策略未保存，请检查连接后重试'))
+  }
+
+  const resetEndpointCapacity = (
+    provider: AiProviderCapacityPolicy['provider'],
+    endpoint: string,
+  ) => {
+    void onSaveProviderCapacityPolicies(providerCapacityPolicies.filter((policy) => (
+      policy.provider !== provider || policy.endpoint !== endpoint
+    ))).catch(() => message.error('端点并发策略未保存，请检查连接后重试'))
   }
 
   React.useEffect(() => {
@@ -469,6 +545,52 @@ export default function SettingsPage({
                   })}
                 </ul>
               )}
+              {providerEndpointGroups.length > 0 ? (
+                <section className="settings-provider-capacity">
+                  <h3>Provider 端点并发</h3>
+                  <p className="settings-field-desc">
+                    同一端点上的模型共享这个上限。默认同时调用 2 个；限流或熔断恢复期间，系统仍会临时降为 1。未被当前模型使用的已存策略仍会保留在此，可随时恢复默认。
+                  </p>
+                  <div className="settings-provider-capacity-list">
+                    {providerEndpointGroups.map((group) => {
+                      const isCustomized = providerCapacityPolicies.some((policy) => (
+                        policy.provider === group.provider && policy.endpoint === group.endpoint
+                      ))
+                      return (
+                        <div key={`${group.provider}\u001f${group.endpoint}`} className="settings-provider-capacity-item">
+                          <div>
+                            <strong>{group.provider}</strong>
+                            <code>{group.endpoint}</code>
+                            <span>{group.modelNames.length > 0 ? group.modelNames.join('、') : '当前没有模型使用这个端点'}</span>
+                          </div>
+                          <div className="settings-provider-capacity-control">
+                            <span>并发</span>
+                            <PurrInputNumber
+                              min={1}
+                              max={16}
+                              step={1}
+                              value={capacityForEndpoint(group.provider, group.endpoint)}
+                              onChange={(value) => {
+                                if (typeof value === 'number') {
+                                  updateEndpointCapacity(group.provider, group.endpoint, value)
+                                }
+                              }}
+                            />
+                            <PurrButton
+                              type="text"
+                              size="small"
+                              disabled={!isCustomized}
+                              onClick={() => resetEndpointCapacity(group.provider, group.endpoint)}
+                            >
+                              恢复默认
+                            </PurrButton>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </section>
+              ) : null}
               <PurrModal
                 title={getModelPreset(editingConfig?.presetId)
                   ? '配置内置模型'

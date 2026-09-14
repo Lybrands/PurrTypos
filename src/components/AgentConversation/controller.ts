@@ -32,6 +32,8 @@ export interface AgentConversationController {
     abortDisabled?: boolean
     paused: boolean
     resuming: boolean
+    /** Product-specific wording for the shared paused-workflow action. */
+    resumeLabel?: string
     attachmentsVersion?: string | number
     history?: {
       sessions: AgentConversationSession[]

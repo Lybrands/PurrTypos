@@ -351,6 +351,9 @@
 }
 .novel-analysis-workspace-header { display: flex; height: 40px; padding: 6px 14px; border-bottom: 1px solid var(--border); background: var(--bg-surface); align-items: center; flex: none; }
 .novel-analysis-workspace-header span { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.novel-analysis-workflow-notice { display: flex; padding: 9px 14px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface)); align-items: center; gap: 12px; flex: none; }
+.novel-analysis-workflow-notice > p { min-width: 0; margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.novel-analysis-workflow-notice > div { display: flex; flex: none; align-items: center; gap: 4px; }
 .novel-analysis-result-actions { display: flex; align-items: center; gap: 10px; }
 .novel-analysis-agent-panel { height: auto; min-height: 0; flex: 1; }
 .novel-analysis-agent-panel .agent-conversation-shell { padding-top: 12px; }
@@ -622,6 +625,7 @@
 .novel-technique-evidence-card .agent-markdown > :last-child { margin-bottom: 4px; }
 .novel-technique-evidence-card .purr-button { margin-left: -6px; }
 @media (max-width: 640px) {
+  .novel-analysis-workflow-notice { align-items: flex-start; flex-direction: column; gap: 6px; }
   .novel-technique-files { height: min(620px, 68vh); min-height: 440px; max-height: 620px; grid-template-columns: 1fr; grid-template-rows: minmax(120px, 180px) minmax(0, 1fr); }
   .novel-technique-files > nav { max-height: 180px; border-right: 0; border-bottom: 1px solid var(--border-light); }
   .novel-technique-tab-toolbar { align-items: flex-start; flex-direction: column; }

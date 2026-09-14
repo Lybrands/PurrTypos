@@ -472,10 +472,10 @@ test('novel-analysis timing resumes the shared ticker and freezes terminal durat
   }
 
   assert.deepEqual(buildNovelAnalysisTiming({
-    ...baseRun, runStatus: 'running', taskStatus: 'running',
+    ...baseRun, runStatus: 'running', taskStatus: 'running', workflowStatus: 'running',
   }, startedAt + 6500, 15000), { turnStartedAt: 8500 })
   assert.deepEqual(buildNovelAnalysisTiming({
-    ...baseRun, runStatus: 'failed', taskStatus: 'failed',
+    ...baseRun, runStatus: 'failed', taskStatus: 'failed', workflowStatus: 'failed',
     updateTime: '2026-08-28 10:00:09.250',
   }, startedAt + 20000, 30000), { durationMs: 9250 })
 })

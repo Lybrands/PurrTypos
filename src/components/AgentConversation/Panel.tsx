@@ -45,10 +45,10 @@ function ComposerFooter({
   resumeDisabled: boolean
 }) {
   const { capabilities, composer, conversation, actions } = controller
-  const showStop = conversation.running
-    || conversation.stopping
-    || conversation.paused
-    || conversation.resuming
+  // A paused workflow has its own resume and domain-level cancellation
+  // controls. Keeping the live-generation stop icon here suggests that a
+  // Provider call is still in flight when no call can be stopped.
+  const showStop = conversation.running || conversation.stopping
   const submitDisabled = isComposerSubmitDisabled(controller)
 
   return (
@@ -89,7 +89,7 @@ function ComposerFooter({
             disabled={resumeDisabled}
             onClick={() => void actions.resume?.()}
           >
-            继续执行
+            {conversation.resumeLabel || '继续执行'}
           </PurrButton>
         ) : null}
         {showStop ? (

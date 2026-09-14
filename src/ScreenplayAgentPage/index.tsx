@@ -120,6 +120,7 @@ import RevisionLibraryModal from './RevisionLibraryModal'
 import ReviewAdjudicationPanel from './ReviewAdjudicationPanel'
 import {
   reviewAgentActionAvailable,
+  reviewPrimaryAction,
   reviewWorkspaceEntry,
 } from './reviewAdjudicationModel'
 import { stageAgentAction } from './stageAgentAction'
@@ -3222,6 +3223,14 @@ export default function ScreenplayAgentPage({
     ) {
       return
     }
+    if (
+      openedProject.active_stage === 'review'
+      && reviewState
+      && reviewPrimaryAction(reviewState).kind === 'processFindings'
+    ) {
+      setReviewAdjudicationOpen(true)
+      return
+    }
     runAgent(
       primaryStageAction.label,
       undefined,
@@ -3238,6 +3247,7 @@ export default function ScreenplayAgentPage({
     reviewMutationPending,
     reviewState?.hardChecks,
     reviewState?.phase,
+    reviewState?.recommendation,
     runAgent,
   ])
   const startDraftRange = React.useCallback((

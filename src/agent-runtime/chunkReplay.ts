@@ -44,6 +44,16 @@ export class AgentChunkReplay {
       appMessage?: unknown
     },
   ): AgentConversationMessage {
+    // A resumed durable turn retains events from its canceled source Root.
+    // Diagnostics still consume them, but the current assistant must not.
+    if (seed.runRole === 'related') {
+      return this.assistants.get(seed.turnId) ?? {
+        role: 'assistant',
+        content: '',
+        model: seed.model,
+        turnStartedAt: seed.turnStartedAt,
+      }
+    }
     const acc = this.accumulators.get(seed.turnId)
       ?? initialAgentAccumulator({
         sessionId: seed.sessionId,

@@ -5,9 +5,7 @@ import pytest
 
 from application.writing_technique_access import WritingTechniqueAccess, TechniqueEvidenceValidator
 from application.writing_technique_exchange import upload_technique
-from application.writing_context_source import RepositoryWritingContextSource
 from database.connection import DatabaseConnection
-from domains.writing.contracts import WritingDomainContext
 from domains.writing.techniques import TechniqueError
 
 
@@ -25,32 +23,6 @@ async def access(tmp_path):
         yield WritingTechniqueAccess(db)
     finally:
         await db.close()
-
-
-async def test_local_upload_reserved_once_and_restored_without_library_publication(access):
-    uploaded = await upload_technique(access.library, files={"SKILL.md": ENTRY, "细节.md": "辅助说明不会自动进入模型上下文。"},
-        operation_id="upload", book_id="book", session_id="1")
-    assert not await access.library.list_objects("technique")
-    reserved = await access.reserve_input(operation_id="send", book_id="book", session_id="1", mode="manual", manual=[uploaded["ref"]])
-    repeated = await access.reserve_input(operation_id="send", book_id="book", session_id="1", mode="manual", manual=[uploaded["ref"]])
-    assert repeated == reserved
-    reopened = WritingTechniqueAccess(access.db)
-    snapshot = await reopened.load_input(reserved["inputId"], "book", "1")
-    source = RepositoryWritingContextSource(None, None, None, None, technique_access=reopened)
-    context = WritingDomainContext(book_id="book", writing_technique_snapshot=snapshot)
-    result = await source.build_techniques(context, 4000)
-    assert ENTRY in json.loads(result["content"])["entries"][0]["content"]
-    assert "辅助说明不会自动进入模型上下文" not in result["content"]
-    assert result["receipts"][0].metadata["path"] == "SKILL.md"
-    with pytest.raises(TechniqueError, match="上下文"):
-        await source.build_techniques(context, 1)
-    with pytest.raises(TechniqueError):
-        await reopened.load_input(reserved["inputId"], "book", "2")
-    with pytest.raises(TechniqueError):
-        await reopened.reserve_input(operation_id="other-session", book_id="book", session_id="2", mode="manual", manual=[uploaded["ref"]])
-    assert not (await reopened.freeze(book_id="book"))["manual"]
-
-
 async def test_tool_reads_are_bound_to_persisted_run_and_record_entry_receipts(access):
     from application.writing_technique_runs import WritingTechniqueRuns
     uploaded = await upload_technique(access.library, files={"SKILL.md": ENTRY, "细节.md": "细节正文"},

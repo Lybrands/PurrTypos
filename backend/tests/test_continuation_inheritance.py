@@ -99,7 +99,7 @@ async def test_plot_materials_are_not_setting_entities_and_overview_is_not_canon
     assert len(preview['records']) == 1
     assert preview['startingPoint']['sourceFactIds'] == ['fact-before']
     assert preview['materialMapping'][0]['kind'] == 'plot'
-    created = await create(db, revision, allow_without_techniques=True)
+    created = await create(db, revision)
     book = created['book']['id']
     assert not await get_setting_entities(db, book)
     rows = await db.fetch_all("SELECT body,records_json FROM continuation_material_baselines WHERE book_id=? AND kind='plot'", [book])
@@ -173,7 +173,7 @@ async def test_no_technique_does_not_block_creation_and_manifest_still_validates
     before = await service.preview_canon(source_revision_id=revision['id'], source_analysis_id='analysis-1', fork_section_id=revision['sections'][0]['id'])
     await db.execute("UPDATE novel_source_sections SET content_digest='changed' WHERE id=?", [revision['sections'][0]['id']])
     with pytest.raises(AppError, match='预览已变化'):
-        await create(db, revision, operation='new', allow_without_techniques=True, expected_snapshot_digest=before['snapshotDigest'])
+        await create(db, revision, operation='new', expected_snapshot_digest=before['snapshotDigest'])
 
 
 @pytest.mark.parametrize('fork_index,total,chapter_count', [(1,2,1),(3,4,2)])
@@ -188,7 +188,7 @@ async def test_multivolume_midpoint_and_end_directory_export(db, fork_index, tot
     service = ContinuationService(db)
     kwargs = dict(source_revision_id=revision['id'], source_analysis_id='vol-analysis', fork_section_id=revision['sections'][fork_index]['id'])
     manifest = await service.preview_canon(**kwargs)
-    created = await service.create_continuation(**kwargs, title='两卷续写', operation_id='volume-case', expected_snapshot_digest=manifest['snapshotDigest'], allow_without_techniques=True)
+    created = await service.create_continuation(**kwargs, title='两卷续写', operation_id='volume-case', expected_snapshot_digest=manifest['snapshotDigest'])
     book = created['book']['id']
     history = ContinuationContextService(db)
     page = await history.list_source_sections(book_id=book, limit=2)
@@ -240,7 +240,7 @@ async def test_source_links_and_editable_plot_conversion(db):
     # Reuse a real evidence-backed fact to check each supported projection.
     await db.execute("UPDATE novel_source_analysis_facts SET fact_kind='foreshadowing', value_json=?, lifecycle_status='active' WHERE id='fact-before'",
                      [json.dumps('[[故事背景]]中的红门尚未解开，[[不存在的角色]]未确认')])
-    created = await create(db, revision, allow_without_techniques=True)
+    created = await create(db, revision)
     book = created['book']['id']
     outline = await db.fetch_one("SELECT markdown_content FROM outlines WHERE book_id=? AND type='global'", [book])
     assert '# 续写起点与待推进事项' in outline['markdown_content']
@@ -255,11 +255,11 @@ async def test_source_links_and_editable_plot_conversion(db):
     root = materials(db).directory(binding)
     files = list((root / '原作情节').glob('*.md'))
     assert len(files) == 1 and '[[资料/背景/' in files[0].read_text()
-    assert (await create(db, revision, allow_without_techniques=True))['book']['id'] == book
+    assert (await create(db, revision))['book']['id'] == book
     assert len(await db.fetch_all("SELECT memory_key FROM story_memory_records WHERE book_id=? AND kind='plot_thread'", [book])) == 1
 
     await db.execute("UPDATE novel_source_analysis_facts SET lifecycle_status='resolved' WHERE id='fact-before'")
-    resolved = await create(db, revision, operation='resolved', allow_without_techniques=True)
+    resolved = await create(db, revision, operation='resolved')
     assert not await db.fetch_all("SELECT memory_key FROM story_memory_records WHERE book_id=? AND kind='plot_thread'", [resolved['book']['id']])
 
 
@@ -267,7 +267,7 @@ async def test_source_links_and_editable_plot_conversion(db):
 async def test_analysis_background_and_world_settings_match_material_destination(db, fact_kind, material_kind):
     revision = await _published_analysis(db)
     await db.execute("UPDATE novel_source_analysis_facts SET fact_kind=? WHERE id='fact-before'", [fact_kind])
-    created = await create(db, revision, allow_without_techniques=True)
+    created = await create(db, revision)
     book = created['book']['id']
     baseline = await db.fetch_one('SELECT kind,entity_id,body FROM continuation_material_baselines WHERE book_id=?', [book])
     assert baseline['kind'] == material_kind

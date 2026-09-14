@@ -1,4 +1,6 @@
 const AGENT_ERROR_MESSAGES: Record<string, string> = {
+  parent_delivery_reconciliation_required: '阶段交付状态未确定，已停止自动重试。请核对已显示内容后发起新任务。',
+  child_result_idle_timeout: '等待子任务结果超时，已停止本轮执行。',
   planning_invalid: 'Agent 计划格式无效，已安全停止。',
   planning_contract_violation: 'Agent 计划超出当前工具授权，已安全停止。',
   planning_failed: 'Agent 计划生成失败，已停止执行。',

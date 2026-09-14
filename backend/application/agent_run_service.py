@@ -28,7 +28,6 @@ from purra.model_protocol import FeatureSupport
 from purra.ports import CancellationSignal
 from application.agent_composition import AgentComposition
 from application.run_binding import RunBindingLifecycle
-from application.agent_public_progress import RequiredPublicProgress
 from infrastructure.models.capabilities import normalize_thinking_enabled
 AgentRunUpdate = AgentOutputEvent | AgentRunResult
 
@@ -38,6 +37,20 @@ class AgentRunService:
 
     def __init__(self, composition: AgentComposition) -> None:
         self._composition = composition
+
+    async def run_operation(self, *, request, options, run_id, operation_id, api_key, signal=None):
+        composition = self._composition
+        request = await composition.prepare_request(request, run_id=run_id)
+        options = composition.bind_run_profile(request, options)
+        core = composition.create_core_for_request(request, api_key, agent_tree_enabled=False)
+        try:
+            from application.public_commentary_output import private_model_operation
+            with private_model_operation():
+                return await core.execute_operation(request, run_id=run_id, operation_id=operation_id,
+                                                    options=options, signal=signal)
+        finally:
+            await core.close()
+            composition.release_core(core)
 
     async def read_validated_result(self, run_id: str) -> str:
         """Read the private canonical result without replaying execution."""
@@ -73,6 +86,9 @@ class AgentRunService:
             ),
             signal,
         )
+
+    async def report_agent_results(self, run_id, results, signal=None):
+        await self._composition.report_agent_results(run_id, results, signal)
 
     async def run(
         self,
@@ -121,14 +137,8 @@ class AgentRunService:
                 )
             ),
         }
-        if (
-            request.tools_enabled
-            and request.metadata.get("responseAudience") == "internal"
-            and request.metadata.get("progressAudience") == "public"
-        ):
-            progress = RequiredPublicProgress(composition.output_repository)
-            options = replace(options, response_validators=(*options.response_validators, progress))
-            create_core_kwargs["public_progress_requirement"] = progress
+        if options.agent_tree_run_id is not None:
+            create_core_kwargs["agent_tree_enabled"] = True
         if long_task_executor is not None:
             create_core_kwargs["long_task_executor"] = long_task_executor
         core = composition.create_core_for_request(

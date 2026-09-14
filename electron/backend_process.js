@@ -6,6 +6,42 @@ const { execSync, spawn } = require('child_process')
 
 const BACKEND_PORT = 18321
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`
+const NOVEL_ANALYSIS_ACCEPTANCE_ENV = 'PURRTYPOS_NOVEL_ANALYSIS_REPLACEMENT_ACCEPTANCE'
+const NOVEL_ANALYSIS_ACCEPTANCE_MARKER = '.purrtypos-novel-analysis-replacement-acceptance'
+const SCREENPLAY_ACCEPTANCE_ENV = 'PURRTYPOS_SCREENPLAY_REPLACEMENT_ACCEPTANCE'
+const SCREENPLAY_ACCEPTANCE_MARKER = '.purrtypos-screenplay-replacement-acceptance'
+const WRITING_ACCEPTANCE_ENV = 'PURRTYPOS_WRITING_REPLACEMENT_ACCEPTANCE'
+const WRITING_ACCEPTANCE_MARKER = '.purrtypos-writing-replacement-acceptance'
+
+const REPLACEMENT_ACCEPTANCE_TARGETS = [
+  [NOVEL_ANALYSIS_ACCEPTANCE_ENV, NOVEL_ANALYSIS_ACCEPTANCE_MARKER, 'Novel Analysis'],
+  [SCREENPLAY_ACCEPTANCE_ENV, SCREENPLAY_ACCEPTANCE_MARKER, 'Screenplay'],
+  [WRITING_ACCEPTANCE_ENV, WRITING_ACCEPTANCE_MARKER, 'Writing'],
+]
+
+function resolveBackendDataDir({ app, platform, processEnv, fsImpl }) {
+  const pathImpl = platform === 'win32' ? path.win32 : path.posix
+  const userData = app.getPath('userData')
+  const enabledTargets = REPLACEMENT_ACCEPTANCE_TARGETS.filter(
+    ([envName]) => processEnv[envName] === '1',
+  )
+  if (enabledTargets.length === 0) return userData
+
+  const explicit = processEnv.PURRTYPOS_DATA_DIR?.trim()
+  if (!explicit) {
+    throw new Error('Replacement acceptance requires PURRTYPOS_DATA_DIR')
+  }
+  const candidate = pathImpl.resolve(explicit)
+  if (candidate === pathImpl.resolve(userData)) {
+    throw new Error('Replacement acceptance must not use Electron userData')
+  }
+  for (const [, marker, label] of enabledTargets) {
+    if (!fsImpl.existsSync(path.join(candidate, marker))) {
+      throw new Error(`${label} replacement acceptance data directory is not marked`)
+    }
+  }
+  return candidate
+}
 
 function createBackendProcessManager({
   app,
@@ -38,6 +74,9 @@ function createBackendProcessManager({
   }
 
   function getPythonCommand() {
+    const explicitPython = processEnv.PURRTYPOS_PYTHON?.trim()
+    if (!app.isPackaged && explicitPython) return explicitPython
+
     const virtualEnvPython = getVirtualEnvPython()
     if (virtualEnvPython) return virtualEnvPython
 
@@ -64,25 +103,31 @@ function createBackendProcessManager({
     const backendDir = app.isPackaged
       ? path.join(resourcesPath, 'backend')
       : path.join(moduleDir, '..', 'backend')
-    return {
-      backendDir,
-      skillsDir: path.join(backendDir, 'skills'),
-    }
+    return { backendDir }
   }
 
   function start() {
     if (childProcess) return childProcess
 
-    const { backendDir, skillsDir } = getBackendPaths()
+    const { backendDir } = getBackendPaths()
     const env = {
       ...processEnv,
-      PURRTYPOS_DATA_DIR: app.getPath('userData'),
-      PURRTYPOS_SKILLS_DIR: skillsDir,
+      PURRTYPOS_DATA_DIR: resolveBackendDataDir({
+        app,
+        platform,
+        processEnv,
+        fsImpl,
+      }),
       PURRTYPOS_PORT: String(port),
       PURRTYPOS_DEV_DIAGNOSTICS: (
         processEnv.PURRTYPOS_DEV_DIAGNOSTICS
         ?? (app.isPackaged ? '0' : '1')
       ),
+      // Packaged Python sources live inside signed application resources.
+      // Writing __pycache__ there mutates the sealed bundle after first launch.
+      PYTHONDONTWRITEBYTECODE: app.isPackaged
+        ? '1'
+        : processEnv.PYTHONDONTWRITEBYTECODE,
     }
     const frozen = app.isPackaged ? getFrozenBackendExe(backendDir) : null
 

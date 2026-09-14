@@ -6,9 +6,14 @@ import pytest
 
 from database.connection import DatabaseConnection
 from application.continuation_service import ContinuationService
-from application.writing_agent_profile import WritingAgentProfile
-from domains.writing.contracts import WritingDomainContext
-from purra.contracts import AgentMessage, AgentRunRequest, MessageRole, ModelRequest
+from agents.writing.profile import WritingReplacementProfile
+from purra.contracts import (
+    AgentMessage,
+    AgentRunRequest,
+    DomainContext,
+    MessageRole,
+    ModelRequest,
+)
 import json
 
 
@@ -106,17 +111,16 @@ async def test_database_import_preserves_source_canon_and_run_binding(tmp_path: 
             source_analysis_id="analysis-1",
             fork_section_id="source-section",
             expected_snapshot_digest=preview["snapshotDigest"],
-            operation_id="import-fixture", allow_without_techniques=True,
+            operation_id="import-fixture",
         )
-        profile = WritingAgentProfile(
-            source, skills_dir=Path(__file__).resolve().parent.parent / "skills"
-        )
+        profile = WritingReplacementProfile(source)
         prepared = await profile.prepare_request(AgentRunRequest(
             messages=(AgentMessage(role=MessageRole.USER, content="续写"),),
             model=ModelRequest(provider="test", model="model"),
-            domain_context=WritingDomainContext(
-                book_id=created["book"]["id"]
-            ).to_core_context(),
+            domain_context=DomainContext(
+                namespace="purrtypos.writing",
+                payload={"book_id": created["book"]["id"]},
+            ),
         ))
         binding = profile.run_binding_attributes(prepared)
         await source.execute(

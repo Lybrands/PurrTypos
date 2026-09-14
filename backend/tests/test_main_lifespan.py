@@ -9,6 +9,7 @@ import config
 import dependencies
 import main
 from application.agent_composition import get_agent_composition
+from agents.shared.implementation import AgentKind, replacement_implementation
 from database import connection as database_connection
 from exceptions import DatabaseNotReadyError
 from infrastructure.persistence import run_store
@@ -54,7 +55,6 @@ def _capture_database(monkeypatch, tmp_path):
 
     monkeypatch.setattr(database_connection, "DatabaseConnection", _factory)
     monkeypatch.setattr(main, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(config, "SKILLS_DIR", BACKEND_DIR / "skills")
     dependencies.clear_db()
     return created
 
@@ -93,9 +93,15 @@ async def test_lifespan_shutdown_clears_composition_and_global_db(
         assert application.router_count == 24
         assert dependencies.get_db() is created[0]
         assert get_agent_composition().agent_profile_ids == (
-            "writing",
-            "novel_analysis",
-            "screenplay",
+            "writing.purra-native.v1",
+            "novel_analysis.purra-native.v1",
+            "screenplay.purra-native.v1",
+        )
+        assert (
+            get_agent_composition()
+            .agent_implementation_router.for_create(AgentKind.WRITING)
+            .identity
+            == replacement_implementation(AgentKind.WRITING)
         )
 
     assert created[0]._conn is None
@@ -104,6 +110,40 @@ async def test_lifespan_shutdown_clears_composition_and_global_db(
         dependencies.get_db()
     with pytest.raises(RuntimeError, match="not been initialized"):
         get_agent_composition()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_defaults_new_analysis_runs_to_replacement(
+    monkeypatch,
+    tmp_path,
+):
+    _capture_database(monkeypatch, tmp_path)
+    async with main.lifespan(_RecordingApplication()):
+        assert (
+            get_agent_composition()
+            .agent_implementation_router.for_create(AgentKind.NOVEL_ANALYSIS)
+            .identity
+            == replacement_implementation(AgentKind.NOVEL_ANALYSIS)
+        )
+
+
+@pytest.mark.asyncio
+async def test_lifespan_defaults_new_screenplay_runs_to_replacement(
+    monkeypatch,
+    tmp_path,
+):
+    _capture_database(monkeypatch, tmp_path)
+
+    async with main.lifespan(_RecordingApplication()):
+        route = (
+            get_agent_composition()
+            .agent_implementation_router
+            .for_create(AgentKind.SCREENPLAY, recipe_version=1)
+        )
+        assert route.identity == replacement_implementation(
+            AgentKind.SCREENPLAY,
+            recipe_version=1,
+        )
 
 
 @pytest.mark.asyncio

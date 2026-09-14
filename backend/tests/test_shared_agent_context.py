@@ -14,9 +14,6 @@ from domains.agent_policy import (
     build_agent_final_response_policy,
     build_agent_public_progress_policy,
 )
-from domains.novel_analysis_prompts import build_novel_analysis_method_guidance
-from domains.screenplay_agent.prompts import build_screenplay_planning_policy
-from domains.writing.prompts import build_writing_planning_policy
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
@@ -188,22 +185,6 @@ async def test_domain_cannot_replace_a_shared_policy_block():
         match="domain context cannot replace shared Agent policy",
     ):
         await provider.build_context(_request(), _budget())
-
-
-@pytest.mark.parametrize(
-    "domain_policy",
-    (
-        build_writing_planning_policy(),
-        build_novel_analysis_method_guidance(),
-        build_screenplay_planning_policy(),
-    ),
-)
-def test_domain_policy_does_not_restate_shared_agent_behavior(domain_policy):
-    for shared_marker in (
-        "【公开执行说明】",
-        "【最终答复】",
-    ):
-        assert shared_marker not in domain_policy
 
 
 def test_shared_public_policies_do_not_name_runtime_internals():

@@ -36,6 +36,7 @@ def route_planning_stream(
     runtime: Callable[..., Awaitable[dict]],
     *,
     progress: str | None = None,
+    progress_chunks: tuple[str, ...] | None = None,
 ):
     """Route the same Provider stream entry to deterministic plan/runtime fixtures."""
 
@@ -49,20 +50,45 @@ def route_planning_stream(
             plan = json.loads(content) if isinstance(content, str) else content
         except (TypeError, ValueError):
             plan = content
-        wire = planning_stream_wire(plan, progress=progress)
+        progress_text = progress
+        if progress_chunks is not None:
+            if not progress_chunks or any(not chunk for chunk in progress_chunks):
+                raise ValueError("progress_chunks must contain nonempty chunks")
+            if progress_text is not None and progress_text != "".join(progress_chunks):
+                raise ValueError("progress and progress_chunks disagree")
+            progress_text = "".join(progress_chunks)
+        wire = planning_stream_wire(plan, progress=progress_text)
 
         async def chunks():
-            yield {
-                "choices": [{
-                    "delta": {"content": wire},
-                    "finish_reason": response.get("finish_reason") or "stop",
-                }],
-                **(
-                    {"usage": response["usage"]}
-                    if response.get("usage") is not None
-                    else {}
-                ),
-            }
+            wire_chunks = (wire,)
+            if progress_chunks is not None:
+                prefix = '{"v":1,"type":"progress","text":"'
+                suffix = '"}\n'
+                plan_wire = planning_stream_wire(plan)
+                wire_chunks = tuple(
+                    (
+                        prefix if index == 0 else ""
+                    ) + json.dumps(chunk, ensure_ascii=False)[1:-1] + (
+                        suffix + plan_wire
+                        if index == len(progress_chunks) - 1 else ""
+                    )
+                    for index, chunk in enumerate(progress_chunks)
+                )
+            for index, content_delta in enumerate(wire_chunks):
+                is_last = index == len(wire_chunks) - 1
+                yield {
+                    "choices": [{
+                        "delta": {"content": content_delta},
+                        "finish_reason": (
+                            response.get("finish_reason") or "stop"
+                        ) if is_last else None,
+                    }],
+                    **(
+                        {"usage": response["usage"]}
+                        if is_last and response.get("usage") is not None
+                        else {}
+                    ),
+                }
 
         return {
             "applied_generation_limit": response.get(

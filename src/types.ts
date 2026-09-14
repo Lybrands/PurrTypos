@@ -555,6 +555,11 @@ export interface ScreenplayConversationRuntimeInput {
   contextWindow?: AiContextWindow;
 }
 
+/** Novel analysis may resume without an open renderer, so it binds a saved model. */
+export type NovelAnalysisRuntimeInput = ScreenplayConversationRuntimeInput & {
+  modelConfigId: string;
+};
+
 export interface CharacterOption {
   id: number;
   category: string;
@@ -800,8 +805,24 @@ export interface WritingTechniqueResult {
   evidenceRefs: string[]; scopeNotes: string[]; reason: string;
 }
 
+export type NovelAnalysisReplacementTechniqueResult = {
+  status: 'generated';
+  techniques: Array<{
+    title: string;
+    bodyMarkdown: string;
+    observationIds: string[];
+  }>;
+} | {
+  status: 'empty';
+  reason: string;
+};
+
 export interface NovelAnalysisArtifact {
   analysisSchemaVersion?: number;
+  artifactContract?: 'purrtypos.novel_analysis.review.v1';
+  artifactRef?: string;
+  publicationSupported?: boolean;
+  analysisTechniqueResult?: NovelAnalysisReplacementTechniqueResult;
   techniqueResult?: WritingTechniqueResult;
   writingSkill?: DistilledWritingSkill;
   distillation?: WritingSkillDistillation;
@@ -818,17 +839,73 @@ export interface NovelAnalysisArtifact {
   reviewStatus: 'pending' | 'reviewed';
 }
 
+export type NovelAnalysisConversationStatus = 'streaming' | 'finalized';
+export type NovelAnalysisWorkflowStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+export type NovelAnalysisWorkflowPauseKind = 'system' | 'user' | 'budget' | 'unknown';
+export type NovelAnalysisUnitStatus =
+  | 'pending'
+  | 'waiting_retry'
+  | 'claimed'
+  | 'running'
+  | 'needs_split'
+  | 'blocked'
+  | 'expanded'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+
+/** Result of a pause, resume, or cancel command; it is not a conversation Run. */
+export interface NovelAnalysisTaskControlReceipt {
+  commandStatus: 'accepted' | 'completed';
+  taskId: string;
+  workflowStatus: NovelAnalysisWorkflowStatus | null;
+  workflowPauseKind: NovelAnalysisWorkflowPauseKind | null;
+  workflowReasonCode: string | null;
+  workflowResumable: boolean;
+  workflowAutoResumeAtMs: number | null;
+  workflowAutoRecoveryEligible: boolean;
+  taskRevision: number;
+  totalUnits: number;
+  completedUnits: number;
+  failedUnits: number;
+  commandId?: string;
+}
+
 export interface NovelAnalysisRun {
   runId: string;
   runStatus: string;
+  /** Chat delivery lifecycle; it intentionally differs from workflowStatus. */
+  conversationStatus: NovelAnalysisConversationStatus;
   commandId: string;
   interactionKind?: 'analysis' | 'follow_up';
+  /** A scheduler-owned continuation; no synthetic user prompt is rendered. */
+  automaticRecovery?: boolean;
   conversationId?: string;
   analysisArtifactRef?: string | null;
   prompt?: string;
   finalResponse?: string;
+  /** Root delivered a persisted checkpoint; the underlying task is incomplete. */
+  partialCompletion?: boolean;
   taskId: string | null;
+  /** Raw persistence fact for diagnostics; workflowStatus drives the UI. */
   taskStatus: string | null;
+  /** Stable durable-workflow projection used by the UI. */
+  workflowStatus: NovelAnalysisWorkflowStatus | null;
+  /** Why a paused workflow stopped; budget requires an explicit bounded resume. */
+  workflowPauseKind: NovelAnalysisWorkflowPauseKind | null;
+  /** Stable public error code explaining the durable workflow state. */
+  workflowReasonCode: string | null;
+  /** Whether a resume command is valid for the durable workflow. */
+  workflowResumable: boolean;
+  /** Persisted due time for a system-owned automatic continuation. */
+  workflowAutoResumeAtMs?: number | null;
+  workflowAutoRecoveryEligible?: boolean;
   taskRevision: number | null;
   totalUnits: number;
   completedUnits: number;
@@ -859,10 +936,12 @@ export interface NovelAnalysisRun {
     title: string;
     kind: string;
     plannerStepId?: string;
-    status: string;
+    status: NovelAnalysisUnitStatus;
     attempt: number;
     maxAttempts: number;
     errorCode?: string | null;
+    /** Durable retry deadline; absent for units that are immediately runnable. */
+    nextRetryAtMs?: number | null;
     updateTime?: string | null;
   }>;
   error?: string | null;
@@ -1335,6 +1414,9 @@ export interface AiAgentRunSnapshot {
   version: 2;
   run: {
     runId: string;
+    rootRunId?: string;
+    parentRunId?: string;
+    agentId?: string;
     sessionId?: number | null;
     conversationId?: number | null;
     status: 'running' | 'done' | 'blocked' | 'failed' | 'canceled';
@@ -1692,6 +1774,7 @@ export interface AiToolCallDiagnostic {
   eventRowId: number;
   name?: string;
   displayName?: string;
+  presentationGroup?: { key: string; label: string };
   operationId?: string;
   startedAt?: string;
   completedAt?: string;
@@ -2083,19 +2166,19 @@ export interface ElectronAPI {
   getNovelSourceRevision: (data: { revisionId: string }) => Promise<ApiResult<NovelSourceRevision>>;
   getNovelSourceSection: (data: { revisionId: string; sectionId: string; startCharacter?: number; characterLimit?: number }) => Promise<ApiResult<NovelSourceSection>>;
   searchNovelSourceSections: (data: { revisionId: string; query: string; limit?: number }) => Promise<ApiResult<NovelSourceSearchResult[]>>;
-  startNovelAnalysis: (data: { conversationId?: string; commandId: string; revisionId: string; prompt?: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
-  followUpNovelAnalysis: (data: { replaceRunId?: string; commandId: string; revisionId: string; conversationId?: string; artifactId?: string; prompt: string; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
+  startNovelAnalysis: (data: { conversationId?: string; commandId: string; revisionId: string; prompt?: string; runtime: NovelAnalysisRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string; sectionCount: number }>>;
+  followUpNovelAnalysis: (data: { replaceRunId?: string; commandId: string; revisionId: string; conversationId?: string; artifactId?: string; prompt: string; runtime: NovelAnalysisRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
   listNovelAnalysisRuns: (data: { revisionId: string }) => Promise<ApiResult<NovelAnalysisRun[]>>;
-  pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisRun>>;
-  resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: ScreenplayConversationRuntimeInput }) => Promise<ApiResult<{ status: string; taskId: string; commandId: string }>>;
-  cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisRun>>;
+  pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
+  resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: NovelAnalysisRuntimeInput }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
+  cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
   getNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<NovelAnalysisArtifact>>;
-  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null; techniqueResult?: WritingTechniqueResult }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null; techniqueResult?: WritingTechniqueResult; analysisTechniqueResult?: NovelAnalysisReplacementTechniqueResult }) => Promise<ApiResult<NovelAnalysisArtifact>>;
   publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
   getPublishedNovelAnalysis: (data: { analysisId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   previewContinuationCanon: (data: { sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string }) => Promise<ApiResult<ContinuationCanonPreview>>;
-  createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; operationId: string; allowWithoutTechniques?: boolean; useSourceTechniques?: boolean; enableVolume?: boolean }) => Promise<ApiResult<ContinuationWorkspace>>;
+  createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; operationId: string; useSourceTechniques?: boolean; enableVolume?: boolean }) => Promise<ApiResult<ContinuationWorkspace>>;
   getContinuation: (data: { bookId: string }) => Promise<ApiResult<ContinuationWorkspace>>;
   // Chapter diff history
   commitChapterDiff: (data: {
@@ -2566,6 +2649,8 @@ export interface GeneralSettings {
   sync_outline_chapter: boolean;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
+  /** 按协议 Provider 与共享端点控制真实模型调用并发。 */
+  ai_provider_capacity_policies?: AiProviderCapacityPolicy[];
   /** PurrA memory extraction/review model. Empty means model-assisted memory is unavailable. */
   memory_model_id?: string;
   /** Explicit OpenAI-compatible Embedding endpoint used by the PurrA memory component. */
@@ -2599,6 +2684,13 @@ export type AiReasoningEffort = 'low' | 'high' | 'max';
 
 export type AiBuiltinProviderId = 'zai' | 'deepseek' | 'moonshot' | 'minimax' | 'mimo';
 export type AiApiProvider = 'openai' | 'anthropic' | 'zai';
+
+/** 一个端点可服务多个模型，因此并发策略不能挂在单个模型名称上。 */
+export interface AiProviderCapacityPolicy {
+  provider: AiApiProvider;
+  endpoint: string;
+  maxConcurrentCalls: number;
+}
 
 /** 单条 AI 模型配置（可自定义，用于设置页与对话模型下拉） */
 export type ModelSettingChoice<T> = { state: 'inherit' | 'provider_default' } | { state: 'explicit'; value: T };

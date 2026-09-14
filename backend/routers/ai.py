@@ -513,7 +513,7 @@ async def get_agent_run_tool_diagnostics(run_id: str, after: int = 0):
     """Read private tool IO only through the development diagnostics gate."""
     from config import DEV_DIAGNOSTICS_ENABLED
     from dependencies import get_db
-    from application.screenplay_tool_presentation import (
+    from agents.screenplay.historical_tool_presentation import (
         reproject_screenplay_tool_diagnostics,
     )
     from infrastructure.persistence.run_store import get_run
@@ -624,7 +624,7 @@ async def get_latest_session_agent_run(
     """Return the latest session-owned Run for page recovery."""
 
     from application.agent_composition import get_agent_composition
-    from application.agent_run_queries import AgentRunQueryService
+    from agents.shared.run_query import VersionedAgentRunQueryService
     from dependencies import get_db
     from infrastructure.persistence.run_store import (
         get_latest_run_for_session,
@@ -675,9 +675,10 @@ async def get_latest_session_agent_run(
                 if receipt is not None else None
             ),
         }
-    snapshot = await AgentRunQueryService(
+    snapshot = await VersionedAgentRunQueryService(
         composition.run_snapshot_reader,
         composition.output_repository,
+        composition.agent_implementation_router,
         product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
@@ -703,7 +704,7 @@ async def get_agent_run_snapshot(
 ):
     """Return a resumable Run snapshot and durable events after a cursor."""
 
-    from application.agent_run_queries import AgentRunQueryService
+    from agents.shared.run_query import VersionedAgentRunQueryService
     from application.agent_composition import get_agent_composition
     from application.writing_proposal_read_model import (
         SqliteWritingProposalReadModel,
@@ -716,9 +717,10 @@ async def get_agent_run_snapshot(
     run = await get_run(db, run_id)
     if run is None:
         return {"success": False, "error": "Agent Run 不存在"}
-    snapshot = await AgentRunQueryService(
+    snapshot = await VersionedAgentRunQueryService(
         composition.run_snapshot_reader,
         composition.output_repository,
+        composition.agent_implementation_router,
         product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(
         run_id,
@@ -737,7 +739,7 @@ async def stream_agent_run_events(
     after: int = Query(default=0, ge=0),
 ):
     from application.agent_composition import get_agent_composition
-    from application.agent_run_queries import AgentRunQueryService
+    from agents.shared.run_query import VersionedAgentRunQueryService
     from application.agent_event_stream import stream_agent_pages, projection_version
     from dependencies import get_db
     from infrastructure.persistence.run_store import get_run
@@ -746,7 +748,11 @@ async def stream_agent_run_events(
     run = await get_run(get_db(), run_id)
     if run is None or run.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="Agent Run 不存在于当前会话")
-    query = AgentRunQueryService(composition.run_snapshot_reader, composition.output_repository)
+    query = VersionedAgentRunQueryService(
+        composition.run_snapshot_reader,
+        composition.output_repository,
+        composition.agent_implementation_router,
+    )
 
     async def read_page(cursor):
         snapshot = await query.get_snapshot(run_id, after_event_id=cursor, limit=500)
@@ -767,37 +773,6 @@ async def stream_agent_run_events(
         request=request, read_page=read_page,
         notifications=composition.output_notifications, after=after,
     ))
-
-
-@router.get("/ai/agent-runtime-regressions")
-async def get_agent_runtime_regressions():
-    """Run content-free operational incidents against the current evaluator."""
-    from application.operations.deterministic_checks import (
-        run_runtime_regression_suite,
-    )
-
-    return {"success": True, "data": run_runtime_regression_suite()}
-
-
-@router.get("/ai/agent-security-redteam")
-async def get_agent_security_redteam():
-    """Run deterministic, content-free host security boundary checks."""
-    from application.operations.deterministic_checks import (
-        run_agent_security_redteam_suite,
-    )
-
-    return {"success": True, "data": run_agent_security_redteam_suite()}
-
-
-@router.get("/ai/agent-stability-quality-gate")
-async def get_agent_stability_quality_gate():
-    """Run promoted failure-classification incidents as a release gate."""
-
-    from application.operations.deterministic_checks import (
-        run_agent_stability_quality_gate,
-    )
-
-    return {"success": True, "data": run_agent_stability_quality_gate()}
 
 
 # ── POST /ai/models ─────────────────────────────────────────────

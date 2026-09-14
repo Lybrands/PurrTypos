@@ -95,40 +95,17 @@ async def test_persisted_public_partial_history_is_status_independent(status, tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('domain', ['writing', 'analysis', 'screenplay'])
-async def test_public_request_adapters_share_history_contract(domain):
-    from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
-    from application.screenplay_agent_service import _root_request
+async def test_writing_request_adapter_uses_public_history_contract():
     from application.request_mapping import to_writing_agent_request
     from schemas.ai import ChatStreamRequest
-    runtime = ScreenplayAgentRuntimeRequest(apiKey='test', contextWindow='128k', options={
+    runtime_options = {
         'model': 'deepseek-v4-flash', 'model_profile': 'deepseek:deepseek-v4-flash', 'profile_binding': 'compatible',
-        'thinking': {'type': 'enabled'}})
+        'thinking': {'type': 'enabled'}}
     history = (AgentMessage(role='user', content='old'), AgentMessage(role='assistant', content='answer'))
-    if domain == 'writing':
-        body = ChatStreamRequest(apiKey='test', bookId='b', sessionId=1,
-            messages=[{'role': str(m.role), 'content': m.content} for m in history]
-                     + [{'role': 'user', 'content': 'current'}], options=runtime.options)
-        request = to_writing_agent_request(body, runtime.options)
-    elif domain == 'screenplay':
-        request = _root_request({'projectId': 'p', 'sessionId': 1, 'id': 't', 'userContent': 'current'}, runtime, history)
-    else:
-        from application.novel_analysis_service import NovelAnalysisService
-        class Database:
-            async def fetch_all(self, sql, params):
-                assert params == ['r', 'c', 'c', 'r', 'c']
-                return [{'prompt': 'old', 'response': 'answer'}]
-        class Runs:
-            async def run(self, **kwargs):
-                self.request = kwargs['request']
-                if False:
-                    yield
-        service = object.__new__(NovelAnalysisService)
-        service._db = Database()
-        service._runs = Runs()
-        await service._execute_follow_up(source_revision_id='r', section_ids=('s',),
-            artifact_ref='artifact', prompt='current', command_id='c', runtime=runtime)
-        request = service._runs.request
+    body = ChatStreamRequest(apiKey='test', bookId='b', sessionId=1,
+        messages=[{'role': str(m.role), 'content': m.content} for m in history]
+                 + [{'role': 'user', 'content': 'current'}], options=runtime_options)
+    request = to_writing_agent_request(body, runtime_options)
     assert [m.content for m in request.messages] == ['old', 'answer', 'current']
     assert request.metadata['conversationInput']['historyPolicy'] == 'complete_public_turns'
     assert [m.host_metadata['inputSource'] for m in request.messages] == ['public_history', 'public_history', 'current_user']

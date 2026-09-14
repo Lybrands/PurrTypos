@@ -1,9 +1,9 @@
 import pytest
-from application.novel_analysis_sessions import NovelAnalysisSessions
-from application.novel_analysis_service import NovelAnalysisService
+from agents.novel_analysis.sessions import NovelAnalysisSessions
+from agents.novel_analysis.legacy_read_adapter import NovelAnalysisLegacyReadAdapter
 from infrastructure.persistence.agent_conversation_history import analysis_history
 from database.connection import DatabaseConnection
-from tests.test_novel_analysis import _source
+from tests.support.novel_source_fixtures import seed_novel_source
 from exceptions import AppError
 
 
@@ -11,7 +11,7 @@ async def test_session_history_isolation_and_legacy_history_survive_reopen(tmp_p
     db = DatabaseConnection(tmp_path)
     await db.init()
     try:
-        revision = (await _source(db))['id']
+        revision = (await seed_novel_source(db))['id']
         sessions = NovelAnalysisSessions(db)
         legacy = (await sessions.list(revision))[0]['id']
         fresh = (await sessions.create(revision))['id']
@@ -22,7 +22,7 @@ async def test_session_history_isolation_and_legacy_history_survive_reopen(tmp_p
         assert [m.content for m in await analysis_history(db, revision, 'current')] == ['two', 'answer-two']
         await sessions.bind(revision, legacy, 'legacy-current')
         assert [m.content for m in await analysis_history(db, revision, 'legacy-current')] == ['old', 'answer-old', 'one', 'answer-one']
-        runs = await NovelAnalysisService(db).list_for_revision(revision)
+        runs = await NovelAnalysisLegacyReadAdapter(db).list_for_revision(revision)
         assert len(runs) == 4
         assert next(r for r in runs if r['runId'] == 'old')['conversationId'] == legacy
         await sessions.update(revision, fresh, title='追问', closed=True)
@@ -44,7 +44,7 @@ async def test_session_routes_create_rename_close_and_reopen(tmp_path):
     await db.init()
     set_db(db)
     try:
-        revision = (await _source(db))['id']
+        revision = (await seed_novel_source(db))['id']
         app = FastAPI()
         app.include_router(router)
         prefix = router.prefix

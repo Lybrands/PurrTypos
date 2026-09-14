@@ -32,9 +32,9 @@ pip install -r backend/requirements.txt
 ```
 
 PurrA Core、OpenAI、Anthropic 和 Mem0 集成通过
-`backend/requirements-purra.txt` 固定引用 PyPI 正式发布的 0.5.0 包，
-Mem0 保留 `managed` 扩展依赖。开发、CI 和分发打包使用同一份依赖清单，
-无需同级 PurrA 源码目录。
+`backend/requirements-purra.txt` 固定引用仓库内的 PurrA 1.0.0 候选 wheel，
+其来源与 SHA-256 记录在 `backend/purra-candidate.json`；Mem0 保留 `managed`
+扩展依赖。开发、CI 和分发打包使用同一份依赖清单，无需同级 PurrA 源码目录。
 
 如果已有环境安装过同版本的本地 wheel 或可编辑包，先替换这四个包，再检查完整依赖：
 
@@ -44,7 +44,8 @@ python -m pip install -r backend/requirements.txt
 python -m pip check
 ```
 
-更新后重启后端进程，使其加载正式发布包。
+更新后重启后端进程，并运行 `python scripts/verify-purra-candidate.py` 核验实际安装内容。
+候选 wheel 通过本地验收不等同于已发布到公共仓库。
 
 如 Electron 二进制下载失败（"Electron failed to install correctly"），可尝试：
 
@@ -103,7 +104,7 @@ npm run build:web:win
 
 | 模式 | 适用 | 特征 |
 |---|---|---|
-| **Writing Agent** (`agent`) | 写作与项目任务 | 三层 Agent 执行规划、上下文预算、受限工具调用、人工审批和结果校验 |
+| **Writing Agent** (`agent`) | 写作与项目任务 | PurrA Run、上下文预算、受限工具调用、写入提案和结果校验 |
 | **纯问答** (`ask`) | 答疑、构思 | 不携带工具，单轮文本响应 |
 
 模型接入提供两条路径：系统固定提供内置模型，设置页只允许配置其服务商凭据与运行参数，不能新增、复制或删除；代理、自建服务或目录外模型继续使用“高级自定义”。两种路径最终生成相同的 `AiModelConfig`，沿用同一套后端调用链。缺少 API Key 的内置模型仍显示在设置页，但不会进入对话模型列表。
@@ -112,13 +113,12 @@ npm run build:web:win
 
 Kimi K3 通过独立 profile 接入 `kimi-k3`，使用 1M 上下文和当前服务端支持的 Max 思考模式；Agent 工具续轮会回传模型的 `reasoning_content`，避免丢失 K3 的思考历史。
 
-### 工具系统（Skills）
+### Agent 工具系统
 
-`backend/skills/<name>/SKILL.md` 是工具定义的单一来源，文件由：
-1. YAML frontmatter（`name` / `description`）
-2. 正文中的 ` ```json ` 代码块（OpenAI 函数调用的 `parameters` JSON Schema）
-
-后端启动时由 `WritingSkillCatalog` 扫描整个 `skills/` 目录，并由 Writing Domain 校验 Schema、Policy 与 Infrastructure Handler 一致。新增工具必须同时提供 `SKILL.md`、业务 Policy/规划约束和具体 Handler；任一缺失都会在装配时失败关闭。
+三个产品 Agent 的工具合同由各自 replacement 目录中的代码化 catalog 唯一定义：
+`backend/agents/writing`、`backend/agents/novel_analysis` 和
+`backend/agents/screenplay`。工具 schema、授权范围、执行 handler 与结果校验在同一实现
+版本内组合，不再启动扫描 `backend/skills`，也不存在旧 Writing SkillCatalog 回退路径。
 
 ## 项目结构
 
@@ -139,16 +139,20 @@ PurrTypos/
 │   │   ├── books.py / outlines.py / chapters.py / characters.py / ...
 │   │   └── conversations.py / sessions.py / settings.py / ...
 │   ├── application/             # 唯一 Composition Root、请求/SSE 映射和应用用例
-│   ├── domains/writing/         # Writing 业务规则、Planning Policy、上下文与工具契约
-│   ├── infrastructure/          # Provider、SQLite Repository、技能目录和 Writing Handler
+│   ├── agents/                  # 三个 replacement Agent 与共享宿主适配
+│   │   ├── shared/              # 公共 Run、取消、恢复和呈现边界
+│   │   ├── writing/             # 小说创作 profile、上下文、工具与策略
+│   │   ├── novel_analysis/      # 小说分析 profile、任务单元与工具
+│   │   └── screenplay/          # 剧本 profile、阶段任务、Artifact 与发布
+│   ├── domains/                 # 与 Agent 执行器解耦的产品业务规则
+│   ├── infrastructure/          # Provider、SQLite Repository 和宿主基础设施
 │   ├── services/                # 业务源策略与组件投递服务
 │   ├── database/
 │   │   ├── connection.py        # aiosqlite 单连接 + WAL + 事务管理
 │   │   ├── schema.py            # 建表 / 增量迁移
 │   │   └── crud/                # 各表 CRUD（books/outlines/chapters/...）
 │   ├── utils/                   # 通用纯函数与异步流辅助
-│   ├── schemas/                 # Pydantic 请求体
-│   └── skills/                  # 工具定义（每个工具一个目录 + SKILL.md）
+│   └── schemas/                 # Pydantic 请求体
 ├── src/                         # 渲染进程（React + TypeScript）
 │   ├── App.tsx                  # 路由：首页 / 书架 / 工作台
 │   ├── HomePage/ BookshelfPage/ SettingsPage/
@@ -170,7 +174,7 @@ PurrTypos/
 
 ## 长期记忆
 
-- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由 PurrA 0.5.0 发布包 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不再维护平行的长期记忆表或召回实现。
+- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由当前锁定的 PurrA 1.0.0 候选包 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不再维护平行的长期记忆表或召回实现。
 - PurrTypos 只保留业务源到组件的投递策略与持久化 outbox（`memory_source_heads` / `memory_source_deliveries`）。用户保存与业务提交先在 SQLite 中完成，组件投递失败会如实返回并由恢复流程重试。
 - Story Memory 仍是独立的章节证据状态账本，用于版本、来源失效和审阅；它与可编辑的通用长期记忆具有不同生命周期。模型输入由两者共同组装，并在调用 Provider 前校验版本化 evidence receipt。
 

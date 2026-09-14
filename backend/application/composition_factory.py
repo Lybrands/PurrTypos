@@ -5,30 +5,39 @@ from __future__ import annotations
 from functools import partial
 
 from application.agent_composition import AgentComposition
-from application.novel_analysis_agent_profile import (
-    build_novel_analysis_agent_profile,
+from agents.shared.implementation_projector import (
+    AgentImplementationBeginProjector,
 )
-from application.screenplay_agent_profile import (
-    build_screenplay_agent_profile,
+from agents.shared.implementation import AgentKind
+from agents.shared.implementation_registry import (
+    AgentImplementationRegistry,
+    AgentRolloutPolicy,
+    legacy_implementation_profiles,
 )
-from application.screenplay_agent_task_executor import (
-    normalize_screenplay_candidate,
+from agents.shared.composition_routing import (
+    VersionedAgentProfileRegistry,
+    VersionedAgentRequestRouter,
 )
-from application.writing_agent_profile import build_writing_agent_profile
-from infrastructure.screenplay.agent_root_completion_projector import (
-    ScreenplayAgentRootCompletionProjector,
+from agents.shared.implementation_router import (
+    SqliteAgentImplementationRouter,
 )
-from infrastructure.screenplay.agent_continuation_begin_projector import (
-    ScreenplayContinuationBeginProjector,
+from agents.shared.cancellation import VersionRoutedRunCancellationProjector
+from agents.writing.profile import (
+    build_writing_replacement_profile,
+    writing_replacement_implementation_profile,
 )
-from infrastructure.screenplay.agent_run_cancellation_projector import (
-    ScreenplayRunCancellationProjector,
+from agents.novel_analysis.profile import (
+    build_novel_analysis_replacement_profile,
+    novel_analysis_replacement_implementation_profile,
 )
-from infrastructure.screenplay.candidate_completion_projector import (
-    ScreenplayCandidateCompletionProjector,
+from agents.screenplay.profile import (
+    build_screenplay_replacement_profile,
+    screenplay_replacement_implementation_profile,
 )
-from infrastructure.screenplay.long_task_claim_guard import (
-    ScreenplayCheckpointClaimGuard,
+from agents.screenplay.conversation_projection import (
+    ScreenplayReplacementRunBeginProjector,
+    ScreenplayReplacementRunCancellationProjector,
+    ScreenplayReplacementRunCommitProjector,
 )
 
 
@@ -43,52 +52,109 @@ class _ChainedRunCommitProjector:
                 raise TypeError("run commit projector must return None")
 
 
+class _ChainedRunBeginProjector:
+    def __init__(self, *projectors) -> None:
+        self._projectors = tuple(projectors)
+
+    async def project(self, run_id, params):
+        for projector in self._projectors:
+            projected = await projector.project(run_id, params)
+            if projected is not None:
+                raise TypeError("run begin projector must return None")
+
+
 def create_agent_composition(
     db,
     **kwargs,
 ) -> AgentComposition:
     """Install product profiles without teaching generic composition domains."""
 
-    writing_profile_factory = partial(
-        build_writing_agent_profile,
-        skills_dir=kwargs.pop("skills_dir", None),
-        memory_resource=kwargs.get("memory_resource"),
+    rollout_policy = kwargs.pop("agent_rollout_policy", AgentRolloutPolicy())
+    # None of the three legacy runtimes is a valid create target. A partial
+    # host/test policy must not silently reopen a retired implementation.
+    rollout_policy = AgentRolloutPolicy(frozenset({
+        *rollout_policy.replacement_agent_kinds,
+        *AgentKind,
+    }))
+    implementation_profiles = list(legacy_implementation_profiles())
+    implementation_profiles.extend((
+        writing_replacement_implementation_profile(),
+        novel_analysis_replacement_implementation_profile(),
+        screenplay_replacement_implementation_profile(),
+    ))
+    implementation_registry = AgentImplementationRegistry(
+        implementation_profiles
     )
+    implementation_router = SqliteAgentImplementationRouter(
+        db,
+        implementation_registry,
+        rollout_policy=rollout_policy,
+    )
+    for agent_kind in rollout_policy.replacement_agent_kinds:
+        # A configuration flag must never claim replacement ownership unless
+        # the exact implementation profile is installed in this process.
+        implementation_router.for_create(agent_kind)
+
     supplied_projector = kwargs.pop("run_commit_projector", None)
     supplied_cancellation_projectors = tuple(
         kwargs.pop("run_cancellation_projectors", ())
     )
-    screenplay_projectors = (
-        ScreenplayCandidateCompletionProjector(
-            db,
-            candidate_normalizer=normalize_screenplay_candidate,
-        ),
-        ScreenplayAgentRootCompletionProjector(db),
-    )
+    screenplay_projectors = (ScreenplayReplacementRunCommitProjector(db),)
     run_commit_projector = (
         _ChainedRunCommitProjector(*screenplay_projectors, supplied_projector)
         if supplied_projector is not None
         else _ChainedRunCommitProjector(*screenplay_projectors)
     )
-    return AgentComposition(
+    composition = AgentComposition(
         db,
-        run_begin_projector=ScreenplayContinuationBeginProjector(db),
-        long_task_claim_guard=ScreenplayCheckpointClaimGuard(db),
+        run_begin_projector=_ChainedRunBeginProjector(
+            AgentImplementationBeginProjector(db),
+            ScreenplayReplacementRunBeginProjector(db),
+        ),
         run_commit_projector=run_commit_projector,
         run_cancellation_projectors=(
-            ScreenplayRunCancellationProjector(db),
+            VersionRoutedRunCancellationProjector(
+                implementation_router,
+                {
+                    "screenplay.purra-native.v1": (
+                        ScreenplayReplacementRunCancellationProjector(db),
+                    ),
+                },
+            ),
             *supplied_cancellation_projectors,
         ),
         profile_factories=(
-            writing_profile_factory,
-            build_novel_analysis_agent_profile,
-            partial(
-                build_screenplay_agent_profile,
-                candidate_normalizer=normalize_screenplay_candidate,
-            ),
+            build_writing_replacement_profile,
+            build_novel_analysis_replacement_profile,
+            build_screenplay_replacement_profile,
+        ),
+        profile_registry_factory=partial(
+            VersionedAgentProfileRegistry,
+            default_profile_ids={
+                "purrtypos.writing": "writing.purra-native.v1",
+                "purrtypos.novel_analysis": (
+                    "novel_analysis.purra-native.v1"
+                ),
+                "purrtypos.screenplay": "screenplay.purra-native.v1",
+            },
+        ),
+        request_profile_router=VersionedAgentRequestRouter(
+            implementation_router
         ),
         **kwargs,
     )
+    composition.agent_implementation_router = implementation_router
+    return composition
 
 
-__all__ = ["create_agent_composition"]
+def create_versioned_agent_composition(db, **kwargs) -> AgentComposition:
+    """Install the single production runtime for every product Agent.
+
+    Legacy implementation records remain registry tombstones for historical
+    query labeling. No legacy runtime Profile is installed for execution.
+    """
+
+    return create_agent_composition(db, **kwargs)
+
+
+__all__ = ["create_agent_composition", "create_versioned_agent_composition"]

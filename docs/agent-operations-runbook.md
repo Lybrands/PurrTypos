@@ -1,86 +1,70 @@
-# Agent 单路径运维手册
+# 三个 Agent 单路径运维手册
 
-## 1. 运行模型
+## 1. 现行执行路径
 
-PurrTypos 只有一条 Agent 对话路径：
+小说创作、小说分析和剧本请求都从产品路由进入同一个组合根：
 
 ```text
-HTTP /ai/chat/stream
-  -> Application request mapping
-  -> AgentComposition
-  -> PurrA
-  -> Writing Domain / Infrastructure adapters
-  -> Application SSE mapping
+HTTP / SSE route
+  -> application/composition_factory.py
+  -> PurrA AgentComposition / AgentRunService
+  -> agents/{writing,novel_analysis,screenplay}
+  -> canonical Run journal and query
+  -> product projection / SSE presentation
 ```
 
-不需要设置 Agent 架构开关，也不能切回旧 Agent 实现。
+生产环境只安装三个 PurrA-native profile。历史 identity 只用于读取旧 Run、事件和
+tombstone；任何 legacy 执行请求都必须失败关闭，不能回退到旧执行器。
 
-## 2. 启动前检查
+## 2. 生命周期
 
-应用 lifespan 会：
+应用启动时初始化数据库、创建唯一 `AgentComposition`、安装三个 profile，并执行
+统一的孤儿恢复。关闭时终止活跃执行、关闭待审批状态并释放数据库资源。
 
-1. 初始化数据库；
-2. 创建实例级 Writing 技能目录快照；
-3. 装配 `AgentComposition`；
-4. 注册 HTTP Router；
-5. 在关闭时取消未完成审批并释放 Composition 和数据库。
+Composition 未就绪时请求应明确失败。不得临时创建第二个组合根、进程内旧任务表，
+或以环境开关恢复已删除路径。API Key 只存在于调用范围，不得写入 Run、事件或日志。
 
-若 Composition 未初始化，Agent 请求应失败关闭；不得创建临时旧执行器作为兜底。
+## 3. 产品边界
 
-常用配置仍包括模型 API Key、Provider、Base URL、Model、上下文窗口和审批超时。API Key 只存在于请求范围，不能写入 Run、Trace 或日志。
+- Writing 是响应式 Agent Run；只读工具直接返回，章节与材料写入产生可审阅 proposal，
+  由产品接口应用或拒绝。
+- Novel Analysis 使用 Root Run、durable task 和 unit 执行来源分析；暂停后保留已完成单元，
+  恢复只继续未完成工作。
+- Screenplay 使用 Root Run、阶段 operation、candidate Artifact 和 Revision；只有 Revision
+  成功发布才形成正式完成结果。
 
-## 3. 请求契约
+三个产品共享 Run、取消、孤儿恢复、审批呈现和查询基础设施，但领域工具、Artifact、
+Revision 与交付规则仍由各 replacement 目录拥有。
 
-### 普通直接回答
+## 4. 传输、取消与恢复
 
-没有 `bookId` 或关闭 Agent 工具时，请求仍进入同一个 Core，但 Writing 工具范围为空。模型可以直接回答，不能获得隐式数据库能力。
+SSE 断开只表示订阅者离开，不等于取消 durable Run。显式取消使用：
 
-### Writing Agent
+```text
+POST /api/ai/agent-runs/{run_id}/cancel
+```
 
-当请求包含有效 `bookId` 且启用 Agent 工具时，Writing Domain 根据当前书籍、章节和用户目标提供规划约束与工具目录。
+前端重新连接后从规范事件和产品快照恢复展示。不要增加第二个读取
+`http.disconnect` 的协程，也不要用内存 task registry 作为持久状态来源。
 
-### 不支持的调用方工具
+小说分析或剧本任务遇到可恢复错误、预算耗尽或需要用户动作时应进入产品定义的
+暂停/阻塞状态；不得伪装成完成，也不得清空已经提交的单元、Artifact 或 Revision。
 
-产品端只发送空 `tools`。若第三方请求发送非空自定义 `tools` 或显式 `tool_choice`，后端返回安全错误，并保证：
+## 5. 审批与 Writing proposal
 
-- 不调用模型；
-- 不启动 Planner；
-- 不执行工具；
-- 不回退到其他运行路径。
-
-## 4. 流式事件与断连
-
-SSE 事件由 `application/sse_mapping.py` 统一生成。前端依赖的主要事件包括：
-
-- Run 开始、计划和步骤状态；
-- `delta` / `thinkingDelta`；
-- 工具调用、结果和进度；
-- 审批请求与审批结果；
-- Writing Domain effects；
-- Run 完成、阻塞、失败或取消；
-- 最终 `done` 或安全错误。
-
-`EventSourceResponse` 是 ASGI `receive` 的唯一所有者。收到断连或发送失败后，Router 设置共享取消信号并等待 Core 完成清理。不要增加第二个读取 `http.disconnect` 的协程。
-
-## 5. 人工审批
-
-高风险工具通过：
+PurrA 高风险工具审批使用：
 
 ```text
 POST /api/ai/tool-approvals/{approval_id}
 ```
 
-提交 `{ "approved": true }` 或 `{ "approved": false }`。审批必须满足：
+审批必须绑定仍有效的 Run 和具体调用，只能消费一次。拒绝、过期或生命周期关闭时
+不得执行工具；已提交事务不能被迟到取消伪装成未执行。
 
-- `approval_id` 属于当前仍存活的 Run；
-- 每个审批只能成功消费一次；
-- 拒绝不会执行工具；
-- 超时、断连和 shutdown 会关闭等待；
-- 已提交的原子事务不能被迟到的取消伪装成未执行。
+Writing 的 proposal 是产品级内容 diff，不是 PurrA approval。两者可以采用相似呈现，
+但不能共享状态、事务或恢复语义。
 
-不存在旧审批 Broker fallback。
-
-## 6. 诊断与确定性检查
+## 6. 诊断与维护
 
 单次 Run 诊断：
 
@@ -88,94 +72,53 @@ POST /api/ai/tool-approvals/{approval_id}
 GET /api/ai/agent-runs/{run_id}/diagnostics
 ```
 
-诊断包含 Run 终态、Trace 覆盖、工具治理、受控恢复决策、性能信息以及 Artifact/LongTask 运维快照，不包含人工 Pilot 评分。`recovery.decisions` 会说明每次重试、兼容降级或重规划为何被允许/拒绝；`artifactMaintenance` 会区分有效、过期、失联和目标状态失效的 writer claim，并报告结构一致性。两者都只保存控制元数据，不包含工具 JSON、Artifact 正文或 claim token。
-
-调试面板的“安全维护 Artifact”调用：
+开发模式还提供 planner、model-input 和 tool diagnostics。Artifact claim 的安全维护使用：
 
 ```text
 POST /api/ai/artifacts/maintenance
 ```
 
-该入口没有保留期参数，只回收可以确定失效的 writer claim，不删除 Artifact、批次或 LongTask。终态内容清理仍只能通过宿主环境变量显式配置，不能由调试面板触发。
+维护入口只回收可以确认失效的 writer claim，不删除 Artifact、批次或 durable task。
+旧 `/ai/agent-runtime-regressions` 与 `/ai/agent-security-redteam` 端点已经删除；回归与
+红队检查由测试套件承担。
 
-确定性检查：
+## 7. 常见故障判断
 
-```text
-GET /api/ai/agent-runtime-regressions
-GET /api/ai/agent-security-redteam
-```
+- `tool_not_authorized` / `tool_scope_violation`：检查当前 profile 的 catalog、宿主绑定和
+  对象归属，不要放宽默认权限。
+- `tool_input_invalid` / `structured_output_invalid`：属于模型输出合同问题，应在安全预算内
+  重试；不得解析普通文本伪造工具调用。
+- `provider_capacity_limited` / `upstream_stream_interrupted`：核对 provider lease 是否释放、
+  是否已经公开内容或产生副作用，再按恢复策略处理。
+- `approval_unavailable`：核对 approval 是否仍 live、是否已消费或是否在 shutdown 后到达。
+- candidate/Artifact 冲突：先核对 operation attempt、idempotency key 和 writer claim，不能
+  直接覆盖持久化内容。
+- `paused` / `blocked`：先看 task、unit、attempt、output ref 与失败码；修正配置或输入后走
+  正式恢复命令，不手工改终态。
 
-它们不调用外部模型，可用于本地排障和 CI。仓库不再提供 Pilot Runner、双 cohort 报告、Gate 或 Rollout API。
+## 8. 验证门槛
 
-## 7. 故障处理
-
-### `missing_required_tool_call`
-
-模型没有返回当前计划要求的结构化调用。Core 只允许协议内的有限修复；仍失败则停止，不解析普通文本中的伪调用。
-
-### `tool_not_authorized` / `tool_scope_violation`
-
-模型请求了当前步骤未授权的工具，或参数越过当前书籍/章节范围。整批不执行。应检查 Planning Policy、Catalog 和宿主上下文，不要放宽默认权限。
-
-### `approval_unavailable`
-
-审批不存在、超时或生命周期已经关闭。操作未执行。检查前端是否展示当前 approval，以及应用是否发生 shutdown/断连。
-
-### `upstream_stream_interrupted`
-
-供应商流在明确终止前断开。Core 仅在没有向用户暴露内容、没有半成品工具批次且仍有轮次预算时进行一次安全重试。已完成工具不会因重试再次执行。
-
-### `response_constraint_violation`
-
-候选回答不满足 Writing 输出约束，且一次确定性修复仍失败。候选不会展示。应检查任务范围、输入材料和约束实现。
-
-### `response_judge_error`
-
-语义 Judge 无法完成或返回无效契约。候选不会展示。它属于外部模型/协议故障，不应通过跳过 Judge 来兜底。
-
-### 剧本任务的 `paused`
-
-剧本正式任务按“整理依据 → 生成候选稿 → 校验候选稿 → 发布 Revision”执行。单个阶段的可恢复故障不会再把整个任务标记为失败：
-
-- 有剩余安全尝试时，当前阶段进入 `waiting_retry`；
-- 尝试耗尽、协议不兼容或工具副作用未知时，当前阶段进入 `blocked`，任务和对话进入 `paused`；
-- 已完成阶段的 output ref、候选 Artifact 和 Revision 不会被清空；
-- 恢复只重新排队 `blocked` 阶段，不重跑已完成的依据收集或候选写入；
-- `paused` 不生成正式 Assistant 结论，只有 Revision 成功发布后才生成一次最终结论。
-
-排查时先查看 Task/Unit 状态、失败码、attempt 数量和 output ref。不要把 `blocked` 手工改成 `failed`，也不要通过关闭用户选择的思考模式来绕过失败。
-
-### 思考模式与能力不兼容
-
-前端选择的思考模式是该 Run 的不可变执行意图。模型 Profile 声明 `selectable`、`always_enabled` 或 `unavailable`，请求会在调用供应商前完成兼容性校验。遇到 `unsupported_model_feature` 或 `provider_bad_request` 时应：
-
-1. 保留当前 Task 和所有已完成检查点；
-2. 核对 Run provenance 中的 requested reasoning mode 与 capability digest；
-3. 修正模型 Profile、Base URL 或用户配置后恢复任务；
-4. 不得在同一主任务内静默切换为另一种思考模式。
-
-## 8. 修改后的最小验证
-
-按改动范围选择测试，至少覆盖：
+按改动范围运行定向测试，退休或公共边界变更至少执行：
 
 ```bash
-.venv/bin/python -m pytest \
-  packages/purra/tests/test_standalone_agent_conformance.py \
-  packages/purra/tests/test_model_tool_gateway_conformance.py \
-  packages/purra/tests/test_durable_execution.py -q
-.venv/bin/python -m pytest \
-  backend/tests/test_purra_runtime.py \
-  backend/tests/test_agent_composition.py \
-  backend/tests/test_ai_composed_sse_wire_contract.py \
-  backend/tests/test_main_lifespan.py -q
+.venv/bin/python -m pytest -q backend/tests
+npm run typecheck
+npm run test:unit -- --test-concurrency=1
+npm run test:electron
+npm run build:electron
+git diff --check
 ```
 
-随后运行完整后端测试、TypeScript 检查、Electron 单测、Python 编译与 `git diff --check`。
+真实 Provider、浏览器和 Electron 验收是独立门槛。使用合成书籍和隔离数据目录；验收后
+停止所有测试进程并确认相关端口无监听。构建通过不等于 Provider 或真实作品验收通过。
 
-## 9. 变更原则
+## 9. 修改归属
 
-- Core 的通用不变量只在 `purra/` 修改。
-- Writing 语义和工具政策只在 `domains/writing/` 修改。
-- Provider、SQLite 和具体工具实现放在 `infrastructure/`。
-- Router 只处理 HTTP、SSE 和取消传播。
-- 不为临时故障重新引入双路径、环境开关或兼容 facade。
+- 组合根、请求映射与应用用例：`backend/application/`。
+- 公共 Run、恢复、取消和呈现适配：`backend/agents/shared/`。
+- 产品 Agent 合同与执行：`backend/agents/writing/`、`backend/agents/novel_analysis/`、
+  `backend/agents/screenplay/`。
+- Provider、SQLite 与通用宿主实现：`backend/infrastructure/`。
+- Router 只负责 HTTP/SSE 边界，不实现产品执行状态机。
+
+不得为临时故障重新引入双路径、legacy facade 或兼容开关。

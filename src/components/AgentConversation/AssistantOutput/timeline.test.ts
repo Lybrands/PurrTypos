@@ -6,14 +6,37 @@ import { getAgentProcessingLabel } from '../../../agent-runtime/outputPresentati
 import {
   buildAssistantTimeline,
   executionPanelHasTerminalError,
+  getAssistantExecutionStatus,
   getCanonicalOperationStatusText,
   getActiveOperationLabel,
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getOperationGroupProgress,
   groupConsecutiveWorkSteps,
+  isVisibleExecutionLogPart,
+  stageTextToParagraph,
   type AssistantTimelinePart,
 } from './timeline.ts'
+
+test('durable pause presentation overrides the canceled continuation Root', () => {
+  const message: AgentConversationMessage = {
+    role: 'assistant',
+    content: '',
+    canonicalOutput: {
+      ...initialCanonicalOutputState(),
+      runStatus: 'canceled',
+    },
+    taskPlan: {
+      runId: 'root-run',
+      title: '来源分析',
+      status: 'paused',
+      steps: [],
+    },
+  }
+
+  assert.equal(getAssistantExecutionStatus(message), 'paused')
+  assert.equal(message.canonicalOutput?.runStatus, 'canceled')
+})
 
 test('native Provider progress grows one stable live region from real chunks', () => {
   const operation: CanonicalOutputEvent = {
@@ -1183,4 +1206,136 @@ test('public commentary streams paragraphs without the status-title length filte
   const growing = buildAssistantTimeline({ ...message, canonicalOutput: next }, { messageIndex: 0, isStreaming: true })
   assert.equal(growing[0]?.type === 'commentary' ? growing[0].md : '', body + '\n继续核对。')
   assert.equal(growing[0]?.type === 'commentary' ? growing[0].regionKey : '', parts[0]?.type === 'commentary' ? parts[0].regionKey : '')
+})
+
+test('interrupted Root stage remains visible as partial prose without becoming the final answer', () => {
+  const output = initialCanonicalOutputState()
+  output.commentaryBlocks = [{ outputStreamId: 'stage', invocationId: 'invoke',
+    text: '已收到的阶段正文', firstSequence: 1, lastSequence: 3,
+    startedAt: '2026-09-10T00:00:00Z', stage: true, committed: false, aborted: true }]
+  const parts = buildAssistantTimeline({ role: 'assistant', content: '最终回答', canonicalOutput: output },
+    { messageIndex: 0, isStreaming: false })
+  assert.deepEqual(parts, [
+    { type: 'stage', md: '已收到的阶段正文', streamId: 'stage', status: 'aborted' },
+    { type: 'text', md: '最终回答' },
+  ])
+  const execution = parts.filter(isVisibleExecutionLogPart)
+  assert.deepEqual(execution, [
+    { type: 'stage', md: '已收到的阶段正文', streamId: 'stage', status: 'aborted' },
+  ])
+  assert.equal(
+    getExecutionPanelPresentation(execution, {
+      isStreaming: false,
+      status: 'canceled',
+    }).title,
+    '已取消',
+  )
+})
+
+test('terminal durable checkpoint is rendered once when its stage stream is replayed', () => {
+  const checkpoint = '本轮来源分析已安全暂停，尚未写入可用的阶段性成果。'
+  const output = initialCanonicalOutputState()
+  output.runTerminal = true
+  output.finalStreamStatus = 'committed'
+  output.commentaryBlocks = [
+    {
+      outputStreamId: 'checkpoint-stage-1', invocationId: 'invoke-1',
+      text: checkpoint, firstSequence: 1, lastSequence: 1,
+      startedAt: '2026-09-12T04:12:00Z', stage: true, committed: true, aborted: false,
+    },
+    {
+      outputStreamId: 'checkpoint-stage-2', invocationId: 'invoke-2',
+      text: checkpoint, firstSequence: 2, lastSequence: 2,
+      startedAt: '2026-09-12T04:12:01Z', stage: true, committed: true, aborted: false,
+    },
+  ]
+
+  assert.deepEqual(
+    buildAssistantTimeline({ role: 'assistant', content: checkpoint, canonicalOutput: output }, {
+      messageIndex: 0,
+      isStreaming: false,
+    }),
+    [{ type: 'text', md: checkpoint }],
+  )
+})
+
+test('Root stage markdown is presented as one ordinary paragraph without report headings', () => {
+  const markdown = [
+    '# 阶段进展小结：资料提取（进行中）',
+    '',
+    '## 已完成内容',
+    '',
+    '- 第一部分已经核对。',
+    '',
+    '## 进行中 / 待处理',
+    '',
+    '- 第二部分仍在处理。',
+    '',
+    '## 下一步',
+    '',
+    '等待剩余结果。',
+  ].join('\n')
+  assert.equal(
+    stageTextToParagraph(markdown),
+    '第一部分已经核对。 第二部分仍在处理。 等待剩余结果。',
+  )
+  assert.equal(
+    stageTextToParagraph('阶段进展：第一部分已经核对。\n\n下一步：等待剩余结果。'),
+    '第一部分已经核对。 等待剩余结果。',
+  )
+})
+
+
+test('presentation groups show one save action while retaining every checkpoint operation', () => {
+  const base = initialCanonicalOutputState()
+  const checkpoint = (
+    operationId: string,
+    firstSequence: number,
+    status: 'running' | 'succeeded',
+  ) => ({
+    operationId,
+    runId: 'root-run',
+    invocationId: null,
+    kind: 'tool',
+    firstSequence,
+    status,
+    startedAt: '2026-09-11T00:00:00Z',
+    display: {
+      labelParams: {
+        toolName: 'appendAnalysisFacts',
+        displayNames: { 'zh-CN': '保存分析资料' },
+        presentationGroup: {
+          key: 'novel-analysis-material-checkpoints',
+          label: '保存分析资料',
+        },
+      },
+    },
+  })
+  const timeline = buildAssistantTimeline({
+    role: 'assistant',
+    content: '',
+    canonicalOutput: {
+      ...base,
+      operationOrder: ['save-1', 'save-2'],
+      operations: {
+        'save-1': checkpoint('save-1', 3, 'succeeded'),
+        'save-2': checkpoint('save-2', 7, 'running'),
+      },
+    },
+  }, { messageIndex: 0, isStreaming: true })
+  const groups = timeline.filter((part) => part.type === 'operationGroup')
+  assert.equal(groups.length, 1)
+  if (groups[0]?.type !== 'operationGroup') return
+  assert.equal(groups[0].label, '保存分析资料')
+  assert.deepEqual(
+    groups[0].operations.map((operation) => operation.operationId),
+    ['save-1', 'save-2'],
+  )
+  assert.deepEqual(getOperationGroupProgress(groups), {
+    total: 1,
+    completed: 0,
+    current: 1,
+    active: true,
+    parallel: false,
+  })
 })

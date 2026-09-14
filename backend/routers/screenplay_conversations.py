@@ -5,13 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from application.screenplay_agent_task_executor import (
-    ScreenplayTaskUnitExecutor,
+from agents.screenplay.conversation_query import (
+    ScreenplayReplacementConversationQuery,
 )
-from application.screenplay_agent_service import ScreenplayAgentService
-from application.screenplay_agent_stream import ScreenplayCanonicalOutputQuery
+from agents.screenplay.conversation_service import (
+    ScreenplayReplacementConversationService,
+)
 from application.agent_event_stream import stream_agent_pages
-from application.screenplay_v2_service import ScreenplayV2ProjectService
 from dependencies import get_db
 from schemas.screenplay_agent import (
     ResumeScreenplayOperationRequest,
@@ -21,25 +21,26 @@ from schemas.screenplay_agent import (
 
 router = APIRouter()
 
-
-
-
-def _service() -> ScreenplayAgentService:
+def _service():
     from application.agent_composition import get_agent_composition
 
     db = get_db()
     composition = get_agent_composition()
-    return ScreenplayAgentService(
+    return ScreenplayReplacementConversationService(
         db,
         owner_id=composition.execution_owner_id,
         composition=composition,
-        unit_executor_factory=lambda runtime: ScreenplayTaskUnitExecutor(
-            db,
-            runtime=runtime,
-            composition=composition,
-        ),
-        projects=ScreenplayV2ProjectService(db),
-        track_background=composition.track_background_run,
+    )
+
+
+def _chunks():
+    from application.agent_composition import get_agent_composition
+
+    db = get_db()
+    composition = get_agent_composition()
+    return ScreenplayReplacementConversationQuery(
+        db,
+        output_repository=composition.output_journal,
     )
 
 
@@ -82,10 +83,7 @@ async def stream_screenplay_conversation_events(
     from application.agent_composition import get_agent_composition
 
     composition = get_agent_composition()
-    chunks = ScreenplayCanonicalOutputQuery(
-        get_db(),
-        output_repository=composition.output_journal,
-    )
+    chunks = _chunks()
     first = await chunks.list_chunks(
         project_id=project_id, session_id=session_id, after=chunk_after, limit=limit,
     )
@@ -129,10 +127,7 @@ async def resume_screenplay_operation(
         idempotency_key=idempotency_key,
         request=body,
     )
-    if receipt.get("status") == "running" and receipt.get(
-        "dispatchRequired",
-        True,
-    ):
+    if receipt.get("dispatchRequired", True):
         service.dispatch_resumed_operation(
             operation_id,
             body.runtime,

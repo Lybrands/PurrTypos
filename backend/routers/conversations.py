@@ -41,12 +41,14 @@ async def save_conversation(body: SaveConversationRequest):
         if body.agentRunId:
             run_id = str(body.agentRunId)
             run = await db.fetch_one(
-                "SELECT conversation_id, session_id, status, prompt, model_name "
+                "SELECT conversation_id, session_id, status, prompt, model_name, parent_run_id, root_run_id "
                 "FROM ai_agent_runs WHERE id = ?",
                 [run_id],
             )
             if run is None or int(run.get("session_id") or 0) != body.sessionId:
                 raise HTTPException(status_code=409, detail="Agent Run 不属于当前会话")
+            if run.get("parent_run_id") or run.get("root_run_id") not in (None, "", run_id):
+                raise HTTPException(status_code=409, detail="Child Run 不能保存为独立对话")
             run_status = str(run.get("status") or "")
             running_resolution = (
                 run_status == "running"

@@ -2,22 +2,42 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const test = require('node:test')
 const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.cjs')
-const { buildNovelAnalysisMessages, hydrateNovelAnalysisHistory, NovelAnalysisConversationStream } = loadTypeScriptModule(
+const { buildNovelAnalysisMessages, hydrateNovelAnalysisHistory, NovelAnalysisConversationStream, novelAnalysisArtifactId } = loadTypeScriptModule(
   path.join(__dirname, 'analysisConversation.ts'),
 )
 
-const run = (overrides = {}) => ({
-  runId: 'analysis-run', commandId: 'analysis-command', runStatus: 'running',
-  taskId: 'analysis-task', taskStatus: 'running', taskRevision: 1,
-  prompt: '只分析人物的认知差异', totalUnits: 6, completedUnits: 0, failedUnits: 0,
-  units: [{
-    unitId: 'extract:1', title: '分析来源片段 1', kind: 'extract_section',
-    status: 'running', attempt: 1, maxAttempts: 2,
-    summary: '分析来源片段 1完成，识别 20 条事实和 7 个写作技法。',
-    highlights: ['旧版合成摘要'],
-  }],
-  ...overrides,
+test('artifact ids accept only legacy and replacement analysis references', () => {
+  assert.equal(novelAnalysisArtifactId('novel-analysis-artifact://legacy-id'), 'legacy-id')
+  assert.equal(novelAnalysisArtifactId('novel-analysis-v1://replacement-id'), 'replacement-id')
+  assert.equal(novelAnalysisArtifactId('plain-id'), 'plain-id')
+  assert.equal(novelAnalysisArtifactId('unknown://artifact'), '')
 })
+
+const run = (overrides = {}) => {
+  const value = {
+    runId: 'analysis-run', commandId: 'analysis-command', runStatus: 'running',
+    conversationStatus: 'streaming', workflowStatus: 'running',
+    workflowPauseKind: null, workflowReasonCode: null, workflowResumable: false,
+    taskId: 'analysis-task', taskStatus: 'running', taskRevision: 1,
+    prompt: '只分析人物的认知差异', totalUnits: 6, completedUnits: 0, failedUnits: 0,
+    units: [{
+      unitId: 'extract:1', title: '分析来源片段 1', kind: 'extract_section',
+      status: 'running', attempt: 1, maxAttempts: 2,
+      summary: '分析来源片段 1完成，识别 20 条事实和 7 个写作技法。',
+      highlights: ['旧版合成摘要'],
+    }],
+    ...overrides,
+  }
+  if (!Object.hasOwn(overrides, 'workflowStatus')) {
+    value.workflowStatus = value.taskStatus === 'pending' ? 'queued' : value.taskStatus
+  }
+  if (!Object.hasOwn(overrides, 'conversationStatus')) {
+    value.conversationStatus = ['pending', 'running', 'claimed'].includes(value.runStatus)
+      ? 'streaming'
+      : 'finalized'
+  }
+  return value
+}
 
 const event = (sequence, overrides = {}) => ({
   cursor: sequence,
@@ -201,6 +221,33 @@ test('completed analysis uses the persisted root response when no public events 
   const replayed = replayAnalysisEvents(input, [])
   assert.equal(buildNovelAnalysisMessages(input, 'model', replayed).at(-1).content, finalResponse)
   assert.equal(buildNovelAnalysisMessages(input, 'model').at(-1).content, finalResponse)
+})
+
+test('budget checkpoint remains a normal assistant result while the task is incomplete', () => {
+  const finalResponse = '已保存 11/39 个执行单元，尚未生成完整分析。'
+  const assistant = buildNovelAnalysisMessages(run({
+    runStatus: 'done',
+    taskStatus: 'failed',
+    partialCompletion: true,
+    finalResponse,
+    error: 'runtime_budget_exceeded',
+  }), 'model').at(-1)
+
+  assert.equal(assistant.content, finalResponse)
+  assert.equal(assistant.isError, false)
+  assert.equal(assistant.error, undefined)
+})
+
+test('a finalized turn and a paused workflow remain distinct without an assistant error', () => {
+  const assistant = buildNovelAnalysisMessages(run({
+    runStatus: 'done', conversationStatus: 'finalized', taskStatus: 'paused',
+    workflowStatus: 'paused', workflowPauseKind: 'system',
+    workflowReasonCode: 'upstream_stream_interrupted', workflowResumable: true,
+  }), 'model').at(-1)
+
+  assert.equal(assistant.content, '')
+  assert.equal(assistant.isError, false)
+  assert.equal(assistant.error, undefined)
 })
 
 test('public model answer and commentary survive without summaries or private JSON', () => {

@@ -41,7 +41,6 @@ def _env_flag(key: str, default: bool = False) -> bool:
 
 # Paths
 DATA_DIR: Path = Path(_env("PURRTYPOS_DATA_DIR", ""))
-SKILLS_DIR: Path = Path(_env("PURRTYPOS_SKILLS_DIR", ""))
 
 # Server
 HOST: str = _env("PURRTYPOS_HOST", "127.0.0.1")

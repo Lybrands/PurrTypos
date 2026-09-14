@@ -7,6 +7,16 @@ from pydantic import BaseModel, Field
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
 
+class NovelAnalysisRuntimeRequest(ScreenplayAgentRuntimeRequest):
+    """A saved model identity is required for unattended recovery.
+
+    The secret remains request-scoped.  The id only lets the scheduler
+    re-resolve the current local model configuration later.
+    """
+
+    modelConfigId: str = Field(min_length=1, max_length=200)
+
+
 class SourceFilePayload(BaseModel):
     fileName: str = Field(min_length=1, max_length=500)
     extension: Literal[".txt", ".md", ".markdown"]
@@ -42,7 +52,7 @@ class ArchiveSourceWorkRequest(BaseModel):
 
 class StartNovelAnalysisRequest(BaseModel):
     conversationId: str | None = Field(default=None, max_length=200)
-    runtime: ScreenplayAgentRuntimeRequest
+    runtime: NovelAnalysisRuntimeRequest
     prompt: str = Field(
         default="提取人物、世界背景、情节状态和未决线索等创作资料，并提炼可执行的写作技法。",
         min_length=1,
@@ -53,13 +63,13 @@ class StartNovelAnalysisRequest(BaseModel):
 class FollowUpNovelAnalysisRequest(BaseModel):
     replaceRunId: str | None = Field(default=None, min_length=1, max_length=200)
     conversationId: str | None = Field(default=None, max_length=200)
-    runtime: ScreenplayAgentRuntimeRequest
+    runtime: NovelAnalysisRuntimeRequest
     artifactId: str | None = Field(default=None, min_length=1, max_length=300)
     prompt: str = Field(min_length=1, max_length=20_000)
 
 
 class ResumeNovelAnalysisRequest(BaseModel):
-    runtime: ScreenplayAgentRuntimeRequest
+    runtime: NovelAnalysisRuntimeRequest
     retryFailed: bool = False
 
 
@@ -75,6 +85,8 @@ class NovelAnalysisEvidenceRequest(BaseModel):
 
 
 class NovelAnalysisFactRequest(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=200)
+    claimNature: str = Field(default="fact", min_length=1, max_length=100)
     factKind: str = Field(min_length=1, max_length=100)
     subjectKey: str = Field(min_length=1, max_length=300)
     predicate: str = Field(min_length=1, max_length=300)
@@ -84,16 +96,24 @@ class NovelAnalysisFactRequest(BaseModel):
 
 
 class NovelAnalysisCraftCardRequest(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=200)
     cardKind: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
     bodyMarkdown: str = Field(min_length=1, max_length=100_000)
     evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
 
 
+class NovelAnalysisStoryOverviewRequest(BaseModel):
+    summaryMarkdown: str = Field(min_length=1, max_length=20_000)
+    evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
+
+
 class ReviewNovelAnalysisRequest(BaseModel):
     facts: list[NovelAnalysisFactRequest]
     craftCards: list[NovelAnalysisCraftCardRequest]
+    storyOverview: NovelAnalysisStoryOverviewRequest | None = None
     techniqueResult: dict[str, Any] | None = None
+    analysisTechniqueResult: dict[str, Any] | None = None
 
 
 class AnalysisSessionUpdate(BaseModel):

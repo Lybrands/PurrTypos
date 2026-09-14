@@ -118,6 +118,19 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
                 [project_id],
             )
         await db.execute(
+            "DELETE FROM screenplay_operation_access_receipts WHERE project_id = ?",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM screenplay_operation_usage_receipts WHERE project_id = ?",
+            [project_id],
+        )
+        await db.execute(
+            "DELETE FROM screenplay_replacement_projection_receipts "
+            "WHERE project_id = ?",
+            [project_id],
+        )
+        await db.execute(
             "DELETE FROM screenplay_outbox_events WHERE "
             "(aggregate_type = 'screenplayProject' AND aggregate_id = ?) "
             "OR aggregate_id IN (SELECT id FROM screenplay_revisions "
@@ -146,24 +159,28 @@ async def delete_screenplay_project_data(db, project_id: str) -> bool:
         await db.execute(
             "DELETE FROM ai_agent_artifact_projections WHERE artifact_id IN ("
             "SELECT id FROM ai_agent_artifacts "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            "WHERE namespace IN ('purrtypos.screenplay', "
+            "'purrtypos.screenplay.v1') AND owner_id = ?)",
             [project_id],
         )
         await db.execute(
             "DELETE FROM ai_agent_artifact_claims WHERE artifact_id IN ("
             "SELECT id FROM ai_agent_artifacts "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            "WHERE namespace IN ('purrtypos.screenplay', "
+            "'purrtypos.screenplay.v1') AND owner_id = ?)",
             [project_id],
         )
         await db.execute(
             "DELETE FROM ai_agent_artifact_batches WHERE artifact_id IN ("
             "SELECT id FROM ai_agent_artifacts "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            "WHERE namespace IN ('purrtypos.screenplay', "
+            "'purrtypos.screenplay.v1') AND owner_id = ?)",
             [project_id],
         )
         await db.execute(
             "DELETE FROM ai_agent_artifacts "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
+            "WHERE namespace IN ('purrtypos.screenplay', "
+            "'purrtypos.screenplay.v1') AND owner_id = ?",
             [project_id],
         )
         await db.execute(
@@ -379,6 +396,18 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
             [project_id],
         )
     await db.execute(
+        "DELETE FROM screenplay_operation_access_receipts WHERE project_id = ?",
+        [project_id],
+    )
+    await db.execute(
+        "DELETE FROM screenplay_operation_usage_receipts WHERE project_id = ?",
+        [project_id],
+    )
+    await db.execute(
+        "DELETE FROM screenplay_replacement_projection_receipts WHERE project_id = ?",
+        [project_id],
+    )
+    await db.execute(
         "DELETE FROM screenplay_outbox_events WHERE "
         "(aggregate_type = 'screenplayProject' AND aggregate_id = ?) "
         "OR aggregate_id IN (SELECT id FROM screenplay_revisions "
@@ -409,12 +438,14 @@ async def _retire_screenplay_project_data(db, project_id: str) -> None:
         await db.execute(
             f"DELETE FROM {table} WHERE artifact_id IN ("
             "SELECT id FROM ai_agent_artifacts "
-            "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?)",
+            "WHERE namespace IN ('purrtypos.screenplay', "
+            "'purrtypos.screenplay.v1') AND owner_id = ?)",
             [project_id],
         )
     await db.execute(
         "DELETE FROM ai_agent_artifacts "
-        "WHERE namespace = 'purrtypos.screenplay' AND owner_id = ?",
+        "WHERE namespace IN ('purrtypos.screenplay', "
+        "'purrtypos.screenplay.v1') AND owner_id = ?",
         [project_id],
     )
     await db.execute(

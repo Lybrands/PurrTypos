@@ -1,72 +1,61 @@
-"""Shared bound Agent execution for host-owned durable units."""
+"""Execute model/tool operations in the Run that owns a durable task."""
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import replace
+import time
 
-from __future__ import annotations
+from purra.errors import ContractViolationError
+from purra.long_tasks import LongTaskRunRelation
+from infrastructure.persistence.sqlite_long_task_repository import SqliteLongTaskRepository
 
-import asyncio
-
-from purra.contracts import AgentRunResult, RunStatus
-from purra.errors import ModelGatewayError
-
-
-class _BindDurableUnitRun:
-    def __init__(self, bind_run) -> None:
-        self._bind_run = bind_run
-
-    async def validate(self) -> None:
-        pass
-
-    async def before_submit(self) -> None:
-        pass
-
-    async def on_run_started(self, run_id: str) -> None:
-        await self._bind_run(run_id)
-
-    async def on_run_finished(self, result: AgentRunResult) -> None:
-        pass
-
-    async def on_start_failed(self, code: str) -> None:
-        pass
+_operation_run: ContextVar[str | None] = ContextVar("durable_operation_run", default=None)
 
 
-async def run_durable_agent_unit(
-    *, db, runs, request, options, api_key, signal, bind_run,
-    active_error_code="durable_unit_run_active",
-) -> AgentRunResult:
-    binding = options.binding
-    if binding is None:
-        raise ValueError("durable unit Run requires a binding")
-    existing = await db.fetch_one(
-        "SELECT id, status, final_response, model_name "
-        "FROM ai_agent_runs WHERE binding_namespace = ? "
-        "AND binding_aggregate_id = ? AND binding_command_id = ? "
-        "ORDER BY rowid DESC LIMIT 1",
-        [binding.namespace, binding.aggregate_id, binding.command_id],
-    )
-    if existing is not None and existing["status"] == "done":
-        run_id = str(existing["id"])
-        if bind_run is not None:
-            await bind_run(run_id)
-        return AgentRunResult(
-            run_id=run_id, status=RunStatus.DONE,
-            final_response=str(existing.get("final_response") or ""),
-            model=str(existing.get("model_name") or request.model.model),
-        )
-    if existing is not None and existing["status"] == "running":
-        raise ModelGatewayError(
-            "the durable unit already has an active model Run",
-            code=active_error_code, retryable=True,
-        )
-    terminal = None
-    async for update in runs.run(
-        request=request, api_key=api_key, options=options,
-        signal=signal or asyncio.Event(),
-        run_binding_lifecycle=(
-            _BindDurableUnitRun(bind_run) if bind_run is not None else None
-        ),
-        cancellation_reason="durable_unit_canceled" if signal is not None else None,
-    ):
-        if isinstance(update, AgentRunResult):
-            terminal = update
-    if terminal is None:
-        raise RuntimeError("durable unit Run completed without a result")
-    return terminal
+@contextmanager
+def operation_run_scope(run_id: str):
+    token = _operation_run.set(run_id)
+    try:
+        yield
+    finally:
+        _operation_run.reset(token)
+
+
+async def run_durable_operation(*, db, runs, request, options, api_key, signal,
+                                bind_run, task_id: str, unit_id: str,
+                                owning_run_id: str | None = None):
+    tasks = SqliteLongTaskRepository(db)
+    task = await tasks.load(task_id)
+    unit = next((row for row in await tasks.list_units(task_id) if row.id == unit_id), None) if task else None
+    if (unit is None or unit.status.value not in {"claimed", "running"}
+            or unit.lease_expires_at_ms is None or unit.lease_expires_at_ms <= int(time.time() * 1000)):
+        raise ContractViolationError("Model operation requires a claimed Unit", code="long_task_unit_lease_lost")
+    if unit.run_id is not None or options.agent_execution_checkpoint is not None or options.durable_continuation is not None:
+        raise ContractViolationError("Operation cannot replace an independent Run", code="operation_scope_invalid")
+    owner = owning_run_id or _operation_run.get() or task.created_by_run_id
+    if not any(row.run_id == owner and (owner == task.created_by_run_id or row.relation is LongTaskRunRelation.CONTINUATION)
+               for row in await tasks.list_run_bindings(task_id)):
+        raise ContractViolationError("Operation belongs to another Run", code="recipe_root_binding_conflict")
+    owner_row = await db.fetch_one("SELECT agent_id, parent_run_id FROM ai_agent_runs WHERE id=?", [owner])
+    if owner_row and owner_row.get("agent_id"):
+        from infrastructure.persistence.sqlite_run_tree_repository import SqliteRunTreeRepository
+        try:
+            agent = await SqliteRunTreeRepository(db).get_agent(owner_row["agent_id"])
+        except ContractViolationError as error:
+            # Standalone roots have canonical output identity without an Agent tree.
+            if (error.code != "agent_not_found" or owner_row["agent_id"] != owner
+                    or owner_row.get("parent_run_id") is not None):
+                raise
+        else:
+            options = replace(options, agent_capability_grant=agent.capability_grant)
+    if bind_run is not None:
+        await bind_run(owner)
+    operation_id = f"{task_id}:{unit_id}:{unit.attempt}"
+    request = replace(request, metadata={**request.metadata, "operationScopeId": operation_id,
+                                        "operationBinding": {"taskId": task_id, "unitId": unit_id, "unitAttempt": unit.attempt},
+                                        "responseAudience": "internal", "progressAudience": "internal"})
+    result = await runs.run_operation(request=request, options=options, run_id=owner,
+                                    operation_id=operation_id, api_key=api_key, signal=signal)
+
+    if result.run_id != owner:
+        raise ContractViolationError("Operation result changed its owning Run", code="run_identity_conflict")
+    return result, operation_id

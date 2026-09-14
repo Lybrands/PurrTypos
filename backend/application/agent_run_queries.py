@@ -131,6 +131,9 @@ def _run_view(
 ) -> dict[str, Any]:
     return {
         "runId": run.get("id"),
+        **({"rootRunId": run["root_run_id"]} if run.get("root_run_id") else {}),
+        **({"parentRunId": run["parent_run_id"]} if run.get("parent_run_id") else {}),
+        **({"agentId": run["agent_id"]} if run.get("agent_id") else {}),
         "sessionId": run.get("session_id"),
         "conversationId": run.get("conversation_id"),
         "status": run.get("status"),

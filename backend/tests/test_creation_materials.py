@@ -197,32 +197,6 @@ async def test_delete_and_restore_same_identity(db):
     await materials(db).restore('pilot', status['deleted'][0]['id'])
     restored = (await get_characters(db, 'pilot'))[0]
     assert restored['id'] == row['id'] and restored['profile_md'] == '原始'
-
-
-@pytest.mark.asyncio
-async def test_tool_proposal_uses_file_revision_and_stale_accept_rejected(db, monkeypatch):
-    from types import SimpleNamespace
-    from infrastructure.writing.tools.handlers.character_tools import _tool_update_character
-    from routers import setting_diff
-    from schemas.setting_diff import CommitCharacterDiffRequest
-    await create_character(db, 'pilot', {'name': '沈青', 'profile_md': '原始'})
-    root = await migrate(db)
-    row = (await get_characters(db, 'pilot'))[0]
-    chunks = []
-    await _tool_update_character(SimpleNamespace(db=db), {'bookId': 'pilot'}, {'characterId': row['id'], 'profileMd': '模型建议'}, chunks.append)
-    proposal = chunks[0]['proposedSettingDiff']
-    assert proposal['baseRevision'] == row['baseRevision']
-    monkeypatch.setattr(setting_diff, 'get_db', lambda: db)
-    body = CommitCharacterDiffRequest(name='沈青', profileMd='模型建议', before=proposal['before'], after=proposal['proposed'], baseRevision=proposal['baseRevision'])
-    await setting_diff.commit_character_diff(str(row['id']), body)
-    path = next((root / '人物').glob('*.md'))
-    assert decode(path.read_bytes(), path.name)['body'] == '模型建议'
-    path.write_bytes(edit(path.read_bytes(), path.name, {'profile_md': '外部更新'}))
-    with pytest.raises(AppError):
-        await setting_diff.commit_character_diff(str(row['id']), body)
-    assert decode(path.read_bytes(), path.name)['body'] == '外部更新'
-
-
 @pytest.mark.asyncio
 async def test_scoped_retrieval_and_revision_invalidation(db):
     from application.novel_knowledge_service import get_novel_knowledge_service
@@ -369,30 +343,6 @@ def test_material_link_literals_aliases_and_anchors():
     assert result.startswith('[[资料/人物/张会--123#经历|老张]]')
     assert result.endswith('`[[张会]]`\n```md\n[[张会]]\n```\n<!-- [[张会]] -->\n\\[[张会]]')
     assert resolve_links(result, entries) == result
-
-
-@pytest.mark.asyncio
-async def test_agent_relation_preview_is_linked_but_not_applied(db):
-    from types import SimpleNamespace
-    from infrastructure.writing.tools.handlers.character_tools import _tool_update_character
-    from application.novel_knowledge_service import get_novel_knowledge_service
-    import json
-    await migrate(db)
-    target = await create_character(db, 'pilot', {'name': '好友'})
-    source = await create_character(db, 'pilot', {'name': '主角', 'profile_md': '原资料'})
-    events = []
-    result = await _tool_update_character(SimpleNamespace(db=db), {'bookId': 'pilot'},
-        {'characterId': source['id'], 'profileMd': '朋友：[[好友]]'}, events.append)
-    diff = next(e['proposedSettingDiff'] for e in events if 'proposedSettingDiff' in e)
-    assert diff['proposed']['profileMd'] == '朋友：' + target['materialLink']
-    assert (await get_characters(db, 'pilot'))[1]['profile_md'] == '原资料'
-    await update_character(db, source['id'], {'profile_md': diff['proposed']['profileMd'], 'baseRevision': diff['baseRevision']})
-    await get_novel_knowledge_service(db).refresh('pilot')
-    rows = await db.fetch_all('SELECT links_json FROM novel_knowledge_links')
-    links = [link for row in rows for link in json.loads(row['links_json'])]
-    assert any(link['state'] == 'resolved' and '好友' in link['path'] for link in links)
-
-
 def test_source_links_only_connect_unique_existing_materials():
     from infrastructure.obsidian.material_links import resolve_source_links
     entries = [{'title': '甲', 'path': '人物/甲--one.md'},

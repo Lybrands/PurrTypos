@@ -21,12 +21,17 @@ import {
   getExecutionPanelLogKey,
   getExecutionPanelPresentation,
   getCanonicalOperationStatusText,
+  getPresentationGroupStatus,
   getActiveOperationLabel,
   getOperationGroupProgress,
   groupConsecutiveWorkSteps,
+  isVisibleExecutionLogPart,
+  stageTextToParagraph,
   executionPanelHasTerminalError,
+  getAssistantExecutionStatus,
   type AssistantTimelinePart,
   type TimelineOperationPart,
+  type TimelineCanonicalOperationGroupPart,
   type TimelineStepPart,
 } from "./timeline";
 import "./index.scss";
@@ -56,6 +61,7 @@ function getTimelineActivityKey(
 ): string {
   const activity = parts.map((part) => {
     if (part.type === "commentary") return `commentary:${part.md.length}`;
+    if (part.type === "stage") return `stage:${part.streamId}:${part.status}:${part.md.length}`;
     if (part.type === "text") return `text:${part.md.length}`;
     if (part.type === "tools") {
       return [
@@ -70,6 +76,11 @@ function getTimelineActivityKey(
     }
     if (part.type === "operation") {
       return `operation:${part.operation.operationId}:${part.operation.status}`;
+    }
+    if (part.type === "operationGroup") {
+      return `operation-group:${part.groupKey}:${part.operations
+        .map((operation) => `${operation.operationId}:${operation.status}`)
+        .join(",")}`;
     }
     return `context:${JSON.stringify(part.state).length}`;
   });
@@ -99,13 +110,6 @@ function useProcessingStandby(
   return active && settledActivityKey === activityKey;
 }
 
-function isVisibleWorkLogPart(part: AssistantTimelinePart): boolean {
-  if (part.type !== "tools") return part.type !== "text";
-  return part.segment.labels.some(
-    (_label, labelIndex) => !part.segment.cachedFlags?.[labelIndex],
-  );
-}
-
 function workLogHasError(parts: AssistantTimelinePart[]): boolean {
   return parts.some((part) => {
     if (part.type === "contextCompaction") {
@@ -116,6 +120,9 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
     }
     if (part.type === "operation") {
       return part.operation.status === "failed";
+    }
+    if (part.type === "operationGroup") {
+      return getPresentationGroupStatus(part) === "failed";
     }
     if (part.type !== "tools") return false;
     return part.segment.labelOutcomes?.some(
@@ -128,6 +135,9 @@ function workLogHasError(parts: AssistantTimelinePart[]): boolean {
 
 function operationPartIsActive(part: TimelineOperationPart): boolean {
   if (part.type === "operation") return part.operation.status === "running";
+  if (part.type === "operationGroup") {
+    return getPresentationGroupStatus(part) === "running";
+  }
   if (part.type === "tools") return Boolean(part.isLive);
   if (part.type === "contextCompaction") {
     return part.state.status === "running";
@@ -143,6 +153,10 @@ function operationPartCompletedDuration(part: TimelineOperationPart): number {
       ? 0
       : Math.max(0, part.operation.durationMs ?? 0);
   }
+  if (part.type === "operationGroup") {
+    if (getPresentationGroupStatus(part) === "running") return 0;
+    return presentationGroupDuration(part, Date.now()) ?? 0;
+  }
   if (part.type !== "tools") return 0;
   if (part.segment.itemDurationsMs) {
     return part.segment.itemDurationsMs.reduce<number>(
@@ -156,8 +170,36 @@ function operationPartCompletedDuration(part: TimelineOperationPart): number {
 function operationPartActiveStartedAt(
   part: TimelineOperationPart,
 ): number | undefined {
+  if (part.type === "operationGroup") {
+    if (getPresentationGroupStatus(part) !== "running") return undefined;
+    return presentationGroupStartedAt(part);
+  }
   if (part.type !== "tools" || !part.isLive) return undefined;
   return part.segment.activeItemStartedAt ?? part.segment.startedAt;
+}
+
+function presentationGroupStartedAt(
+  group: TimelineCanonicalOperationGroupPart,
+): number | undefined {
+  const values = group.operations
+    .map((operation) => Date.parse(operation.startedAt))
+    .filter(Number.isFinite);
+  return values.length > 0 ? Math.min(...values) : undefined;
+}
+
+function presentationGroupDuration(
+  group: TimelineCanonicalOperationGroupPart,
+  now: number,
+): number | undefined {
+  const startedAt = presentationGroupStartedAt(group);
+  if (startedAt == null) return undefined;
+  const finishedAt = getPresentationGroupStatus(group) === "running"
+    ? now
+    : Math.max(...group.operations.map((operation) => {
+      const value = Date.parse(operation.finishedAt || operation.startedAt);
+      return Number.isFinite(value) ? value : startedAt;
+    }));
+  return Math.max(0, finishedAt - startedAt);
 }
 
 function CanonicalOperationRow({
@@ -193,6 +235,56 @@ function CanonicalOperationRow({
       {running ? (
         <LoadingIcon spin className="bubble-tool-call-icon" />
       ) : failed ? (
+        <AlertCircleIcon className="bubble-tool-call-icon" />
+      ) : (
+        <CheckCircleIcon className="bubble-tool-call-icon" />
+      )}
+      <span>{text}</span>
+      {durationMs != null ? (
+        <span className="bubble-tool-call-duration">
+          · {formatOperationDuration(durationMs)}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function CanonicalOperationGroupRow({
+  group,
+}: {
+  group: TimelineCanonicalOperationGroupPart;
+}) {
+  const status = getPresentationGroupStatus(group);
+  const running = status === "running";
+  const failed = status === "failed";
+  const canceled = status === "canceled";
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [running]);
+  const completed = group.operations.filter(
+    (operation) => operation.status === "succeeded",
+  ).length;
+  const total = group.operations.length;
+  const durationMs = presentationGroupDuration(group, now);
+  const text = running
+    ? `正在${group.label}（${completed}/${total} 个片段）`
+    : failed
+      ? `${group.label}未全部完成（${completed}/${total} 个片段）`
+      : canceled
+        ? `已取消${group.label}（${completed}/${total} 个片段）`
+        : `${group.label}已完成（${total} 个片段）`;
+  const statusClass = running ? "running" : failed || canceled ? "error" : "done";
+  return (
+    <div
+      className={`bubble-tool-call-line ${running ? "a-flicker-opacity" : ""} bubble-tool-call-line--${statusClass}`}
+    >
+      {running ? (
+        <LoadingIcon spin className="bubble-tool-call-icon" />
+      ) : failed || canceled ? (
         <AlertCircleIcon className="bubble-tool-call-icon" />
       ) : (
         <CheckCircleIcon className="bubble-tool-call-icon" />
@@ -243,11 +335,11 @@ function AssistantOutputInner({
   );
 
   const answerParts = timeline.filter((part) => part.type === "text");
-  const executionLogParts = timeline.filter(isVisibleWorkLogPart);
+  const executionLogParts = timeline.filter(isVisibleExecutionLogPart);
   const executionPanel = getExecutionPanelPresentation(executionLogParts, {
     isStreaming,
     durationMs: message.durationMs,
-    status: message.canonicalOutput?.runStatus ?? message.taskPlan?.status,
+    status: getAssistantExecutionStatus(message),
     hasError: executionPanelHasTerminalError(message),
   });
   const executionPanelLogKey = getExecutionPanelLogKey(message)
@@ -271,9 +363,24 @@ function AssistantOutputInner({
   const showProcessingStandby = Boolean(processingLabel) && processingStandbyReady;
 
   const renderStepPart = (part: TimelineStepPart) => {
+    if (part.type === "stage") {
+      return (
+        <p
+          key={part.streamId}
+          className={`work-log__commentary ${isStreaming && part.status === "open" ? "work-log__commentary--active" : ""}`}
+          data-stage-stream={part.streamId}
+          data-stage-status={part.status}
+          onWheel={(event) => {
+            event.stopPropagation();
+            if (event.deltaY < 0) handleWheelUp();
+          }}
+        >
+          {stageTextToParagraph(part.md)}
+        </p>
+      );
+    }
     if (part.type === "commentary") {
-      const isActiveStream =
-        isStreaming && part.regionKey.includes("-stream-");
+      const isActiveStream = isStreaming && part.regionKey.includes("-stream-");
       return (
         <div
           key={part.regionKey}
@@ -317,6 +424,13 @@ function AssistantOutputInner({
             label={part.label}
             isRetry={part.isRetry}
           />
+        </div>
+      );
+    }
+    if (part.type === "operationGroup") {
+      return (
+        <div key={key} className="bubble-tool-call-details">
+          <CanonicalOperationGroupRow group={part} />
         </div>
       );
     }
@@ -390,10 +504,13 @@ function AssistantOutputInner({
         </ExecutionLogStepGroup>
       );
     }
-    if (part.type === "commentary") return renderStepPart(part);
+    if (part.type === "commentary" || part.type === "stage") {
+      return renderStepPart(part);
+    }
     if (
       part.type === "tools" ||
       part.type === "operation" ||
+      part.type === "operationGroup" ||
       part.type === "delegations" ||
       part.type === "contextCompaction"
     ) {

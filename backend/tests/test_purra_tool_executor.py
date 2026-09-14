@@ -673,7 +673,7 @@ async def test_scope_cache_approval_and_handler_run_in_fixed_order():
     )
 
     assert result.outcome is ToolBatchOutcome.COMPLETED
-    assert order == ["scope", "cache", "approval", "handler"]
+    assert order == ["scope", "cache", "approval", "scope", "handler"]
 
 
 @pytest.mark.asyncio

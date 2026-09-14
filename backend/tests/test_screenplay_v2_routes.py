@@ -9,11 +9,10 @@ import pytest_asyncio
 import routers.screenplay_v2 as screenplay_v2_routes
 from fastapi import FastAPI
 
-from application.screenplay_v2_service import ScreenplayV2ProjectService
+from agents.screenplay.project_service import ScreenplayV2ProjectService
 from database.connection import DatabaseConnection
 from dependencies import clear_db, set_db
 from exceptions import AppError, app_error_handler
-from infrastructure.screenplay.tools.query import ScreenplayToolQuery
 from routers.screenplay_v2 import (
     adjudicate_screenplay_v2_review,
     accept_screenplay_v2_revision,
@@ -218,7 +217,7 @@ async def test_pdf_export_uses_accepted_main_document_not_newer_candidates(
         return b"%PDF-1.4\naccepted screenplay\n%%EOF"
 
     monkeypatch.setattr(
-        "application.screenplay_v2_service.build_screenplay_pdf", render,
+        "agents.screenplay.project_service.build_screenplay_pdf", render,
     )
     response = await pdf_client.post(
         f"/api/screenplay/v2/projects/{project_id}/export/pdf",
@@ -266,7 +265,7 @@ async def test_pdf_export_rejects_missing_or_unexportable_drafts(
         pytest.fail("PDF renderer must not run without exportable accepted content")
 
     monkeypatch.setattr(
-        "application.screenplay_v2_service.build_screenplay_pdf",
+        "agents.screenplay.project_service.build_screenplay_pdf",
         unexpected_render,
     )
     response = await pdf_client.post(
@@ -1228,13 +1227,13 @@ async def test_planned_review_decision_selects_revision_not_finalization(
         finding["id"]: finding["status"]
         for finding in reloaded["data"]["workflow"]["review"]["findings"]
     } == {"arc-1": "planned", "pace-1": "riskAccepted"}
-    review_document = await ScreenplayToolQuery(temp_db).read_deliverable(
-        {"projectId": project_id},
-        {"role": "review", "revisionId": review_id},
+    review_document = await get_screenplay_v2_revision(review_id, view="full")
+    document_part = next(
+        part for part in review_document["data"]["parts"]
+        if part["type"] == "document"
     )
-    assert review_document["representation"] == "structured"
-    assert review_document["content"]["reviewedDraftId"] == draft_id
-    assert [issue["id"] for issue in review_document["content"]["issues"]] == [
+    assert document_part["payload"]["reviewedDraftId"] == draft_id
+    assert [issue["id"] for issue in document_part["payload"]["issues"]] == [
         "arc-1", "pace-1",
     ]
 

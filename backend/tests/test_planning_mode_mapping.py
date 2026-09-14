@@ -3,9 +3,7 @@ from __future__ import annotations
 from purra.api import PlanningMode
 
 from application.request_mapping import to_writing_agent_request
-from application.screenplay_agent_service import _root_request
 from schemas.ai import ChatStreamRequest
-from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
 
 def _writing_request(**overrides):
@@ -48,55 +46,3 @@ def test_writing_request_can_explicitly_select_planned_execution():
     )
 
     assert request.planning_mode is PlanningMode.PLANNED
-
-
-def test_screenplay_root_uses_auto_planning():
-    runtime = ScreenplayAgentRuntimeRequest(
-        apiKey="test-key",
-        baseURL="https://api.deepseek.com",
-        options={
-            "model": "deepseek-v4-flash",
-            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
-            "thinking": {"type": "enabled"},
-        },
-        contextWindow="128k",
-    )
-
-    request = _root_request(
-        {
-            "id": "turn-1",
-            "projectId": "project-1",
-            "sessionId": 1,
-            "userContent": "创建剧本阶段产物",
-        },
-        runtime,
-    )
-
-    assert request.planning_mode is PlanningMode.AUTO
-    assert "reasoning_effort" not in request.model.options
-
-
-def test_screenplay_root_preserves_explicit_reasoning_effort():
-    runtime = ScreenplayAgentRuntimeRequest(
-        apiKey="test-key",
-        baseURL="https://api.deepseek.com",
-        options={
-            "model": "deepseek-v4-flash",
-            "model_profile": "deepseek:deepseek-v4-flash", "profile_binding": "compatible",
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": "max",
-        },
-        contextWindow="128k",
-    )
-
-    request = _root_request(
-        {
-            "id": "turn-1",
-            "projectId": "project-1",
-            "sessionId": 1,
-            "userContent": "创建剧本阶段产物",
-        },
-        runtime,
-    )
-
-    assert request.model.options["reasoning_effort"] == "max"

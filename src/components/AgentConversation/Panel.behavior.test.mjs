@@ -101,6 +101,62 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   assert.match(markup, /正在恢复对话/)
 })
 
+test('paused work exposes resume but not the live-generation stop action', () => {
+  const controller = {
+    capabilities: {
+      inputDisabled: false,
+      sessionNavigationDisabled: false,
+      submitMode: 'send',
+    },
+    conversation: {
+      identity: 'session:7:paused-1',
+      sessions: [{ id: 7, title: 'A' }],
+      activeSessionId: 7,
+      messages: [],
+      activities: {},
+      queuedSubmissions: [],
+      initializing: false,
+      running: false,
+      stopping: false,
+      paused: true,
+      resuming: false,
+      resumeLabel: '立即继续',
+    },
+    composer: {
+      value: '',
+      setValue: () => undefined,
+      placeholder: '输入任务',
+      ariaLabel: '输入任务',
+      submitDisabled: false,
+      selectedModel: {
+        id: 'model-1', name: 'model-1', supportsThinking: false,
+        thinkingOnly: false, apiKey: 'test', baseUrl: '',
+      },
+      modelConfigs: [],
+      selectModel: () => undefined,
+      openModelSettings: () => undefined,
+    },
+    actions: {
+      selectSession: () => undefined,
+      createSession: () => undefined,
+      closeSession: () => undefined,
+      renameSession: () => undefined,
+      send: () => undefined,
+      abort: () => undefined,
+      resume: () => undefined,
+      editMessage: () => undefined,
+      resolveToolApproval: async () => ({ success: true }),
+    },
+  }
+
+  const markup = renderToStaticMarkup(
+    React.createElement(AgentConversationPanel, { controller, indexOpen: false }),
+  )
+
+  assert.match(markup, /立即继续/)
+  assert.doesNotMatch(markup, /aria-label="停止生成"/)
+})
+
 test('message time uses local calendar-day labels before falling back to a date', () => {
   const now = new Date('2026-08-27T00:30:00')
 

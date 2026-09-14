@@ -11,7 +11,13 @@ import {
 } from 'react-router-dom'
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiModelConfig, type EntityId, type MemoryEmbeddingConfig } from './types'
+import {
+  Book,
+  type AiModelConfig,
+  type AiProviderCapacityPolicy,
+  type EntityId,
+  type MemoryEmbeddingConfig,
+} from './types'
 import { applyModelRuntimeConfigPatch } from './modelCatalog'
 import { installModelDescriptors } from './models/registry'
 import './App.scss'
@@ -84,6 +90,7 @@ export default function App() {
     getStoredLastOpenedBookId,
   )
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
+  const [providerCapacityPolicies, setProviderCapacityPolicies] = React.useState<AiProviderCapacityPolicy[]>([])
   const [memoryModelId, setMemoryModelId] = React.useState('')
   const [memoryEmbeddingConfig, setMemoryEmbeddingConfig] = React.useState<MemoryEmbeddingConfig | null>(null)
   const configuredModelConfigs = React.useMemo(
@@ -99,6 +106,9 @@ export default function App() {
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
+      }
+      if (Array.isArray(res.data.ai_provider_capacity_policies)) {
+        setProviderCapacityPolicies(res.data.ai_provider_capacity_policies)
       }
       setMemoryModelId(typeof res.data.memory_model_id === 'string' ? res.data.memory_model_id : '')
       const embedding = res.data.memory_embedding_config
@@ -116,6 +126,17 @@ export default function App() {
   }, [])
 
   const memorySaveQueue = React.useRef(Promise.resolve())
+  const providerCapacitySaveQueue = React.useRef(Promise.resolve())
+  const saveProviderCapacityPolicies = React.useCallback((policies: AiProviderCapacityPolicy[]) => {
+    setProviderCapacityPolicies(policies)
+    const request = providerCapacitySaveQueue.current.catch(() => undefined).then(async () => {
+      const result = await services.settings.setSettings({ ai_provider_capacity_policies: policies })
+      if (!result.success) throw new Error('保存 Provider 端点并发策略失败')
+    })
+    providerCapacitySaveQueue.current = request
+    return request
+  }, [])
+
   const saveMemoryConfiguration = React.useCallback((
     patch: import('./SettingsPage/useMemoryAutosave').MemoryConfigurationPatch,
   ): Promise<void> => {
@@ -351,6 +372,8 @@ export default function App() {
             <SettingsPage
               modelConfigs={modelConfigs}
               onSaveModelConfigs={saveModelConfigs}
+              providerCapacityPolicies={providerCapacityPolicies}
+              onSaveProviderCapacityPolicies={saveProviderCapacityPolicies}
               memoryModelId={memoryModelId}
               memoryEmbeddingConfig={memoryEmbeddingConfig}
               onSaveMemoryConfiguration={saveMemoryConfiguration}
