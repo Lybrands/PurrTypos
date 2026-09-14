@@ -1201,6 +1201,41 @@ test('paused durable task emits no formal answer and resume commits once', () =>
   assert.equal(replay.assistant('turn-paused')?.model, 'resumed-model')
 })
 
+test('historical source Root events do not cancel a resumed turn replay', () => {
+  const replay = new AgentChunkReplay()
+  const dependencies = { cfg: model, appMessage }
+  const currentRoot = {
+    turnId: 'turn-resumed-history',
+    rootRunId: 'run-continuation',
+    sessionId: 7,
+    userContent: '继续完成结构设计',
+    turnStartedAt: performance.now(),
+  }
+
+  replay.dispatch({
+    ...currentRoot,
+    eventRunId: 'run-source',
+    runRole: 'related',
+  }, { done: true, aborted: true }, dependencies)
+
+  assert.equal(replay.assistant(currentRoot.turnId), undefined)
+
+  const activeSeed = {
+    ...currentRoot,
+    eventRunId: 'run-continuation',
+    runRole: 'root',
+  }
+  replay.dispatch(activeSeed, canonical('run-continuation', 1, {
+    turnId: currentRoot.turnId,
+    kind: 'run.lifecycle',
+    payload: { status: 'running' },
+  }), dependencies)
+  replay.dispatch(activeSeed, { done: true, model: 'resumed-model' }, dependencies)
+
+  assert.equal(replay.assistant(currentRoot.turnId)?.agentRunId, 'run-continuation')
+  assert.equal(replay.assistant(currentRoot.turnId)?.termination, undefined)
+})
+
 test('paused resume switches the canonical root once and blocks late same-run terminal chunks', () => {
   const replay = new AgentChunkReplay()
   const dependencies = { cfg: model, appMessage }

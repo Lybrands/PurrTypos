@@ -49,4 +49,6 @@ canonical cursor 和事件身份是唯一重放依据。消费成功后推进游
 
 共享历史筛选、问答对预算、协议字段剥离、不同执行状态下公开正文和中断文本的一致承接、空正文与错误提示排除、来源版本/项目/会话隔离、当前与未来 Turn 排除；三个请求入口的共享接入；规划/执行/任务阶段的来源与信任策略；首个公开 chunk 在模型结束前可读；分页追赶中逐 chunk 更新；重复重放、断线恢复、取消、终态与会话隔离。
 
-确定性 Provider、SQLite/SSE 和挂载 DOM 测试与真实 Provider/浏览器端到端验收分别报告。依赖仍使用已发布 PurrA 0.5.0，不以修改本地框架替代应用层契约。
+确定性 Provider、SQLite/SSE 和挂载 DOM 测试与真实 Provider/浏览器端到端验收分别报告。
+当前依赖版本、候选来源与摘要以仓库根 README、`backend/requirements-purra.txt` 和
+`backend/purra-candidate.json` 为准；本地候选通过不等于公共发布完成。

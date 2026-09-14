@@ -15,10 +15,10 @@ from purra.contracts import (
 from purra.errors import ContractViolationError
 from purra.ports import ToolCatalog, ToolRegistration
 from purra.tools import (
+    inspect_tool_contract,
     model_visible_tool_schema,
     resolve_tool_display_name,
 )
-from purra.tools.contract import inspect_tool_contract
 from purra.tools.registry import InMemoryToolCatalog
 
 

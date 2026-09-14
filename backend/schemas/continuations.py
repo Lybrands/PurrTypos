@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CanonPreviewRequest(BaseModel):
@@ -12,11 +12,12 @@ class CanonPreviewRequest(BaseModel):
 
 
 class CreateContinuationRequest(CanonPreviewRequest):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=1, max_length=200)
     expectedSnapshotDigest: str = Field(min_length=71, max_length=71)
     enableVolume: bool = False
     operationId: str = Field(min_length=1, max_length=200)
-    allowWithoutTechniques: bool = False
     useSourceTechniques: bool = True
 
 

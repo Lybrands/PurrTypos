@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
+import hashlib
 from importlib import metadata
 from pathlib import Path
 
@@ -16,13 +18,7 @@ import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "0.5.1"
-PURRA_REQUIREMENTS = (
-    "purra==0.5.1",
-    "purra-openai==0.5.1",
-    "purra-anthropic==0.5.1",
-    "purra-mem0[managed]==0.5.1",
-)
+PURRA_VERSION = "1.0.0"
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
     "httpx2>=2.7.0,<3",
@@ -105,7 +101,7 @@ def _relative(path: Path) -> str:
 
 
 @pytest.mark.parametrize("package", [purra, purra_openai, purra_anthropic, purra_mem0])
-def test_purra_is_loaded_from_the_pinned_published_distribution(package):
+def test_purra_is_loaded_from_the_exact_local_candidate(package):
     requirements = tuple(
         line.strip()
         for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
@@ -118,9 +114,14 @@ def test_purra_is_loaded_from_the_pinned_published_distribution(package):
     distribution = metadata.distribution(name)
     distribution_root = Path(distribution.locate_file("")).resolve()
 
-    assert requirements == PURRA_REQUIREMENTS
+    manifest = json.loads((BACKEND_DIR / "purra-candidate.json").read_text())
+    artifact = next(item for item in manifest["artifacts"] if item["file"].startswith(name + "-"))
+    wheel = BACKEND_DIR / "vendor" / "purra-1.0.0" / artifact["file"]
+    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == artifact["sha256"]
+    assert any(artifact["file"] in line for line in requirements)
     assert distribution.version == PURRA_VERSION
-    assert distribution.read_text("direct_url.json") is None
+    direct = json.loads(distribution.read_text("direct_url.json"))
+    assert direct["archive_info"]["hashes"]["sha256"] == artifact["sha256"]
     assert package_path == distribution_root / name / "__init__.py"
     assert "site-packages" in package_path.parts
     assert not package_path.is_relative_to((ROOT_DIR.parent / "purra").resolve())

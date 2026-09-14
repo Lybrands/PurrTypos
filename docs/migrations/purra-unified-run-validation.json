@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-11",
+  "core_wheel_sha256": "ad9b48fc04aee1c9104081c2190ddd377c573bcafc63b4eea93ad2daec8c2908",
+  "protocol": "owning-run-operations-and-serial-agent-feedback",
+  "checks": {
+    "purra_python": {
+      "passed": 832
+    },
+    "purra_typescript": {
+      "passed": 554,
+      "check": "passed"
+    },
+    "purrtypos_backend": {
+      "passed": 2404,
+      "failed": 0
+    },
+    "purrtypos_frontend": {
+      "passed": 488
+    },
+    "frontend_typecheck": "passed",
+    "vite_build": "passed",
+    "installed_source_hashes": "matched",
+    "pip_check": "passed",
+    "real_provider": "not_run",
+    "electron_ui": "not_run",
+    "browser_synthetic_diagnostics": "passed",
+    "final_wheel_host_integration": {
+      "passed": 142
+    }
+  },
+  "publication": "not_requested",
+  "real_database_migration": "not_performed",
+  "logs": "/tmp/purra-agent-feedback/"
+}

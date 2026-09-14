@@ -114,3 +114,17 @@ def test_sse_keeps_public_plan_and_filters_private_recipe_progress() -> None:
     assert plan_wire["kind"] == "runtime.event"
     assert plan_wire["payload"] == plan.payload
     assert "agentRunTodosUpdated" not in plan_wire
+
+
+def test_sse_preserves_authoritative_agent_ancestry():
+    now = datetime.now(timezone.utc)
+    event = AgentOutputEvent(
+        event_id="child-event", output_stream_id=None, run_id="child-run",
+        root_run_id="root-run", parent_run_id="root-run", agent_id="child-agent",
+        turn_id=None, invocation_id=None, sequence=1,
+        source=OutputSource.RUNTIME, kind=OutputEventKind.RUNTIME,
+        channel=OutputChannel.LIFECYCLE, visibility=OutputVisibility.PUBLIC,
+        payload={"eventType": "run.started", "data": {}}, occurred_at=now, emitted_at=now,
+    )
+    wire = canonical_output_to_sse_chunk(event)
+    assert (wire["rootRunId"], wire["parentRunId"], wire["agentId"]) == ("root-run", "root-run", "child-agent")

@@ -37,6 +37,7 @@ export interface AiDebugTool {
   index: number;
   name: string;
   displayName?: string;
+  presentationGroup?: { key: string; label: string };
   argumentsText: string;
   argumentsValue: unknown;
   status: AiDebugToolStatus;
@@ -118,6 +119,20 @@ export interface AiDebugDelegationActivity {
   error?: string;
 }
 
+export interface AiDebugFeedback {
+  childRunId: string;
+  executionStatus?: string;
+  agentId?: string;
+  state: 'queued' | 'started' | 'streaming' | 'completed' | 'aborted';
+  sequence: number;
+  receivedAt: string;
+  updatedAt: string;
+  outputStreamId?: string;
+  invocationId?: string;
+  text?: string;
+  textSequence?: number;
+}
+
 export interface AiDebugRun {
   id: string;
   turnId?: string;
@@ -145,6 +160,10 @@ export interface AiDebugRun {
   contextBudget?: unknown;
   contextCompaction?: unknown;
   agentRunId?: string;
+  rootRunId?: string;
+  parentRunId?: string;
+  agentId?: string;
+  feedback?: AiDebugFeedback[];
   agentPlan?: unknown;
   delegations: unknown[];
   delegationActivities: AiDebugDelegationActivity[];
@@ -185,7 +204,7 @@ export function aiDebugTurnRootRunId(
   if (!group) return undefined;
   const declaredRoots = [...new Set(
     group.runs
-      .map((run) => String(run.conversationRootRunId || "").trim())
+      .map((run) => String(run.conversationRootRunId || run.rootRunId || "").trim())
       .filter(Boolean),
   )];
   if (declaredRoots.length === 1) return declaredRoots[0];
@@ -592,7 +611,8 @@ function nextStatus(run: AiDebugRun, chunk: AiDebugChunk): AiDebugRunStatus {
       if (status === "canceled") return "aborted";
     }
     if (canonicalProviderTextDelta(chunk)) {
-      return chunk.channel === "final" ? "responding" : "planning";
+      const feedbackOutput = run.feedback?.some(row => row.outputStreamId === chunk.outputStreamId);
+      return chunk.channel === "final" || feedbackOutput ? "responding" : "planning";
     }
     if (chunk.kind === "operation.started") {
       return chunk.payload.kind === "tool" ? "tool" : "thinking";
@@ -653,6 +673,18 @@ function appendEvent(run: AiDebugRun, chunk: AiDebugChunk, now: number): AiDebug
   return [...run.events, event].slice(-MAX_EVENTS_PER_RUN);
 }
 
+function presentationGroupFrom(
+  value: unknown,
+): AiDebugTool["presentationGroup"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const group = value as Record<string, unknown>;
+  const key = typeof group.key === "string" ? group.key.trim() : "";
+  const label = typeof group.label === "string" ? group.label.trim() : "";
+  return key && label ? { key, label } : undefined;
+}
+
 function upsertTools(
   run: AiDebugRun,
   chunk: AiDebugChunk,
@@ -669,6 +701,9 @@ function upsertTools(
       const display = chunk.payload.display as Record<string, unknown> | undefined;
       const params = display?.labelParams as Record<string, unknown> | undefined;
       const rawDisplayNames = params?.displayNames;
+      const presentationGroup = presentationGroupFrom(
+        params?.presentationGroup,
+      );
       const displayNames = rawDisplayNames
         && typeof rawDisplayNames === "object"
         && !Array.isArray(rawDisplayNames)
@@ -683,6 +718,7 @@ function upsertTools(
         index: 0,
         name: String(params?.toolName || "工具操作"),
         displayName: resolveLocalizedToolDisplayName(displayNames),
+        ...(presentationGroup ? { presentationGroup } : {}),
         argumentsText: "",
         argumentsValue: undefined,
         status: "running",
@@ -1057,6 +1093,9 @@ export function recordAiDebugRunUsageSnapshot(
   const terminal = ['done', 'failed', 'canceled'].includes(snapshot.run.status);
   replaceRunByAgentRunId(runId, (run) => ({
     ...run, tokenUsage: usage ?? run.tokenUsage,
+    rootRunId: snapshot.run.rootRunId ?? run.rootRunId,
+    parentRunId: snapshot.run.parentRunId ?? run.parentRunId,
+    agentId: snapshot.run.agentId ?? run.agentId,
     model: run.model || snapshot.run.provenance.modelName || undefined,
     startedAt: startedAt ?? run.startedAt,
     updatedAt: updatedAt ?? run.updatedAt,
@@ -1108,6 +1147,10 @@ export function recordAiDebugChunk(streamId: string, chunk: AiDebugChunk): void 
         ? runtimeData.data
         : run.contextCompaction,
       agentRunId: runId || run.agentRunId,
+      rootRunId: canonicalEvent?.rootRunId ?? run.rootRunId,
+      parentRunId: canonicalEvent?.parentRunId ?? run.parentRunId,
+      agentId: canonicalEvent?.agentId ?? run.agentId,
+      feedback: projectFeedback(run.feedback ?? [], canonicalEvent),
       agentPlan: mergeDebugAgentPlan(run.agentPlan, runtimeData),
       delegations: delegation
         ? upsertDebugDelegation(run.delegations, delegation)
@@ -1132,6 +1175,19 @@ export function recordAgentConversationDebugChunk(data: {
   chunk: AiDebugChunk;
 }): void {
   if (!DEBUG_STORE_ENABLED) return;
+  if (data.turnId && data.conversationRootRunId) {
+    for (const run of state.runs) {
+      if (
+        run.turnId === data.turnId
+        && run.conversationRootRunId !== data.conversationRootRunId
+      ) {
+        replaceRun(run.id, (current) => ({
+          ...current,
+          conversationRootRunId: data.conversationRootRunId,
+        }));
+      }
+    }
+  }
   const existing = state.runs.find((run) => run.agentRunId === data.runId);
   const streamId = existing?.id ?? `agent-${data.runId}`;
   if (!existing) {
@@ -1274,4 +1330,29 @@ export function getAiDebugSnapshot(): AiDebugState {
 
 export function clearAiDebugRuns(): void {
   setState({ runs: [], selectedRunId: null });
+}
+
+/** Keep feedback evidence outside the truncated diagnostic event list. */
+export function projectFeedback(rows: AiDebugFeedback[], event: CanonicalOutputEvent | null): AiDebugFeedback[] {
+  if (event?.visibility === 'public' && event.channel === 'commentary' && event.outputStreamId) {
+    const delta = canonicalProviderTextDelta(event);
+    if (delta) return rows.map(row => row.outputStreamId === event.outputStreamId && (row.textSequence ?? 0) < event.sequence
+      ? { ...row, text: (row.text ?? '') + delta, textSequence: event.sequence } : row);
+  }
+  const runtime = canonicalRuntimeData(event);
+  if (!event || !runtime || !['agent.feedback.queued', 'agent.feedback.state'].includes(runtime.eventType)) return rows;
+  const { childRunId, agentId, outputStreamId, invocationId, executionStatus } = runtime.data;
+  const state = runtime.eventType === 'agent.feedback.queued' ? 'queued' : runtime.data.state;
+  if (typeof childRunId !== 'string' || !['queued', 'started', 'streaming', 'completed', 'aborted'].includes(String(state))) return rows;
+  const previous = rows.find(row => row.childRunId === childRunId);
+  if (previous && previous.sequence >= event.sequence) return rows;
+  const row: AiDebugFeedback = {
+    ...previous, childRunId, state: state as AiDebugFeedback['state'], sequence: event.sequence,
+    receivedAt: previous?.receivedAt ?? event.occurredAt, updatedAt: event.occurredAt,
+    ...(typeof agentId === 'string' ? { agentId } : {}),
+    ...(typeof executionStatus === 'string' ? { executionStatus } : {}),
+    ...(typeof outputStreamId === 'string' ? { outputStreamId } : {}),
+    ...(typeof invocationId === 'string' ? { invocationId } : {}),
+  };
+  return previous ? rows.map(item => item.childRunId === childRunId ? row : item) : [...rows, row];
 }

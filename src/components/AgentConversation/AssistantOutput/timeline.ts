@@ -4,6 +4,7 @@ import type {
 } from "../../../agent-runtime/contracts";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
 import { publicAgentProgressNarration } from "../../../agent-runtime/outputPresentation.ts";
+import { markdownToPlainText } from "../../../utils/markdown.ts";
 import {
   resolveLocalizedToolDisplayName,
   toolCallDisplayRow,
@@ -17,6 +18,13 @@ export type TimelineCommentaryPart = {
   durationMs?: number;
   startedAt?: number;
   regionKey: string;
+};
+
+export type TimelineStagePart = {
+  type: "stage";
+  md: string;
+  streamId: string;
+  status: "open" | "completed" | "aborted";
 };
 
 export type TimelineToolsPart = {
@@ -42,20 +50,48 @@ export type TimelineCanonicalOperationPart = {
   isRetry: boolean;
 };
 
+export type TimelineCanonicalOperationGroupPart = {
+  type: "operationGroup";
+  groupKey: string;
+  label: string;
+  operations: CanonicalOperation[];
+};
+
 export type AssistantTimelinePart =
+  | TimelineStagePart
   | TimelineCommentaryPart
   | TimelineToolsPart
   | TimelineTextPart
   | TimelineDelegationsPart
   | TimelineContextCompactionPart
-  | TimelineCanonicalOperationPart;
+  | TimelineCanonicalOperationPart
+  | TimelineCanonicalOperationGroupPart;
 
-export type TimelineStepPart = TimelineCommentaryPart | TimelineToolsPart;
+export type TimelineStepPart =
+  | TimelineCommentaryPart
+  | TimelineStagePart
+  | TimelineToolsPart;
 export type TimelineOperationPart =
   | TimelineToolsPart
   | TimelineDelegationsPart
   | TimelineContextCompactionPart
-  | TimelineCanonicalOperationPart;
+  | TimelineCanonicalOperationPart
+  | TimelineCanonicalOperationGroupPart;
+
+export function getPresentationGroupStatus(
+  part: TimelineCanonicalOperationGroupPart,
+): CanonicalOperation["status"] {
+  if (part.operations.some((operation) => operation.status === "running")) {
+    return "running";
+  }
+  if (part.operations.some((operation) => operation.status === "failed")) {
+    return "failed";
+  }
+  if (part.operations.some((operation) => operation.status === "canceled")) {
+    return "canceled";
+  }
+  return "succeeded";
+}
 
 export interface OperationGroupProgress {
   total: number;
@@ -74,6 +110,37 @@ export interface BuildAssistantTimelineOptions {
   allowStreamingText?: boolean;
 }
 
+export function isVisibleExecutionLogPart(
+  part: AssistantTimelinePart,
+): boolean {
+  if (part.type !== "tools") return part.type !== "text";
+  return part.segment.labels.some(
+    (_label, labelIndex) => !part.segment.cachedFlags?.[labelIndex],
+  );
+}
+
+const STAGE_SECTION_LABEL = String.raw`(?:阶段(?:性)?进展(?:小结|总结)?|已完成(?:内容)?|进行中\s*(?:\/|／)\s*待处理|不确定性(?:与注意事项)?|注意事项|下一步)`;
+const STAGE_SECTION_HEADING = new RegExp(`^${STAGE_SECTION_LABEL}[:：]?$`);
+const STAGE_SECTION_PREFIX = new RegExp(`^${STAGE_SECTION_LABEL}[:：]\\s*`);
+const STAGE_MARKDOWN_HEADING = new RegExp(
+  String.raw`^\s{0,3}#{1,6}\s+${STAGE_SECTION_LABEL}(?:[:：].*)?\s*$`,
+);
+
+export function stageTextToParagraph(value: string): string {
+  const withoutReportHeadings = value
+    .split(/\r?\n/)
+    .filter((line) => !STAGE_MARKDOWN_HEADING.test(line))
+    .join("\n");
+  return markdownToPlainText(withoutReportHeadings)
+    .split(/\n+/)
+    .map((line) => line.trim().replace(/^•\s*/, ""))
+    .map((line) => line.replace(STAGE_SECTION_PREFIX, "").trim())
+    .filter((line) => line && !STAGE_SECTION_HEADING.test(line))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function getOperationGroupProgress(
   parts: TimelineOperationPart[],
 ): OperationGroupProgress {
@@ -85,6 +152,12 @@ export function getOperationGroupProgress(
     if (part.type === "operation") {
       total += 1;
       if (part.operation.status === "running") activeCount += 1;
+      else completed += 1;
+      continue;
+    }
+    if (part.type === "operationGroup") {
+      total += 1;
+      if (getPresentationGroupStatus(part) === "running") activeCount += 1;
       else completed += 1;
       continue;
     }
@@ -145,6 +218,12 @@ export function getActiveOperationLabel(
     if (part.type === "operation" && part.operation.status === "running") {
       return part.isRetry ? `重试 ${part.label}` : part.label;
     }
+    if (
+      part.type === "operationGroup"
+      && getPresentationGroupStatus(part) === "running"
+    ) {
+      return part.label;
+    }
     if (part.type === "tools" && part.isLive) {
       const completed = Math.max(0, part.segment.completedToolCount ?? 0);
       const activeLabel = part.segment.labels.find(
@@ -169,7 +248,8 @@ function isTimelineOperationPart(
   return part.type === "tools"
     || part.type === "delegations"
     || part.type === "contextCompaction"
-    || part.type === "operation";
+    || part.type === "operation"
+    || part.type === "operationGroup";
 }
 
 export function getExecutionPanelPresentation(
@@ -221,6 +301,16 @@ export function executionPanelHasTerminalError(
     || planStatus === "failed"
     || planStatus === "blocked"
   );
+}
+
+export function getAssistantExecutionStatus(
+  message: Pick<AgentConversationMessage, "canonicalOutput" | "taskPlan">,
+): string | null | undefined {
+  // A durable pause intentionally cancels the current Root while keeping the
+  // LongTask resumable. Preserve the Root event record, but present the
+  // product workflow state instead of calling the paused turn "canceled".
+  if (message.taskPlan?.status === "paused") return "paused";
+  return message.canonicalOutput?.runStatus ?? message.taskPlan?.status;
 }
 
 export function getCanonicalOperationStatusText(
@@ -280,6 +370,12 @@ export function buildAssistantTimeline(
 
   if (message.canonicalOutput) {
     const canonicalOutput = message.canonicalOutput;
+    const canonicalMarkdown = canonicalOutput.finalStreamStatus === "open"
+      ? message.streamingContent || message.content
+      : message.content;
+    const terminalAnswer = canonicalOutput.runTerminal
+      ? canonicalMarkdown.trim()
+      : "";
     const canonicalParts: Array<{
       sequence: number;
       part: AssistantTimelinePart;
@@ -317,13 +413,22 @@ export function buildAssistantTimeline(
       });
     }
     canonicalOutput.commentaryBlocks
-      .filter((block) => !block.aborted)
+      .filter((block) => block.stage || !block.aborted)
       .forEach((block) => {
         const narration = block.text.trim();
         if (!narration) return;
+        // A durable checkpoint is persisted both as the terminal answer and
+        // as its completed stage stream. The answer owns that text once the
+        // Root is terminal; otherwise a replay renders it twice (or more).
+        if (terminalAnswer && narration === terminalAnswer) return;
         canonicalParts.push({
           sequence: block.firstSequence,
-          part: {
+          part: block.stage ? {
+            type: "stage",
+            md: narration,
+            streamId: block.outputStreamId,
+            status: block.aborted ? "aborted" : block.committed ? "completed" : "open",
+          } : {
             type: "commentary",
             md: narration,
             startedAt: Date.parse(block.startedAt),
@@ -357,6 +462,10 @@ export function buildAssistantTimeline(
         },
       });
     });
+    const presentationGroups = new Map<
+      string,
+      { sequence: number; part: TimelineCanonicalOperationGroupPart }
+    >();
     canonicalOutput.operationOrder.forEach((operationId) => {
       const operation = canonicalOutput.operations[operationId];
       // Planning and model lifecycle remain canonical state. Their public
@@ -369,6 +478,25 @@ export function buildAssistantTimeline(
         || (operation.kind === "context_compaction" && message.contextCompaction)
         || (operation.kind === "delegation" && message.delegations?.length)
       ) return;
+      const presentationGroup = operationPresentationGroup(operation);
+      if (presentationGroup) {
+        const groupKey = `${operation.runId}:${presentationGroup.key}`;
+        const existing = presentationGroups.get(groupKey);
+        if (existing) {
+          existing.part.operations.push(operation);
+        } else {
+          presentationGroups.set(groupKey, {
+            sequence: operation.firstSequence,
+            part: {
+              type: "operationGroup",
+              groupKey,
+              label: presentationGroup.label,
+              operations: [operation],
+            },
+          });
+        }
+        return;
+      }
       canonicalParts.push({
         sequence: operation.firstSequence,
         part: {
@@ -379,13 +507,13 @@ export function buildAssistantTimeline(
         },
       });
     });
+    presentationGroups.forEach(({ sequence, part }) => {
+      canonicalParts.push({ sequence, part });
+    });
     canonicalParts
       .sort((left, right) => left.sequence - right.sequence)
       .forEach(({ part }) => parts.push(part));
 
-    const canonicalMarkdown = canonicalOutput.finalStreamStatus === "open"
-      ? message.streamingContent || message.content
-      : message.content;
     if (canonicalMarkdown.trim()) {
       parts.push({ type: "text", md: canonicalMarkdown });
     }
@@ -465,6 +593,19 @@ export function buildAssistantTimeline(
   }
 
   return parts;
+}
+
+function operationPresentationGroup(
+  operation: CanonicalOperation,
+): { key: string; label: string } | undefined {
+  const value = operation.display.labelParams.presentationGroup;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const group = value as Record<string, unknown>;
+  const key = typeof group.key === "string" ? group.key.trim() : "";
+  const label = typeof group.label === "string" ? group.label.trim() : "";
+  return key && label ? { key, label } : undefined;
 }
 
 function canonicalOperationLabel(operation: CanonicalOperation): string {

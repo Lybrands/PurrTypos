@@ -9,7 +9,9 @@ import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 
+from application.agent_delegation_policy import DELEGATION_GUIDANCE, RESULT_PRESENTATION
 from purra.contracts import (
+    AgentMessage, MessageRole, MessageOrigin,
     AgentRunRequest,
     ApprovalDecision,
     ApprovalStatus,
@@ -36,6 +38,7 @@ from purra.api import (
     ContextStrategy,
     ExecutionProfile,
     AgentPreset,
+    AgentTreePolicy,
 )
 from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from purra.operations import AgentOperationController
@@ -58,6 +61,7 @@ from purra.output import (
     AgentOutputProcessor,
     AgentOutputRepository,
 )
+from infrastructure.persistence.sqlite_run_tree_repository import SqliteRunTreeRepository
 from purra.tools import InMemoryToolCatalog
 from application.conversation_compaction import ConversationCompactionService
 from application.artifact_continuity import ArtifactContinuityCoordinator
@@ -70,6 +74,7 @@ from application.agent_tool_presentation import (
 )
 from application.shared_agent_context import with_shared_agent_context
 from application.public_commentary_output import PublicCommentaryOutputProcessor
+from application.assistant_text_facts import AssistantTextFactsProvider
 from application.model_runtime import with_adapter_public_progress
 from application.run_provenance import (
     _normalized_model_request_profile,
@@ -218,6 +223,8 @@ class AgentComposition:
         tool_execution_limits: ToolExecutionLimits | None = None,
         long_task_claim_guard: LongTaskClaimGuard | None = None,
         memory_resource=None,
+        profile_registry_factory=None,
+        request_profile_router=None,
     ):
         self._db = db
         self._execution_db = execution_db or db
@@ -241,10 +248,12 @@ class AgentComposition:
             run_begin_projector=run_begin_projector,
             run_commit_projector=run_commit_projector,
         )
+        self._run_tree_repository = SqliteRunTreeRepository(db)
         self._output_publisher = InProcessAgentOutputPublisher()
         self._output_processor = PublicCommentaryOutputProcessor(
             self._output_repository,
             self._output_publisher,
+            is_child_run=self._is_child_agent_run,
         )
         self._tool_idempotency_gateway = SqliteToolIdempotencyGateway(
             db,
@@ -269,10 +278,16 @@ class AgentComposition:
                 artifact_continuity=self._artifact_continuity,
                 long_task_repository=self._long_task_repository,
                 execution_lease_store=self._execution_lease_store,
+                memory_resource=self._memory_resource,
             )
             for factory in profile_factories
         )
-        self._profile_registry = AgentProfileRegistry(self._profiles)
+        self._profile_registry = (
+            AgentProfileRegistry(self._profiles)
+            if profile_registry_factory is None
+            else profile_registry_factory(self._profiles)
+        )
+        self._request_profile_router = request_profile_router
         self._approval_gateway = approval_gateway or SqliteApprovalGateway(db)
         self._tool_execution_limits = tool_execution_limits or ToolExecutionLimits(
             approval_timeout_seconds=AGENT_APPROVAL_TIMEOUT_SECONDS,
@@ -281,6 +296,13 @@ class AgentComposition:
         self._background_run_tasks: set[asyncio.Task[None]] = set()
         self._active_cores: set[AgentCore] = set()
         self._closed = False
+
+    async def _is_child_agent_run(self, run_id: str) -> bool:
+        row = await self._db.fetch_one(
+            "SELECT parent_run_id FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        return bool(row is not None and row.get("parent_run_id"))
 
     @property
     def database(self):
@@ -329,6 +351,37 @@ class AgentComposition:
     @property
     def output_processor(self) -> AgentOutputProcessor:
         return self._output_processor
+
+    async def report_operation_result(self, *, context, facts, runtime, signal=None):
+        from application.operation_stage_output import OperationStageOutput
+        reporter = getattr(self, "_operation_stage_output", None)
+        if reporter is None:
+            reporter = self._operation_stage_output = OperationStageOutput(
+                self._db, self._output_processor, self._output_repository,
+                self._create_stage_invocation,
+            )
+        await reporter.report(context=context, facts=facts, runtime=runtime, signal=signal)
+
+    async def _create_stage_invocation(self, run_id, runtime):
+        from application.model_runtime import model_request_from_runtime, reasoning_mode_from_options
+        run = await self._db.fetch_one(
+            "SELECT runtime_limits_json,deadline_at_ms,selected_context_window_tokens FROM ai_agent_runs WHERE id=?", [run_id])
+        limits = runtime_limits_from_mapping(json.loads(run["runtime_limits_json"]))
+        model = model_request_from_runtime(runtime)
+        reasoning = reasoning_mode_from_options(model.options)
+        manager = AgentModelInvocationManager(
+            ProviderModelGateway(runtime.apiKey.get_secret_value(), request_observer=model_request_observer(self._db)),
+            output_observer=self._output_processor,
+            operation_controller=AgentOperationController(self._output_processor),
+            invocation_timeout_ms=limits.provider_invocation_timeout_ms,
+            runtime_limits=limits, budget_repository=self._repository,
+        )
+        context = ModelInvocationContext(
+            run_id=run_id, turn_id=run_id, requested_reasoning_mode=reasoning,
+            deadline_at_ms=run["deadline_at_ms"], deadline_code="run_deadline_exceeded",
+            context_window_tokens=run["selected_context_window_tokens"],
+        )
+        return manager, context, model, reasoning
 
     async def create_model_task_runner(
         self,
@@ -399,12 +452,38 @@ class AgentComposition:
     async def prepare_request(
         self,
         request: AgentRunRequest,
+        *,
+        run_id: str | None = None,
     ) -> AgentRunRequest:
         """Hydrate renderer-independent, authoritative domain catalogs."""
+
+        if self._request_profile_router is not None:
+            route_for_request = getattr(
+                self._request_profile_router,
+                "route_for_request",
+                None,
+            )
+            if callable(route_for_request):
+                request = await route_for_request(request, run_id=run_id)
+            elif run_id is None:
+                request = self._request_profile_router.route_for_create(request)
+            else:
+                request = await self._request_profile_router.route_for_run(
+                    request, run_id,
+                )
 
         profile = self._profile_registry.for_request(request)
         prepared = await profile.prepare_request(request)
         resolved = request if prepared is None else prepared
+        if (
+            resolved.tools_enabled
+            and resolved.metadata.get("responseAudience") != "internal"
+            and resolved.metadata.get("agentTreeEnabled", True) is not False
+        ):
+            if not any(message.content == DELEGATION_GUIDANCE for message in resolved.messages):
+                resolved = replace(resolved, messages=(AgentMessage(
+                    role=MessageRole.DEVELOPER, origin=MessageOrigin.HOST_CONTEXT,
+                    content=DELEGATION_GUIDANCE), *resolved.messages))
         if _uses_adapter_public_progress(resolved):
             resolved = replace(
                 resolved,
@@ -438,6 +517,7 @@ class AgentComposition:
         api_key: str,
         *,
         agent_profile: str,
+        agent_tree_enabled: bool = True,
         on_required_tool_choice_unsupported: Callable[[], None] | None = None,
         extra_tool_registrations: Sequence[ToolRegistration] = (),
         allowed_tool_modes: Collection[ToolExecutionMode] | None = None,
@@ -451,6 +531,7 @@ class AgentComposition:
         evidence_validator=None,
         public_progress_from_content: bool = False,
         public_progress_requirement=None,
+        runtime_limits_override=None,
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -465,6 +546,7 @@ class AgentComposition:
         profile_id = str(agent_profile or "").strip()
         profile = self._profile_registry.require(profile_id)
         adapter = profile.adapter
+        runtime_limits = runtime_limits_override or adapter.runtime_limits
         planning_policy = adapter.planning_policy
         context_provider = context_provider_override or adapter.context_provider
         context_provider_factory = None
@@ -571,13 +653,18 @@ class AgentComposition:
             conversation_compactor=resolved_compactor,
             conversation_compactor_factory=conversation_compactor_factory,
             execution_state_factory=adapter.execution_state_factory,
-            runtime_limits=adapter.runtime_limits,
+            runtime_limits=runtime_limits,
             recovery_policy=adapter.recovery_policy,
             component_bindings=_host_component_bindings(profile.id),
+            agent_tree_policy=AgentTreePolicy(
+                max_agents_per_root=16,
+                result_presentation_instruction=RESULT_PRESENTATION,
+            ) if agent_tree_enabled else None,
         )
         core = AgentCore(
             model_gateway=model_gateway,
             run_repository=self._repository,
+            run_tree_repository=self._run_tree_repository if agent_tree_enabled else None,
             preset=preset,
             approval_gateway=self._approval_gateway,
             tool_idempotency_gateway=self._tool_idempotency_gateway,
@@ -597,6 +684,13 @@ class AgentComposition:
         self._active_cores.add(core)
         return core
 
+    async def report_agent_results(self, run_id, results, signal=None):
+        owners = [core for core in self._active_cores if run_id in core.active_agent_root_ids]
+        if len(owners) != 1:
+            from purra.errors import ContractViolationError
+            raise ContractViolationError("Agent feedback requires its active owning Core", code="agent_feedback_unavailable")
+        await owners[0].report_agent_results(run_id, results, signal)
+
     def release_core(self, core: AgentCore) -> None:
         self._active_cores.discard(core)
 
@@ -614,10 +708,17 @@ class AgentComposition:
         )
         if callable(validator_hook) and "evidence_validator" not in kwargs:
             kwargs["evidence_validator"] = validator_hook(request)
+        runtime_limits_hook = getattr(profile, "runtime_limits_for_request", None)
+        if callable(runtime_limits_hook) and "runtime_limits_override" not in kwargs:
+            kwargs["runtime_limits_override"] = runtime_limits_hook(request)
         kwargs.setdefault(
             "public_progress_from_content",
             _uses_adapter_public_progress(request),
         )
+        kwargs.setdefault("agent_tree_enabled",
+            request.tools_enabled
+            and request.metadata.get("responseAudience") != "internal"
+            and request.metadata.get("agentTreeEnabled", True) is not False)
         return self.create_core(
             api_key,
             agent_profile=profile.id,
@@ -630,6 +731,12 @@ class AgentComposition:
         options: AgentCoreRunOptions,
     ) -> AgentCoreRunOptions:
         """Persist the selected product profile through the existing Run binding."""
+
+        if isinstance(options.committed_result_facts_provider, AssistantTextFactsProvider):
+            options = replace(
+                options,
+                committed_result_facts_provider=AssistantTextFactsProvider(self._db),
+            )
 
         binding = options.binding
         profile = self._profile_registry.for_request(request)

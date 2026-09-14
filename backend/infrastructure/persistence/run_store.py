@@ -274,6 +274,7 @@ async def get_run(
 ) -> dict[str, Any] | None:
     return await db.fetch_one(
         "SELECT id, session_id, conversation_id, status, mode, prompt, "
+        "root_run_id, parent_run_id, agent_id, "
         "model_provider, model_name, context_window, endpoint_digest, "
         "request_profile_digest, requested_reasoning_mode, output_contract, "
         "tool_protocol_contract, recovery_policy_id, capability_snapshot_digest, "
@@ -313,6 +314,7 @@ async def get_latest_run_for_session(
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE session_id = ? "
+        "AND parent_run_id IS NULL AND (root_run_id IS NULL OR root_run_id = id) "
         "ORDER BY create_time DESC, rowid DESC LIMIT 1",
         [int(session_id)],
     )
@@ -336,6 +338,7 @@ async def get_run_for_session_request(
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
         "FROM ai_agent_runs WHERE session_id = ? "
+        "AND parent_run_id IS NULL AND (root_run_id IS NULL OR root_run_id = id) "
         "AND binding_namespace = 'writing.chat.request' "
         "AND binding_aggregate_id = ? AND binding_command_id = ? "
         "ORDER BY rowid DESC LIMIT 1",

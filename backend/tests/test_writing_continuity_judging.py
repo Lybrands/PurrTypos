@@ -9,7 +9,6 @@ from domains.writing.continuity_judging import (
     AtomicContinuityJudgeContractError,
     AtomicContinuityJudgePolicy,
 )
-from domains.writing.prompts import frame_untrusted_writing_context
 
 
 _CANDIDATE = (
@@ -24,8 +23,17 @@ _CANDIDATE = (
 )
 
 
+def _frame_untrusted_context(blocks: dict[str, str]) -> str:
+    payload = [
+        {"source": source, "content": content}
+        for source, content in blocks.items()
+        if content.strip()
+    ]
+    return "【参考材料】\n" + json.dumps(payload, ensure_ascii=False)
+
+
 def _source_messages() -> tuple[AgentMessage, ...]:
-    retrieval = frame_untrusted_writing_context({
+    retrieval = _frame_untrusted_context({
         "associated_chapters_and_outlines": (
             "## 关联大纲《第一章》(outlineId=outline-1)\n"
             "本章发生在雨夜，使用蓝色铜钥匙。"

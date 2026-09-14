@@ -14,6 +14,23 @@ const { registerNovelKnowledgeIpc } = require('./novel_knowledge_ipc')
 const knowledgeHostSecret = require('node:crypto').randomBytes(32).toString('hex')
 const { configureAppIcon } = require('./app_icon')
 
+const replacementAcceptance = [
+  'PURRTYPOS_NOVEL_ANALYSIS_REPLACEMENT_ACCEPTANCE',
+  'PURRTYPOS_SCREENPLAY_REPLACEMENT_ACCEPTANCE',
+].some((name) => process.env[name] === '1')
+if (replacementAcceptance) {
+  const isolatedUserData = process.env.PURRTYPOS_ACCEPTANCE_ELECTRON_USER_DATA_DIR?.trim()
+  if (!isolatedUserData) {
+    throw new Error('Replacement acceptance requires isolated Electron userData')
+  }
+  const resolvedUserData = path.resolve(isolatedUserData)
+  const marker = path.join(resolvedUserData, '.purrtypos-electron-acceptance')
+  if (!fs.existsSync(marker)) {
+    throw new Error('Replacement acceptance Electron userData is not marked')
+  }
+  app.setPath('userData', resolvedUserData)
+}
+
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 
 if (!isDev) {

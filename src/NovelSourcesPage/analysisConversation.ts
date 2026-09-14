@@ -12,6 +12,18 @@ const historyModel: AiModelConfig = {
   id: '', name: '', apiKey: '', baseUrl: '', supportsThinking: false, thinkingOnly: false,
 }
 
+const ANALYSIS_ARTIFACT_PREFIXES = [
+  'novel-analysis-artifact://',
+  'novel-analysis-v1://',
+] as const
+
+export function novelAnalysisArtifactId(reference: string): string {
+  const value = String(reference || '').trim()
+  const prefix = ANALYSIS_ARTIFACT_PREFIXES.find(item => value.startsWith(item))
+  if (prefix) return value.slice(prefix.length)
+  return value.includes('://') ? '' : value
+}
+
 /**
  * Load every persisted page before a saved analysis is projected back into
  * the conversation. The analysis event stream then takes over for live
@@ -189,8 +201,15 @@ class NovelAnalysisRunStream {
 }
 
 function analysisMayHaveError(run: NovelAnalysisRun) {
-  if (['pending', 'running', 'claimed'].includes(run.taskStatus || '')) return false
-  return [run.taskStatus, run.runStatus].some(status => ['failed', 'blocked', 'paused'].includes(status || ''))
+  if (run.partialCompletion) return false
+  const workflowStatus = run.workflowStatus
+  if (['queued', 'running'].includes(workflowStatus || '')) return false
+  // A pause is an actionable workflow state, not an assistant-response error.
+  if (workflowStatus === 'paused') return false
+  if (workflowStatus === 'failed') return true
+  // Workflow completion means its Units settled; it does not retroactively
+  // erase a failed root public presentation from the same analysis turn.
+  return run.runStatus === 'failed'
 }
 
 function analysisErrorMessage(run: NovelAnalysisRun) {
@@ -221,7 +240,7 @@ export function buildNovelAnalysisMessages(
   const mayHaveError = analysisMayHaveError(run)
   const error = analysisErrorMessage(run) || (mayHaveError ? runtimeMessage?.error : undefined)
   const messages: AgentConversationMessage[] = []
-  if (run.prompt) {
+  if (run.prompt && !run.automaticRecovery) {
     messages.push({
       role: 'user',
       content: run.prompt,
@@ -233,7 +252,7 @@ export function buildNovelAnalysisMessages(
     ...runtimeMessage,
     role: 'assistant',
     content: runtimeMessage?.content
-      || (run.runStatus === 'done' ? run.finalResponse : '')
+      || (run.conversationStatus === 'finalized' ? run.finalResponse : '')
       || '',
     sentAt: run.updateTime || undefined,
     agentRunId: run.runId,

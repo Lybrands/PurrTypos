@@ -63,6 +63,7 @@ import { buildNovelAnalysisTaskPlan } from './analysisTaskPlan'
 import {
   buildNovelAnalysisMessages,
   NovelAnalysisConversationStream,
+  novelAnalysisArtifactId,
 } from './analysisConversation'
 import './index.scss'
 
@@ -74,20 +75,70 @@ const LONG_SOURCE_SECTION_CHARACTERS = 100_000
 
 function analysisRuntimeForModel(model: AiModelConfig) {
   const { options } = buildStreamOptions({ cfg: model, selectedModel: model.id })
-  return { apiKey: model.apiKey, baseURL: model.baseUrl || undefined,
+  return { modelConfigId: model.id, apiKey: model.apiKey, baseURL: model.baseUrl || undefined,
     apiProvider: normalizeApiProvider(model.apiProvider), locale: document.documentElement.lang || 'zh-CN',
     options, contextWindow: options.context_window }
 }
 type AnalysisSubmissionSnapshot = { replaceRunId?: string; conversationId: string; revisionId: string; runtime: ReturnType<typeof analysisRuntimeForModel> }
 
-const ACTIVE_ANALYSIS_STATUSES = new Set(['pending', 'running', 'claimed'])
+const ACTIVE_ANALYSIS_STATUSES = new Set(['queued', 'pending', 'running', 'claimed'])
 const BLOCKING_ANALYSIS_STATUSES = new Set([...ACTIVE_ANALYSIS_STATUSES, 'paused'])
+function durableAnalysisStatus(run?: NovelAnalysisRun) {
+  if (!run) return ''
+  return run.workflowStatus || ''
+}
 function isAnalysisRunActive(run: NovelAnalysisRun) {
-  return ACTIVE_ANALYSIS_STATUSES.has(run.runStatus) || ACTIVE_ANALYSIS_STATUSES.has(run.taskStatus || '')
+  return run.conversationStatus === 'streaming'
+    || ACTIVE_ANALYSIS_STATUSES.has(durableAnalysisStatus(run))
 }
 
 function isAnalysisRunBlocking(run: NovelAnalysisRun) {
-  return BLOCKING_ANALYSIS_STATUSES.has(run.runStatus) || BLOCKING_ANALYSIS_STATUSES.has(run.taskStatus || '')
+  return BLOCKING_ANALYSIS_STATUSES.has(durableAnalysisStatus(run))
+}
+
+function analysisStatusText(runs: NovelAnalysisRun[], hasPublishedAnalysis: boolean) {
+  if (hasPublishedAnalysis) return '已有保存结果'
+  if (runs.some(isAnalysisRunActive)) return '分析进行中'
+  if (runs.some(run => durableAnalysisStatus(run) === 'paused')) return '分析已暂停'
+  return '等待分析'
+}
+
+function pausedAnalysisWorkflowNotice(run?: NovelAnalysisRun) {
+  if (!run || durableAnalysisStatus(run) !== 'paused') return null
+  const total = Math.max(0, Number(run.totalUnits) || 0)
+  const completed = Math.min(total, Math.max(0, Number(run.completedUnits) || 0))
+  const remaining = Math.max(0, total - completed)
+  const progress = total > 0
+    ? `已保留 ${completed}/${total} 个步骤的成果，剩余 ${remaining} 个步骤。`
+    : '已保留当前可用成果。'
+  const dueAt = Number(run.workflowAutoResumeAtMs || 0)
+  const dueText = Number.isFinite(dueAt) && dueAt > Date.now()
+    ? `系统预计将在 ${new Intl.DateTimeFormat('zh-CN', {
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      }).format(new Date(dueAt))} 再次尝试。`
+    : ''
+  if (run.workflowPauseKind === 'budget') {
+    return {
+      text: `本轮模型调用预算已用完，分析已安全暂停。${progress}继续执行只会为这些未完成步骤补充一轮受限调用额度。`,
+      resumeLabel: '继续并补充一轮预算',
+    }
+  }
+  if (run.workflowPauseKind === 'user') {
+    return {
+      text: `分析已按你的要求暂停。${progress}恢复后会从未完成步骤继续。`,
+      resumeLabel: '继续执行',
+    }
+  }
+  if (run.workflowPauseKind === 'system') {
+    return {
+      text: `模型服务暂时不可用，分析已安全暂停。${progress}${dueText}`,
+      resumeLabel: dueText ? '立即继续' : '继续执行',
+    }
+  }
+  return {
+    text: `分析已安全暂停。${progress}你可以继续执行，或结束这次未完成的分析。`,
+    resumeLabel: '继续执行',
+  }
 }
 
 function importSectionPreview(content: string, start: number, end: number) {
@@ -686,7 +737,7 @@ export default function NovelSourcesPage({
       const result = await services.novelSources.followUpAnalysis({
         revisionId: analysisRevisionId,
         conversationId,
-        artifactId: replaceRunId ? undefined : resultRef?.replace('novel-analysis-artifact://', ''),
+        artifactId: replaceRunId || !resultRef ? undefined : novelAnalysisArtifactId(resultRef),
         replaceRunId,
         prompt,
         commandId,
@@ -713,7 +764,8 @@ export default function NovelSourcesPage({
 
   const openArtifact = React.useCallback(async (reference: string) => {
     const generation = detailGeneration.current
-    const artifactId = reference.replace('novel-analysis-artifact://', '')
+    const artifactId = novelAnalysisArtifactId(reference)
+    if (!artifactId) return appMessage.error('分析结果引用无效')
     const result = await services.novelSources.getAnalysisArtifact({ artifactId })
     if (generation !== detailGeneration.current) return
     if (!result.success || !result.data) return appMessage.error(result.error || '读取分析结果失败')
@@ -724,7 +776,7 @@ export default function NovelSourcesPage({
   React.useEffect(() => {
     if (analysisResultOpen) return
     const reference = analysisRuns[0]?.artifactRef || analysisRuns[0]?.analysisArtifactRef
-    if (!reference || reference.replace('novel-analysis-artifact://', '') === analysisArtifact?.artifactId) return
+    if (!reference || novelAnalysisArtifactId(reference) === analysisArtifact?.artifactId) return
     void openArtifact(reference)
   }, [analysisArtifact, analysisRuns, openArtifact, analysisResultOpen])
 
@@ -740,7 +792,7 @@ export default function NovelSourcesPage({
           : await services.novelSources.resumeAnalysis({
               taskId: run.taskId,
               commandId: resumeCommandId,
-              retryFailed: run.taskStatus === 'failed',
+              retryFailed: durableAnalysisStatus(run) === 'failed',
               runtime: runtime(),
             })
       if (!result.success) throw new Error(result.error || '分析任务操作失败')
@@ -764,6 +816,7 @@ export default function NovelSourcesPage({
         craftCards: analysisArtifact.craftCards,
         storyOverview: analysisArtifact.storyOverview,
         techniqueResult: analysisArtifact.techniqueResult,
+        analysisTechniqueResult: analysisArtifact.analysisTechniqueResult,
       })
       if (!reviewed.success || !reviewed.data) throw new Error(reviewed.error || '保存审核结果失败')
       const published = await services.novelSources.publishAnalysisArtifact({ artifactId: reviewed.data.artifactId })
@@ -1066,6 +1119,7 @@ export default function NovelSourcesPage({
   const currentPlan = latestRun && latestRun.interactionKind !== 'follow_up'
     ? buildNovelAnalysisTaskPlan(latestRun)
     : undefined
+  const workflowNotice = pausedAnalysisWorkflowNotice(latestRun)
   const conversationMessages: AgentConversationMessage[] = sessionRuns.length
     ? [...sessionRuns].reverse().flatMap(run => buildNovelAnalysisMessages(
         run, selectedAnalysisModel?.name || '',
@@ -1081,10 +1135,12 @@ export default function NovelSourcesPage({
     return <section className="novel-analysis-result-summary">
       <div className="novel-analysis-result-summary-copy"><span>分析结果</span></div>
       <div className="novel-analysis-result-summary-actions">
-        <em className={run.publishedAnalysisId ? 'is-saved' : ''}>{run.publishedAnalysisId ? '已保存' : '待保存'}</em>
+        <em className={run.publishedAnalysisId ? 'is-saved' : ''}>{run.publishedAnalysisId ? '已保存' : run.artifactRef.startsWith('novel-analysis-v1://') ? '待审核' : '待保存'}</em>
         <PurrButton size="small" onClick={async () => {
           const generation = detailGeneration.current
-          const result = await services.novelSources.getAnalysisArtifact({ artifactId: run.artifactRef!.replace('novel-analysis-artifact://', '') })
+          const artifactId = novelAnalysisArtifactId(run.artifactRef!)
+          if (!artifactId) { appMessage.error('分析结果引用无效'); return }
+          const result = await services.novelSources.getAnalysisArtifact({ artifactId })
           if (generation !== detailGeneration.current) return
           if (!result.success || !result.data) { appMessage.error(result.error || '读取分析结果失败'); return }
           setAnalysisArtifact(result.data)
@@ -1108,7 +1164,11 @@ export default function NovelSourcesPage({
     setSourceReaderOpen(true)
   }
   const analysisResultActions = analysisArtifact ? <div className="novel-analysis-result-actions">
-    {analysisArtifact.analysisSchemaVersion !== 3 ? <small>旧版分析仅供查看，请重新发起分析以生成新版写作技法。</small> : <PurrButton type="primary" disabled={busy} onClick={() => void saveAnalysis()}>{publishedAnalysisId ? '保存修改' : '保存分析结果'}</PurrButton>}
+    {analysisArtifact.publicationSupported === false
+      ? <small>当前分析结果仅供查看，尚不能写入正式来源资料。</small>
+      : analysisArtifact.artifactContract !== 'purrtypos.novel_analysis.review.v1' && analysisArtifact.analysisSchemaVersion !== 3
+        ? <small>旧版分析仅供查看，请重新发起分析以生成新版写作技法。</small>
+        : <PurrButton type="primary" disabled={busy} onClick={() => void saveAnalysis()}>{publishedAnalysisId ? '保存修改' : '保存分析结果'}</PurrButton>}
   </div> : null
   const analysisResultDetail = analysisArtifact ? <section className="novel-analysis-result-detail">
     <PurrTabs
@@ -1130,11 +1190,21 @@ export default function NovelSourcesPage({
           key: 'craft',
           label: '写作技法',
           children: <section className="novel-analysis-result-tab">
-            <SourceTechniqueResults key={publishedAnalysisId || 'unsaved'} analysisId={publishedAnalysisId}
-              canAdd={analysisArtifact.techniqueResult?.status === 'generated'} />
-            <WritingSkillReview artifact={analysisArtifact} onTechniqueResultChange={(techniqueResult) => {
-              setAnalysisArtifact(current => current ? { ...current, techniqueResult } : current)
-            }} />
+            {analysisArtifact.analysisTechniqueResult?.status === 'generated'
+              ? analysisArtifact.analysisTechniqueResult.techniques.map((technique, index) => <article key={`${technique.title}-${index}`} className="novel-analysis-result-overview">
+                <h4>{technique.title}</h4>
+                <Markdown>{technique.bodyMarkdown}</Markdown>
+              </article>)
+              : analysisArtifact.analysisTechniqueResult?.status === 'empty'
+                ? <p className="novel-analysis-result-empty">{analysisArtifact.analysisTechniqueResult.reason || '当前材料不足以形成可复用写作技法。'}</p>
+                : null}
+            {analysisArtifact.artifactContract !== 'purrtypos.novel_analysis.review.v1' ? <>
+              <SourceTechniqueResults key={publishedAnalysisId || 'unsaved'} analysisId={publishedAnalysisId}
+                canAdd={analysisArtifact.techniqueResult?.status === 'generated'} />
+              <WritingSkillReview artifact={analysisArtifact} onTechniqueResultChange={(techniqueResult) => {
+                setAnalysisArtifact(current => current ? { ...current, techniqueResult } : current)
+              }} />
+            </> : null}
             <WritingTechniqueEvidence scopeNotes={analysisArtifact.techniqueResult?.scopeNotes ?? []} cards={analysisArtifact.craftCards} onShowEvidence={(title, evidence, body) => showEvidence(title, evidence, { kind: 'craft', heading: title, body })} />
           </section>,
         },
@@ -1171,7 +1241,7 @@ export default function NovelSourcesPage({
       /> : null}
     </PurrModal> : null}
     {analysisArtifact ? <PurrModal
-      title={`分析结果 · ${analysisArtifact.facts.length} 条创作资料 · ${analysisArtifact.techniqueResult?.status === 'generated' || analysisArtifact.writingSkill ? '1 个写作技法' : '未生成写作技法'}`}
+      title={`分析结果 · ${analysisArtifact.facts.length} 条创作资料 · ${analysisArtifact.analysisTechniqueResult?.status === 'generated' || analysisArtifact.techniqueResult?.status === 'generated' || analysisArtifact.writingSkill ? '1 个写作技法' : '未生成写作技法'}`}
       open={analysisResultOpen}
       width="min(1180px, calc(100vw - 48px))"
       footer={analysisResultActions}
@@ -1266,8 +1336,9 @@ export default function NovelSourcesPage({
       running: Boolean(hasActiveAnalysis || waitingForRun || analysisPending),
       stopping: busy && !analysisPending && Boolean(hasActiveAnalysis),
       abortDisabled: !analysisReady || analysisPending || waitingForRun || !latestRun,
-      paused: latestRun?.taskStatus === 'paused',
-      resuming: busy && latestRun?.taskStatus === 'paused',
+      paused: durableAnalysisStatus(latestRun) === 'paused' && Boolean(latestRun?.workflowResumable),
+      resuming: busy && durableAnalysisStatus(latestRun) === 'paused',
+      resumeLabel: workflowNotice?.resumeLabel,
       attachmentsVersion: sessionRuns.map(run => `${run.runId}:${run.artifactRef || ''}:${run.publishedAnalysisId || ''}`).join('|'),
     },
     composer: {
@@ -1328,7 +1399,7 @@ export default function NovelSourcesPage({
         analysisComposer.cancelQueue(analysisScope)
         refreshComposer()
         if (!latestRun) return
-        if (latestRun.taskId && BLOCKING_ANALYSIS_STATUSES.has(latestRun.taskStatus || '')) {
+        if (latestRun.taskId && BLOCKING_ANALYSIS_STATUSES.has(durableAnalysisStatus(latestRun))) {
           await controlAnalysis(latestRun, 'cancel')
           return
         }
@@ -1336,7 +1407,9 @@ export default function NovelSourcesPage({
         if (!result.success) appMessage.error(result.error || '停止追问失败')
         await reloadAnalysis(analysisRevisionId)
       },
-      resume: () => latestRun ? controlAnalysis(latestRun, 'resume') : undefined,
+      resume: () => latestRun?.workflowResumable
+        ? controlAnalysis(latestRun, 'resume')
+        : undefined,
       editMessage: (index, content) => {
         const message = conversationMessages[index]
         if (message?.role !== 'user' || !message.clientTurnId) return
@@ -1365,6 +1438,15 @@ export default function NovelSourcesPage({
     {recoveryError ? <div role="alert" className="novel-analysis-recovery-error">
       <span>对话恢复失败：{recoveryError}</span>
       <PurrButton size="small" onClick={() => setRecoveryAttempt(value => value + 1)}>重新恢复</PurrButton>
+    </div> : null}
+    {workflowNotice && latestRun ? <div className="novel-analysis-workflow-notice" role="status">
+      <p>{workflowNotice.text}</p>
+      <div>
+        {latestRun.workflowResumable ? <PurrButton size="small" disabled={busy}
+          onClick={() => void controlAnalysis(latestRun, 'resume')}>{workflowNotice.resumeLabel}</PurrButton> : null}
+        <PurrButton size="small" type="text" disabled={busy}
+          onClick={() => void controlAnalysis(latestRun, 'cancel')}>结束本次分析</PurrButton>
+      </div>
     </div> : null}
     <AgentConversationPanel
       className="novel-analysis-agent-panel"
@@ -1405,7 +1487,7 @@ export default function NovelSourcesPage({
           <dl>
             <div><dt>当前版本</dt><dd>版本 {selectedRevision?.version_no ?? '—'}</dd></div>
             <div><dt>原文长度</dt><dd>{selectedRevision?.character_count.toLocaleString() ?? '—'} 字符</dd></div>
-            <div><dt>分析状态</dt><dd>{publishedAnalyses.length ? '已有保存结果' : hasBlockingAnalysis ? '分析进行中' : '等待分析'}</dd></div>
+            <div><dt>分析状态</dt><dd>{analysisStatusText(analysisRuns, publishedAnalyses.length > 0)}</dd></div>
           </dl>
           <PurrButton icon={<BookIcon />} onClick={() => {
             setSourceReaderTarget(null)

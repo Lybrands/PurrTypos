@@ -151,6 +151,7 @@ async def init_screenplay_agent_schema(db) -> None:
         assistant_content TEXT NOT NULL DEFAULT '',
         intent_json TEXT NOT NULL DEFAULT '{}',
         runtime_profile_json TEXT NOT NULL DEFAULT '{}',
+        implementation_id TEXT NOT NULL DEFAULT 'legacy-frozen-2026-09-12',
         planner_run_id TEXT DEFAULT NULL,
         operation_id TEXT DEFAULT NULL UNIQUE,
         task_id TEXT DEFAULT NULL,
@@ -176,6 +177,10 @@ async def init_screenplay_agent_schema(db) -> None:
         for column in await db.fetch_all("PRAGMA table_info(screenplay_agent_turns)")
     }
     for name, definition in (
+        (
+            "implementation_id",
+            "TEXT NOT NULL DEFAULT 'legacy-frozen-2026-09-12'",
+        ),
         ("stage_command_json", "TEXT DEFAULT NULL"),
         ("operation_id", "TEXT DEFAULT NULL"),
         ("task_id", "TEXT DEFAULT NULL"),

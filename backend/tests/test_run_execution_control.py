@@ -967,6 +967,30 @@ async def test_terminal_writing_hole_is_reconciled_without_current_recovery_ids(
 
 
 @pytest.mark.asyncio
+async def test_child_terminal_result_never_materializes_as_a_conversation(db):
+    from infrastructure.persistence.run_conversation_store import (
+        ensure_terminal_run_conversation,
+        materialize_recovered_run_conversations,
+        materialize_terminal_writing_run_holes,
+    )
+    await db.execute("INSERT INTO ai_sessions (id, book_id) VALUES (195, 'synthetic')")
+    root = await run_store.create_run(db, session_id=195, prompt="root", mode="agent")
+    child = await run_store.create_run(
+        db, session_id=195, prompt="PRIVATE_CHILD_INSTRUCTION", mode="agent",
+        root_run_id=root, parent_run_id=root,
+    )
+    await db.execute("UPDATE ai_agent_runs SET status='done', final_response='PRIVATE_CHILD_RESULT' WHERE id=?", [child])
+    assert (await run_store.get_latest_run_for_session(db, 195))["id"] == root
+    assert await ensure_terminal_run_conversation(db, child) is None
+    assert await materialize_recovered_run_conversations(db, [child]) == ()
+    assert await materialize_terminal_writing_run_holes(db) == ()
+    assert await db.fetch_all("SELECT id FROM ai_conversations WHERE session_id=195") == []
+    await db.execute("UPDATE ai_agent_runs SET status='done', final_response='ROOT_FINAL' WHERE id=?", [root])
+    assert await materialize_terminal_writing_run_holes(db) == (root,)
+    assert await db.fetch_all("SELECT response FROM ai_conversations WHERE session_id=195") == [{"response": "ROOT_FINAL"}]
+
+
+@pytest.mark.asyncio
 async def test_orphan_monitor_retries_terminal_writing_holes_after_projection_failure(
     db,
     orphan_recovery,

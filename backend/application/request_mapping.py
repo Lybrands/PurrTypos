@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from application.assistant_text_facts import AssistantTextFactsProvider
+
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from types import SimpleNamespace
@@ -23,17 +25,14 @@ from purra.output import (
     ResponseTransactionPolicy,
 )
 from purra.ports import ResponseJudgePolicy
-from domains.writing.context import writing_context_claims
-from domains.writing.contracts import (
-    WRITING_DOMAIN_NAMESPACE,
-    WritingDomainContext,
-)
-from domains.writing.response import (
+from agents.writing.context_claims import writing_context_claims
+from agents.writing.request_contract import WritingRequestContext
+from agents.writing.response_contract import (
     writing_response_contract_for_request,
     writing_response_constraints,
     writing_response_validators,
 )
-from domains.writing.public_facts import WritingPublicFactsProvider
+from agents.writing.public_facts import WritingPublicFactsProvider
 from schemas.ai import ChatStreamRequest
 from application.agent_conversation_input import conversation_messages, conversation_input_metadata
 from application.model_runtime import (
@@ -90,7 +89,7 @@ def to_writing_agent_request(
     runtime = SimpleNamespace(options=options, contextWindow=window_label,
                               baseURL=options.get("baseURL") or body.baseURL,
                               apiProvider=body.apiProvider)
-    context = WritingDomainContext(
+    context = WritingRequestContext(
         writing_technique_input_id=body.writingTechniqueInputId,
         book_id=body.bookId,
         chapter_id=body.chapterId,
@@ -152,7 +151,7 @@ def writing_run_options(
     provenance: RunProvenance | None = None,
     response_judge_policies: Sequence[ResponseJudgePolicy] = (),
 ) -> AgentCoreRunOptions:
-    context = WritingDomainContext.from_core_context(request.domain_context)
+    context = WritingRequestContext.from_core_context(request.domain_context)
     context_window = request.context_window or 200_000
     response_constraints = writing_response_constraints(request)
     response_validators = writing_response_validators(request)
@@ -195,7 +194,7 @@ def writing_run_options(
                 mode=ResponseTransactionMode.VALIDATED_RESULT,
                 public_presentation=PublicPresentationMode.MODEL_LIVE,
             )
-            if requires_validated_result
+            if requires_validated_result or request.tools_enabled
             else None
         ),
         committed_result_facts_provider=(
@@ -203,7 +202,7 @@ def writing_run_options(
                 writing_response_contract_for_request(request)
             )
             if requires_validated_result
-            else None
+            else AssistantTextFactsProvider()
         ),
     )
 def _has_caller_tool_definitions(value: Any) -> bool:

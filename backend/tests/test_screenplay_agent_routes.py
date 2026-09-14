@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 import pytest
+from types import SimpleNamespace
 from infrastructure.persistence.agent_output_publisher import InProcessAgentOutputPublisher
 
 import routers.screenplay_conversations as conversation_routes
@@ -11,6 +12,65 @@ from tests.support.asgi_sse import start_asgi_request
 
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_router_selects_only_replacement_service(
+    monkeypatch,
+):
+    captured = {}
+
+    composition = SimpleNamespace(
+        execution_owner_id="replacement-http-owner",
+        output_journal=object(),
+    )
+
+    class ReplacementService:
+        def __init__(self, db, composition, *, owner_id):
+            captured.update(db=db, composition=composition, owner_id=owner_id)
+
+    monkeypatch.setattr(conversation_routes, "get_db", lambda: "route-db")
+    monkeypatch.setattr(
+        agent_composition, "get_agent_composition", lambda: composition
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayReplacementConversationService",
+        ReplacementService,
+    )
+    selected = conversation_routes._service()
+
+    assert isinstance(selected, ReplacementService)
+    assert captured == {
+        "db": "route-db",
+        "composition": composition,
+        "owner_id": "replacement-http-owner",
+    }
+
+
+async def test_router_selects_replacement_canonical_query_with_same_policy(
+    monkeypatch,
+):
+    composition = SimpleNamespace(output_journal="journal")
+    captured = {}
+
+    class ReplacementQuery:
+        def __init__(self, db, *, output_repository):
+            captured.update(db=db, output_repository=output_repository)
+
+    monkeypatch.setattr(conversation_routes, "get_db", lambda: "route-db")
+    monkeypatch.setattr(
+        agent_composition, "get_agent_composition", lambda: composition
+    )
+    monkeypatch.setattr(
+        conversation_routes,
+        "ScreenplayReplacementConversationQuery",
+        ReplacementQuery,
+    )
+
+    selected = conversation_routes._chunks()
+
+    assert isinstance(selected, ReplacementQuery)
+    assert captured == {"db": "route-db", "output_repository": "journal"}
 
 
 class _Service:
@@ -49,62 +109,6 @@ def _body(**extra):
         },
         **extra,
     }
-
-
-async def test_production_unit_executor_uses_the_composed_tool_loop(
-    monkeypatch,
-):
-    captured_service = {}
-    captured_executor = {}
-
-    class Composition:
-        execution_owner_id = "route-composition-owner"
-        output_processor = object()
-
-        @staticmethod
-        def track_background_run(_task):
-            return None
-
-    composition = Composition()
-
-    class CapturingService:
-        def __init__(self, _db, **kwargs):
-            captured_service.update(kwargs)
-
-    class CapturingExecutor:
-        def __init__(self, _db, **kwargs):
-            captured_executor.update(kwargs)
-
-    monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
-    monkeypatch.setattr(
-        agent_composition,
-        "get_agent_composition",
-        lambda: composition,
-    )
-    monkeypatch.setattr(
-        conversation_routes,
-        "ScreenplayAgentService",
-        CapturingService,
-    )
-    monkeypatch.setattr(
-        conversation_routes,
-        "ScreenplayV2ProjectService",
-        lambda *_args, **_kwargs: object(),
-    )
-    monkeypatch.setattr(
-        conversation_routes,
-        "ScreenplayTaskUnitExecutor",
-        CapturingExecutor,
-    )
-
-    conversation_routes._service()
-    captured_service["unit_executor_factory"](object())
-
-    assert captured_service["composition"] is composition
-    assert "planner" not in captured_service
-    assert "resolver" not in captured_service
-    assert captured_executor["composition"] is composition
-    assert "candidate_model_service" not in captured_executor
 
 
 async def _post(app, body):
@@ -383,7 +387,7 @@ async def test_conversation_sse_streams_only_canonical_agent_output(
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayCanonicalOutputQuery",
+        "ScreenplayReplacementConversationQuery",
         _Chunks,
     )
     monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
@@ -446,7 +450,7 @@ async def test_conversation_sse_announces_empty_chunk_replay_completion(
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayCanonicalOutputQuery",
+        "ScreenplayReplacementConversationQuery",
         _Chunks,
     )
     monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
@@ -499,7 +503,7 @@ async def test_conversation_sse_advances_past_unbound_canonical_output(
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayCanonicalOutputQuery",
+        "ScreenplayReplacementConversationQuery",
         _Chunks,
     )
     monkeypatch.setattr(conversation_routes, "get_db", lambda: object())
@@ -556,7 +560,7 @@ async def test_conversation_sse_disconnect_only_detaches_subscription(monkeypatc
     )
     monkeypatch.setattr(
         conversation_routes,
-        "ScreenplayCanonicalOutputQuery",
+        "ScreenplayReplacementConversationQuery",
         Chunks,
     )
 

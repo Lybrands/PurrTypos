@@ -11,6 +11,32 @@ from database.connection import DatabaseConnection
 pytestmark = pytest.mark.asyncio
 
 
+async def test_startup_marks_existing_turns_as_frozen_legacy(
+    tmp_path: Path,
+):
+    first = DatabaseConnection(tmp_path)
+    await first.init()
+    await first.execute(
+        "INSERT INTO screenplay_agent_turns "
+        "(id, project_id, session_id, command_id, user_content) "
+        "VALUES ('legacy-identity-turn', 'project', 1, 'command', '旧消息')"
+    )
+    await first.execute(
+        "ALTER TABLE screenplay_agent_turns DROP COLUMN implementation_id"
+    )
+    await first.close()
+
+    reopened = DatabaseConnection(tmp_path)
+    await reopened.init()
+    try:
+        assert await reopened.fetch_one(
+            "SELECT implementation_id FROM screenplay_agent_turns "
+            "WHERE id = 'legacy-identity-turn'"
+        ) == {"implementation_id": "legacy-frozen-2026-09-12"}
+    finally:
+        await reopened.close()
+
+
 async def test_startup_adds_nullable_stage_command_to_existing_turns(
     tmp_path: Path,
 ):

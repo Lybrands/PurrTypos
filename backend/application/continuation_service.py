@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from uuid import uuid4
 
 from constants import BOOK_COLORS
-from domains.novel_analysis import canonical_digest
+from application.canonical_json import canonical_json_digest
 from exceptions import AppError, NotFoundError
 from utils.id_utils import short_id8
 
@@ -154,7 +154,7 @@ class ContinuationService:
             "sourceTitle": str(revision["source_title"]),
             "sourceVersionNo": int(revision["version_no"]),
             "forkSectionTitle": str(fork["title"]),
-            "snapshotDigest": canonical_digest(canonical),
+            "snapshotDigest": canonical_json_digest(canonical),
         }
 
     async def create_continuation(
@@ -167,7 +167,6 @@ class ContinuationService:
         expected_snapshot_digest: str,
         enable_volume: bool = False,
         operation_id: str,
-        allow_without_techniques: bool = False,
         use_source_techniques: bool = True,
     ) -> dict:
         if not str(operation_id or "").strip():
@@ -175,9 +174,9 @@ class ContinuationService:
         normalized_title = str(title or "").strip()
         if not normalized_title:
             raise AppError("续写作品名称不能为空", 422)
-        request_digest = canonical_digest({"title": normalized_title, "revision": source_revision_id,
+        request_digest = canonical_json_digest({"title": normalized_title, "revision": source_revision_id,
             "analysis": source_analysis_id, "fork": fork_section_id, "digest": expected_snapshot_digest,
-            "volume": enable_volume, "allowWithoutTechniques": allow_without_techniques, "useSourceTechniques": use_source_techniques})
+            "volume": enable_volume, "useSourceTechniques": use_source_techniques})
         async with self._db.transaction(cancellation_linearizable=True):
             previous = await self._db.fetch_one("SELECT * FROM continuation_operations WHERE operation_id=?", [operation_id])
             if previous:
@@ -279,7 +278,7 @@ class ContinuationService:
                     fork_section_id,
                     preview["forkOrdinal"],
                     snapshot_id,
-                    canonical_digest(binding_canonical),
+                    canonical_json_digest(binding_canonical),
                 ],
             )
             await self._db.execute(

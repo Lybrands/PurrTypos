@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 
-from domains.screenplay_agent import ScreenplayStageCommand
+from agents.screenplay.contracts import ScreenplayStageCommand
 from schemas.screenplay_v2 import ScreenplayV2DeliverableRole, ScreenplayV2Model
 
 

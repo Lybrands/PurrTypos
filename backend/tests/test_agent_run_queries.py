@@ -231,6 +231,8 @@ async def test_run_snapshot_reuses_canonical_live_serializer_for_replay(temp_db)
     assert snapshot is not None
     assert snapshot["events"][0]["chunk"] == {
         "eventId": snapshot["events"][0]["chunk"]["eventId"],
+        "rootRunId": run_id,
+        "agentId": run_id,
         "outputStreamId": None,
         "runId": run_id,
         "turnId": None,

@@ -1,6 +1,9 @@
 # 模型请求公共入口与适配规范
 
-状态：已实施。适用于 PurrTypos 与已发布的 PurrA 0.5.0。本文规定模型请求的公共边界；后续已恢复三 Agent 与蒸馏验证，实际产物、质量缺陷及框架阻断见[后续验收](2026-09-06-agent-and-distillation-acceptance.md)，不能用请求链路通过代替完整对话或蒸馏质量通过。
+状态：公共请求边界仍有效；本文最初在 PurrA 0.5.0 阶段实施，其中的版本与验收结论是
+历史快照。当前锁定依赖及候选身份以仓库根 README、`backend/requirements-purra.txt` 和
+`backend/purra-candidate.json` 为准。本文规定模型请求的公共边界；不能用请求链路通过
+代替完整对话、真实 Provider 或蒸馏质量验收。
 
 ## 1. 范围与所有权
 
@@ -119,7 +122,9 @@ stream 和 complete 都接入取消。取消后不交付迟到结果或写入业
 
 架构测试禁止 Application、Domain、Router、Service 绕过 Gateway/公共服务调用聊天适配器。现有协议、预算、工具、恢复、canonical/SSE 和前端 DOM 回归继续执行。测试包含 fake SDK 与 OpenAI mock HTTP body；模拟通过与真实 Provider 通过分别报告。
 
-项目门禁：`npm run check:agent-refactor`、`npm run build:web`、`git diff --check`。Web 打包使用已发布 PurrA 0.5.0；不修改框架源代码。Windows/Electron 安装包未在本次构建。
+当时的项目门禁为 `npm run check:agent-refactor`、`npm run build:web`、
+`git diff --check`；当时使用 PurrA 0.5.0，且未构建 Windows/Electron 包。
+这些是该阶段的历史验收范围，不是当前依赖或最终发布状态。
 
 最终完整检查通过：后端 2,123 项，前端 441 项，类型检查和组件边界检查通过。`npm run build:web` 与 `git diff --check` 均通过。测试与打包不代表真实 Provider/浏览器表现；本轮启动的验证进程均已退出。
 

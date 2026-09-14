@@ -95,7 +95,7 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     assert.equal(state.controller.composer.updateModel, updateModel)
     await React.act(async () => state.controller.actions.send('历史尚未加载'))
     assert.equal(state.controller.conversation.queuedSubmissions.length, 0)
-    const run = { runId: 'root-A', commandId: 'command-A', runStatus: 'running', taskStatus: 'completed',
+    const run = { runId: 'root-A', commandId: 'command-A', runStatus: 'running', taskStatus: 'completed', workflowStatus: 'running',
       prompt: '分析', units: [], artifactRef: 'novel-analysis-artifact://artifact-A', interactionKind: 'analysis' }
     await publish([run])
     assert.equal(state.controller.capabilities.inputDisabled, false)
@@ -111,7 +111,7 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     const deletedId = state.controller.conversation.queuedSubmissions[1].id
     await React.act(async () => state.controller.actions.updateQueuedSubmission(deletedId, null))
     model.apiKey = 'changed-after-enqueue'
-    await publish([{ ...run, runStatus: 'completed' }])
+    await publish([{ ...run, runStatus: 'completed', workflowStatus: 'completed' }])
     assert.equal(state.requests.length, 0, 'wait for the existing artifact before deciding follow-up')
     await React.act(async () => resolveArtifact({ success: true, data: {
       artifactId: 'artifact-A', facts: [], craftCards: [],
@@ -141,7 +141,7 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     assert.equal(state.controller.composer.value, 'A 的新草稿')
     assert.equal(state.controller.conversation.queuedSubmissions.length, 0)
     assert.equal(state.requests.length, 1, 'late completion must not resubmit the accepted request')
-    await publish([{ ...run, taskId: 'completed-task' }])
+    await publish([{ ...run, taskId: 'completed-task', workflowStatus: 'completed' }])
     await React.act(async () => state.controller.actions.abort())
     assert.deepEqual(state.canceledRoots, ['root-A'], 'stop must target the still-running Root when its Task has completed')
     state.workId = 'C'
@@ -153,7 +153,7 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     assert.equal(state.requests[1].prompt, '没有分析结果也只问原文')
     await React.act(async () => acceptRequest({ success: true }))
     const cRun = {...run, runId: 'c-answer', commandId: state.requests[1].commandId, taskId: null, artifactRef: undefined,
-      conversationId: 'legacy:C:v1', interactionKind: 'follow_up', runStatus: 'done', finalResponse: '之前的回答'}
+      conversationId: 'legacy:C:v1', interactionKind: 'follow_up', runStatus: 'done', conversationStatus: 'finalized', workflowStatus: 'completed', finalResponse: '之前的回答'}
     await publish([cRun])
     assert.ok(state.controller.conversation.messages.some(message => message.content === '之前的回答'))
     await React.act(async () => state.controller.composer.setValue('尚未发送的草稿'))

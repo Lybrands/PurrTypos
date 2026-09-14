@@ -1,5 +1,19 @@
 """Project explicitly public Provider text into the canonical commentary stream."""
+import asyncio
 from datetime import datetime, timezone
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_private_operation = ContextVar("private_model_operation", default=False)
+
+@contextmanager
+def private_model_operation():
+    token = _private_operation.set(True)
+    try:
+        yield
+    finally:
+        _private_operation.reset(token)
+
 
 from purra.output import AgentOutputProcessor, AgentOutputIntent, AgentOutputEventDraft, OutputChannel, OutputSource
 
@@ -48,15 +62,47 @@ class PublicCommentaryParser:
                      if CLOSE_COMMENTARY.startswith(self.pending[-size:])), 0)
 
 
+class RecordPlanningProgressPolicy:
+    async def authorize_provider_chunk(self, spec, chunk):
+        return chunk
+
+    async def authorize_planning_delta(self, spec, chunk):
+        return chunk
+
+
 class PublicCommentaryOutputProcessor(AgentOutputProcessor):
     """Use PurrA's journal/publisher; never promote reasoning or tool arguments."""
-    def __init__(self, repository, publisher):
-        super().__init__(repository, publisher)
+    def __init__(self, repository, publisher, *, is_child_run=None):
+        super().__init__(repository, publisher, policy=RecordPlanningProgressPolicy())
         self._commentary_streams = {}
+        self._public_stream_locks = {}
+        self._held_public_streams = {}
+        self._is_child_run = is_child_run
 
     async def open_model_stream(self, receipt, spec):
-        opened = await super().open_model_stream(receipt, spec)
-        if spec.intent is AgentOutputIntent.STRUCTURED_PRIVATE and spec.output_protocol is None:
+        lock = None
+        if spec.intent in {AgentOutputIntent.EXECUTION_PUBLIC, AgentOutputIntent.FINAL_PUBLIC}:
+            lock = self._public_stream_locks.setdefault(spec.run_id, asyncio.Lock())
+            await lock.acquire()
+        try:
+            opened = await super().open_model_stream(receipt, spec)
+        except BaseException:
+            if lock is not None:
+                lock.release()
+            raise
+        if lock is not None:
+            self._held_public_streams[spec.output_stream_id] = lock
+        is_child = (
+            bool(await self._is_child_run(spec.run_id))
+            if self._is_child_run is not None
+            else False
+        )
+        if (
+            spec.intent is AgentOutputIntent.STRUCTURED_PRIVATE
+            and spec.output_protocol is None
+            and not is_child
+            and not _private_operation.get()
+        ):
             self._commentary_streams[spec.output_stream_id] = (spec, PublicCommentaryParser(), 0)
         return opened
 
@@ -64,9 +110,7 @@ class PublicCommentaryOutputProcessor(AgentOutputProcessor):
         events = await super().accept_provider_chunk(output_stream_id, chunk)
         spec = self._require_stream(output_stream_id)
         if spec.intent in {AgentOutputIntent.FINAL_PUBLIC, AgentOutputIntent.EXECUTION_PUBLIC}:
-            batch = self._require_batch(output_stream_id)
-            async with batch.lock:
-                events = (*events, *await self._flush_batch_locked(spec, batch))
+            events = (*events, *await self.flush_model_stream(output_stream_id))
         state = self._commentary_streams.get(output_stream_id)
         if state is None:
             return events
@@ -74,9 +118,7 @@ class PublicCommentaryOutputProcessor(AgentOutputProcessor):
         value = parser.feed(chunk.content_delta or "", terminal=bool(chunk.tool_call_deltas or chunk.finish_reason))
         if value:
             # Flush the source bytes before publishing their public projection.
-            batch = self._require_batch(output_stream_id)
-            async with batch.lock:
-                await self._flush_batch_locked(spec, batch)
+            await self.flush_model_stream(output_stream_id)
             index += 1
             event = await self._append(AgentOutputEventDraft.public_text(
                 run_id=spec.run_id, turn_id=spec.turn_id,
@@ -90,20 +132,30 @@ class PublicCommentaryOutputProcessor(AgentOutputProcessor):
         return events
 
     async def finish_model_stream(self, output_stream_id, finish_reason):
-        event = await super().finish_model_stream(output_stream_id, finish_reason)
-        self._commentary_streams.pop(output_stream_id, None)
-        return event
+        try:
+            return await super().finish_model_stream(output_stream_id, finish_reason)
+        finally:
+            self._commentary_streams.pop(output_stream_id, None)
+            self._release_public_stream(output_stream_id)
 
     async def abort_model_stream(self, output_stream_id, error_code):
         try:
             return await super().abort_model_stream(output_stream_id, error_code)
         finally:
             self._commentary_streams.pop(output_stream_id, None)
+            self._release_public_stream(output_stream_id)
+
+    def _release_public_stream(self, output_stream_id):
+        lock = self._held_public_streams.pop(output_stream_id, None)
+        if lock is not None:
+            lock.release()
 
     async def accept_run_lifecycle_event(self, commit, event):
         outputs = await super().accept_run_lifecycle_event(commit, event)
         if commit.terminal_status is not None:
             run_ids = {item.run_id for item in commit.events}
+            for run_id in run_ids:
+                self._public_stream_locks.pop(run_id, None)
             self._commentary_streams = {
                 key: state for key, state in self._commentary_streams.items()
                 if state[0].run_id not in run_ids

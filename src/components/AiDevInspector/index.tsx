@@ -3,6 +3,7 @@ import { PurrButton } from "@/purr-components";
 import type { AiTaskPlan } from "../../agent-runtime";
 import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
 import ToolDiagnosticsCard from "./ToolDiagnosticsCard";
+import { groupToolPresentation } from "./toolPresentation";
 import ViewportBlock from "../ViewportBlock";
 import DiagnosticText, { characterCount } from "./DiagnosticText";
 import type {
@@ -218,6 +219,65 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
       </div>
     </details>
   );
+}
+
+function groupedToolStatus(tools: AiDebugTool[]): {
+  text: string;
+  state: 'running' | 'failed' | 'completed';
+} {
+  const completed = tools.filter((tool) => tool.status === 'completed').length;
+  const running = tools.filter((tool) => tool.status === 'running').length;
+  const failed = tools.length - completed - running;
+  if (running > 0) {
+    return { state: 'running', text: `保存中 · ${completed}/${tools.length}` };
+  }
+  if (failed > 0) {
+    return { state: 'failed', text: `部分失败 · ${completed}/${tools.length}` };
+  }
+  return { state: 'completed', text: `已完成 · ${tools.length} 条` };
+}
+
+function ToolPresentationGroupCard({
+  label,
+  tools,
+}: {
+  label: string;
+  tools: AiDebugTool[];
+}) {
+  const status = groupedToolStatus(tools);
+  return <details
+    className="ai-dev-inspector__tool-presentation-group"
+    data-status={status.state}
+  >
+    <summary>
+      <span>
+        <strong>{label}</strong>
+        <small>{tools.length} 条独立、可恢复的落盘记录</small>
+      </span>
+      <em>{status.text}</em>
+    </summary>
+    <div className="ai-dev-inspector__tool-list ai-dev-inspector__tool-presentation-group-body">
+      <div className="ai-dev-inspector__notice">
+        普通对话只显示这一项；展开后可核对各分段工具操作。
+      </div>
+      {tools.map((tool) => <ToolCard
+        key={`${tool.batchIndex}-${tool.id}`}
+        tool={tool}
+      />)}
+    </div>
+  </details>;
+}
+
+function ToolPresentationList({ tools }: { tools: AiDebugTool[] }) {
+  return <div className="ai-dev-inspector__tool-list">
+    {groupToolPresentation(tools).map((item) => item.type === 'tool'
+      ? <ToolCard key={`${item.tool.batchIndex}-${item.tool.id}`} tool={item.tool} />
+      : <ToolPresentationGroupCard
+        key={`group-${item.groupKey}`}
+        label={item.label}
+        tools={item.tools}
+      />)}
+  </div>;
 }
 
 interface FailureDiagnosis {
@@ -939,6 +999,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
   const [open, setOpen] = React.useState(false);
   React.useEffect(() => setOpen(false), [run.id]);
   const isRoot = Boolean(rootRunId && run.agentRunId === rootRunId);
+  const isChild = Boolean(run.parentRunId && run.agentId);
   const elapsed = (run.finishedAt ?? now) - run.startedAt;
   const modelCallRows = [
     ...run.modelCalls.map((call) => ({
@@ -972,8 +1033,8 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
       >
         <summary>
           <div>
-            <span>{isRoot ? "主 AGENT" : `执行段 ${index + 1}`}</span>
-            <strong>{isRoot ? "主流程" : run.source || run.taskType}</strong>
+            <span>{isRoot ? "主 AGENT" : isChild ? "子 AGENT" : "历史 RUN · 关系未确认"}</span>
+            <strong>{isRoot ? "统一输出与工具执行" : run.source || run.taskType}</strong>
             <small title={usage ? tokenUsageTitle(usage) : undefined}>
               {isRoot ? `${run.source} · ` : ""}{formatTime(run.startedAt)}
               {usage ? ` · ${tokenUsageText(usage)}` : ""}
@@ -994,7 +1055,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
             <span><b>{run.tools.length}</b>工具调用</span>
             {usage ? <>
               <span title={tokenUsageTitle(usage)}>
-                <b>{tokenUsageText(usage)}</b>本段消耗
+                <b>{tokenUsageText(usage)}</b>当前 Run 消耗
               </span>
               <span><b>{formatTokens(usage.inputTokens)} / {formatTokens(usage.generationTokens)}</b>输入 / 生成</span>
               {usage.reasoningTokens != null && usage.reasoningTokens > 0 ? (
@@ -1017,9 +1078,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
               <div className="ai-dev-inspector__section-title">
                 <span>工具执行</span><small>{run.tools.length} 个</small>
               </div>
-              <div className="ai-dev-inspector__tool-list">
-                {run.tools.map((tool) => <ToolCard key={`${tool.batchIndex}-${tool.id}`} tool={tool} />)}
-              </div>
+              <ToolPresentationList tools={run.tools} />
             </div>
           ) : null}
 
@@ -1126,7 +1185,7 @@ function ConversationTimeline({
         <div className="ai-dev-inspector__turn-facts">
           <span>{formatTime(turn.startedAt)} 开始</span>
           <span>{formatDuration(finishedAt - turn.startedAt)}</span>
-          <span>{runs.length} 个执行段</span>
+          <span>{runs.filter(run => run.parentRunId && run.agentId).length} 个已确认子 Agent · {runs.length} 条 Run 记录</span>
           <span>{modelCallCount} 次模型调用</span>
           <span>{toolCallCount} 次工具调用</span>
           {turnUsage ? (
@@ -1151,9 +1210,25 @@ function ConversationTimeline({
         status={rootRun?.status ?? lifecycle.status}
       />
 
+      <section className="ai-dev-inspector__feedback-panel">
+        <div className="ai-dev-inspector__section-title"><strong>子 Agent 反馈 → 主 Agent 说明</strong><small>按反馈到达顺序</small></div>
+        <p>子 Agent 可并行执行；公开说明由主 Agent 排队逐条输出。工具调用保留在所属 Run 内。</p>
+        {(rootRun?.feedback ?? []).length ? <ol>
+          {rootRun!.feedback!.map((feedback, index) => {
+            const child = runs.find(run => run.agentRunId === feedback.childRunId);
+            const labels = { queued: '已返回 · 等待主 Agent 说明', started: '主 Agent 准备说明', streaming: '主 Agent 正在说明', completed: '主 Agent 已完成说明', aborted: '说明中断 · 需要核对' };
+            return <li key={feedback.childRunId} data-feedback-state={feedback.state}>
+              <div><strong>{child?.source || `子 Agent 反馈 ${index + 1}`}</strong><span>{labels[feedback.state]}</span></div>
+              <small>{feedback.executionStatus ? `执行结果：${({ done: '已完成', failed: '失败', canceled: '已取消' } as Record<string, string>)[feedback.executionStatus] || feedback.executionStatus}` : child ? `最近执行记录：${STATUS_LABELS[child.status]}` : '执行详情尚未加载'} · {formatTime(Date.parse(feedback.receivedAt))} 收到</small>
+              {feedback.text ? <details><summary>查看主 Agent 的对应说明</summary><pre>{feedback.text}</pre></details> : null}
+              <details><summary>反馈关联记录</summary><dl><dt>子 Agent Run</dt><dd>{feedback.childRunId}</dd><dt>主 Agent 输出流</dt><dd>{feedback.outputStreamId || '尚未观察到公开文本'}</dd></dl></details>
+            </li>;
+          })}
+        </ol> : <p>尚未观察到反馈记录。历史 Run 完成状态不能证明主 Agent 已公开说明。</p>}
+      </section>
       <div className="ai-dev-inspector__timeline-heading">
-        <strong>执行过程</strong>
-        <span>按发生顺序排列</span>
+        <strong>Agent 与所属 Run</strong>
+        <span>按开始时间排列 · 可并行</span>
       </div>
       <div className="ai-dev-inspector__timeline">
         {runs.map((run, index) => (

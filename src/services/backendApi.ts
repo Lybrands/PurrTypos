@@ -453,7 +453,7 @@ export const backendApi: BackendApi = {
   ),
   reviewNovelAnalysisArtifact: (data) => apiPostIdempotent(
     `/novel-analysis-artifacts/${data.artifactId}/review`,
-    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview, techniqueResult: data.techniqueResult },
+    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview, techniqueResult: data.techniqueResult, analysisTechniqueResult: data.analysisTechniqueResult },
     data.commandId,
   ),
   publishNovelAnalysisArtifact: (data) => apiPost(

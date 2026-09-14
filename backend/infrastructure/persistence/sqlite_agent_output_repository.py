@@ -15,6 +15,7 @@ from purra.api import (
     PlanningScope,
     PlanningStreamError,
     PlanningStreamParser,
+    PlanningTextDeltaParser,
 )
 from purra.contracts import (
     DomainEffect,
@@ -1156,7 +1157,10 @@ class SqliteAgentOutputRepository:
             if (
                 stream.get("output_protocol") is not None
                 and draft.visibility is OutputVisibility.PUBLIC
-                and draft.kind is not OutputEventKind.PLANNING_PROGRESS
+                and draft.kind not in {
+                    OutputEventKind.PLANNING_PROGRESS,
+                    OutputEventKind.PLANNING_DELTA,
+                }
             ):
                 raise ContractViolationError(
                     "planning bytes cannot be published as ordinary text"
@@ -1170,7 +1174,10 @@ class SqliteAgentOutputRepository:
                 raise ContractViolationError(
                     f"canonical event run {draft.run_id!r} does not exist"
                 )
-        if draft.kind is OutputEventKind.PLANNING_PROGRESS:
+        if draft.kind in {
+            OutputEventKind.PLANNING_PROGRESS,
+            OutputEventKind.PLANNING_DELTA,
+        }:
             await self._validate_planning_projection(draft)
         if draft.kind is OutputEventKind.AGENT_PROGRESS:
             await self._validate_agent_progress_projection(draft)
@@ -1416,8 +1423,13 @@ class SqliteAgentOutputRepository:
             or payload.get("operationId") != scope.operation_id
             or payload.get("revision") != scope.revision
             or payload.get("attempt") != spec.planning_attempt
-            or draft.source_event_key
-            != f"planning:{draft.invocation_id}:{payload.get('recordIndex')}"
+            or draft.source_event_key != (
+                f"planning-delta:{draft.invocation_id}:"
+                f"{payload.get('sourceChunkIndex')}:"
+                f"{payload.get('sourcePartIndex')}"
+                if draft.kind is OutputEventKind.PLANNING_DELTA
+                else f"planning:{draft.invocation_id}:{payload.get('recordIndex')}"
+            )
         ):
             raise ContractViolationError("planning projection scope mismatch")
         if not await self._planning_operation_is_active(
@@ -1439,6 +1451,33 @@ class SqliteAgentOutputRepository:
             "ORDER BY sequence, id",
             [draft.run_id, draft.invocation_id, OutputSource.PROVIDER.value],
         )
+        if draft.kind is OutputEventKind.PLANNING_DELTA:
+            target_index = payload.get("sourceChunkIndex")
+            target_part = payload.get("sourcePartIndex")
+            if type(target_index) is not int or type(target_part) is not int:
+                raise ContractViolationError(
+                    "planning delta source identity is invalid"
+                )
+            by_index: dict[int, str] = {}
+            for row in rows:
+                for index, text in _provider_content_chunks(row):
+                    by_index[index] = text
+            parser = PlanningTextDeltaParser()
+            expected = None
+            for index in sorted(by_index):
+                deltas = parser.feed(by_index[index])
+                if index == target_index and 1 <= target_part <= len(deltas):
+                    expected = deltas[target_part - 1]
+                    break
+            if (
+                expected is None
+                or expected.text != payload.get("textDelta")
+                or expected.record_index != payload.get("recordIndex")
+            ):
+                raise ContractViolationError(
+                    "planning delta does not match Provider source"
+                )
+            return
         raw = "".join(_provider_text(row) for row in rows).encode("utf-8")
         start = payload.get("sourceStart")
         end = payload.get("sourceEnd")
@@ -1678,6 +1717,32 @@ def _provider_text(row: Mapping[str, Any]) -> str:
         for entry in entries
         if isinstance(entry, dict)
         and entry.get("kind") == OutputEventKind.PROVIDER_CONTENT_DELTA.value
+        and isinstance(entry.get("payload"), dict)
+    )
+
+
+def _provider_content_chunks(
+    row: Mapping[str, Any],
+) -> tuple[tuple[int, str], ...]:
+    payload = _json_mapping(row.get("payload_json"))
+    if row.get("kind") == OutputEventKind.PROVIDER_CONTENT_DELTA.value:
+        index = payload.get("sourceChunkIndex")
+        return (
+            ((int(index), str(payload.get("delta") or "")),)
+            if type(index) is int
+            else ()
+        )
+    if row.get("kind") != OutputEventKind.PROVIDER_DELTA_BATCH.value:
+        return ()
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return ()
+    return tuple(
+        (int(entry["sourceChunkIndex"]), str(entry["payload"].get("delta") or ""))
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("kind") == OutputEventKind.PROVIDER_CONTENT_DELTA.value
+        and type(entry.get("sourceChunkIndex")) is int
         and isinstance(entry.get("payload"), dict)
     )
 

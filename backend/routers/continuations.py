@@ -33,7 +33,6 @@ async def create_continuation(body: CreateContinuationRequest):
         expected_snapshot_digest=body.expectedSnapshotDigest,
         enable_volume=body.enableVolume,
         operation_id=body.operationId,
-        allow_without_techniques=body.allowWithoutTechniques,
         use_source_techniques=body.useSourceTechniques,
     )}
 
