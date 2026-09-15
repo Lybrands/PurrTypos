@@ -1,5 +1,5 @@
 # Local candidate only; run pip from the project root. See purra-candidate.json.
-./backend/vendor/purra-1.0.0/purra-1.0.0-py3-none-any.whl # sha256=d5b1f7803c21505c0b80d77eaa3c9e48ada66a7d7f2ad22ba9b582ee47a198f4
+./backend/vendor/purra-1.0.0/purra-1.0.0-py3-none-any.whl # sha256=6d215d3b10f8c17af26dbac006864cc32bf95784f6d4ce35dc4037c5380a1bf1
 ./backend/vendor/purra-1.0.0/purra_openai-1.0.0-py3-none-any.whl # sha256=4abed23852834e63f9d49d86f9134a2d78abe91a04fa5228582fe9471dd43188
 ./backend/vendor/purra-1.0.0/purra_anthropic-1.0.0-py3-none-any.whl # sha256=3049d50e15370219df01e29f41e73a5b3fcd9086b11c691fabe860dcd03e4019
 ./backend/vendor/purra-1.0.0/purra_mem0-1.0.0-py3-none-any.whl # sha256=c2621689e3f71490de1da1d9c7e729dfdcb0b254a40a24e36595de315cea4a0d

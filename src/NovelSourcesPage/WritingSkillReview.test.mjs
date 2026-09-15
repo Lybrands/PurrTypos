@@ -17,7 +17,10 @@ test('分析结果使用目录树，并按完整子目录路径读取选中文�
     originalRead = service.readVersionFile
     const reads = []
     service.versionManifest = async () => ({ success: true, data: {
-      metadata: { name: '测试技法', description: '测试用途' },
+      metadata: { name: '测试技法', description: '测试用途', retrieval: {
+        intents: ['制造持续压力'], contexts: ['人物必须作出选择'], objectives: ['推动冲突升级'],
+        keywords: ['环境压力'], exclusions: ['一次性突发事件'],
+      } },
       files: ['SKILL.md', '场景/对白/示例.md', '场景/说明.md'].map(path => ({ path })),
     } })
     service.readVersionFile = async (id, version, path) => {
@@ -32,6 +35,9 @@ test('分析结果使用目录树，并按完整子目录路径读取选中文�
     } })))
     const item = name => window.document.querySelector(`[role="treeitem"][aria-label="${name}"]`)
     assert.ok(window.document.querySelector('nav[aria-label="写作技法文件目录"] [role="tree"]'))
+    const metadata = window.document.querySelector('[aria-label="Skill 检索源数据"]')
+    assert.match(metadata.textContent, /制造持续压力/)
+    assert.match(metadata.textContent, /一次性突发事件/)
     assert.equal(item('场景').getAttribute('aria-expanded'), 'true')
     assert.equal(item('对白').getAttribute('aria-level'), '3')
     assert.equal(item('示例.md').getAttribute('aria-level'), '4')

@@ -2,95 +2,94 @@ from types import SimpleNamespace
 
 import pytest
 
-from agents.novel_analysis.stage_output import NovelAnalysisStageOutput
-from agents.novel_analysis.stage_output import build_stage_output_text
+from agents.novel_analysis.stage_output import (
+    NovelAnalysisStageOutput,
+    build_stage_output_facts,
+)
 
 
-def test_map_stage_output_contains_findings_not_internal_payload():
-    text = build_stage_output_text(
+def test_map_stage_output_supplies_facts_without_composing_public_prose():
+    facts = build_stage_output_facts(
         "map",
         {
             "findings": [
                 {
+                    "dimension": "characters",
                     "subject": "林月与苏文",
                     "analysis": "两条视角线先错位推进，再通过预知与追踪汇合。",
                 },
                 {
+                    "dimension": "plot",
                     "subject": "能力觉醒",
-                    "analysis": "危机把能力展示、人物选择和后续组织任务连成同一条因果链。",
+                    "analysis": "危机把能力展示、人物选择和组织任务连成因果链。",
                 },
             ],
             "private": "INTERNAL_JSON_MUST_NOT_APPEAR",
         },
-        {"dimensions": ["characters", "plot"]},
+        {"displayTitle": "分析人物与情节", "dimensions": ["characters", "plot"]},
     )
 
-    assert text.startswith("人物、设定与情节分析已经形成较稳定的判断。")
-    assert "两条视角线先错位推进" in text
-    assert "危机把能力展示" in text
-    assert "INTERNAL_JSON_MUST_NOT_APPEAR" not in text
-    assert len(text) <= 270
+    assert facts["stageTitle"] == "分析人物与情节"
+    assert facts["findings"][0]["subject"] == "林月与苏文"
+    assert "INTERNAL_JSON_MUST_NOT_APPEAR" not in str(facts)
+    assert "…" not in str(facts)
 
 
-def test_synthesis_and_review_stage_outputs_explain_actual_conclusions():
-    payload = {
-        "facts": [
-            {
+def test_synthesis_stage_output_keeps_committed_summary_as_model_evidence():
+    summary = "林月由普通毕业生进入犬域，并在追杀中完成首次能力觉醒。"
+    facts = build_stage_output_facts(
+        "synthesize",
+        {
+            "summaryMarkdown": summary,
+            "facts": [{
+                "factKind": "character_summary",
                 "subjectKey": "林月",
-                "value": "由普通毕业生进入犬域，并在追杀中完成首次能力觉醒。",
-            },
-        ],
-        "craftCards": [
-            {
+                "predicate": "人物归纳",
+                "value": {"profile_md": summary},
+                "id": "private-id",
+            }],
+            "craftCards": [{
                 "title": "章末钩子",
-                "bodyMarkdown": "在新信息出现后截断场景，推动读者进入下一章。",
-            },
-        ],
-    }
+                "bodyMarkdown": "在新信息出现后截断场景。",
+            }],
+        },
+        {"displayTitle": "形成整书分析总结"},
+    )
 
-    synthesis = build_stage_output_text("synthesize", payload, {})
-    review = build_stage_output_text("review", payload, {})
-
-    assert "林月" in synthesis and "章末钩子" in synthesis
-    assert "接下来核对" in synthesis
-    assert "审核已经完成" in review
-    assert "人工确认" in review
+    assert facts["summaryMarkdown"] == summary
+    assert facts["facts"][0]["subjectKey"] == "林月"
+    assert "private-id" not in str(facts)
 
 
 @pytest.mark.asyncio
-async def test_semantic_milestone_persists_and_publishes_public_commentary():
-    drafts = []
-    published = []
+async def test_semantic_milestone_invokes_root_model_reporter_with_signal():
+    reports = []
+    runtime = object()
+    signal = object()
 
     class Db:
         async def fetch_one(self, query, params):
             if "json_each" in query:
                 return {"present": 1}
-            return {"turn_id": "turn-analysis"}
+            raise AssertionError((query, params))
 
-    class Output:
-        async def append_event(self, draft):
-            drafts.append(draft)
-            return draft
-
-    class Publisher:
-        async def publish_committed(self, event):
-            published.append(event)
+    async def report(**kwargs):
+        reports.append(kwargs)
 
     reporter = NovelAnalysisStageOutput(
-        Db(), output_repository=Output(), publisher=Publisher()
+        Db(), reporter=report, runtime=runtime,
     )
-    reporter._artifacts = SimpleNamespace(load_payload=lambda _artifact_id: None)
 
     async def load_payload(_artifact_id):
         return {
             "findings": [{
+                "dimension": "plot",
                 "subject": "双线结构",
-                "analysis": "林月的冒险线与苏文的预知线先错位推进，再在组织线汇合。",
+                "analysis": "两条视角线先错位推进，再在组织线汇合。",
             }],
         }
 
-    reporter._artifacts.load_payload = load_payload
+    reporter._artifacts = SimpleNamespace(load_payload=load_payload)
     context = SimpleNamespace(
         run_id="root-run",
         task=SimpleNamespace(id="analysis-task"),
@@ -98,17 +97,17 @@ async def test_semantic_milestone_persists_and_publishes_public_commentary():
             id="map:extract:0",
             metadata={
                 "unitKind": "map",
+                "displayTitle": "分析当前小说分片",
                 "dimensions": ["characters", "plot"],
             },
         ),
     )
     result = SimpleNamespace(metadata={"artifactId": "artifact-1"})
 
-    await reporter.publish(context, result)
+    await reporter.publish(context, result, signal)
 
-    assert published == drafts
-    assert len(drafts) == 1
-    assert drafts[0].channel.value == "commentary"
-    assert drafts[0].visibility.value == "public"
-    assert drafts[0].payload["eventType"] == "novel_analysis.stage_output"
-    assert "双线结构" in drafts[0].payload["data"]["text"]
+    assert len(reports) == 1
+    assert reports[0]["context"] is context
+    assert reports[0]["runtime"] is runtime
+    assert reports[0]["signal"] is signal
+    assert reports[0]["facts"]["findings"][0]["subject"] == "双线结构"

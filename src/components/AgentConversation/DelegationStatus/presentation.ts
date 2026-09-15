@@ -10,14 +10,17 @@ export function collapseSubAgentDelegations(
   for (const item of items) {
     const unitId = String(item.unitId || "").trim();
     const agentId = String(item.agentId || "").trim();
-    const key = unitId
-      ? `unit:${unitId}`
-      : agentId
-        ? `agent:${agentId}`
-        : `delegation:${item.delegationId}`;
-    const index = indexes.get(key);
+    const keys = [
+      ...(agentId ? [`agent:${agentId}`] : []),
+      ...(unitId ? [`unit:${unitId}`] : []),
+    ];
+    const index = keys
+      .map((key) => indexes.get(key))
+      .find((value): value is number => value != null);
     if (index == null) {
-      indexes.set(key, collapsed.length);
+      const nextIndex = collapsed.length;
+      (keys.length ? keys : [`delegation:${item.delegationId}`])
+        .forEach((key) => indexes.set(key, nextIndex));
       collapsed.push(item);
       continue;
     }
@@ -28,6 +31,11 @@ export function collapseSubAgentDelegations(
       delegationId: current.delegationId,
       startedAt: current.startedAt ?? item.startedAt,
     };
+    [
+      ...(current.agentId ? [`agent:${current.agentId}`] : []),
+      ...(current.unitId ? [`unit:${current.unitId}`] : []),
+      ...keys,
+    ].forEach((key) => indexes.set(key, index));
   }
   return collapsed;
 }

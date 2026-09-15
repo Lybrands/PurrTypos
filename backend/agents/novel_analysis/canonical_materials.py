@@ -62,15 +62,21 @@ def _fact(value: object) -> dict[str, object]:
     # example "unresolved" or "timeline"). Canonicalize that harmlessly;
     # factKind remains the authoritative semantic category.
     nature = raw_nature if raw_nature in CANONICAL_CLAIM_NATURES else "fact"
-    fact_value = _material_value(
-        kind,
-        _without_model_lifecycle(item.get("value")),
-        item.get("subjectKey"),
-    )
+    raw_value = _without_model_lifecycle(item.get("value"))
+    kind = _canonical_setting_kind(kind, raw_value)
+    fact_value = _material_value(kind, raw_value, item.get("subjectKey"))
     return {"id": _text(item.get("id"), "fact id", 200), "claimNature": nature,
             "factKind": kind, "subjectKey": _text(item.get("subjectKey"), "subjectKey", 300),
             "predicate": _text(item.get("predicate"), "predicate", 300),
             "value": fact_value, "lifecycleStatus": "active"}
+
+
+def _canonical_setting_kind(kind: str, value: object) -> str:
+    """Use the creation form's explicit entity type for unambiguous settings."""
+    if kind != "setting" or not isinstance(value, Mapping):
+        return kind
+    entity_type = str(value.get("entity_type") or "").strip()
+    return entity_type if entity_type in {"location", "faction", "item"} else kind
 
 
 def _without_model_lifecycle(value: object) -> object:

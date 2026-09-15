@@ -469,6 +469,8 @@ class PurrAScalableMapChildRunner:
                     f"{READ_NOVEL_SOURCE_SLICE} 读取正文；不要请求其他分片，"
                     "不要输出引文或原文依据。完成后必须调用 "
                     f"{SUBMIT_NOVEL_ANALYSIS_CHILD_RESULT} 提交结果；"
+                    "characters 维度按具体人物分别生成 finding；即使原文在同一段"
+                    "介绍多人，也不要生成群像或把多个姓名合为一个 subject。"
                     "最终回复不要承载分析数据。提交的 result 只包含 findings，"
                     "其中条目使用 dimension、subject、analysis："
                     '{"findings":[{"dimension":"允许维度",'

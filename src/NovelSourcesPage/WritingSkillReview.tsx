@@ -4,7 +4,7 @@ import Markdown from '../components/Markdown'
 import TechniqueFileTree from '../components/TechniqueFileTree'
 import { services } from '@/services'
 import { CloseIcon, EditIcon, PurrButton, PurrModal, PurrSpin, PurrTooltip, SaveIcon, usePurrToast } from '@/purr-components'
-import { techniqueOperationId, type TechniqueDraft, type TechniqueFileChange, type TechniqueManifest } from '../services/writingTechniques'
+import { techniqueOperationId, type TechniqueDraft, type TechniqueFileChange, type TechniqueManifest, type TechniqueMetadata } from '../services/writingTechniques'
 import type { NovelAnalysisArtifact, WritingTechniqueResult } from '../types'
 
 const FRONTMATTER = /^(---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$))/
@@ -17,6 +17,31 @@ function splitFrontmatter(content: string) {
 function requireTechniqueData<T>(result: { success: boolean; data?: T; error?: string }): T {
   if (!result.success || result.data == null) throw new Error(result.error || '写作技法操作失败')
   return result.data
+}
+
+const RETRIEVAL_FIELDS = [
+  ['intents', '创作意图'],
+  ['contexts', '适用情境'],
+  ['objectives', '使用目标'],
+  ['keywords', '检索关键词'],
+  ['exclusions', '排除条件'],
+] as const
+
+function SkillMetadataPanel({ metadata }: { metadata: TechniqueMetadata }) {
+  const retrieval = metadata.retrieval
+  return <section className="novel-technique-metadata" aria-label="Skill 检索源数据">
+    <header>
+      <div><strong>{metadata.name}</strong><span>Skill 检索源数据</span></div>
+      <p>{metadata.description}</p>
+    </header>
+    {retrieval && <dl>
+      {RETRIEVAL_FIELDS.map(([key, label]) => {
+        const values = retrieval[key]
+        if (!values?.length) return null
+        return <div key={key}><dt>{label}</dt><dd>{values.map(value => <span key={value}>{value}</span>)}</dd></div>
+      })}
+    </dl>}
+  </section>
 }
 
 export function WritingSkillReview({ artifact, onTechniqueResultChange }: {
@@ -169,6 +194,7 @@ export function WritingSkillReview({ artifact, onTechniqueResultChange }: {
   const content = contents[path] ?? ''
   const { prefix, body } = splitFrontmatter(content)
   const isMarkdown = path.endsWith('.md')
+  const skillMetadata = editing ? draft?.manifest?.metadata : manifest?.metadata
   return <section className={`novel-technique-review${editing ? ' is-editing' : ''}`}>
     {error && <p role="alert" className="novel-technique-error">{error}</p>}
     <div className="novel-technique-files">
@@ -190,7 +216,13 @@ export function WritingSkillReview({ artifact, onTechniqueResultChange }: {
             </> : <PurrTooltip title="编辑技法"><PurrButton type="text" size="small" aria-label="编辑技法" icon={<EditIcon />} loading={busy} onClick={() => void startEditing()} /></PurrTooltip>}
           </div>
         </header>
-        {loading ? <PurrSpin /> : isMarkdown && editing ? <KnowledgeMarkdownEditor documentKey={`${draft?.draftId ?? 'version'}:${path}`} value={body} ariaLabel={`${path} 正文`} onChange={value => setContents(previous => ({ ...previous, [path]: `${prefix}${value}` }))} /> : isMarkdown ? <div className="novel-technique-markdown"><Markdown>{body}</Markdown></div> : <pre>{content}</pre>}
+        {loading ? <PurrSpin /> : isMarkdown && editing ? <>
+          {path === 'SKILL.md' && skillMetadata && <SkillMetadataPanel metadata={skillMetadata} />}
+          <KnowledgeMarkdownEditor documentKey={`${draft?.draftId ?? 'version'}:${path}`} value={body} ariaLabel={`${path} 正文`} onChange={value => setContents(previous => ({ ...previous, [path]: `${prefix}${value}` }))} />
+        </> : isMarkdown ? <div className="novel-technique-document">
+          {path === 'SKILL.md' && skillMetadata && <SkillMetadataPanel metadata={skillMetadata} />}
+          <div className="novel-technique-markdown"><Markdown>{body}</Markdown></div>
+        </div> : <pre>{content}</pre>}
       </article>
     </div>
     <PurrModal open={Boolean(pendingDelete)} title={pendingDelete?.folder ? '删除文件夹？' : '删除文件？'} onCancel={() => setPendingDelete(null)} onOk={() => void applyDelete()} okText="删除" confirmLoading={busy} okButtonProps={{ danger: true }}>

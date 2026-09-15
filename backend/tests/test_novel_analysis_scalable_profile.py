@@ -571,13 +571,18 @@ async def test_simulated_provider_runs_real_map_and_multilevel_reduce_dag(
     )
     composition = create_isolated_scalable_novel_analysis_composition(db)
     request = _request("unused")
+    stage_reports = []
+
+    async def report_stage(**kwargs):
+        stage_reports.append(kwargs)
+
     executor = ScalableNovelAnalysisUnitExecutor(
         db,
         model_name="test-model",
         stage_output=NovelAnalysisStageOutput(
             db,
-            output_repository=composition.output_repository,
-            publisher=composition.output_notifications,
+            reporter=report_stage,
+            runtime=object(),
         ),
     )
     results = []
@@ -611,19 +616,11 @@ async def test_simulated_provider_runs_real_map_and_multilevel_reduce_dag(
     assert tool_calls.count(READ_NOVEL_ANALYSIS_SKILL_INPUT) == 1
     assert tool_calls.count(READ_NOVEL_ANALYSIS_REVIEW_INPUT) == 1
     assert all(len(items) == 2 for items in reduce_reads)
-    stage_rows = await db.fetch_all(
-        "SELECT payload_json FROM ai_agent_run_events "
-        "WHERE json_extract(payload_json, '$.eventType') = "
-        "'novel_analysis.stage_output' ORDER BY sequence"
-    )
-    stage_text = " ".join(
-        str(json.loads(item["payload_json"])["data"]["text"])
-        for item in stage_rows
-    )
-    assert "人物、设定与情节分析" in stage_text
-    assert "整部作品的综合分析已经形成" in stage_text
-    assert "审核已经完成" in stage_text
-    assert "sourceRevisionId" not in stage_text
+    reported_kinds = {
+        report["facts"]["stageKind"] for report in stage_reports
+    }
+    assert {"reduce", "synthesize", "skill", "review"} <= reported_kinds
+    assert all(report["context"].run_id == results[0].run_id for report in stage_reports)
     rows = await db.fetch_all(
         "SELECT id, root_run_id, parent_run_id FROM ai_agent_runs "
         "WHERE parent_run_id IS NOT NULL ORDER BY id"
