@@ -1,20 +1,23 @@
 import type { AgentConversationMessage } from '../agent-runtime/contracts.ts'
-import type { AiAgentRunSnapshot, AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
+import type { AiAgentDelegation, AiAgentRunSnapshot, AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
 import { AgentChunkReplay } from '../agent-runtime/chunkReplay.ts'
 import type { AiStreamChunk } from '../agent-runtime/chunkHandlers/types.ts'
 import {
   loadCompleteAgentRunSnapshot,
   replayAgentRunSnapshotAsync,
 } from '../agent-runtime/runSnapshotHydration.ts'
-import { buildNovelAnalysisTaskPlan, buildNovelAnalysisTiming } from './analysisTaskPlan.ts'
+import {
+  backendTimestampMs,
+  buildNovelAnalysisTaskPlan,
+  buildNovelAnalysisTiming,
+} from './analysisTaskPlan.ts'
 
 const historyModel: AiModelConfig = {
   id: '', name: '', apiKey: '', baseUrl: '', supportsThinking: false, thinkingOnly: false,
 }
 
 const ANALYSIS_ARTIFACT_PREFIXES = [
-  'novel-analysis-artifact://',
-  'novel-analysis-v1://',
+  'novel-analysis://',
 ] as const
 
 export function novelAnalysisArtifactId(reference: string): string {
@@ -62,6 +65,10 @@ export async function hydrateNovelAnalysisHistory(input: {
     message: await replayAgentRunSnapshotAsync({
       snapshot,
       relatedSnapshots: relatedSnapshots.filter((item): item is AiAgentRunSnapshot => Boolean(item)),
+      relatedRunRoles: Object.fromEntries((input.run.relatedRuns ?? []).map((item) => [
+        item.runId,
+        item.role === 'previous_root' ? 'final_response' : 'related',
+      ])),
       prompt: input.run.prompt || '',
       turnId: `novel-analysis:${input.run.commandId || input.run.runId}`,
       model: input.model.name,
@@ -173,7 +180,7 @@ class NovelAnalysisRunStream {
     this.members = ids
     this.rootRunId = run.runId
     const turnId = `novel-analysis:${run.commandId || run.runId}`
-    const createdAt = Date.parse(run.createTime || '')
+    const createdAt = backendTimestampMs(run.createTime)
     const freshCursors = new Set(fresh.map(event => event.cursor))
     const events = rebuild ? [...this.events.values()].sort((a, b) => a.cursor - b.cursor)
       : added.size === 0 ? fresh : [...this.events.values()].filter(event => added.has(event.runId) || freshCursors.has(event.cursor))
@@ -183,9 +190,14 @@ class NovelAnalysisRunStream {
       if (!ids.has(event.runId)) continue
       this.replay.dispatch({
         turnId, rootRunId: run.runId, eventRunId: event.runId,
-        runRole: event.runId === run.runId ? 'root' : 'unit', sessionId: 0,
+        runRole: event.runId === run.runId
+          ? 'root'
+          : run.relatedRuns?.find(item => item.runId === event.runId)?.role === 'previous_root'
+            ? 'final_response'
+            : 'related',
+        sessionId: 0,
         userContent: run.prompt || '', model: cfg.name,
-        turnStartedAt: performance.now() - (Number.isFinite(createdAt) ? Math.max(0, Date.now() - createdAt) : 0),
+        turnStartedAt: performance.now() - (createdAt == null ? 0 : Math.max(0, Date.now() - createdAt)),
       }, event.chunk as AiStreamChunk, { cfg })
       const message = this.replay.assistant(turnId)
       if (message) onChunk?.({ runId: run.runId, message })
@@ -218,13 +230,15 @@ function analysisErrorMessage(run: NovelAnalysisRun) {
   if (!code) return ''
   if (code === 'planning_failed') return '模型未能生成符合来源范围和安全约束的分析计划，请调整分析重点后重试。'
   if (code === 'durable_task_scope_conflict') return '已有分析任务尚未结束，请恢复或取消当前任务。'
-  if (code === 'upstream_stream_interrupted' || code === 'model_gateway_error') return '模型连接中断；系统会自动重试，仍未恢复时可手动重试。'
+  if (code === 'upstream_stream_interrupted' || code === 'model_gateway_error') return '模型连接中断，本次分析已结束。请检查模型服务后，由你决定是否重新分析。'
   if (code === 'provider_authentication_failed') return '模型凭据无效，请检查模型设置后重试。'
   if (code === 'provider_bad_request') return '模型拒绝了分析请求，请更换兼容模型或检查模型设置。'
-  if (code === 'provider_rate_limited') return '模型服务当前繁忙，系统会自动重试。'
+  if (code === 'provider_rate_limited') return '模型服务当前繁忙，本次分析已结束。请稍后由你决定是否重新分析。'
   if (code === 'provider_insufficient_balance') return '模型账户余额或额度不足，请处理后重试。'
-  if (code === 'model_invocation_deadline_exceeded') return '模型单次分析超过当前时限，未完成的步骤已经安全停止；可以重试或更换响应更快的模型。'
-  if (code === 'model_invocation_failed') return '模型调用中断，可以保留当前任务并重试。'
+  if (code === 'model_invocation_deadline_exceeded') return '模型单次分析超过当前时限，本次分析已结束。你可以重新分析或更换响应更快的模型。'
+  if (code === 'model_invocation_failed') return '模型调用中断，本次分析已结束。请由你决定是否重新分析。'
+  if (code === 'max_model_rounds') return '子 Agent 达到模型轮次上限，仍未提交最终结果。本次分析已结束，请由你决定如何处理。'
+  if (code === 'novel_analysis_child_failed') return '子 Agent 未能完成任务，本次分析已结束，请由你决定如何处理。'
   if (code === 'model_reasoning_mode_conflict') return '模型请求的推理配置发生冲突，请检查模型调用链路。'
   if (code === 'user_paused_novel_analysis') return '任务由你暂停，恢复后会从未完成的步骤继续。'
   return `分析未完成：${code}`
@@ -239,6 +253,7 @@ export function buildNovelAnalysisMessages(
   const followUp = run.interactionKind === 'follow_up'
   const mayHaveError = analysisMayHaveError(run)
   const error = analysisErrorMessage(run) || (mayHaveError ? runtimeMessage?.error : undefined)
+  const projectedDelegations = novelAnalysisDelegations(run)
   const messages: AgentConversationMessage[] = []
   if (run.prompt && !run.automaticRecovery) {
     messages.push({
@@ -259,9 +274,52 @@ export function buildNovelAnalysisMessages(
     longTaskId: run.taskId || undefined,
     model: runtimeMessage?.model || modelName,
     taskPlan: followUp ? runtimeMessage?.taskPlan : buildNovelAnalysisTaskPlan(run),
+    delegations: mergeDelegations(runtimeMessage?.delegations, projectedDelegations),
     isError: Boolean(error || (mayHaveError && runtimeMessage?.isError)),
     error: error || undefined,
     ...buildNovelAnalysisTiming(run),
   })
   return messages
+}
+
+function novelAnalysisDelegations(run: NovelAnalysisRun): AiAgentDelegation[] {
+  return (run.relatedRuns ?? [])
+    .filter((item) => item.role === 'child')
+    .map((item) => ({
+      delegationId: `run:${item.runId}`,
+      runId: item.runId,
+      ...(item.agentId ? { agentId: item.agentId } : {}),
+      ...(item.previousRunId ? { previousRunId: item.previousRunId } : {}),
+      agentName: item.agentName || item.agentTitle || '子 Agent',
+      agentTitle: item.agentTitle || null,
+      objective: item.objective || '',
+      ...(item.createTime ? { startedAt: item.createTime } : {}),
+      ...(item.unitId ? { unitId: item.unitId } : {}),
+      ...(item.attempt != null ? { attempt: item.attempt } : {}),
+      status: delegationStatus(item.status),
+      required: true,
+      priority: 0,
+    }))
+}
+
+function mergeDelegations(
+  runtime: AiAgentDelegation[] | undefined,
+  projected: AiAgentDelegation[],
+): AiAgentDelegation[] | undefined {
+  if (!runtime?.length) return projected.length ? projected : undefined
+  const byRunId = new Map(runtime.map((item) => [item.runId, item]))
+  for (const item of projected) {
+    const current = byRunId.get(item.runId)
+    byRunId.set(item.runId, current ? { ...item, ...current, status: item.status } : item)
+  }
+  return [...byRunId.values()]
+}
+
+function delegationStatus(status: string): AiAgentDelegation['status'] {
+  if (status === 'pending' || status === 'queued') return 'queued'
+  if (status === 'claimed') return 'claimed'
+  if (status === 'running' || status === 'waiting') return 'running'
+  if (status === 'done' || status === 'completed') return 'done'
+  if (status === 'canceled') return 'canceled'
+  return 'failed'
 }

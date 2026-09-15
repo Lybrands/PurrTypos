@@ -6,11 +6,14 @@ import json
 from hashlib import sha256
 
 from agents.novel_analysis.domain import NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE
-from agents.novel_analysis.executor import NovelAnalysisReplacementUnitExecutor
-from agents.novel_analysis.model_runner import PurrANovelAnalysisModelUnitRunner
-from agents.novel_analysis.profile import NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
-from agents.novel_analysis.request_compiler import compile_novel_analysis_request_scope
-from agents.shared.implementation import AgentKind, replacement_implementation
+from agents.novel_analysis.planner_contract import SCALABLE_ANALYSIS_RECIPE_VERSION
+from agents.novel_analysis.scalable_executor import ScalableNovelAnalysisUnitExecutor
+from agents.novel_analysis.stage_output import NovelAnalysisStageOutput
+from agents.novel_analysis.scalable_profile import (
+    NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
+    scalable_novel_analysis_implementation,
+)
+from agents.shared.implementation import AgentKind
 from agents.shared.saved_model_binding import capture_saved_model_binding
 from agents.shared.composition_routing import (
     IMPLEMENTATION_OWNER_RUN_METADATA_KEY,
@@ -50,7 +53,7 @@ class NovelAnalysisRuntimeBindingUnavailable(RuntimeError):
 
 
 class NovelAnalysisReplacementExecutionService:
-    """Compile and execute only the new contract; never fall back to legacy."""
+    """Compile and execute the scalable novel-analysis contract."""
 
     def __init__(
         self,
@@ -70,12 +73,14 @@ class NovelAnalysisReplacementExecutionService:
             return
         route = composition.agent_implementation_router.for_create(
             AgentKind.NOVEL_ANALYSIS,
-            recipe_version=1,
+            recipe_version=SCALABLE_ANALYSIS_RECIPE_VERSION,
         )
         if (
-            route.runtime_profile_id != NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
+            route.runtime_profile_id != NOVEL_ANALYSIS_SCALABLE_PROFILE_ID
             or route.identity
-            != replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1)
+            != scalable_novel_analysis_implementation(
+                recipe_version=SCALABLE_ANALYSIS_RECIPE_VERSION
+            )
         ):
             raise NovelAnalysisReplacementUnavailable(
                 "Novel Analysis replacement rollout is not enabled"
@@ -88,25 +93,23 @@ class NovelAnalysisReplacementExecutionService:
         command_id: str,
         prompt: str,
         runtime,
-        failed_resume_attempts: int = 0,
         implementation_owner_run_id: str | None = None,
+        recovery_source: str | None = None,
     ) -> AgentRunRequest:
         question = str(prompt or "").strip()
         if not question or len(question) > 20_000:
             raise ValueError("novel analysis prompt is invalid")
-        if type(failed_resume_attempts) is not int or failed_resume_attempts < 0:
-            raise ValueError("failed resume attempts must be non-negative")
         model = model_request_from_runtime(
             runtime,
             task_reasoning_preference="economical",
         )
         context_window = runtime_context_window_tokens(runtime)
-        scope = await compile_novel_analysis_request_scope(
-            self._db,
-            source_revision_id=source_revision_id,
-            command_id=command_id,
-            segment_token_budget=_segment_token_budget(context_window),
+        revision = await self._db.fetch_one(
+            "SELECT id FROM novel_source_revisions WHERE id = ?",
+            [source_revision_id],
         )
+        if revision is None:
+            raise ValueError("novel analysis source revision does not exist")
         runtime_binding = await capture_saved_model_binding(self._db, runtime)
         if runtime_binding is None:
             raise NovelAnalysisRuntimeBindingUnavailable(
@@ -117,7 +120,10 @@ class NovelAnalysisReplacementExecutionService:
             model=model,
             domain_context=DomainContext(
                 namespace=NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE,
-                payload=scope.to_mapping(),
+                payload={
+                    "sourceRevisionId": source_revision_id,
+                    "commandId": command_id,
+                },
             ),
             mode="novel_analysis",
             tools_enabled=False,
@@ -125,8 +131,11 @@ class NovelAnalysisReplacementExecutionService:
             context_window=context_window,
             metadata={
                 "locale": str(getattr(runtime, "locale", "zh-CN") or "zh-CN"),
-                "failedResumeAttempts": failed_resume_attempts,
                 "progressAudience": "public",
+                **(
+                    {"recoverySource": recovery_source}
+                    if recovery_source else {}
+                ),
                 **(
                     {"runtimeBinding": runtime_binding}
                     if runtime_binding is not None
@@ -147,7 +156,6 @@ class NovelAnalysisReplacementExecutionService:
         prompt: str,
         runtime,
         signal,
-        failed_resume_attempts: int = 0,
         run_binding_lifecycle=None,
         implementation_owner_run_id: str | None = None,
     ):
@@ -158,7 +166,6 @@ class NovelAnalysisReplacementExecutionService:
             prompt=prompt,
             runtime=runtime,
             signal=signal,
-            failed_resume_attempts=failed_resume_attempts,
             run_binding_lifecycle=run_binding_lifecycle,
             implementation_owner_run_id=implementation_owner_run_id,
         ):
@@ -175,7 +182,7 @@ class NovelAnalysisReplacementExecutionService:
         signal,
         durable_continuation,
         run_binding_lifecycle,
-        failed_resume_attempts: int = 0,
+        recovery_source: str = "user",
     ):
         async for update in self._run(
             source_revision_id=source_revision_id,
@@ -184,10 +191,10 @@ class NovelAnalysisReplacementExecutionService:
             prompt=prompt,
             runtime=runtime,
             signal=signal,
-            failed_resume_attempts=failed_resume_attempts,
             durable_continuation=durable_continuation,
             run_binding_lifecycle=run_binding_lifecycle,
             implementation_owner_run_id=durable_continuation.source.run_id,
+            recovery_source=recovery_source,
         ):
             yield update
 
@@ -200,28 +207,29 @@ class NovelAnalysisReplacementExecutionService:
         prompt: str,
         runtime,
         signal,
-        failed_resume_attempts: int,
         durable_continuation=None,
         run_binding_lifecycle=None,
         implementation_owner_run_id=None,
+        recovery_source: str | None = None,
     ):
         request = await self.build_request(
             source_revision_id=source_revision_id,
             command_id=task_command_id,
             prompt=prompt,
             runtime=runtime,
-            failed_resume_attempts=failed_resume_attempts,
             implementation_owner_run_id=implementation_owner_run_id,
+            recovery_source=recovery_source,
         )
         model = request.model
         context_window = request.context_window
         profile_digest = _request_profile_digest(request)
-        executor = NovelAnalysisReplacementUnitExecutor(
+        executor = ScalableNovelAnalysisUnitExecutor(
             self._db,
-            model_runner=PurrANovelAnalysisModelUnitRunner(
+            model_name=model.model,
+            stage_output=NovelAnalysisStageOutput(
                 self._db,
-                self._composition,
-                runtime,
+                output_repository=self._composition.output_repository,
+                publisher=self._composition.output_notifications,
             ),
         )
         async for update in self._runs.run(
@@ -245,8 +253,8 @@ class NovelAnalysisReplacementExecutionService:
                     execution_intent=run_execution_intent(
                         model,
                         reasoning_mode_from_options(model.options),
-                        output_contract="novel_analysis_review_artifact_v1",
-                        tool_protocol_contract="novel_analysis_replacement_tools_v1",
+                        output_contract="novel_analysis_scalable_review_v1",
+                        tool_protocol_contract="novel_analysis_scalable_tools_v2",
                     ),
                 ),
                 binding=RunBinding(
@@ -266,12 +274,6 @@ class NovelAnalysisReplacementExecutionService:
             long_task_executor=executor,
         ):
             yield update
-
-
-def _segment_token_budget(context_window: int) -> int:
-    if type(context_window) is not int or context_window < 8_192:
-        raise ValueError("novel analysis context window is too small")
-    return min(16_000, max(256, (context_window - 8_192) // 4))
 
 
 def _request_profile_digest(request: AgentRunRequest) -> str:

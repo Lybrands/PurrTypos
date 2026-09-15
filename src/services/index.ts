@@ -210,6 +210,7 @@ export const services = {
   ai: {
     generateSessionTitle: backendApi.generateSessionTitle,
     getAgentRunSnapshot: backendApi.getAgentRunSnapshot,
+    getSubAgentConversation: backendApi.getSubAgentConversation,
     consumeAgentRunEvents: backendApi.consumeAgentRunEvents,
     getAgentRunPlannerDiagnostics: backendApi.getAgentRunPlannerDiagnostics,
     getAgentRunModelInputDiagnostics: backendApi.getAgentRunModelInputDiagnostics,

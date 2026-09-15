@@ -18,6 +18,7 @@ import type {
   AgentSessionId,
 } from '../../../agent-runtime'
 import type { AgentConversationSession } from '../controller'
+import { sortConversationSessionsNewestFirst } from '../sessionView'
 import './index.scss'
 
 export type { AgentConversationActivity } from '../../../agent-runtime'
@@ -98,6 +99,10 @@ export default function AgentConversationIndex<
   onCollapse,
 }: AgentConversationIndexProps<TSession>) {
   const hasBlankSession = sessions.length > 0 && isCurrentSessionEmpty
+  const orderedSessions = React.useMemo(
+    () => sortConversationSessionsNewestFirst(sessions),
+    [sessions],
+  )
 
   return (
     <aside className="agent-conversation-index" aria-label="AI 对话记录">
@@ -131,7 +136,7 @@ export default function AgentConversationIndex<
       <div className="agent-conversation-index__list">
         {sessions.length === 0 ? (
           <PurrEmpty image={false} description={emptyDescription} />
-        ) : [...sessions].reverse().map((session) => {
+        ) : orderedSessions.map((session) => {
           const active = session.id === activeSessionId
           const activity = sessionActivities[session.id]
           return (

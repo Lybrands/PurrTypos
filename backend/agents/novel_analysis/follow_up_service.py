@@ -75,6 +75,7 @@ class NovelAnalysisReplacementFollowUpService:
             raise ValueError("novel analysis follow-up prompt is invalid")
         artifact_id = _optional_artifact_id(artifact_id)
         review = None
+        implementation_owner_run_id = None
         if artifact_id:
             artifact = await self._artifacts.load(artifact_id)
             if artifact is None:
@@ -89,6 +90,16 @@ class NovelAnalysisReplacementFollowUpService:
                 raise ValueError("analysis Artifact belongs to frozen legacy")
             if review.get("sourceRevisionId") != source_revision_id:
                 raise ValueError("analysis Artifact belongs to another source revision")
+            task_id = str(review.get("taskId") or "")
+            task = await self._db.fetch_one(
+                "SELECT created_by_run_id FROM ai_agent_long_tasks WHERE id = ?",
+                [task_id],
+            ) if task_id else None
+            implementation_owner_run_id = str(
+                (task or {}).get("created_by_run_id") or ""
+            ).strip()
+            if not implementation_owner_run_id:
+                raise ValueError("analysis Artifact owner Run is unavailable")
         context_window = runtime_context_window_tokens(runtime)
         scope = await compile_novel_analysis_request_scope(
             self._db,
@@ -127,9 +138,8 @@ class NovelAnalysisReplacementFollowUpService:
                 **(
                     {
                         "analysisArtifactId": artifact_id,
-                        IMPLEMENTATION_OWNER_RUN_METADATA_KEY: str(
-                            review["createdByRunId"]
-                        ),
+                        IMPLEMENTATION_OWNER_RUN_METADATA_KEY:
+                            implementation_owner_run_id,
                     }
                     if review is not None
                     else {}
@@ -141,7 +151,7 @@ class NovelAnalysisReplacementFollowUpService:
             },
         )
         return request, (
-            str(review["createdByRunId"])
+            implementation_owner_run_id
             if review is not None
             else None
         )
@@ -277,10 +287,9 @@ def _optional_artifact_id(value: str | None) -> str | None:
     normalized = str(value or "").strip()
     if not normalized:
         return None
-    for prefix in ("novel-analysis-v1://", "novel-analysis-artifact://"):
-        if normalized.startswith(prefix):
-            normalized = normalized[len(prefix):]
-            break
+    prefix = "novel-analysis://"
+    if normalized.startswith(prefix):
+        normalized = normalized[len(prefix):]
     if "://" in normalized:
         raise ValueError("analysis Artifact reference is invalid")
     return normalized

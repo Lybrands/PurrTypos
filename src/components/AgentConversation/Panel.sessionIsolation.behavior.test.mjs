@@ -374,9 +374,14 @@ test('mounted A to B hydration blocks Enter and retires the A editor identity', 
       setScrolledUpByReason() {}, onResolveToolApproval: async () => ({ success: true }),
     }))
     await act(async () => renderStandby(standbyMessage))
+    await act(async () => window.document.querySelector('.work-log__toggle').click())
     assert.equal(window.document.querySelector('.work-log__commentary').textContent, description)
+    assert.notEqual(window.document.querySelector('.work-log__commentary').closest('.work-log'), null,
+      'live prose and tool activity belong to the same chronological process panel')
     await act(async () => new Promise(resolve => window.setTimeout(resolve, 1100)))
     assert.equal(window.document.querySelector('.bubble-processing-standby').textContent, '正在思考')
+    assert.notEqual(window.document.querySelector('.bubble-processing-standby').closest('.work-log'), null,
+      'processing standby belongs to the process panel instead of the final-answer area')
     assert.equal(window.document.body.textContent.split(description).length - 1, 1)
     const continued = description + '继续补充公开说明。'
     const next = { ...standbyMessage, canonicalOutput: { ...standbyMessage.canonicalOutput,

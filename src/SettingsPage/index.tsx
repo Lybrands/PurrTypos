@@ -50,6 +50,8 @@ interface SettingsPageProps {
   onHome: () => void
   syncOutlineChapter: boolean
   onSyncOutlineChapterChange: (value: boolean) => void
+  agentPreventSystemSleep: boolean
+  onAgentPreventSystemSleepChange: (value: boolean) => void
 }
 
 export default function SettingsPage({
@@ -64,6 +66,8 @@ export default function SettingsPage({
   onHome,
   syncOutlineChapter,
   onSyncOutlineChapterChange,
+  agentPreventSystemSleep,
+  onAgentPreventSystemSleepChange,
 }: SettingsPageProps) {
   const { message } = useAppFeedback()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
@@ -460,6 +464,17 @@ export default function SettingsPage({
               >
                 点击章节大纲或章节列表时，同步切换另一侧选中项
               </PurrCheckbox>
+              <div className="settings-preference-row">
+                <div className="settings-preference-copy">
+                  <strong>Agent 运行时防止系统休眠</strong>
+                  <p>允许屏幕正常关闭；任务运行期间保持电脑和本地服务唤醒，任务结束或暂停后恢复系统休眠。</p>
+                </div>
+                <PurrSwitch
+                  checked={agentPreventSystemSleep}
+                  onChange={onAgentPreventSystemSleepChange}
+                  aria-label="Agent 运行时防止系统休眠"
+                />
+              </div>
             </div>
           )}
           {activeTab === 'models' && (

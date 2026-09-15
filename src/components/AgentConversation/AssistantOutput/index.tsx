@@ -536,10 +536,19 @@ function AssistantOutputInner({
           hasError={executionPanelHasTerminalError(message)}
         >
           {executionLogItems.map(renderExecutionLogItem)}
+          {showProcessingStandby ? (
+            <div
+              className="bubble-processing-standby"
+              role="status"
+              aria-live="polite"
+            >
+              <span>{processingLabel}</span>
+            </div>
+          ) : null}
         </ExecutionLog>
       ) : null}
 
-      {!message.isError && !showPlaceholder &&
+      {!showPlaceholder &&
         answerParts.map((part, partIndex) => {
           if (part.type !== "text") return null;
           const structuredQuestions = isStreaming
@@ -559,15 +568,6 @@ function AssistantOutputInner({
           );
         })}
 
-      {showProcessingStandby ? (
-        <div
-          className="bubble-processing-standby"
-          role="status"
-          aria-live="polite"
-        >
-          <span>{processingLabel}</span>
-        </div>
-      ) : null}
       {message.isError || message.error ? (
         <ErrorReportNotice
           message={message.isError

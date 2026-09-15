@@ -188,10 +188,10 @@ def test_novel_analysis_router_owns_sessions_outside_frozen_application():
     assert "application.novel_analysis_sessions" not in imports
 
 
-def test_novel_analysis_router_uses_read_only_legacy_history_adapter():
+def test_novel_analysis_router_has_no_legacy_history_adapter():
     imports = _imports(BACKEND_DIR / "routers" / "novel_sources.py")
 
-    assert "agents.novel_analysis.legacy_read_adapter" in imports
+    assert "agents.novel_analysis.legacy_read_adapter" not in imports
 
 
 def test_novel_analysis_product_control_has_no_frozen_service_dependency():
@@ -976,7 +976,7 @@ def test_production_composition_does_not_install_frozen_novel_analysis_profile()
     assert "application.novel_analysis_agent_profile" not in imported
     assert "build_novel_analysis_agent_profile" not in source
     assert '"purrtypos.novel_analysis": (' in source
-    assert '"novel_analysis.purra-native.v1"' in source
+    assert '"novel_analysis.scalable.v2"' in source
 
 
 def test_retired_novel_analysis_shared_island_is_not_reintroduced():

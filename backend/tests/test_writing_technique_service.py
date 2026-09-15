@@ -5,7 +5,7 @@ from database.connection import DatabaseConnection
 from domains.writing.techniques import TechniqueError
 
 
-ENTRY = "---\nname: 视角控制\ndescription: 在误会场景中按人物可知范围分配信息。\n---\n只写人物当前能知道的信息。"
+ENTRY = "---\nname: 视角控制\ndescription: 在误会场景中按人物可知范围分配信息。\nmetadata:\n  retrieval:\n    intents: [控制信息揭示]\n    contexts: [人物认知范围不同的场景]\n    objectives: [保持视角信息一致]\n    keywords: [视角控制, 信息差]\n    exclusions: [全知叙述]\n---\n只写人物当前能知道的信息。"
 
 
 @pytest.fixture
@@ -41,6 +41,10 @@ async def test_manual_default_and_session_inheritance_are_independent(service):
 
 async def test_scheme_full_version_and_index_rebuild_preserve_business_state(service):
     ref = await published(service)
+    technique = await service.get_object("technique", ref["id"])
+    assert technique["metadata"]["retrieval"]["keywords"] == [
+        "视角控制", "信息差",
+    ]
     content = {"schemaVersion": 1, "name": "误会场景", "description": "用于双方掌握信息不同的对话", "composition": "按当前人物视角使用。", "members": [ref]}
     draft = await service.create_draft(kind="scheme", operation_id="scheme", content=content)
     scheme_id, draft_id = draft["schemeId"], draft["draftId"]

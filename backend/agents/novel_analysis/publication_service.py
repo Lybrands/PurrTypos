@@ -1,8 +1,7 @@
-"""Replacement-only user review and publication for Novel Analysis v1."""
+"""User review and publication for scalable Novel Analysis."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Mapping
 from uuid import uuid4
@@ -12,6 +11,10 @@ from agents.novel_analysis.review_artifact import (
     NovelAnalysisReviewedArtifactStore,
 )
 from agents.novel_analysis.domain import NOVEL_ANALYSIS_PUBLISHABLE_FACT_KINDS
+from agents.novel_analysis.canonical_materials import (
+    CanonicalAnalysisMaterialError,
+    validate_canonical_materials,
+)
 from agents.novel_analysis.review_projection import (
     NOVEL_ANALYSIS_REVIEW_CONTRACT,
     NOVEL_ANALYSIS_REVIEW_REF_PREFIX,
@@ -21,9 +24,10 @@ from infrastructure.persistence.sqlite_artifact_repository import (
     SqliteArtifactRepository,
 )
 from purra.json_values import canonical_json_digest
+from application.source_analysis_techniques import register as register_source_technique
 
 
-NOVEL_ANALYSIS_PUBLISHED_SCHEMA_VERSION = 4
+NOVEL_ANALYSIS_PUBLISHED_SCHEMA_VERSION = 5
 
 
 class NovelAnalysisPublicationError(ValueError):
@@ -71,7 +75,6 @@ class NovelAnalysisReplacementPublicationService:
             "artifactRef": receipt.resource_ref,
             "createdByRunId": source["createdByRunId"],
             "taskId": source["taskId"],
-            "publicationSupported": True,
         }
 
     async def load_reviewed(self, artifact_id: str) -> dict[str, object]:
@@ -95,7 +98,6 @@ class NovelAnalysisReplacementPublicationService:
             "artifactRef": NOVEL_ANALYSIS_REVIEW_REF_PREFIX + artifact.id,
             "createdByRunId": artifact.created_by_run_id,
             "taskId": source["taskId"],
-            "publicationSupported": True,
         }
 
     async def publish(self, artifact_id: str) -> dict[str, object]:
@@ -109,7 +111,6 @@ class NovelAnalysisReplacementPublicationService:
                 "artifactRef",
                 "createdByRunId",
                 "taskId",
-                "publicationSupported",
             }
         })
         existing_id = None
@@ -129,21 +130,22 @@ class NovelAnalysisReplacementPublicationService:
                     "FROM novel_source_analyses WHERE source_revision_id = ?",
                     [revision_id],
                 )
-                ordinals = [
-                    int(item["sectionOrdinal"])
-                    for item in _all_evidence(reviewed)
-                ]
-                if not ordinals:
+                last_section = await self._db.fetch_one(
+                    "SELECT MAX(ordinal) AS ordinal FROM novel_source_sections "
+                    "WHERE revision_id = ?",
+                    [revision_id],
+                )
+                coverage_end_ordinal = (last_section or {}).get("ordinal")
+                if type(coverage_end_ordinal) is not int:
                     raise NovelAnalysisPublicationError(
-                        "reviewed analysis has no publishable evidence"
+                        "reviewed analysis source has no sections"
                     )
                 summary = {
                     "artifactId": artifact_id,
                     "artifactContract": NOVEL_ANALYSIS_REVIEW_CONTRACT,
                     "sourceArtifactRef": reviewed["sourceArtifactRef"],
                     "sectionIds": reviewed["sectionIds"],
-                    "analysisTechniqueResult": reviewed["analysisTechniqueResult"],
-                    "coverage": reviewed["coverage"],
+                    "techniqueResult": reviewed["techniqueResult"],
                     "conflicts": reviewed["conflicts"],
                     "storyOverview": reviewed["storyOverview"],
                 }
@@ -156,43 +158,62 @@ class NovelAnalysisReplacementPublicationService:
                         analysis_id,
                         revision_id,
                         int((latest or {}).get("version_no") or 0) + 1,
-                        max(ordinals),
+                        coverage_end_ordinal,
                         NOVEL_ANALYSIS_PUBLISHED_SCHEMA_VERSION,
                         digest,
                         _json(summary),
                     ],
                 )
                 for fact in reviewed["facts"]:
-                    await self._insert_fact(analysis_id, fact)
+                    await self._insert_fact(
+                        analysis_id, fact, coverage_end_ordinal
+                    )
                 for card in reviewed["craftCards"]:
                     await self._insert_card(analysis_id, card)
-        return await self._published(existing_id or str(analysis_id))
+        published_id = existing_id or str(analysis_id)
+        technique = reviewed.get("techniqueResult")
+        if isinstance(technique, Mapping) and technique.get("status") == "generated":
+            candidate = technique.get("candidate")
+            if isinstance(candidate, Mapping):
+                await register_source_technique(
+                    self._db,
+                    published_id,
+                    {
+                        "id": str(candidate["techniqueId"]),
+                        "versionId": str(candidate["versionId"]),
+                    },
+                    "candidate",
+                )
+        return await self._published(published_id)
 
     def _validate_review(self, source, payload: Mapping[str, object]) -> dict:
         raw = dict(payload)
-        evidence = {
-            _evidence_key(item): item
-            for item in _all_evidence(source)
-        }
         source_fact_ids = {str(item["id"]) for item in source["facts"]}
         source_card_ids = {str(item["id"]) for item in source["craftCards"]}
         facts = [
-            _review_fact(item, source_fact_ids, evidence)
+            _review_fact(item, source_fact_ids)
             for item in _mapping_list(raw.get("facts"), "facts")
         ]
         cards = [
-            _review_card(item, source_card_ids, evidence)
+            _review_card(item, source_card_ids)
             for item in _mapping_list(raw.get("craftCards"), "craftCards")
         ]
         _unique((item["id"] for item in facts), "fact ids")
         _unique((item["id"] for item in cards), "craft card ids")
-        overview = _review_overview(raw.get("storyOverview"), evidence)
-        technique = _review_technique(
-            raw.get("analysisTechniqueResult"),
-            {str(item["id"]) for item in cards},
+        overview = _review_overview(raw.get("storyOverview"))
+        skill = _review_skill_result(
+            raw.get("techniqueResult", source.get("techniqueResult"))
         )
+        try:
+            canonical = validate_canonical_materials({
+                "summaryMarkdown": overview["summaryMarkdown"],
+                "facts": facts,
+                "craftCards": cards,
+            })
+        except CanonicalAnalysisMaterialError as error:
+            raise NovelAnalysisPublicationError(str(error)) from error
         return {
-            "analysisSchemaVersion": 1,
+            "analysisSchemaVersion": 2,
             "artifactContract": NOVEL_ANALYSIS_REVIEW_CONTRACT,
             "artifactKind": "novel_analysis_review",
             "sourceArtifactRef": str(
@@ -200,11 +221,10 @@ class NovelAnalysisReplacementPublicationService:
             ),
             "sourceRevisionId": str(source["sourceRevisionId"]),
             "sectionIds": list(source["sectionIds"]),
-            "facts": facts,
-            "craftCards": cards,
+            "facts": canonical["facts"],
+            "craftCards": canonical["craftCards"],
             "storyOverview": overview,
-            "analysisTechniqueResult": technique,
-            "coverage": dict(source["coverage"]),
+            "techniqueResult": skill,
             "conflicts": list(source["conflicts"]),
             "reviewStatus": "reviewed",
         }
@@ -219,9 +239,13 @@ class NovelAnalysisReplacementPublicationService:
                 "only a completed analysis task can be reviewed or published"
             )
 
-    async def _insert_fact(self, analysis_id: str, fact: Mapping) -> None:
+    async def _insert_fact(
+        self,
+        analysis_id: str,
+        fact: Mapping,
+        coverage_end_ordinal: int,
+    ) -> None:
         fact_id = "fact_" + uuid4().hex
-        ordinals = [int(item["sectionOrdinal"]) for item in fact["evidence"]]
         content_digest = canonical_json_digest({
             key: value for key, value in fact.items() if key != "id"
         })
@@ -238,13 +262,12 @@ class NovelAnalysisReplacementPublicationService:
                 fact["predicate"],
                 _json(fact.get("value")),
                 fact["lifecycleStatus"],
-                min(ordinals),
-                max(ordinals),
+                0,
+                coverage_end_ordinal,
                 content_digest,
                 fact["claimNature"],
             ],
         )
-        await self._insert_evidence(analysis_id, "fact", fact_id, fact["evidence"])
 
     async def _insert_card(self, analysis_id: str, card: Mapping) -> None:
         card_id = "craft_" + uuid4().hex
@@ -264,29 +287,6 @@ class NovelAnalysisReplacementPublicationService:
                 content_digest,
             ],
         )
-        await self._insert_evidence(
-            analysis_id, "craft_card", card_id, card["evidence"]
-        )
-
-    async def _insert_evidence(
-        self, analysis_id: str, owner_type: str, owner_id: str, evidence
-    ) -> None:
-        for item in evidence:
-            await self._db.execute(
-                "INSERT INTO novel_source_analysis_evidence "
-                "(id, analysis_id, owner_type, owner_id, section_id, excerpt, "
-                "locator_json, excerpt_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                [
-                    "evidence_" + uuid4().hex,
-                    analysis_id,
-                    owner_type,
-                    owner_id,
-                    item["sectionId"],
-                    item["excerpt"],
-                    _json(item["locator"]),
-                    item["excerptDigest"],
-                ],
-            )
 
     async def _published(self, analysis_id: str) -> dict[str, object]:
         row = await self._db.fetch_one(
@@ -306,28 +306,6 @@ class NovelAnalysisReplacementPublicationService:
             "WHERE analysis_id = ? ORDER BY id",
             [analysis_id],
         )
-        evidence_rows = await self._db.fetch_all(
-            "SELECT e.*, s.ordinal AS section_ordinal, "
-            "s.title AS section_title FROM novel_source_analysis_evidence e "
-            "JOIN novel_source_sections s ON s.id = e.section_id "
-            "WHERE e.analysis_id = ? ORDER BY e.id",
-            [analysis_id],
-        )
-        evidence_by_owner: dict[tuple[str, str], list[dict]] = {}
-        for item in evidence_rows:
-            locator = json.loads(str(item["locator_json"]))
-            evidence_by_owner.setdefault(
-                (str(item["owner_type"]), str(item["owner_id"])), []
-            ).append({
-                "id": str(item["id"]),
-                "sectionId": str(item["section_id"]),
-                "sectionOrdinal": int(item["section_ordinal"]),
-                "sectionTitle": str(item["section_title"]),
-                "referenceKind": locator.get("referenceKind", "quote"),
-                "excerpt": str(item["excerpt"]),
-                "locator": locator,
-                "excerptDigest": str(item["excerpt_digest"]),
-            })
         return {
             "id": str(row["id"]),
             "sourceRevisionId": str(row["source_revision_id"]),
@@ -348,9 +326,6 @@ class NovelAnalysisReplacementPublicationService:
                 "firstSectionOrdinal": int(item["first_section_ordinal"]),
                 "lastSectionOrdinal": int(item["last_section_ordinal"]),
                 "contentDigest": str(item["content_digest"]),
-                "evidence": evidence_by_owner.get(
-                    ("fact", str(item["id"])), []
-                ),
             } for item in facts],
             "craftCards": [{
                 "id": str(item["id"]),
@@ -359,15 +334,12 @@ class NovelAnalysisReplacementPublicationService:
                 "bodyMarkdown": str(item["body_markdown"]),
                 "status": str(item["status"]),
                 "contentDigest": str(item["content_digest"]),
-                "evidence": evidence_by_owner.get(
-                    ("craft_card", str(item["id"])), []
-                ),
             } for item in cards],
             "createTime": row["create_time"],
         }
 
 
-def _review_fact(value, allowed_ids, evidence) -> dict:
+def _review_fact(value, allowed_ids) -> dict:
     raw = _mapping(value, "fact")
     fact_id = _allowed_id(raw.get("id"), allowed_ids, "fact id")
     kind = _text(raw.get("factKind"), "factKind", 100)
@@ -383,106 +355,53 @@ def _review_fact(value, allowed_ids, evidence) -> dict:
         "lifecycleStatus": _text(
             raw.get("lifecycleStatus") or "active", "lifecycleStatus", 100
         ),
-        "evidence": _review_evidence(raw.get("evidence"), evidence),
     }
 
 
-def _review_card(value, allowed_ids, evidence) -> dict:
+def _review_card(value, allowed_ids) -> dict:
     raw = _mapping(value, "craft card")
     return {
         "id": _allowed_id(raw.get("id"), allowed_ids, "craft card id"),
         "cardKind": _text(raw.get("cardKind"), "cardKind", 100),
         "title": _text(raw.get("title"), "title", 500),
         "bodyMarkdown": _text(raw.get("bodyMarkdown"), "bodyMarkdown", 20_000),
-        "evidence": _review_evidence(raw.get("evidence"), evidence),
     }
 
 
-def _review_overview(value, evidence) -> dict:
+def _review_overview(value) -> dict:
     raw = _mapping(value, "storyOverview")
     return {
         "summaryMarkdown": _text(
             raw.get("summaryMarkdown"), "summaryMarkdown", 20_000
         ),
-        "evidence": _review_evidence(raw.get("evidence"), evidence),
     }
 
 
-def _review_technique(value, allowed_ids: set[str]) -> dict:
-    raw = _mapping(value, "analysisTechniqueResult")
-    if raw.get("status") == "empty":
+def _review_skill_result(value) -> dict:
+    raw = _mapping(value, "techniqueResult")
+    status = raw.get("status")
+    if status == "insufficient_material":
         return {
-            "status": "empty",
-            "reason": _text(raw.get("reason"), "technique reason", 2_000),
-            "techniques": [],
+            "status": status,
+            "candidate": None,
+            "evidenceRefs": [],
+            "scopeNotes": list(raw.get("scopeNotes") or []),
+            "reason": _text(raw.get("reason"), "technique reason", 3_000),
         }
-    if raw.get("status") != "generated":
-        raise NovelAnalysisPublicationError("technique status is invalid")
-    techniques = []
-    for item in _mapping_list(raw.get("techniques"), "techniques"):
-        ids = [str(value or "").strip() for value in item.get("observationIds", [])]
-        if not ids or any(not value or value not in allowed_ids for value in ids):
-            raise NovelAnalysisPublicationError(
-                "technique references an unavailable reviewed craft card"
-            )
-        techniques.append({
-            "title": _text(item.get("title"), "technique title", 500),
-            "bodyMarkdown": _text(
-                item.get("bodyMarkdown"), "technique body", 20_000
-            ),
-            "observationIds": ids,
-        })
-    if not techniques:
-        raise NovelAnalysisPublicationError("generated techniques are empty")
-    return {"status": "generated", "techniques": techniques}
-
-
-def _review_evidence(value, allowed) -> list[dict]:
-    result = []
-    for raw in _mapping_list(value, "evidence"):
-        start = raw.get("segmentStartCharacter")
-        end = raw.get("segmentEndCharacter")
-        excerpt = str(raw.get("excerpt") or "")
-        if type(start) is not int or type(end) is not int or end <= start or not excerpt:
-            raise NovelAnalysisPublicationError("review evidence locator is invalid")
-        key = (
-            str(raw.get("sectionId") or ""),
-            start,
-            end,
-            "sha256:" + hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
-        )
-        source = allowed.get(key)
-        if source is None:
-            raise NovelAnalysisPublicationError(
-                "review evidence does not match the source Artifact"
-            )
-        result.append(dict(source))
-    if not result:
-        raise NovelAnalysisPublicationError("review evidence is required")
-    return result
-
-
-def _all_evidence(value) -> list[dict]:
-    return [
-        evidence
-        for item in [
-            *value.get("facts", []),
-            *value.get("craftCards", []),
-            value.get("storyOverview", {}),
-        ]
-        if isinstance(item, Mapping)
-        for evidence in item.get("evidence", [])
-        if isinstance(evidence, Mapping)
-    ]
-
-
-def _evidence_key(item: Mapping) -> tuple:
-    return (
-        str(item.get("sectionId") or ""),
-        item.get("segmentStartCharacter"),
-        item.get("segmentEndCharacter"),
-        str(item.get("excerptDigest") or ""),
-    )
+    candidate = _mapping(raw.get("candidate"), "technique candidate")
+    if status != "generated":
+        raise NovelAnalysisPublicationError("writing Skill status is invalid")
+    return {
+        "status": "generated",
+        "candidate": {
+            "techniqueId": _text(candidate.get("techniqueId"), "techniqueId", 200),
+            "draftId": _text(candidate.get("draftId"), "draftId", 200),
+            "versionId": _text(candidate.get("versionId"), "versionId", 200),
+        },
+        "evidenceRefs": [str(item) for item in raw.get("evidenceRefs") or []],
+        "scopeNotes": [str(item) for item in raw.get("scopeNotes") or []],
+        "reason": "",
+    }
 
 
 def _mapping(value, name: str) -> dict:

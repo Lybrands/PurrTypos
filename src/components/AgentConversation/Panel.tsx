@@ -14,6 +14,8 @@ import ConversationIndex from './ConversationIndex'
 import SessionHistory from './ConversationIndex/SessionHistory'
 import ConversationViewport from './ConversationViewport'
 import TaskProgress from './TaskProgress'
+import { SubAgentOverview } from './DelegationStatus'
+import { collapseSubAgentDelegations } from './DelegationStatus/presentation'
 import type { AgentSessionId } from '../../agent-runtime'
 import type { AgentConversationController } from './controller'
 import type { AgentConversationExtensions } from './extensions'
@@ -21,6 +23,8 @@ import { buildAgentModelLabels } from './messageMetadata'
 import { buildAgentConversationPanelView } from './panelView'
 import { isComposerSubmitDisabled } from './composerPolicy'
 import QueuedSubmissions from './QueuedSubmissions'
+import { prepareAgentCompletionNotifications } from '../../platform/agentNotifications'
+import { useAgentCompletionNotification } from './useAgentCompletionNotification'
 import './Panel.scss'
 
 export interface AgentConversationPanelProps {
@@ -87,7 +91,10 @@ function ComposerFooter({
             icon={<RefreshIcon size={15} />}
             loading={conversation.resuming}
             disabled={resumeDisabled}
-            onClick={() => void actions.resume?.()}
+            onClick={() => {
+              prepareAgentCompletionNotifications()
+              void actions.resume?.()
+            }}
           >
             {conversation.resumeLabel || '继续执行'}
           </PurrButton>
@@ -101,7 +108,7 @@ function ComposerFooter({
               icon={<StopCircleIcon size={18} />}
               onClick={() => void actions.abort()}
               disabled={conversation.initializing || conversation.activeSessionId == null
-                || conversation.abortDisabled || conversation.stopping || conversation.resuming}
+                || conversation.abortDisabled || conversation.stopping}
               aria-label="停止生成"
             />
           </PurrTooltip>
@@ -113,7 +120,11 @@ function ComposerFooter({
             className="agent-composer__send"
             icon={<ArrowUpIcon style={{ fontSize: 16 }} />}
             disabled={submitDisabled}
-            onClick={() => { if (!isComposerSubmitDisabled(controller)) void actions.send() }}
+            onClick={() => {
+              if (isComposerSubmitDisabled(controller)) return
+              prepareAgentCompletionNotifications()
+              void actions.send()
+            }}
             aria-label={submitLabel}
           />
         </PurrTooltip>
@@ -129,6 +140,7 @@ export default function AgentConversationPanel({
   onIndexOpenChange,
   className,
 }: AgentConversationPanelProps) {
+  useAgentCompletionNotification(controller)
   const [uncontrolledIndexOpen, setUncontrolledIndexOpen] = React.useState(true)
   const [editingSessionId, setEditingSessionId] = React.useState<AgentSessionId | null>(null)
   const [editingSessionTitle, setEditingSessionTitle] = React.useState('')
@@ -147,6 +159,15 @@ export default function AgentConversationPanel({
     ...controller.composer.modelConfigs,
     ...(controller.composer.selectedModel ? [controller.composer.selectedModel] : []),
   ]), [controller.composer.modelConfigs, controller.composer.selectedModel])
+  const currentAgentMessage = React.useMemo(() => (
+    [...controller.conversation.messages]
+      .reverse()
+      .find((message) => message.role === 'assistant' && message.delegations?.length)
+  ), [controller.conversation.messages])
+  const currentSubAgents = React.useMemo(
+    () => collapseSubAgentDelegations(currentAgentMessage?.delegations ?? []),
+    [currentAgentMessage?.delegations],
+  )
 
   const setIndexOpen = React.useCallback((open: boolean) => {
     if (indexOpen == null) setUncontrolledIndexOpen(open)
@@ -227,14 +248,30 @@ export default function AgentConversationPanel({
           value={controller.composer.value}
           onChange={controller.composer.setValue}
           onSubmit={() => {
-            if (!isComposerSubmitDisabled(controller)) void controller.actions.send()
+            if (isComposerSubmitDisabled(controller)) return
+            prepareAgentCompletionNotifications()
+            void controller.actions.send()
           }}
           placeholder={controller.composer.placeholder}
           ariaLabel={controller.composer.ariaLabel}
           disabled={controller.capabilities.inputDisabled}
           submitDisabled={isComposerSubmitDisabled(controller)}
-          floatingContent={view.showTaskProgress && controller.composer.taskPlan ? (
-            <TaskProgress plan={controller.composer.taskPlan} placement="topLeft" />
+          floatingContent={(
+            (view.showTaskProgress && controller.composer.taskPlan)
+            || currentSubAgents.length > 0
+          ) ? (
+            <div className="agent-composer__floating-content">
+              {view.showTaskProgress && controller.composer.taskPlan ? (
+                <TaskProgress plan={controller.composer.taskPlan} placement="topLeft" />
+              ) : null}
+              {currentSubAgents.length > 0 ? (
+                <SubAgentOverview
+                  items={currentSubAgents}
+                  activities={currentAgentMessage?.subAgentActivities}
+                  placement="topLeft"
+                />
+              ) : null}
+            </div>
           ) : null}
           supplementaryContent={<QueuedSubmissions controller={controller} />}
           commands={extensions?.composerCommands}

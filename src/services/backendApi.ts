@@ -441,7 +441,7 @@ export const backendApi: BackendApi = {
   ),
   resumeNovelAnalysis: (data) => apiPostIdempotent(
     `/novel-analysis-tasks/${data.taskId}/resume`,
-    { runtime: data.runtime, retryFailed: data.retryFailed },
+    { runtime: data.runtime },
     data.commandId,
   ),
   cancelNovelAnalysis: (data) => apiPost(
@@ -453,7 +453,7 @@ export const backendApi: BackendApi = {
   ),
   reviewNovelAnalysisArtifact: (data) => apiPostIdempotent(
     `/novel-analysis-artifacts/${data.artifactId}/review`,
-    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview, techniqueResult: data.techniqueResult, analysisTechniqueResult: data.analysisTechniqueResult },
+    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview, techniqueResult: data.techniqueResult },
     data.commandId,
   ),
   publishNovelAnalysisArtifact: (data) => apiPost(
@@ -677,6 +677,8 @@ export const backendApi: BackendApi = {
     const query = params.toString()
     return apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}${query ? `?${query}` : ''}`)
   },
+  getSubAgentConversation: (data) =>
+    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/sub-agent-conversation`),
   getAgentRunPlannerDiagnostics: (data) =>
     apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/planner-diagnostics`),
   getAgentRunModelInputDiagnostics: (data) =>

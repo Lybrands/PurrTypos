@@ -16,7 +16,6 @@ function isOperationPart(
 ): part is TimelineOperationPart {
   return part.type === "tools"
     || part.type === "operation"
-    || part.type === "delegations"
     || part.type === "contextCompaction";
 }
 

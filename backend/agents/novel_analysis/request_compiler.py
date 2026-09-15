@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agents.novel_analysis.domain import NovelAnalysisRequestScope
-from agents.novel_analysis.recipe import AnalysisSegment
+from agents.novel_analysis.source_segment import AnalysisSegment
 from purra.context_budget import estimate_json_tokens
 
 

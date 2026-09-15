@@ -97,6 +97,7 @@ export function mergeAgentRunSnapshot(current: AiAgentRunSnapshot, page: AiAgent
 type SnapshotReplayInput = {
   snapshot: AiAgentRunSnapshot
   relatedSnapshots?: AiAgentRunSnapshot[]
+  relatedRunRoles?: Record<string, 'unit' | 'final_response' | 'related'>
   prompt: string
   turnId: string
   sessionId?: number
@@ -166,7 +167,9 @@ function* replaySnapshotSteps(input: SnapshotReplayInput): Generator<void, Agent
     if (event.chunk) replay.dispatch({
       ...seed,
       eventRunId: source.run.runId,
-      runRole: source.run.runId === snapshot.run.runId ? 'root' : 'unit',
+      runRole: source.run.runId === snapshot.run.runId
+        ? 'root'
+        : input.relatedRunRoles?.[source.run.runId] ?? 'unit',
     }, event.chunk as AiStreamChunk, { cfg })
     if (performance.now() - sliceStarted >= 8) {
       yield
@@ -181,8 +184,12 @@ function* replaySnapshotSteps(input: SnapshotReplayInput): Generator<void, Agent
     role: 'assistant' as const,
     content: '',
   }
+  const retainsPreviousRoots = Object.values(input.relatedRunRoles ?? {})
+    .includes('final_response')
   const content = snapshot.run.status === 'done' && !replayed.longTaskId
-    ? snapshot.run.finalResponse || replayed.content || ''
+    ? retainsPreviousRoots
+      ? mergeContinuedResponse(replayed.content, snapshot.run.finalResponse)
+      : snapshot.run.finalResponse || replayed.content || ''
     : replayed.content || ''
   const canonicalOutput = replayed.canonicalOutput && snapshot.run.status === 'done'
     ? {
@@ -202,6 +209,15 @@ function* replaySnapshotSteps(input: SnapshotReplayInput): Generator<void, Agent
     durationMs: snapshotDurationMs(snapshot) ?? replayed.durationMs,
     ...(snapshot.run.status === 'running' ? { isError: false } : {}),
   }
+}
+
+function mergeContinuedResponse(replayed: string, persisted: string): string {
+  const history = String(replayed || '')
+  const current = String(persisted || '')
+  if (!history) return current
+  if (!current || history.endsWith(current)) return history
+  if (current.startsWith(history)) return current
+  return `${history}${history.endsWith('\n') || current.startsWith('\n') ? '' : '\n\n'}${current}`
 }
 
 function snapshotDurationMs(snapshot: AiAgentRunSnapshot): number | undefined {

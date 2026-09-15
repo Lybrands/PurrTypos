@@ -7,6 +7,7 @@ export interface PurrCollapseItem {
   key: string
   label: React.ReactNode
   children: React.ReactNode
+  extra?: React.ReactNode
   disabled?: boolean
 }
 
@@ -45,6 +46,7 @@ export function PurrCollapse({
               <ChevronRightIcon className="purr-collapse__chevron" />
               <span className="purr-collapse__label">{item.label}</span>
             </Accordion.Trigger>
+            {item.extra && <span className="purr-collapse__extra">{item.extra}</span>}
           </Accordion.Header>
           <Accordion.Panel className="purr-collapse__panel">
             <div className="purr-collapse__content">{item.children}</div>

@@ -1,4 +1,3 @@
-import Markdown from '../../components/Markdown'
 import { services } from '@/services'
 import React from 'react'
 import { useMaterialRefresh } from './useMaterialRefresh'
@@ -10,22 +9,17 @@ import {
   AiChatIcon,
   CompassIcon,
 } from '@/purr-components'
-import { PurrCollapse, PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSegmented, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
-import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
+import { PurrButton, PurrEmpty, PurrModal, PurrSegmented, PurrTag, PurrTooltip } from '@/purr-components'
 import type { EntityId, SettingEntity, SettingEntityType } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
+import MaterialProfileEditorModal, { MATERIAL_ENTITY_TYPE_OPTIONS } from './MaterialProfileEditorModal'
 import './StoryBackgroundTab.scss'
 import './CharacterTab.scss'
 
-export const ENTITY_TYPE_OPTIONS: Array<{ value: SettingEntityType; label: string }> = [
-  { value: 'location', label: '地点' },
-  { value: 'faction', label: '势力' },
-  { value: 'item', label: '物品' },
-  { value: 'other', label: '其他' },
-]
+export const ENTITY_TYPE_OPTIONS = MATERIAL_ENTITY_TYPE_OPTIONS
 
 const ENTITY_TYPE_LABEL: Record<string, string> = Object.fromEntries(
   ENTITY_TYPE_OPTIONS.map((o) => [o.value, o.label]),
@@ -327,53 +321,7 @@ export default function WorldEntityTab({
         onRestored={loadEntities}
       />
 
-      <PurrModal
-        title={editTarget ? '编辑设定条目' : '新建设定条目'}
-        open={editModalOpen}
-        onOk={handleSave}
-        onCancel={closeModal}
-        okText={editTarget ? '保存' : '创建'}
-        cancelText="取消"
-        okButtonProps={{ loading: saving }}
-        width={680}
-        destroyOnHidden
-        className="character-edit-modal"
-      >
-        <div className="character-edit-meta">
-          <PurrSelect
-            value={draftType}
-            onChange={(v) => setDraftType(v as SettingEntityType)}
-            options={ENTITY_TYPE_OPTIONS}
-            className="world-entity-edit-type"
-            popupMatchSelectWidth={false}
-          />
-          <PurrInput
-            placeholder="条目名称（必填）"
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            maxLength={50}
-            className="character-edit-name"
-          />
-          <PurrSelect
-            mode="tags"
-            placeholder="标签：输入后回车确认"
-            value={draftTags}
-            onChange={setDraftTags}
-            open={false}
-            suffixIcon={null}
-            maxCount={10}
-            className="character-edit-tags"
-          />
-        </div>
-        {editTarget?.inheritedBaseline && <><PurrCollapse size="small" defaultActiveKeys={["baseline"]} items={[{key: "baseline", label: "原作资料 · 只读", children: <Markdown>{editTarget.inheritedBaseline}</Markdown>}]} /><p>本书后续发展</p></>}
-        <KnowledgeMarkdownEditor
-          documentKey={`world-entity:${editTarget?.id ?? 'new'}`}
-          value={draftProfileMd}
-          onChange={setDraftProfileMd}
-          ariaLabel="设定条目档案"
-          className="character-edit-profile"
-        />
-      </PurrModal>
+      <MaterialProfileEditorModal kind="entity" open={editModalOpen} creating={!editTarget} name={draftName} tags={draftTags} profileMd={draftProfileMd} documentKey={`world-entity:${editTarget?.id ?? 'new'}`} onNameChange={setDraftName} onTagsChange={setDraftTags} onProfileChange={setDraftProfileMd} onOk={handleSave} onCancel={closeModal} entityType={draftType} onEntityTypeChange={setDraftType} inheritedBaseline={editTarget?.inheritedBaseline} saving={saving} />
 
       <PurrModal
         title="删除设定条目"

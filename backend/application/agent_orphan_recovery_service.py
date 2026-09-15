@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 
+from agents.shared.implementation_registry import (
+    AgentImplementationNotInstalledError,
+)
 from application.agent_cancellation_service import AgentCancellationService
 from purra.contracts import RunStatus, StepStatus, TaskStepUpdate
 from purra.events import AgentEvent, CoreEventType
+from purra.errors import ContractViolationError
 from purra.orphan_recovery import OrphanRecoveryCoordinator
 from purra.output import RunLifecycleOutputDraft
 from purra.ports import RunCommit
 from purra.run_control import OrphanRunDecision, OrphanRunDisposition
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentOrphanRecoveryService:
@@ -56,8 +64,18 @@ class _AgentOrphanRunSettler:
         explicitly_canceled = (
             decision.disposition is OrphanRunDisposition.CANCEL
         )
+        await self._cancel_agent_tree(decision.run_id)
         if explicitly_canceled:
-            await self._cancellation.cancel(decision.run_id)
+            try:
+                await self._cancellation.cancel(decision.run_id)
+            except AgentImplementationNotInstalledError:
+                # Frozen implementations deliberately have no product runtime.
+                # Their abandoned Runs still need a Core terminal state, but
+                # must not be routed back through removed domain projectors.
+                logger.info(
+                    "Skipping product cancellation projection for retired Run %s",
+                    decision.run_id,
+                )
         await self._commit_terminal(
             decision.run_id,
             status=status,
@@ -67,7 +85,26 @@ class _AgentOrphanRunSettler:
             ),
         )
         if explicitly_canceled:
-            await self._cancellation.cancel(decision.run_id)
+            receipt = await (
+                self._composition.run_control_store.load_cancellation_receipt(
+                    decision.run_id
+                )
+            )
+            if receipt is not None and receipt.draining:
+                await self._composition.run_control_store.complete_cancellation(
+                    decision.run_id,
+                    terminalized=True,
+                )
+
+    async def _cancel_agent_tree(self, run_id: str) -> None:
+        """Fence every unfinished Child before the SQL Root is terminalized."""
+
+        tree = self._composition.run_tree_repository
+        try:
+            await tree.cancel_subtree(run_id)
+        except ContractViolationError as error:
+            if str(getattr(error, "code", "")) != "child_run_not_found":
+                raise
 
     @staticmethod
     def _recovery_reason(

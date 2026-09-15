@@ -372,6 +372,16 @@ async def test_restart_reconciles_finalized_candidate_before_continuing_dag(
             metadata={"sourceType": "chapter", "sourceId": "chapter-1"},
         )
 
+        assert await repository.recover_after_restart() == ()
+        await temp_db.execute(
+            "UPDATE ai_agent_long_task_units SET lease_expires_at_ms = 0 "
+            "WHERE task_id = ?",
+            [task_id],
+        )
+        await temp_db.execute(
+            "UPDATE ai_agent_runs SET lease_expires_at_ms = 0 "
+            "WHERE id = 'screenplay-root'",
+        )
         assert await repository.recover_after_restart() == (task_id,)
         recovered = (await repository.list_units(task_id))[0]
         assert recovered.error_code == "execution_recovery_after_restart"

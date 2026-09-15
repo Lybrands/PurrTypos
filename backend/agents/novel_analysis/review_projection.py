@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from hashlib import sha256
 
 from agents.novel_analysis.attempt_artifact import (
     NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_KIND,
@@ -17,8 +16,8 @@ from purra.artifacts import ArtifactStatus
 from purra.json_values import thaw_json_mapping
 
 
-NOVEL_ANALYSIS_REVIEW_CONTRACT = "purrtypos.novel_analysis.review.v1"
-NOVEL_ANALYSIS_REVIEW_REF_PREFIX = "novel-analysis-v1://"
+NOVEL_ANALYSIS_REVIEW_CONTRACT = "purrtypos.novel_analysis.review.v2"
+NOVEL_ANALYSIS_REVIEW_REF_PREFIX = "novel-analysis://"
 
 
 class NovelAnalysisReviewProjectionError(ValueError):
@@ -26,7 +25,7 @@ class NovelAnalysisReviewProjectionError(ValueError):
 
 
 class NovelAnalysisReviewProjection:
-    """Expose only the settled review winner; never rewrite a legacy Artifact."""
+    """Expose only the settled review winner."""
 
     def __init__(self, db) -> None:
         self._db = db
@@ -103,155 +102,49 @@ class NovelAnalysisReviewProjection:
         payload: Mapping[str, object],
     ) -> dict[str, object]:
         expected = {
-            "schemaVersion",
-            "kind",
-            "sourceRevisionId",
-            "facts",
-            "observations",
-            "storyOverview",
-            "techniqueResult",
-            "coverageReport",
-            "evidenceIndex",
-            "reviewStatus",
+            "schemaVersion", "kind", "childRunId", "skillArtifactId", "skillDigest", "coverageArtifactId",
+            "coverageDigest", "synthesisArtifactId", "synthesisDigest",
+            "summaryMarkdown", "facts", "craftCards", "techniqueResult",
         }
-        if set(payload) != expected or (
-            payload.get("schemaVersion") != 1
-            or payload.get("kind") != "review"
-            or payload.get("reviewStatus") != "pending_review"
-        ):
+        if set(payload) != expected or payload.get("schemaVersion") != 3:
             raise NovelAnalysisReviewProjectionError(
-                "replacement review Artifact payload is invalid"
+                "scalable review Artifact payload is invalid"
             )
-        revision_id = str(payload.get("sourceRevisionId") or "")
-        if not revision_id or revision_id != task_owner_id:
-            raise NovelAnalysisReviewProjectionError(
-                "replacement review Artifact source scope changed"
-            )
+        summary = _required_text(payload.get("summaryMarkdown"), "summaryMarkdown")
         facts = _mapping_list(payload.get("facts"), "facts")
-        observations = _mapping_list(payload.get("observations"), "observations")
-        evidence_index = _mapping_list(payload.get("evidenceIndex"), "evidenceIndex")
-        coverage = _mapping(payload.get("coverageReport"), "coverageReport")
-        if coverage.get("missingSegmentIds") != []:
+        cards = _mapping_list(payload.get("craftCards"), "craftCards")
+        if not facts:
+            raise NovelAnalysisReviewProjectionError("scalable review facts are empty")
+        section_ids = await self._section_ids(task_owner_id)
+        if not section_ids:
             raise NovelAnalysisReviewProjectionError(
-                "replacement review Artifact has incomplete coverage"
+                "scalable review source sections no longer resolve"
             )
-        evidence_by_ref = {}
-        section_ids = []
-        for item in evidence_index:
-            key = (
-                str(item.get("segmentId") or ""),
-                str(item.get("sourceSpanId") or ""),
-            )
-            section_id = str(item.get("sectionId") or "")
-            text = item.get("text")
-            start = item.get("startCharacter")
-            end = item.get("endCharacter")
-            ordinal = item.get("sectionOrdinal")
-            if (
-                not all(key)
-                or key in evidence_by_ref
-                or not section_id
-                or not isinstance(text, str)
-                or not text
-                or type(start) is not int
-                or type(end) is not int
-                or end <= start
-                or type(ordinal) is not int
-            ):
-                raise NovelAnalysisReviewProjectionError(
-                    "replacement review evidence index is invalid"
-                )
-            evidence_by_ref[key] = {
-                "referenceKind": "quote",
-                "sectionId": section_id,
-                "excerpt": text,
-                "segmentStartCharacter": start,
-                "segmentEndCharacter": end,
-                "sectionOrdinal": ordinal,
-                "locator": {"start": start, "end": end},
-                "excerptDigest": "sha256:" + sha256(text.encode("utf-8")).hexdigest(),
-            }
-            section_ids.append(section_id)
-        titles = await self._section_titles(revision_id, tuple(dict.fromkeys(section_ids)))
-        if set(titles) != set(section_ids):
-            raise NovelAnalysisReviewProjectionError(
-                "replacement review evidence section no longer resolves"
-            )
-        for evidence in evidence_by_ref.values():
-            evidence["sectionTitle"] = titles[evidence["sectionId"]]
-
-        projected_facts = []
-        for fact in facts:
-            projected_facts.append({
-                "claimNature": "fact",
-                "id": _required_text(fact.get("factId"), "factId"),
-                "factKind": _required_text(fact.get("factKind"), "factKind"),
-                "subjectKey": _required_text(fact.get("subjectKey"), "subjectKey"),
-                "predicate": _required_text(fact.get("predicate"), "predicate"),
-                "value": fact.get("value"),
-                "lifecycleStatus": "active",
-                "evidence": _project_evidence(fact.get("evidenceRefs"), evidence_by_ref),
-            })
-        projected_cards = []
-        for observation in observations:
-            projected_cards.append({
-                "id": _required_text(
-                    observation.get("observationId"), "observationId"
-                ),
-                "cardKind": _required_text(
-                    observation.get("cardKind"), "cardKind"
-                ),
-                "title": _required_text(observation.get("title"), "title"),
-                "bodyMarkdown": _required_text(
-                    observation.get("bodyMarkdown"), "bodyMarkdown"
-                ),
-                "evidence": _project_evidence(
-                    observation.get("evidenceRefs"), evidence_by_ref
-                ),
-            })
-        overview = _mapping(payload.get("storyOverview"), "storyOverview")
-        story_overview = {
-            "summaryMarkdown": _required_text(
-                overview.get("summaryMarkdown"), "summaryMarkdown"
-            ),
-            "evidence": _project_evidence(
-                overview.get("evidenceRefs"), evidence_by_ref
-            ),
-        }
         return {
-            "analysisSchemaVersion": 1,
+            "analysisSchemaVersion": 2,
             "artifactContract": NOVEL_ANALYSIS_REVIEW_CONTRACT,
             "artifactId": artifact_id,
             "artifactRef": NOVEL_ANALYSIS_REVIEW_REF_PREFIX + artifact_id,
-            "artifactKind": "novel_analysis_review",
+            "artifactKind": "novel_analysis_scalable_review",
             "createdByRunId": created_by_run_id,
             "taskId": task_id,
-            "sourceRevisionId": revision_id,
-            "sectionIds": list(dict.fromkeys(section_ids)),
-            "facts": projected_facts,
-            "craftCards": projected_cards,
-            "storyOverview": story_overview,
-            "analysisTechniqueResult": payload.get("techniqueResult"),
-            "coverage": coverage,
+            "sourceRevisionId": task_owner_id,
+            "sectionIds": section_ids,
+            "facts": facts,
+            "craftCards": cards,
+            "storyOverview": {"summaryMarkdown": summary},
+            "techniqueResult": payload.get("techniqueResult"),
             "conflicts": [],
             "reviewStatus": "pending",
-            "publicationSupported": True,
         }
 
-    async def _section_titles(
-        self,
-        revision_id: str,
-        section_ids: tuple[str, ...],
-    ) -> dict[str, str]:
-        if not section_ids:
-            return {}
-        placeholders = ",".join("?" for _ in section_ids)
+    async def _section_ids(self, revision_id: str) -> list[str]:
         rows = await self._db.fetch_all(
-            "SELECT id, title FROM novel_source_sections "
-            f"WHERE revision_id = ? AND id IN ({placeholders})",
-            [revision_id, *section_ids],
+            "SELECT id FROM novel_source_sections "
+            "WHERE revision_id = ? ORDER BY ordinal",
+            [revision_id],
         )
-        return {str(row["id"]): str(row.get("title") or "") for row in rows}
+        return [str(row["id"]) for row in rows]
 
 
 def _artifact_id(reference_or_id: str) -> str:
@@ -268,12 +161,6 @@ def _artifact_id(reference_or_id: str) -> str:
     return artifact_id
 
 
-def _mapping(value, name: str) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise NovelAnalysisReviewProjectionError(f"{name} is invalid")
-    return dict(value)
-
-
 def _mapping_list(value, name: str) -> list[dict[str, object]]:
     if not isinstance(value, list) or any(not isinstance(item, Mapping) for item in value):
         raise NovelAnalysisReviewProjectionError(f"{name} is invalid")
@@ -285,25 +172,6 @@ def _required_text(value, name: str) -> str:
     if not normalized:
         raise NovelAnalysisReviewProjectionError(f"{name} is invalid")
     return normalized
-
-
-def _project_evidence(value, evidence_by_ref) -> list[dict[str, object]]:
-    references = _mapping_list(value, "evidenceRefs")
-    if not references:
-        raise NovelAnalysisReviewProjectionError("evidenceRefs is empty")
-    result = []
-    for reference in references:
-        key = (
-            str(reference.get("segmentId") or ""),
-            str(reference.get("sourceSpanId") or ""),
-        )
-        evidence = evidence_by_ref.get(key)
-        if evidence is None:
-            raise NovelAnalysisReviewProjectionError(
-                "replacement review evidence reference is unresolved"
-            )
-        result.append(dict(evidence))
-    return result
 
 
 __all__ = [

@@ -101,6 +101,7 @@ class AgentRolloutPolicy:
     """Process configuration used only when a brand-new Run is created."""
 
     replacement_agent_kinds: frozenset[AgentKind] = frozenset()
+    create_identity_overrides: tuple[AgentImplementationIdentity, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -108,6 +109,12 @@ class AgentRolloutPolicy:
             "replacement_agent_kinds",
             frozenset(AgentKind(value) for value in self.replacement_agent_kinds),
         )
+        overrides = tuple(self.create_identity_overrides)
+        if any(item.recipe_version is not None for item in overrides):
+            raise ValueError("create identity override cannot pin a recipe version")
+        if len({item.agent_kind for item in overrides}) != len(overrides):
+            raise ValueError("create identity override is duplicated")
+        object.__setattr__(self, "create_identity_overrides", overrides)
 
     def identity_for_create(
         self,
@@ -116,6 +123,12 @@ class AgentRolloutPolicy:
         recipe_version: int | None = None,
     ) -> AgentImplementationIdentity:
         normalized = AgentKind(agent_kind)
+        override = next((
+            item for item in self.create_identity_overrides
+            if item.agent_kind is normalized
+        ), None)
+        if override is not None:
+            return replace(override, recipe_version=recipe_version)
         if normalized in self.replacement_agent_kinds:
             return replacement_implementation(
                 normalized,

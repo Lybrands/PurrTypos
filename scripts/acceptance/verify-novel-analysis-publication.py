@@ -13,7 +13,7 @@ import urllib.request
 from uuid import uuid4
 
 
-REVIEW_REF_PREFIX = "novel-analysis-v1://"
+REVIEW_REF_PREFIX = "novel-analysis://"
 ATTEMPT_ARTIFACT_NAMESPACE = "purrtypos.novel_analysis.v1"
 DEFAULT_EDIT_MARKER = "人工审核确认：药箱用途仍待后续情节揭示。"
 

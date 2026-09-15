@@ -109,6 +109,35 @@ test('native Provider progress grows one stable live region from real chunks', (
   assert.equal(output.finalText, '')
 })
 
+test('validated analysis stage output renders as ordinary process narration', () => {
+  const canonicalOutput = reduceCanonicalOutput(
+    initialCanonicalOutputState(),
+    {
+      eventId: 'analysis-stage-1', runId: 'run-1', turnId: 'turn-1',
+      invocationId: null, outputStreamId: null, sequence: 7,
+      source: 'runtime', kind: 'runtime.event', channel: 'commentary', visibility: 'public',
+      occurredAt: '2026-09-02T08:00:07Z', emittedAt: '2026-09-02T08:00:07Z',
+      payload: {
+        eventType: 'novel_analysis.stage_output',
+        data: {
+          stageId: 'task:extract',
+          text: '人物关系已经形成较稳定的判断。林月与苏文的双线由错位走向汇合。',
+        },
+      },
+    },
+  )
+  const timeline = buildAssistantTimeline({
+    role: 'assistant', content: '', canonicalOutput,
+  }, { messageIndex: 4, isStreaming: true })
+
+  assert.deepEqual(timeline, [{
+    type: 'commentary',
+    md: '人物关系已经形成较稳定的判断。林月与苏文的双线由错位走向汇合。',
+    startedAt: Date.parse('2026-09-02T08:00:07Z'),
+    regionKey: '4-analysis-stage-task:extract',
+  }])
+})
+
 test('planning uses public narration instead of an executable operation row', () => {
   for (const phase of ['planning', 'replanning']) {
     for (const status of ['succeeded', 'failed', 'canceled']) {
@@ -272,6 +301,43 @@ test('canonical timeline filters model operations, localizes tools, and groups c
   )
 })
 
+test('known operation label keys never fall back to the generic operation name', () => {
+  const operation = {
+    operationId: 'restored-tool',
+    runId: 'run-1',
+    invocationId: null,
+    kind: 'restored',
+    firstSequence: 1,
+    status: 'succeeded' as const,
+    startedAt: '2026-09-15T00:00:00Z',
+    display: {
+      labelKey: 'agent.operation.tool',
+      labelParams: {
+        displayNames: { 'zh-CN': '读取整书分析结果' },
+      },
+    },
+  }
+  const timeline = buildAssistantTimeline({
+    role: 'assistant',
+    content: '',
+    canonicalOutput: {
+      ...initialCanonicalOutputState(),
+      operationOrder: [operation.operationId],
+      operations: { [operation.operationId]: operation },
+    },
+  }, { messageIndex: 0 })
+
+  assert.equal(timeline[0]?.type, 'operation')
+  assert.equal(
+    timeline[0]?.type === 'operation' ? timeline[0].label : '',
+    '读取整书分析结果',
+  )
+  assert.equal(
+    getCanonicalOperationStatusText(operation, '读取整书分析结果', false),
+    '已完成 读取整书分析结果',
+  )
+})
+
 test('parameterized backend tool labels survive live and restored canonical timelines', () => {
   for (const [toolName, label] of [
     ['readScreenplayDeliverable', '读取第 2 集场景表'],
@@ -429,7 +495,56 @@ test('canonical timeline retains compaction and sequenced delegation without dup
   assert.deepEqual(
     groupConsecutiveWorkSteps(timeline, 'turn-canonical')
       .map((part) => part.type),
-    ['contextCompaction', 'commentary', 'stepGroup'],
+    ['contextCompaction', 'commentary', 'operation', 'delegations'],
+  )
+})
+
+test('derived child Agents keep their individual chronological positions with backend UTC timestamps', () => {
+  const base = initialCanonicalOutputState()
+  const child = (id: string, startedAt: string) => ({
+    delegationId: `run:${id}`,
+    runId: id,
+    agentName: id,
+    objective: `处理 ${id}`,
+    startedAt,
+    status: 'running' as const,
+    required: true,
+    priority: 0,
+  })
+  const timeline = buildAssistantTimeline({
+    role: 'assistant',
+    content: '',
+    delegations: [
+      child('child-1', '2026-08-12 00:00:02.250'),
+      child('child-2', '2026-08-12 00:00:04'),
+    ],
+    canonicalOutput: {
+      ...base,
+      lastSequence: 3,
+      commentaryBlocks: [{
+        outputStreamId: 'commentary-1', firstSequence: 1, lastSequence: 1,
+        startedAt: '2026-08-12T00:00:01Z', text: '先检查范围。',
+        committed: true, aborted: false,
+      }],
+      operationOrder: ['read-1'],
+      operations: {
+        'read-1': {
+          operationId: 'read-1', runId: 'root', invocationId: null,
+          kind: 'tool', firstSequence: 3, status: 'succeeded',
+          startedAt: '2026-08-12T00:00:03Z',
+          display: { labelParams: { toolName: 'readNovelSourceSlice' } },
+        },
+      },
+    },
+  }, { messageIndex: 0 })
+
+  assert.deepEqual(timeline.map((part) => part.type), [
+    'commentary', 'delegations', 'operation', 'delegations',
+  ])
+  assert.deepEqual(
+    timeline.filter((part) => part.type === 'delegations')
+      .map((part) => part.items[0].runId),
+    ['child-1', 'child-2'],
   )
 })
 
@@ -655,7 +770,7 @@ test('execution panel covers active empty work and completed visible operations'
     {
       visible: true,
       active: true,
-      autoOpen: true,
+      autoOpen: false,
       stepCount: 0,
       title: '正在进行',
     },
@@ -936,6 +1051,37 @@ test('consecutive legacy operations collapse into one step group', () => {
       ['写入剧本候选稿', '检查剧本候选稿', '发布候选稿'],
     )
   }
+})
+
+test('each delegated Agent remains a standalone chronological row', () => {
+  const delegation = {
+    delegationId: 'delegation-review',
+    runId: 'child-review',
+    agentName: 'reviewer',
+    objective: '检查连续性',
+    status: 'running' as const,
+    required: true,
+    priority: 0,
+  }
+  const grouped = groupConsecutiveWorkSteps([
+    {
+      type: 'tools',
+      segmentIndex: 0,
+      segment: { commentaryBlockIndex: null, labels: ['读取资料'] },
+    },
+    { type: 'delegations', items: [delegation] },
+    {
+      type: 'tools',
+      segmentIndex: 1,
+      segment: { commentaryBlockIndex: null, labels: ['保存结果'] },
+    },
+  ], 'turn-agent-row')
+
+  assert.deepEqual(grouped.map((item) => item.type), [
+    'tools',
+    'delegations',
+    'tools',
+  ])
 })
 
 test('a persisted single-operation batch keeps its recorded row timing', () => {

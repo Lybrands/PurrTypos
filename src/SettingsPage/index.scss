@@ -118,6 +118,38 @@
   }
 }
 
+.settings-preference-row {
+  display: flex;
+  max-width: 620px;
+  min-height: 68px;
+  margin-top: 14px;
+  padding: 13px 15px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-xs);
+}
+
+.settings-preference-copy {
+  min-width: 0;
+
+  strong {
+    color: var(--text-primary);
+    font-size: var(--font-size);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  p {
+    margin: 5px 0 0;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    line-height: 1.55;
+  }
+}
+
 .settings-field {
   display: flex;
   max-width: 540px;

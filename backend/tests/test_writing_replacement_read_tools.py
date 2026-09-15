@@ -26,8 +26,8 @@ from agents.writing.profile import (
     WritingReplacementProfile,
     writing_replacement_implementation_profile,
 )
-from agents.novel_analysis.profile import (
-    NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,
+from agents.novel_analysis.scalable_profile import (
+    NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
 )
 from agents.screenplay.profile import SCREENPLAY_REPLACEMENT_PROFILE_ID
 from agents.writing.composition import (
@@ -780,7 +780,7 @@ async def test_versioned_composition_selects_writing_replacement_for_new_run(
 
     assert composition.agent_profile_ids == (
         WRITING_REPLACEMENT_PROFILE_ID,
-        NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,
+        NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
         SCREENPLAY_REPLACEMENT_PROFILE_ID,
     )
     assert prepared.metadata[RUNTIME_PROFILE_METADATA_KEY] == (

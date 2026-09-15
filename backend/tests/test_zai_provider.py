@@ -53,7 +53,7 @@ class _FakeClient:
         self.close_calls += 1
 
 
-def test_zai_transport_does_not_preempt_source_analysis_activity_window(
+def test_zai_transport_does_not_preempt_agent_invocation_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ):
     from infrastructure.models import zai_chat
@@ -74,7 +74,7 @@ def test_zai_transport_does_not_preempt_source_analysis_activity_window(
     timeout = captured["timeout"]
     assert captured["max_retries"] == 0
     assert timeout.connect == 15.0
-    assert timeout.read == 125.0
+    assert timeout.read == 305.0
     assert timeout.write == 30.0
     assert timeout.pool == 30.0
 

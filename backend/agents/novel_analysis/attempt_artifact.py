@@ -27,6 +27,11 @@ from purra.json_values import canonical_json_digest, thaw_json_mapping
 NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE = "purrtypos.novel_analysis.v1"
 NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_KIND = "unit_attempt_result"
 NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_SCHEMA_VERSION = 1
+INTERRUPTED_ATTEMPT_CODES = frozenset({
+    "execution_interrupted",
+    "execution_recovery_after_restart",
+    "novel_analysis_stage_output_failed",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,7 +127,7 @@ class NovelAnalysisAttemptArtifactStore:
             expected_revision=artifact.revision,
             expected_item_count=1,
             expected_coverage_keys=(unit_id,),
-            resource_ref=f"novel-analysis-v1://{artifact.id}",
+            resource_ref=f"novel-analysis://{artifact.id}",
             write_lease=lease,
         ))
         return _receipt(finalized.id, replayed=replayed)
@@ -170,6 +175,30 @@ class NovelAnalysisAttemptArtifactStore:
             return None
         return await self.load_payload(artifact.id)
 
+    async def try_load_execution_payload(
+        self,
+        *,
+        task_id: str,
+        unit_id: str,
+        attempt: int,
+        error_code: object = None,
+    ) -> tuple[dict[str, object], str] | None:
+        """Load this attempt, or its predecessor after process interruption."""
+
+        operation_id = f"{task_id}:{unit_id}:{attempt}"
+        payload = await self.try_load_operation_payload(
+            task_id=task_id, operation_id=operation_id
+        )
+        if payload is not None:
+            return payload, operation_id
+        if attempt < 2 or str(error_code or "") not in INTERRUPTED_ATTEMPT_CODES:
+            return None
+        previous_operation_id = f"{task_id}:{unit_id}:{attempt - 1}"
+        payload = await self.try_load_operation_payload(
+            task_id=task_id, operation_id=previous_operation_id
+        )
+        return (payload, previous_operation_id) if payload is not None else None
+
     def _require_same_attempt(self, artifact, operation_id, payload) -> None:
         metadata = artifact.metadata
         if (
@@ -192,12 +221,13 @@ class NovelAnalysisAttemptArtifactStore:
 def _receipt(artifact_id: str, *, replayed: bool) -> AnalysisAttemptArtifactReceipt:
     return AnalysisAttemptArtifactReceipt(
         artifact_id=artifact_id,
-        resource_ref=f"novel-analysis-v1://{artifact_id}",
+        resource_ref=f"novel-analysis://{artifact_id}",
         replayed=replayed,
     )
 
 
 __all__ = [
     "AnalysisAttemptArtifactReceipt",
+    "INTERRUPTED_ATTEMPT_CODES",
     "NovelAnalysisAttemptArtifactStore",
 ]

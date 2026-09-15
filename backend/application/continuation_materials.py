@@ -17,11 +17,13 @@ FACT_LABELS = {
 
 def fact_markdown(record):
     value = record['value']
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+    if isinstance(value, dict):
+        text = value.get('content') or value.get('profile_md') or json.dumps(value, ensure_ascii=False, indent=2)
+    else:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
     if record.get('claimNature') == 'inference':
         text = '【推断，非原文明示】\n\n' + text
-    evidence = '来源：' + '、'.join(dict.fromkeys(e.get('sectionTitle', e['sectionId']) for e in record['evidence']))
-    return f"### {record['subjectKey']} · {FACT_LABELS.get(record['factKind'], '原作事实')}\n{record['predicate']}：{text}\n\n{evidence}"
+    return f"### {record['subjectKey']} · {FACT_LABELS.get(record['factKind'], '原作事实')}\n{record['predicate']}：{text}"
 
 
 async def initialize_materials(db, book_id, preview):
@@ -33,11 +35,19 @@ async def initialize_materials(db, book_id, preview):
         if kind == 'plot':
             identity = key
         elif kind == 'character':
-            identity = await db.execute_and_get_id('INSERT INTO characters(book_id,name,profile_md) VALUES (?,?,?)', [book_id, key, ''])
+            material = next((r['value'] for r in records if r['factKind'] == 'character_summary' and isinstance(r['value'], dict)), {})
+            identity = await db.execute_and_get_id(
+                'INSERT INTO characters(book_id,name,tags,profile_md) VALUES (?,?,?,?)',
+                [book_id, material.get('name') or key, material.get('tags') or '', ''],
+            )
         elif kind == 'entity':
+            material = next((r['value'] for r in records if isinstance(r['value'], dict) and r['value'].get('profile_md')), {})
             entity_types = {r['factKind'] for r in records} & {'location', 'faction', 'item'}
-            entity_type = next(iter(entity_types)) if len(entity_types) == 1 else 'other'
-            identity = await db.execute_and_get_id("INSERT INTO setting_entities(book_id,entity_type,name,profile_md) VALUES (?,?,?,?)", [book_id, entity_type, key, ''])
+            entity_type = material.get('entity_type') or (next(iter(entity_types)) if len(entity_types) == 1 else 'other')
+            identity = await db.execute_and_get_id(
+                "INSERT INTO setting_entities(book_id,entity_type,name,tags,profile_md) VALUES (?,?,?,?,?)",
+                [book_id, entity_type, material.get('name') or key, material.get('tags') or '', ''],
+            )
         else:
             identity = book_id
             await db.execute('INSERT INTO story_background(book_id,content) VALUES (?,?)', [book_id, ''])
@@ -82,7 +92,7 @@ async def initialize_plot(db, book_id, source_preview, svc, plot_entries):
             '# 原作情节快照\n\n' + body + '\n\n> 此文件保留创建时的来源资料；续写发展在大纲和伏笔管理中维护。'))
 
     records = sorted((r for r in source_preview['records'] if r['factKind'] in {'event', 'timeline', 'unresolved_plot', 'foreshadowing'}),
-                     key=lambda r: (max(e['sectionOrdinal'] for e in r['evidence']), r['sourceFactId']))
+                     key=lambda r: (r['lastSectionOrdinal'], r['sourceFactId']))
     def content(record):
         text = resolve_source_links(fact_markdown(record), entries)
         entry = next(item for item in plot_entries if item['sourceKey'] == record['subjectKey'])
@@ -94,7 +104,7 @@ async def initialize_plot(db, book_id, source_preview, svc, plot_entries):
             key = (record['factKind'], record['subjectKey'], record['predicate'])
             previous = latest_plots.get(key)
             # At the same source position, a resolved state takes precedence.
-            if previous and previous.get('lifecycleStatus') == 'resolved' and max(e['sectionOrdinal'] for e in previous['evidence']) == max(e['sectionOrdinal'] for e in record['evidence']):
+            if previous and previous.get('lifecycleStatus') == 'resolved' and previous['lastSectionOrdinal'] == record['lastSectionOrdinal']:
                 continue
             latest_plots[key] = record
     open_plots = [r for r in latest_plots.values() if r.get('lifecycleStatus', 'active') == 'active']
@@ -104,15 +114,15 @@ async def initialize_plot(db, book_id, source_preview, svc, plot_entries):
             '\n\n# 续写起点与待推进事项\n\n' + '\n\n'.join(content(r) for r in open_plots) + '\n\n# 后续剧情规划\n\n'})
     ledger = StoryMemoryLedger(SqliteStoryMemoryRepository(db))
     for record in open_plots:
-        section = max(record['evidence'], key=lambda e: e['sectionOrdinal'])
-        chapter_id = 'source:' + book_id + ':' + section['sectionId']
+        section = next(item for item in source_preview['sections'] if item['ordinal'] == record['lastSectionOrdinal'])
+        chapter_id = 'source:' + book_id + ':' + section['id']
         delta = await ledger.stage_settings(book_id=book_id, chapter_id=chapter_id,
             source_revision=source_preview['snapshotDigest'], source_type='continuation',
             changes=[StorySettingChange(
                 setting=PlotThread(thread_id='source-' + record['sourceFactId'],
                     title=record['subjectKey'] + ' · ' + FACT_LABELS[record['factKind']],
                     summary=content(record), opened_chapter_id=chapter_id),
-                source=SourceReference(chapter_id=chapter_id, excerpt=section['excerpt'],
+                source=SourceReference(chapter_id=chapter_id, excerpt=str(record['value']),
                     locator={'analysisId': source_preview['sourceAnalysisId'], 'sourceFactId': record['sourceFactId']},
-                    narrative_order=section['sectionOrdinal']))])
+                    narrative_order=section['ordinal']))])
         await ledger.approve_delta(delta.id)

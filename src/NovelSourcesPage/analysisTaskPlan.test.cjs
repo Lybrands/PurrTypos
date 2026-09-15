@@ -2,9 +2,16 @@ const assert = require('node:assert/strict')
 const path = require('node:path')
 const test = require('node:test')
 const { loadTypeScriptModule } = require('../../scripts/load-typescript-module.cjs')
-const { buildNovelAnalysisTaskPlan, buildNovelAnalysisTiming } = loadTypeScriptModule(
+const { backendTimestampMs, buildNovelAnalysisTaskPlan, buildNovelAnalysisTiming } = loadTypeScriptModule(
   path.join(__dirname, 'analysisTaskPlan.ts'),
 )
+
+test('backend timestamps without an offset are interpreted as UTC', () => {
+  assert.equal(
+    backendTimestampMs('2026-09-14 16:57:50.627'),
+    Date.parse('2026-09-14T16:57:50.627Z'),
+  )
+})
 
 const run = (overrides = {}) => ({
   runId: 'analysis-run', runStatus: 'done', taskId: 'analysis-task',

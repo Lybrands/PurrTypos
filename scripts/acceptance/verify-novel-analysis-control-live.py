@@ -389,7 +389,7 @@ def run_resume(args, runtime: dict) -> None:
             args.base_url,
             "POST",
             f"/api/novel-analysis-tasks/{checkpoint['taskId']}/resume",
-            {"runtime": runtime, "retryFailed": False},
+            {"runtime": runtime},
             headers={"Idempotency-Key": command_id},
         ),
         "resume Novel Analysis task",
@@ -460,7 +460,7 @@ def run_cancel(args, runtime: dict) -> None:
             args.base_url,
             "POST",
             f"/api/novel-analysis-tasks/{active['taskId']}/resume",
-            {"runtime": runtime, "retryFailed": False},
+            {"runtime": runtime},
             headers={"Idempotency-Key": "cancel-resume-rejected-" + uuid4().hex},
         )
     except RequestError as error:

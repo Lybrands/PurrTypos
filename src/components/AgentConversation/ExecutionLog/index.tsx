@@ -65,22 +65,29 @@ export default function ExecutionLog({
   children,
 }: ExecutionLogProps) {
   const [openState, setOpenState] = React.useState(() =>
-    getInitialExecutionLogOpenState(
-      openStateStore.get(logKey),
-      autoOpen,
-    ),
+    active
+      ? { open: true, manuallySet: false }
+      : getInitialExecutionLogOpenState(
+          openStateStore.get(logKey),
+          autoOpen,
+        ),
   );
   const contentId = React.useId();
   const now = useTicker(active && startedAt != null);
 
   React.useEffect(() => {
+    if (active) {
+      setOpenState({ open: true, manuallySet: false });
+      return;
+    }
     setOpenState(getInitialExecutionLogOpenState(
       readExecutionLogOpenState(openStateStore, logKey),
       autoOpen,
     ));
-  }, [logKey]);
+  }, [active, autoOpen, logKey]);
 
   React.useEffect(() => {
+    if (active) return;
     const nextState = applyExecutionLogAutoOpen(
       openState,
       autoOpen,
@@ -88,7 +95,7 @@ export default function ExecutionLog({
     if (nextState === openState) return;
     writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
-  }, [autoOpen, logKey, openState]);
+  }, [active, autoOpen, logKey, openState]);
 
   const elapsedMs = active && startedAt != null
     ? Math.max(0, now - startedAt)
@@ -100,6 +107,7 @@ export default function ExecutionLog({
       ? formatDuration(elapsedMs)
       : null;
   const toggleOpen = () => {
+    if (active) return;
     const nextState = toggleExecutionLogOpenState(openState);
     writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
@@ -109,7 +117,7 @@ export default function ExecutionLog({
     <section
       className={`work-log ${openState.open ? "work-log--open" : ""} ${active ? "work-log--active" : ""} ${hasError ? "work-log--error" : ""}`}
     >
-      {hasDetails ? (
+      {hasDetails && !active ? (
         <button
           type="button"
           className="work-log__toggle"

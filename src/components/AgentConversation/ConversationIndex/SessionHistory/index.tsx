@@ -15,6 +15,7 @@ import type {
   AgentConversationController,
   AgentConversationSession,
 } from '../../controller'
+import { sortConversationSessionsNewestFirst } from '../../sessionView'
 import './index.scss'
 
 export interface AgentConversationHistoryController {
@@ -96,7 +97,7 @@ export default function SessionHistory({
 
   const grouped = React.useMemo(() => {
     const groups: Record<string, AgentConversationSession[]> = {}
-    for (const session of [...filtered].reverse()) {
+    for (const session of sortConversationSessionsNewestFirst(filtered)) {
       const group = getDateGroup(session.createdAt)
       if (!groups[group]) groups[group] = []
       groups[group].push(session)

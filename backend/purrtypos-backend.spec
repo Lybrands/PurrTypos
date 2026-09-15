@@ -22,6 +22,12 @@ if os.path.isdir(_skills_src):
 _screenplay_skills = os.path.join("domains", "screenplay_agent", "skills")
 _datas.append((os.path.join(_spec_dir, _screenplay_skills), _screenplay_skills))
 
+_novel_analysis_skills = os.path.join("agents", "novel_analysis", "skills")
+_datas.append((
+    os.path.join(_spec_dir, _novel_analysis_skills),
+    _novel_analysis_skills,
+))
+
 _hiddenimports = [
     "certifi",
     "aiosqlite",

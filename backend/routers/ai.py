@@ -705,6 +705,7 @@ async def get_agent_run_snapshot(
     """Return a resumable Run snapshot and durable events after a cursor."""
 
     from agents.shared.run_query import VersionedAgentRunQueryService
+    from application.agent_run_queries import AgentRunQueryService
     from application.agent_composition import get_agent_composition
     from application.writing_proposal_read_model import (
         SqliteWritingProposalReadModel,
@@ -717,12 +718,23 @@ async def get_agent_run_snapshot(
     run = await get_run(db, run_id)
     if run is None:
         return {"success": False, "error": "Agent Run 不存在"}
-    snapshot = await VersionedAgentRunQueryService(
-        composition.run_snapshot_reader,
-        composition.output_repository,
-        composition.agent_implementation_router,
-        product_event_query=SqliteWritingProposalReadModel(db),
-    ).get_snapshot(
+    query_options = {
+        "product_event_query": SqliteWritingProposalReadModel(db),
+    }
+    if run.get("parent_run_id"):
+        query = AgentRunQueryService(
+            composition.run_snapshot_reader,
+            composition.output_repository,
+            **query_options,
+        )
+    else:
+        query = VersionedAgentRunQueryService(
+            composition.run_snapshot_reader,
+            composition.output_repository,
+            composition.agent_implementation_router,
+            **query_options,
+        )
+    snapshot = await query.get_snapshot(
         run_id,
         after_event_id=after,
         limit=limit,
@@ -730,6 +742,91 @@ async def get_agent_run_snapshot(
     if snapshot is None:
         return {"success": False, "error": "Agent Run 不存在"}
     return {"success": True, "data": snapshot}
+
+
+@router.get("/ai/agent-runs/{run_id}/sub-agent-conversation")
+async def get_sub_agent_conversation(run_id: str):
+    """Return every completed turn leading to the selected Child Run."""
+
+    from application.agent_composition import get_agent_composition
+    from application.sub_agent_result_presentation import present_sub_agent_result
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
+    from purra.errors import ContractViolationError
+
+    run = await get_run(get_db(), run_id)
+    if run is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    if not run.get("parent_run_id"):
+        return {"success": False, "error": "该 Run 不是子 Agent 对话"}
+
+    composition = get_agent_composition()
+    tree_runs = []
+    try:
+        selected_tree_run = await composition.run_tree_repository.get_run(run_id)
+    except ContractViolationError:
+        selected_tree_run = None
+    if selected_tree_run is not None:
+        agent_id = selected_tree_run.agent_id
+        current = selected_tree_run
+        seen = set()
+        while current is not None:
+            if current.run_id in seen or current.agent_id != agent_id:
+                raise HTTPException(status_code=409, detail="子 Agent 对话链无效")
+            seen.add(current.run_id)
+            tree_runs.append(current)
+            if current.previous_run_id is None:
+                break
+            current = await composition.run_tree_repository.get_run(
+                current.previous_run_id
+            )
+        tree_runs.reverse()
+    else:
+        agent_id = str(run.get("agent_id") or run_id)
+        tree_runs = [None]
+
+    turns = []
+    for tree_run in tree_runs:
+        turn_run_id = tree_run.run_id if tree_run is not None else run_id
+        stored = run if turn_run_id == run_id else await get_run(get_db(), turn_run_id)
+        status = str((stored or {}).get("status") or "")
+        if status in {"pending", "queued"}:
+            display_status = "queued"
+        elif status in {"claimed", "running", "waiting"}:
+            display_status = "running"
+        elif status == "done":
+            display_status = "done"
+        elif status == "canceled":
+            display_status = "canceled"
+        else:
+            display_status = "failed"
+        final_response = str((stored or {}).get("final_response") or "")
+        if status == "done" and not final_response:
+            try:
+                final_response = await composition.output_repository.load_validated_result(
+                    turn_run_id
+                )
+            except ContractViolationError:
+                final_response = ""
+        turns.append({
+            "runId": turn_run_id,
+            "prompt": (
+                tree_run.objective if tree_run is not None
+                else str((stored or {}).get("prompt") or "")
+            ),
+            "finalResponse": present_sub_agent_result(final_response),
+            "status": display_status,
+        })
+
+    return {
+        "success": True,
+        "data": {
+            "version": 2,
+            "agentId": agent_id,
+            "selectedRunId": run_id,
+            "turns": turns,
+        },
+    }
 
 
 @router.get("/ai/agent-runs/{run_id}/events")

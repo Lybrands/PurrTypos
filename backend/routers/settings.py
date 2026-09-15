@@ -15,6 +15,7 @@ from application.run_provenance import digest_model_endpoint
 from infrastructure.models.profiles.descriptors import model_descriptors
 
 router = APIRouter(tags=["settings"])
+AGENT_PREVENT_SYSTEM_SLEEP_SETTING = "agent_prevent_system_sleep"
 
 
 def _serialize_value(value) -> str:
@@ -43,6 +44,32 @@ async def get_settings():
         data["ai_model_configs"] = [upgrade_model_config(c) for c in data["ai_model_configs"]]
     data["model_descriptors"] = model_descriptors()
     return {"success": True, "data": data}
+
+
+@router.get("/runtime/agent-power-state")
+async def get_agent_power_state():
+    """Return the durable Agent activity used by the Electron power lease."""
+
+    db = get_db()
+    setting = await db.fetch_one(
+        "SELECT value FROM settings WHERE key = ?",
+        [AGENT_PREVENT_SYSTEM_SLEEP_SETTING],
+    )
+    raw_enabled = (setting or {}).get("value")
+    try:
+        enabled = json.loads(raw_enabled) is True
+    except (json.JSONDecodeError, TypeError):
+        enabled = False
+    active = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_runs WHERE status = 'running'"
+    )
+    return {
+        "success": True,
+        "data": {
+            "enabled": enabled,
+            "activeAgentRunCount": int((active or {}).get("count") or 0),
+        },
+    }
 
 
 @router.put("/settings")

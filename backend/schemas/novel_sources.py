@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
 
@@ -69,19 +69,13 @@ class FollowUpNovelAnalysisRequest(BaseModel):
 
 
 class ResumeNovelAnalysisRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     runtime: NovelAnalysisRuntimeRequest
-    retryFailed: bool = False
 
 
 class PauseNovelAnalysisRequest(BaseModel):
     expectedTaskRevision: int | None = Field(default=None, ge=1)
-
-
-class NovelAnalysisEvidenceRequest(BaseModel):
-    sectionId: str = Field(min_length=1, max_length=200)
-    excerpt: str = Field(min_length=1, max_length=20_000)
-    segmentStartCharacter: int | None = Field(default=None, ge=0, le=10_000_000)
-    segmentEndCharacter: int | None = Field(default=None, gt=0, le=10_000_000)
 
 
 class NovelAnalysisFactRequest(BaseModel):
@@ -92,7 +86,6 @@ class NovelAnalysisFactRequest(BaseModel):
     predicate: str = Field(min_length=1, max_length=300)
     value: Any
     lifecycleStatus: str = Field(default="active", min_length=1, max_length=100)
-    evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
 
 
 class NovelAnalysisCraftCardRequest(BaseModel):
@@ -100,20 +93,17 @@ class NovelAnalysisCraftCardRequest(BaseModel):
     cardKind: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
     bodyMarkdown: str = Field(min_length=1, max_length=100_000)
-    evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
 
 
 class NovelAnalysisStoryOverviewRequest(BaseModel):
     summaryMarkdown: str = Field(min_length=1, max_length=20_000)
-    evidence: list[NovelAnalysisEvidenceRequest] = Field(min_length=1)
 
 
 class ReviewNovelAnalysisRequest(BaseModel):
     facts: list[NovelAnalysisFactRequest]
     craftCards: list[NovelAnalysisCraftCardRequest]
     storyOverview: NovelAnalysisStoryOverviewRequest | None = None
-    techniqueResult: dict[str, Any] | None = None
-    analysisTechniqueResult: dict[str, Any] | None = None
+    techniqueResult: dict[str, Any]
 
 
 class AnalysisSessionUpdate(BaseModel):

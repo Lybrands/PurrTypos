@@ -1087,12 +1087,27 @@ class SqliteLongTaskRepository:
         *,
         reason_code: str = "execution_recovery_after_restart",
     ) -> tuple[str, ...]:
-        """Pause every process-owned task and release its active unit."""
+        """Pause only tasks whose Unit and Root leases have actually expired.
+
+        A second desktop/backend process can briefly share the same database.
+        Process startup is therefore not proof that existing work is orphaned.
+        """
 
         async with self._db.transaction(cancellation_linearizable=True):
+            now_ms = int(time.time() * 1000)
             rows = await self._db.fetch_all(
-                "SELECT id FROM ai_agent_long_tasks "
-                "WHERE status = 'running' ORDER BY create_time ASC"
+                "SELECT task.id FROM ai_agent_long_tasks task "
+                "WHERE task.status = 'running' "
+                "AND NOT EXISTS (SELECT 1 FROM ai_agent_long_task_units unit "
+                "WHERE unit.task_id = task.id "
+                "AND unit.status IN ('claimed', 'running') "
+                "AND unit.lease_expires_at_ms > ?) "
+                "AND NOT EXISTS (SELECT 1 FROM ai_agent_long_task_runs binding "
+                "JOIN ai_agent_runs run ON run.id = binding.run_id "
+                "WHERE binding.task_id = task.id AND run.status = 'running' "
+                "AND run.lease_expires_at_ms > ?) "
+                "ORDER BY task.create_time ASC",
+                [now_ms, now_ms],
             )
             task_ids = tuple(str(row["id"]) for row in rows)
             for task_id in task_ids:
@@ -1100,7 +1115,6 @@ class SqliteLongTaskRepository:
                 if task.cancellation_requested_at_ms is not None:
                     await self._cancel_in_transaction(task)
                     continue
-                now_ms = int(time.time() * 1000)
                 await self._db.execute(
                     "UPDATE ai_agent_long_task_units SET status = 'pending', "
                     "max_attempts = max_attempts + 1, worker_id = NULL, "
@@ -1251,7 +1265,12 @@ class SqliteLongTaskRepository:
                     "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                     [task.id],
                 )
-                await self._clear_task_state_reason(task)
+                await self._clear_task_state_reason(
+                    task,
+                    preserve_automatic_recovery=(
+                        normalized_recovery_source == "automatic"
+                    ),
+                )
                 updated = await self._require(task.id)
                 await append_long_task_event(
                     self._db,
@@ -1280,7 +1299,12 @@ class SqliteLongTaskRepository:
                 "WHERE task_id = ? AND status = 'blocked'",
                 [task.id],
             )
-            await self._clear_task_state_reason(task)
+            await self._clear_task_state_reason(
+                task,
+                preserve_automatic_recovery=(
+                    normalized_recovery_source == "automatic"
+                ),
+            )
             await self._update_task_status(task, LongTaskStatus.RUNNING)
             updated = await self._require(task.id)
             await append_long_task_event(
@@ -1637,13 +1661,27 @@ class SqliteLongTaskRepository:
             [normalized_code or None, normalized_scope, task.id],
         )
 
-    async def _clear_task_state_reason(self, task) -> None:
+    async def _clear_task_state_reason(
+        self,
+        task,
+        *,
+        preserve_automatic_recovery: bool = False,
+    ) -> None:
+        recovery_paths = (
+            "'$.autoResumeNotBeforeMs', '$.autoRecoveryBudgetExceeded', "
+            "'$.autoRecoveryReasonCode'"
+            if preserve_automatic_recovery
+            else (
+                "'$.autoResumeNotBeforeMs', '$.automaticRecoveryAttempt', "
+                "'$.automaticRecoveryWaitSpentMs', '$.autoRecoveryBudgetExceeded', "
+                "'$.autoRecoveryReasonCode'"
+            )
+        )
         await self._db.execute(
             "UPDATE ai_agent_long_tasks SET state_reason_code = NULL, "
             "state_reason_scope = NULL, metadata_json = json_remove(metadata_json, "
-            "'$.autoResumeNotBeforeMs', '$.automaticRecoveryAttempt', "
-            "'$.automaticRecoveryWaitSpentMs', '$.autoRecoveryBudgetExceeded', "
-            "'$.autoRecoveryReasonCode'), "
+            + recovery_paths
+            + "), "
             "update_time = CURRENT_TIMESTAMP WHERE id = ?",
             [task.id],
         )

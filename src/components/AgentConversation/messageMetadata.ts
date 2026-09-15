@@ -3,10 +3,11 @@ import type { AiModelConfig } from '../../types'
 export function parseAgentMessageTime(value?: string): Date | null {
   if (!value?.trim()) return null
   const raw = value.trim()
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)
-    ? `${raw.replace(' ', 'T')}Z`
-    : raw
-  const date = new Date(normalized)
+  const normalized = raw.replace(' ', 'T')
+  const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(normalized)
+    ? `${normalized}Z`
+    : normalized
+  const date = new Date(timestamp)
   return Number.isNaN(date.getTime()) ? null : date
 }
 

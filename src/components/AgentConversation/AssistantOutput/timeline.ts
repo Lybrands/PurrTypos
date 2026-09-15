@@ -5,6 +5,8 @@ import type {
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
 import { publicAgentProgressNarration } from "../../../agent-runtime/outputPresentation.ts";
 import { markdownToPlainText } from "../../../utils/markdown.ts";
+import { parseAgentMessageTime } from "../messageMetadata.ts";
+import { collapseSubAgentDelegations } from "../DelegationStatus/presentation.ts";
 import {
   resolveLocalizedToolDisplayName,
   toolCallDisplayRow,
@@ -108,6 +110,10 @@ export interface BuildAssistantTimelineOptions {
   loading?: boolean;
   /** 子 Run 可显示已收到的普通文本；根回答始终保持终态原子提交。 */
   allowStreamingText?: boolean;
+}
+
+function timelineTimestamp(value: string | null | undefined): number {
+  return parseAgentMessageTime(value ?? undefined)?.getTime() ?? Number.NaN;
 }
 
 export function isVisibleExecutionLogPart(
@@ -271,7 +277,7 @@ export function getExecutionPanelPresentation(
   return {
     visible,
     active,
-    autoOpen: active,
+    autoOpen: false,
     stepCount,
     title: active
       ? "正在进行"
@@ -399,19 +405,18 @@ export function buildAssistantTimeline(
         part: { type: "contextCompaction", state: message.contextCompaction },
       });
     }
-    if (message.delegations?.length) {
-      const delegationSequences = message.delegations.flatMap((delegation) => {
-        const sequence = canonicalOutput.delegations[delegation.delegationId]
-          ?.firstSequence;
-        return sequence == null ? [] : [sequence];
-      });
+    collapseSubAgentDelegations(message.delegations ?? []).forEach((delegation, delegationIndex) => {
       canonicalParts.push({
-        sequence: delegationSequences.length > 0
-          ? Math.min(...delegationSequences)
-          : Number.NEGATIVE_INFINITY,
-        part: { type: "delegations", items: message.delegations },
+        sequence: canonicalOutput.delegations[delegation.delegationId]
+          ?.firstSequence
+          ?? derivedDelegationSequence(
+            canonicalOutput,
+            delegation.startedAt,
+            delegationIndex,
+          ),
+        part: { type: "delegations", items: [delegation] },
       });
-    }
+    });
     canonicalOutput.commentaryBlocks
       .filter((block) => block.stage || !block.aborted)
       .forEach((block) => {
@@ -431,7 +436,7 @@ export function buildAssistantTimeline(
           } : {
             type: "commentary",
             md: narration,
-            startedAt: Date.parse(block.startedAt),
+            startedAt: timelineTimestamp(block.startedAt),
             regionKey: `${messageIndex}-canonical-commentary-${block.outputStreamId}`,
           },
         });
@@ -444,7 +449,7 @@ export function buildAssistantTimeline(
         part: {
           type: "commentary",
           md: narration,
-          startedAt: Date.parse(progress.occurredAt),
+          startedAt: timelineTimestamp(progress.occurredAt),
           regionKey: `${messageIndex}-planning-progress-${progress.eventId}`,
         },
       });
@@ -457,8 +462,21 @@ export function buildAssistantTimeline(
         part: {
           type: "commentary",
           md: narration,
-          startedAt: Date.parse(progress.occurredAt),
+          startedAt: timelineTimestamp(progress.occurredAt),
           regionKey: `${messageIndex}-agent-progress-stream-${progress.outputStreamId}`,
+        },
+      });
+    });
+    (canonicalOutput.stageOutputs ?? []).forEach((stage) => {
+      const narration = publicAgentProgressNarration(stage.text);
+      if (!narration) return;
+      canonicalParts.push({
+        sequence: stage.sequence,
+        part: {
+          type: "commentary",
+          md: narration,
+          startedAt: timelineTimestamp(stage.occurredAt),
+          regionKey: `${messageIndex}-analysis-stage-${stage.stageId}`,
         },
       });
     });
@@ -539,10 +557,6 @@ export function buildAssistantTimeline(
   if (message.contextCompaction) {
     parts.push({ type: "contextCompaction", state: message.contextCompaction });
   }
-  if (message.delegations?.length) {
-    parts.push({ type: "delegations", items: message.delegations });
-  }
-
   segments.forEach((segment, segmentIndex) => {
     appendCommentary(segment.commentaryBlockIndex, `tool-${segmentIndex}`);
     if (segment.labels.length === 0) return;
@@ -565,6 +579,10 @@ export function buildAssistantTimeline(
 
   blocks.forEach((_block, blockIndex) => {
     appendCommentary(blockIndex, "tail");
+  });
+
+  collapseSubAgentDelegations(message.delegations ?? []).forEach((delegation) => {
+    parts.push({ type: "delegations", items: [delegation] });
   });
 
   const assistantMarkdown = message.content;
@@ -595,6 +613,41 @@ export function buildAssistantTimeline(
   return parts;
 }
 
+function derivedDelegationSequence(
+  output: NonNullable<AgentConversationMessage["canonicalOutput"]>,
+  startedAt: string | null | undefined,
+  index: number,
+): number {
+  const timestamp = timelineTimestamp(startedAt);
+  if (!Number.isFinite(timestamp)) return output.lastSequence + 1 + index / 1000;
+  const anchors = [
+    ...output.commentaryBlocks.map((item) => ({
+      timestamp: timelineTimestamp(item.startedAt), sequence: item.firstSequence,
+    })),
+    ...output.planningProgress.map((item) => ({
+      timestamp: timelineTimestamp(item.occurredAt), sequence: item.sequence,
+    })),
+    ...output.agentProgress.map((item) => ({
+      timestamp: timelineTimestamp(item.occurredAt), sequence: item.sequence,
+    })),
+    ...(output.stageOutputs ?? []).map((item) => ({
+      timestamp: timelineTimestamp(item.occurredAt), sequence: item.sequence,
+    })),
+    ...output.operationOrder.map((operationId) => output.operations[operationId])
+      .filter(Boolean)
+      .map((item) => ({
+        timestamp: timelineTimestamp(item.startedAt), sequence: item.firstSequence,
+      })),
+  ].filter((item) => Number.isFinite(item.timestamp))
+    .sort((left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence);
+  const before = anchors.filter((item) => item.timestamp <= timestamp).at(-1);
+  const after = anchors.find((item) => item.timestamp > timestamp);
+  if (before && after) return (before.sequence + after.sequence) / 2 + index / 1000;
+  if (before) return before.sequence + 0.5 + index / 1000;
+  if (after) return after.sequence - 0.5 + index / 1000;
+  return output.lastSequence + 1 + index / 1000;
+}
+
 function operationPresentationGroup(
   operation: CanonicalOperation,
 ): { key: string; label: string } | undefined {
@@ -613,24 +666,41 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
   const toolName = typeof params.toolName === "string"
     ? params.toolName
     : operation.toolName;
-  if (operation.kind === "tool" && toolName) {
+  const isToolOperation = operation.kind === "tool"
+    || operation.display.labelKey === "agent.operation.tool";
+  if (isToolOperation) {
     const displayNames = localizedDisplayNames(params.displayNames);
     const displayName = resolveLocalizedToolDisplayName(displayNames);
     if (displayName) return displayName;
-    return toolCallDisplayRow(
-      toolName,
-      {},
-      [],
-      [],
-    ).label;
+    if (toolName) {
+      return toolCallDisplayRow(
+        toolName,
+        {},
+        [],
+        [],
+      ).label;
+    }
   }
   const labels: Record<string, string> = {
+    model: "生成模型响应",
+    planning: "制定执行计划",
     validation: "校验输出",
     context_compaction: "压缩上下文",
     delegation: "委派子 Agent",
     tool: "执行工具",
   };
-  return labels[operation.kind] || "执行操作";
+  const labelKeys: Record<string, string> = {
+    "agent.operation.model": labels.model,
+    "agent.operation.planning": labels.planning,
+    "agent.operation.tool": labels.tool,
+    "agent.operation.validation": labels.validation,
+    "agent.operation.context_compaction": labels.context_compaction,
+  };
+  return labels[operation.kind]
+    || (operation.display.labelKey
+      ? labelKeys[operation.display.labelKey]
+      : undefined)
+    || "执行操作";
 }
 
 function localizedDisplayNames(

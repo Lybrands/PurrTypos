@@ -1,13 +1,12 @@
-import Markdown from '../../components/Markdown'
 import { services } from '@/services'
 import React from 'react'
 import { useMaterialRefresh } from './useMaterialRefresh'
 import { AiChatIcon, PlusIcon, UserIcon, DeleteIcon, EditIcon, SettingsIcon, HistoryIcon } from '@/purr-components'
-import { PurrCollapse, PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
-import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
+import { PurrButton, PurrEmpty, PurrModal, PurrTag, PurrTooltip } from '@/purr-components'
 import type { Character, CharacterOption, EntityId } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import CharacterOptionsModal from './CharacterOptionsModal'
+import MaterialProfileEditorModal from './MaterialProfileEditorModal'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
@@ -324,45 +323,7 @@ export default function CharacterTab({
         onRestored={loadCharacters}
       />
 
-      <PurrModal
-        title={editTarget ? '编辑人物' : '新建人物'}
-        open={editModalOpen}
-        onOk={handleSave}
-        onCancel={closeModal}
-        okText={editTarget ? '保存' : '创建'}
-        cancelText="取消"
-        okButtonProps={{ loading: saving }}
-        width={680}
-        destroyOnHidden
-        className="character-edit-modal"
-      >
-        <div className="character-edit-meta">
-          <PurrInput
-            placeholder="人物姓名（必填）"
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            maxLength={50}
-            className="character-edit-name"
-          />
-          <PurrSelect
-            mode="tags"
-            placeholder="标签：选择或输入，回车确认"
-            value={draftTags}
-            onChange={setDraftTags}
-            options={tagOptions.map((t) => ({ label: t.value, value: t.value }))}
-            maxCount={10}
-            className="character-edit-tags"
-          />
-        </div>
-        {editTarget?.inheritedBaseline && <><PurrCollapse size="small" defaultActiveKeys={["baseline"]} items={[{key: "baseline", label: "原作资料 · 只读", children: <Markdown>{editTarget.inheritedBaseline}</Markdown>}]} /><p>本书后续发展</p></>}
-        <KnowledgeMarkdownEditor
-          documentKey={`character:${editTarget?.id ?? 'new'}`}
-          value={draftProfileMd}
-          onChange={setDraftProfileMd}
-          ariaLabel="人物档案"
-          className="character-edit-profile"
-        />
-      </PurrModal>
+      <MaterialProfileEditorModal kind="character" open={editModalOpen} creating={!editTarget} name={draftName} tags={draftTags} profileMd={draftProfileMd} documentKey={`character:${editTarget?.id ?? 'new'}`} onNameChange={setDraftName} onTagsChange={setDraftTags} onProfileChange={setDraftProfileMd} onOk={handleSave} onCancel={closeModal} tagOptions={tagOptions.map((item) => ({ label: item.value, value: item.value }))} inheritedBaseline={editTarget?.inheritedBaseline} saving={saving} />
 
       <CharacterOptionsModal
         open={configOpen}
