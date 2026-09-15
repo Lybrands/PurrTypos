@@ -163,3 +163,41 @@ test("fresh retry runs collapse into one logical Unit row", () => {
   assert.equal(rows[0].startedAt, "2026-09-16T16:08:23.794020+08:00");
   assert.equal(rows[0].status, "running");
 });
+
+test("continued runs collapse into one logical Agent row across Units", () => {
+  const rows = collapseSubAgentDelegations([
+    {
+      delegationId: "run:extract",
+      runId: "extract",
+      agentId: "agent-reader",
+      agentName: "map-0",
+      agentTitle: "分析当前小说分片",
+      objective: "提取资料",
+      unitId: "map:extract:0",
+      attempt: 1,
+      status: "done",
+      required: true,
+      priority: 0,
+    },
+    {
+      delegationId: "run:craft",
+      runId: "craft",
+      agentId: "agent-reader",
+      previousRunId: "extract",
+      agentName: "map-0",
+      agentTitle: "分析当前小说分片",
+      objective: "分析技法",
+      unitId: "map:craft:0",
+      attempt: 1,
+      status: "running",
+      required: true,
+      priority: 0,
+    },
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].runId, "craft");
+  assert.equal(rows[0].delegationId, "run:extract");
+  assert.equal(rows[0].previousRunId, "extract");
+  assert.equal(rows[0].status, "running");
+});

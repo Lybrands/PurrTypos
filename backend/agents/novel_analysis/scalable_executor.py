@@ -94,7 +94,7 @@ class ScalableNovelAnalysisUnitExecutor:
         result = await executor.execute(context, signal)
         if self._stage_output is not None:
             try:
-                await self._stage_output.publish(context, result)
+                await self._stage_output.publish(context, result, signal)
             except Exception as error:
                 raise NovelAnalysisStageOutputError(
                     "failed to publish durable novel-analysis stage output"

@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 
+from agents.novel_analysis.canonical_materials import validate_canonical_materials
 from infrastructure.persistence.sqlite_artifact_claim_repository import (
     SqliteArtifactClaimRepository,
 )
@@ -154,6 +155,7 @@ def build_novel_analysis_child_submission_registration(db) -> ToolRegistration:
             result = arguments.get("result")
             if not child_run_id or not isinstance(result, Mapping):
                 raise ValueError("Structured result must be a JSON object")
+            result = _normalize_stage_result(result)
             resource_ref, replayed = await submissions.commit(
                 child_run_id=child_run_id,
                 payload=result,
@@ -221,6 +223,14 @@ def build_novel_analysis_child_submission_registration(db) -> ToolRegistration:
             },
         },
     )
+
+
+def _normalize_stage_result(result: Mapping[str, object]) -> dict[str, object]:
+    value = dict(result)
+    canonical_keys = {"summaryMarkdown", "facts", "craftCards"}
+    if canonical_keys.intersection(value):
+        return validate_canonical_materials(value)
+    return value
 
 
 __all__ = [

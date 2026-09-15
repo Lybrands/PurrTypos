@@ -183,7 +183,7 @@
     "src/purra/planner.py": "84cc020359718a3ed80cbf658e5fa218d31222c0a300b71568bf294b780d6dfd",
     "src/purra/planning_activation.py": "d405d3f6ec6f9867419cf8a8947e2fa16a9fb0f6eb12c2b79661a377e6b86e23",
     "src/purra/planning_context.py": "0338cffef50c9cdae04dda173e261cf7716d6394b1f1ebe1a32c2ff951442371",
-    "src/purra/planning_stream.py": "ae3ad66eff85ea9ded6fae9be1596aa7b5e6e461d2ba7d64ccdca55b45a3a1ee",
+    "src/purra/planning_stream.py": "b8f829a1f1f5dda8f9f9d2340d61753ca18d61e260c1d3cdbcffbe7c75a4d587",
     "src/purra/ports/__init__.py": "f5886f15e97cd4cd059b89077396827c6fdb2edd972e1c98ba17968e85e50764",
     "src/purra/ports/context.py": "902d12a16eb0fc15a442ee0b9394e930bcf8b0bf403c8a28830718ca6a5c7026",
     "src/purra/ports/evidence.py": "10647130bed1a2c04b49956a7cfc11393d29f54d461bace1b7bb4838e25cffe3",
@@ -280,7 +280,7 @@
     "tests/test_package_boundaries.py": "faa592345fa787583601d26cdb48be2ee4aa2d78b2cf9af952c6d5b5f5e4d532",
     "tests/test_parent_delivery_pagination.py": "c715e66541ea445ac1a2ab0af488e6bb025bed65e7454474e43d813f749d6686",
     "tests/test_planning_contract.py": "1fb33dec0c456295566e3062e1f6ff45c05bcd37de54049d387905a4af45bdeb",
-    "tests/test_planning_stream.py": "25a73859ea6c4a2b645099cc0d47283b199de95b310f9045e77a3ae243687585",
+    "tests/test_planning_stream.py": "cbced51fcd5ab60c3cbf2aae64cd319039fe1f61c2b88dd2dce3bdbc8932c59d",
     "tests/test_provider_liveness_red_regressions.py": "2cde8c541a9ce2eee831d48449ed6169aac7d7141a58e1b5f4f1c64a1f67928d",
     "tests/test_provider_liveness_sampler.py": "9ca77d5dd8e468f1a4e8330a62c5644d5d05396e9fbe55790040ea094e9eac30",
     "tests/test_public_api.py": "1531b87f8994cb23d723aa59f6cce675ed2c169314e830cdc00b2d2de4ba7c9c",
@@ -360,7 +360,7 @@
     "typescript/src/planning/coordinator.ts": "fcbd6a436095bf2adbe9af961be8c1fe4ad3296110117e826cc0800c95d2a487",
     "typescript/src/planning/response-validation.ts": "e3192260e5abed206790f59ef1844bb75685b9c3eddca84b1e42f0fbbcb16d46",
     "typescript/src/planning/state.ts": "e26790acfe84cfee723c349f1e778483edb3468006ac897339b0014471b4c648",
-    "typescript/src/planning/stream.ts": "361c41f5a569c7604cee01d3d312b035ce5c47d03764a5e32f41169c12ed381a",
+    "typescript/src/planning/stream.ts": "72e184e53f20f209349b21c1d6467cc2f93156b8d12d76eb187db8aab0e2d59d",
     "typescript/src/planning/types.ts": "467a2f5b5167671c471f34ceca54fbe836c2c663fd68592ccad3743451fba7f6",
     "typescript/src/recovery/index.ts": "e9d2028d5de936232b61c2793af78261aaf9e84060e13c48429c95d7da91cad8",
     "typescript/src/retrieval/errors.ts": "fc0fdd9eb5330b2fa8a66abbb22a313e1aba4fe07294ba36fcbb60bb1d7b4781",
@@ -407,7 +407,7 @@
     "typescript/test/observability.test.mjs": "91c0c0f458d3a688a52f1d46179edb342186aa234d42e0068e5d3c2f4da72313",
     "typescript/test/operations.test.mjs": "cc74ce3fb067f6445dddd860edcd0133283fc2ab725fb7b3162edae9e0282ad7",
     "typescript/test/parent-delivery-recovery.test.mjs": "fb1d9ed76ad699181a21460f8a45d8a22fe4ffd5bebb8abb59afb2724ef6c8cf",
-    "typescript/test/planning-stream.test.mjs": "ee1971efae5a5bf6ba03fde718dcdbbbf62e4c87887392fc4cb602bd4ee4d0ff",
+    "typescript/test/planning-stream.test.mjs": "db53cfbad003452b12cfd9220b2eaa2197fbfd12987c431aae8c1045bc915f52",
     "typescript/test/planning.test.mjs": "fed0258b16d1468e00bee2c1561dd1a5aa38654304d49df4ab6fc027a7213081",
     "typescript/test/recipe-capacity.test.mjs": "707ae04babab03f0be013d1b94ad2096dbd3d40b6906c5560113c038f343dab4",
     "typescript/test/recovery-worker.test.mjs": "4a6631dd8178a2912861b2f6f22cde7a13694775b3e00c5ddf7e87e69a7f97cd",
@@ -432,7 +432,7 @@
   "artifacts": [
     {
       "file": "purra-1.0.0-py3-none-any.whl",
-      "sha256": "d5b1f7803c21505c0b80d77eaa3c9e48ada66a7d7f2ad22ba9b582ee47a198f4",
+      "sha256": "6d215d3b10f8c17af26dbac006864cc32bf95784f6d4ce35dc4037c5380a1bf1",
       "source": "/Users/liuyubin/Lybrand_project/purra"
     },
     {

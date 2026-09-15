@@ -92,3 +92,25 @@ def test_materials_require_story_background_and_creation_material_shapes():
     invalid["facts"][-1]["value"] = "旧的分析专用字符串"
     with pytest.raises(CanonicalAnalysisMaterialError, match="must be an object"):
         validate_canonical_materials(invalid)
+
+
+def test_setting_kind_uses_explicit_creation_entity_type():
+    payload = _payload()
+    payload["facts"].append({
+        "id": "fact-location",
+        "claimNature": "summary",
+        "factKind": "setting",
+        "subjectKey": "犬域",
+        "predicate": "场景设定",
+        "value": {
+            "entity_type": "location",
+            "name": "犬域",
+            "tags": "异空间",
+            "profile_md": "独立异空间。",
+        },
+    })
+
+    result = validate_canonical_materials(payload)
+
+    assert result["facts"][-1]["factKind"] == "location"
+    assert result["facts"][-1]["value"]["entity_type"] == "location"

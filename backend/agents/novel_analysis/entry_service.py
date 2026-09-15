@@ -228,8 +228,8 @@ class NovelAnalysisReplacementExecutionService:
             model_name=model.model,
             stage_output=NovelAnalysisStageOutput(
                 self._db,
-                output_repository=self._composition.output_repository,
-                publisher=self._composition.output_notifications,
+                reporter=self._composition.report_operation_result,
+                runtime=runtime,
             ),
         )
         async for update in self._runs.run(
