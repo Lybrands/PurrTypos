@@ -5,10 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from infrastructure.persistence.sqlite_run_tree_repository import (
+    SqliteRunTreeRepository,
+)
+from purra.errors import ContractViolationError
 from purra.json_values import thaw_json_mapping
 
 from agents.novel_analysis.review_projection import (
     NOVEL_ANALYSIS_REVIEW_REF_PREFIX,
+    NovelAnalysisReviewProjection,
+    NovelAnalysisReviewProjectionError,
 )
 
 
@@ -22,6 +28,7 @@ class NovelAnalysisReplacementRunProjection:
         self._db = db
         self._tasks = long_tasks
         self._runs = SqliteRunRepository(db)
+        self._run_tree = SqliteRunTreeRepository(db)
 
     async def list_for_revision(self, source_revision_id: str) -> list[dict]:
         rows = await self._db.fetch_all(
@@ -54,21 +61,33 @@ class NovelAnalysisReplacementRunProjection:
             [NOVEL_ANALYSIS_REPLACEMENT_RUN_NAMESPACE, source_revision_id],
         )
         latest_by_task: dict[str, str] = {}
+        origin_by_task: dict[str, dict] = {}
         for row in rows:
             task_id = str(row.get("task_id") or "")
             if task_id and task_id not in latest_by_task:
                 latest_by_task[task_id] = str(row["run_id"])
+            if task_id and str(row.get("relation") or "") == "created":
+                origin_by_task[task_id] = row
 
         projected = []
         for row in rows:
             run_id = str(row["run_id"])
             task_id = str(row.get("task_id") or "")
             is_latest = bool(task_id and latest_by_task.get(task_id) == run_id)
+            # A durable continuation is another execution Root for the same
+            # logical user turn. Project only its latest Root; otherwise an
+            # automatic recovery appears as a fabricated second user message.
+            if task_id and not is_latest:
+                continue
+            origin = origin_by_task.get(task_id, row)
             metadata = _mapping(row.get("metadata_json"))
-            attributes = _mapping(row.get("binding_attributes_json"))
+            attributes = _mapping(origin.get("binding_attributes_json"))
             units = await self._tasks.list_units(task_id) if is_latest else ()
             snapshot = await self._runs.get(run_id)
-            artifact_ref, published_id = await self._result_refs(task_id, run_id)
+            artifact_ref, published_id, artifact_summary = await self._result_refs(
+                task_id
+            )
+            related_runs = await self._related_runs(run_id, task_id=task_id)
             workflow = _workflow(row, units, metadata) if is_latest else _empty_workflow()
             interaction_kind = str(
                 attributes.get("interactionKind") or "analysis"
@@ -84,17 +103,20 @@ class NovelAnalysisReplacementRunProjection:
                     if str(row.get("run_status") or "") in {"pending", "running"}
                     else "finalized"
                 ),
-                "commandId": str(row.get("binding_command_id") or ""),
-                "conversationId": row.get("conversation_id"),
+                "commandId": str(origin.get("binding_command_id") or ""),
+                "conversationId": origin.get("conversation_id"),
                 "interactionKind": interaction_kind,
-                "automaticRecovery": bool(attributes.get("automaticRecovery")),
+                "automaticRecovery": False,
                 "analysisArtifactRef": (
                     NOVEL_ANALYSIS_REVIEW_REF_PREFIX + analysis_artifact_id
                     if interaction_kind == "follow_up" and analysis_artifact_id
                     else None
                 ),
-                "prompt": str(row.get("prompt") or ""),
-                "finalResponse": str(row.get("final_response") or ""),
+                "prompt": str(origin.get("prompt") or ""),
+                "finalResponse": (
+                    str(row.get("final_response") or "").strip()
+                    or artifact_summary
+                ),
                 "partialCompletion": False,
                 "taskId": task_id or None,
                 "taskStatus": (
@@ -114,32 +136,109 @@ class NovelAnalysisReplacementRunProjection:
                 "artifactRef": artifact_ref,
                 "publishedAnalysisId": published_id,
                 "providerOutputEvents": int(row.get("provider_output_events") or 0),
-                # Replacement Unit model calls are Operations in this Root Run,
-                # not synthetic related Runs.
-                "relatedRuns": [],
+                # Scalable Units execute as real Agent-tree Child Runs. Expose
+                # their identities so diagnostics can render their tool calls;
+                # public conversation projection still filters private output.
+                "relatedRuns": related_runs,
                 "analysisPlan": _plan(snapshot),
                 "units": [_unit(item) for item in units],
-                "createTime": row.get("create_time"),
+                "createTime": origin.get("create_time"),
                 "updateTime": row.get("update_time"),
             })
         return projected
 
+    async def _related_runs(
+        self, root_run_id: str, *, task_id: str = ""
+    ) -> list[dict[str, object]]:
+        previous_roots = []
+        if task_id:
+            previous_roots = await self._db.fetch_all(
+                "SELECT r.id, r.status FROM ai_agent_runs r "
+                "JOIN ai_agent_long_task_runs binding ON binding.run_id = r.id "
+                "WHERE binding.task_id = ? AND r.id <> ? "
+                "ORDER BY r.rowid",
+                [task_id, root_run_id],
+            )
+            rows = await self._db.fetch_all(
+                "SELECT child.id, child.status, child.agent_id, "
+                "child.create_time, (SELECT event.occurred_at "
+                "FROM ai_agent_run_events event WHERE event.run_id = child.id "
+                "AND event.event_type = 'run.lifecycle' "
+                "ORDER BY event.id LIMIT 1) AS precise_start_time "
+                "FROM ai_agent_runs child "
+                "JOIN ai_agent_long_task_runs binding "
+                "ON binding.run_id = child.root_run_id "
+                "WHERE binding.task_id = ? "
+                "AND child.parent_run_id = child.root_run_id "
+                "ORDER BY child.rowid",
+                [task_id],
+            )
+        else:
+            rows = await self._db.fetch_all(
+                "SELECT child.id, child.status, child.agent_id, child.create_time, "
+                "(SELECT event.occurred_at FROM ai_agent_run_events event "
+                "WHERE event.run_id = child.id "
+                "AND event.event_type = 'run.lifecycle' "
+                "ORDER BY event.id LIMIT 1) AS precise_start_time "
+                "FROM ai_agent_runs child "
+                "WHERE child.root_run_id = ? "
+                "AND child.parent_run_id = ? ORDER BY child.rowid",
+                [root_run_id, root_run_id],
+            )
+        result: list[dict[str, object]] = [{
+            "runId": str(row["id"]),
+            "status": str(row["status"]),
+            "role": "previous_root",
+        } for row in previous_roots]
+        for row in rows:
+            item: dict[str, object] = {
+                "runId": str(row["id"]),
+                "status": str(row["status"]),
+                "role": "child",
+                "createTime": row.get("precise_start_time") or row.get("create_time"),
+            }
+            try:
+                tree_run = await self._run_tree.get_run(str(row["id"]))
+                agent = await self._run_tree.get_agent(tree_run.agent_id)
+            except ContractViolationError:
+                pass
+            else:
+                item.update({
+                    "agentId": agent.agent_id,
+                    "agentName": agent.name,
+                    "agentTitle": agent.title,
+                    "objective": tree_run.objective,
+                    "previousRunId": tree_run.previous_run_id,
+                    "unitId": tree_run.input_payload.get("unitId"),
+                    "attempt": tree_run.input_payload.get("attempt"),
+                })
+            result.append(item)
+        return result
+
     async def _result_refs(
-        self, task_id: str, run_id: str
-    ) -> tuple[str | None, str | None]:
+        self, task_id: str
+    ) -> tuple[str | None, str | None, str]:
         if not task_id:
-            return None, None
+            return None, None, ""
         row = await self._db.fetch_one(
             "SELECT u.output_ref FROM ai_agent_long_task_units u "
             "JOIN ai_agent_artifacts a "
             "ON u.output_ref = ? || a.id "
             "WHERE u.task_id = ? AND u.unit_id = 'review:artifact' "
-            "AND u.status = 'completed' AND a.created_by_run_id = ?",
-            [NOVEL_ANALYSIS_REVIEW_REF_PREFIX, task_id, run_id],
+            "AND u.status = 'completed'",
+            [NOVEL_ANALYSIS_REVIEW_REF_PREFIX, task_id],
         )
         source_ref = str((row or {}).get("output_ref") or "") or None
         if source_ref is None:
-            return None, None
+            return None, None, ""
+        try:
+            review = await NovelAnalysisReviewProjection(self._db).load(source_ref)
+        except NovelAnalysisReviewProjectionError:
+            # Retired review contracts are neither recovered nor exposed. They
+            # must not prevent a fresh canonical analysis from being created.
+            return None, None, ""
+        overview = _mapping(review.get("storyOverview"))
+        summary = str(overview.get("summaryMarkdown") or "").strip()
         task = await self._db.fetch_one(
             "SELECT owner_id FROM ai_agent_long_tasks WHERE id = ?",
             [task_id],
@@ -153,12 +252,13 @@ class NovelAnalysisReplacementRunProjection:
             [str(task["owner_id"]), source_ref],
         )
         if published is None:
-            return source_ref, None
+            return source_ref, None, summary
         reviewed_id = str(published.get("artifact_id") or "")
         return (
             NOVEL_ANALYSIS_REVIEW_REF_PREFIX + reviewed_id
             if reviewed_id else source_ref,
             str(published["id"]),
+            summary,
         )
 
 
@@ -261,7 +361,7 @@ def _workflow(row, units, metadata: Mapping[str, object]) -> dict:
         "status": status,
         "pauseKind": pause_kind,
         "reasonCode": reason,
-        "resumable": status in {"paused", "failed"},
+        "resumable": status == "paused",
         "autoResumeAtMs": due,
         "autoRecoveryEligible": auto,
     }

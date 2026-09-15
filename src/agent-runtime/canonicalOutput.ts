@@ -16,6 +16,7 @@ export type CanonicalOutputEvent = {
   agentId?: string
   outputStreamId: string | null
   runId: string
+  previousRunId?: string | null
   turnId: string | null
   invocationId: string | null
   sequence: number
@@ -89,10 +90,19 @@ export type CanonicalAgentProgress = {
   occurredAt: string
 }
 
+export type CanonicalStageOutput = {
+  stageId: string
+  text: string
+  sequence: number
+  occurredAt: string
+}
+
 export type CanonicalDelegation = {
   delegationId: string
   firstSequence: number
   runId: string
+  agentId?: string | null
+  previousRunId?: string | null
   agentName: string
   agentTitle: string | null
   objective: string
@@ -127,6 +137,7 @@ export type CanonicalOutputState = {
   commentaryBlocks: CanonicalCommentaryBlock[]
   planningProgress: CanonicalPlanningProgress[]
   agentProgress: CanonicalAgentProgress[]
+  stageOutputs?: CanonicalStageOutput[]
   operations: Record<string, CanonicalOperation>
   operationOrder: string[]
   delegations: Record<string, CanonicalDelegation>
@@ -158,6 +169,7 @@ export function initialCanonicalOutputState(
     commentaryBlocks: [],
     planningProgress: [],
     agentProgress: [],
+    stageOutputs: [],
     operations: {},
     operationOrder: [],
     delegations: {},
@@ -646,6 +658,24 @@ function applyRuntimeEvent(
     next = applyApprovalRequested(next, data)
   } else if (eventType === 'approval.resolved') {
     next = applyApprovalResolved(next, data)
+  } else if (eventType === 'novel_analysis.stage_output') {
+    const stageId = stringValue(data.stageId)
+    const text = stringValue(data.text).trim()
+    if (stageId && text) {
+      const stage = {
+        stageId,
+        text,
+        sequence: event.sequence,
+        occurredAt: event.occurredAt,
+      }
+      next = {
+        ...next,
+        stageOutputs: [
+          ...(next.stageOutputs ?? []).filter((item) => item.stageId !== stageId),
+          stage,
+        ],
+      }
+    }
   }
   return next
 }
@@ -713,6 +743,10 @@ function applyDelegationEvent(
     delegationId,
     firstSequence: current?.firstSequence ?? event.sequence,
     runId: stringValue(event.payload.runId) || event.runId,
+    agentId: stringValue(event.payload.agentId) || current?.agentId || null,
+    previousRunId: stringValue(event.payload.previousRunId)
+      || current?.previousRunId
+      || null,
     agentName,
     agentTitle: stringValue(event.payload.agentTitle) || null,
     objective: stringValue(event.payload.objective),

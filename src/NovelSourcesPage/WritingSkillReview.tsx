@@ -25,7 +25,7 @@ export function WritingSkillReview({ artifact, onTechniqueResultChange }: {
 }) {
   const toast = usePurrToast()
   const result = artifact.techniqueResult
-  const candidate = result?.candidate
+  const candidate = result.candidate
   const [activeCandidate, setActiveCandidate] = React.useState(candidate)
   const [manifest, setManifest] = React.useState<TechniqueManifest | null>(null)
   const [draft, setDraft] = React.useState<TechniqueDraft | null>(null)
@@ -165,7 +165,6 @@ export function WritingSkillReview({ artifact, onTechniqueResultChange }: {
     } catch (error) { toast.error((error as Error).message) } finally { setBusy(false) }
   }
 
-  if (!result) return <div className="novel-analysis-result-list"><p>旧版分析仅供查看。</p>{artifact.writingSkill && <Markdown>{artifact.writingSkill.markdown}</Markdown>}</div>
   if (result.status === 'insufficient_material') return <p>{result.reason}</p>
   const content = contents[path] ?? ''
   const { prefix, body } = splitFrontmatter(content)

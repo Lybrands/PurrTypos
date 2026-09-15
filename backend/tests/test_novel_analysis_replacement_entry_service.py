@@ -9,14 +9,17 @@ import pytest
 import pytest_asyncio
 
 from agents.novel_analysis.composition import (
-    create_isolated_novel_analysis_replacement_composition,
+    create_isolated_scalable_novel_analysis_composition,
 )
 from agents.novel_analysis.domain import NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE
 from agents.novel_analysis.entry_service import (
     NovelAnalysisReplacementExecutionService,
 )
-from agents.novel_analysis.executor import NovelAnalysisReplacementUnitExecutor
-from agents.novel_analysis.profile import NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
+from agents.novel_analysis.scalable_executor import ScalableNovelAnalysisUnitExecutor
+from agents.novel_analysis.scalable_profile import (
+    NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
+    scalable_novel_analysis_implementation,
+)
 from agents.novel_analysis.product_service import (
     VersionedNovelAnalysisProductService,
 )
@@ -26,7 +29,6 @@ from agents.novel_analysis.follow_up_service import (
 from agents.novel_analysis.edit_replay import (
     NovelAnalysisReplacementEditLifecycle,
 )
-from agents.novel_analysis.recipe import AnalysisSegment, compile_analysis_recipe
 from agents.novel_analysis.recovery_service import (
     NovelAnalysisReplacementRecoveryService,
 )
@@ -34,13 +36,16 @@ from agents.novel_analysis.review_projection import (
     NovelAnalysisReviewProjection,
     NovelAnalysisReviewProjectionError,
 )
+from agents.novel_analysis.publication_service import (
+    NovelAnalysisReplacementPublicationService,
+)
 from agents.novel_analysis.run_projection import (
     NovelAnalysisReplacementRunProjection,
+    _workflow,
 )
 from agents.novel_analysis.stream_projection import (
     VersionedNovelAnalysisStreamQuery,
 )
-from agents.novel_analysis.submission_tool import SUBMIT_NOVEL_ANALYSIS_UNIT_RESULT
 from agents.novel_analysis.attempt_artifact import NovelAnalysisAttemptArtifactStore
 from agents.shared.implementation import AgentKind, replacement_implementation
 from agents.shared.implementation_registry import AgentRolloutPolicy
@@ -49,6 +54,22 @@ from agents.shared.saved_model_binding import (
     resolve_saved_model_runtime,
 )
 from application.composition_factory import create_versioned_agent_composition
+
+
+def test_failed_analysis_is_terminal_and_not_resumable() -> None:
+    workflow = _workflow(
+        {
+            "task_status": "failed",
+            "state_reason_code": None,
+            "state_reason_scope": None,
+        },
+        [SimpleNamespace(error_code="novel_analysis_skill_output_invalid")],
+        {},
+    )
+
+    assert workflow["status"] == "failed"
+    assert workflow["reasonCode"] == "novel_analysis_skill_output_invalid"
+    assert workflow["resumable"] is False
 from application.continuation_service import ContinuationService
 from application.model_runtime import runtime_from_settings
 from application.run_provenance import digest_model_endpoint
@@ -99,11 +120,13 @@ async def temp_db(tmp_path):
         "(id, work_id, version_no, content_digest, parser_version, byte_count, character_count) "
         "VALUES ('revision-1', 'work-1', 1, 'revision-digest', 1, 100, 100)"
     )
+    source_text = "潮水漫过旧城。" + "风" * 93
     await db.execute(
         "INSERT INTO novel_source_sections "
-        "(id, revision_id, ordinal, title, text_content, content_digest) "
-        "VALUES ('section-1', 'revision-1', 0, '第一章', ?, 'section-digest')",
-        ["潮水漫过旧城。" + "风" * 93],
+        "(id, revision_id, ordinal, title, text_content, content_digest, "
+        "byte_count, character_count) VALUES "
+        "('section-1', 'revision-1', 0, '第一章', ?, 'section-digest', ?, ?)",
+        [source_text, len(source_text.encode("utf-8")), len(source_text)],
     )
     try:
         yield db
@@ -154,15 +177,13 @@ async def test_partial_rollout_policy_cannot_restore_legacy_analysis_create(
             AgentKind.NOVEL_ANALYSIS,
             recipe_version=1,
         )
-        assert route.identity == replacement_implementation(
-            AgentKind.NOVEL_ANALYSIS,
+        assert route.identity == scalable_novel_analysis_implementation(
             recipe_version=1,
         )
         assert "novel_analysis" not in composition.agent_profile_ids
         NovelAnalysisReplacementExecutionService(temp_db, composition)
     finally:
         await composition.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_product_start_uses_create_policy_without_touching_frozen_legacy(
@@ -223,7 +244,6 @@ async def test_product_start_uses_create_policy_without_touching_frozen_legacy(
         "dispatchActive": True,
     }
 
-
 @pytest.mark.asyncio
 async def test_product_pause_routes_by_persisted_run_identity_not_rollout_policy(
     temp_db,
@@ -246,7 +266,7 @@ async def test_product_pause_routes_by_persisted_run_identity_not_rollout_policy
     )
     await SqliteAgentImplementationStore(temp_db).bind(
         run_id,
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
@@ -285,57 +305,6 @@ async def test_product_pause_routes_by_persisted_run_identity_not_rollout_policy
     assert receipt["workflowStatus"] == "paused"
     assert receipt["workflowPauseKind"] == "user"
 
-
-@pytest.mark.asyncio
-async def test_product_control_rejects_historical_legacy_task_as_read_only(
-    temp_db,
-) -> None:
-    run_id = await create_run(
-        temp_db,
-        run_id="legacy-product-root",
-        session_id=None,
-        prompt="分析",
-        mode="novel_analysis",
-        binding=RunBinding(
-            namespace="novel_source_analysis",
-            aggregate_id="revision-1",
-            command_id="legacy-product-root-command",
-        ),
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_long_tasks "
-        "(id, namespace, kind, owner_id, created_by_run_id, status, total_units) "
-        "VALUES (?, ?, ?, ?, ?, 'running', 1)",
-        [
-            "legacy-product-task",
-            "purrtypos.novel_analysis",
-            "novel_source_analysis",
-            "revision-1",
-            run_id,
-        ],
-    )
-    composition = create_versioned_agent_composition(
-        temp_db,
-        agent_rollout_policy=AgentRolloutPolicy(
-            frozenset({AgentKind.NOVEL_ANALYSIS})
-        ),
-    )
-    try:
-        with pytest.raises(AppError, match="旧版小说分析仅供查看"):
-            await VersionedNovelAnalysisProductService(
-                temp_db,
-                composition,
-            ).pause("legacy-product-task", expected_revision=1)
-        task = await composition.long_task_repository.load(
-            "legacy-product-task"
-        )
-    finally:
-        await composition.shutdown()
-
-    assert task is not None
-    assert task.status is LongTaskStatus.RUNNING
-
-
 @pytest.mark.asyncio
 async def test_product_resume_uses_persisted_replacement_and_saved_model_binding(
     temp_db,
@@ -361,7 +330,7 @@ async def test_product_resume_uses_persisted_replacement_and_saved_model_binding
     )
     await SqliteAgentImplementationStore(temp_db).bind(
         run_id,
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
@@ -376,7 +345,7 @@ async def test_product_resume_uses_persisted_replacement_and_saved_model_binding
             json.dumps({"runtimeBinding": runtime_binding}),
         ],
     )
-    calls: list[tuple[str, str, bool]] = []
+    calls: list[tuple[str, str]] = []
 
     class FakeRecovery:
         def __init__(self, db, selected_composition, *, entry_service) -> None:
@@ -388,7 +357,6 @@ async def test_product_resume_uses_persisted_replacement_and_saved_model_binding
             calls.append((
                 kwargs["task_id"],
                 kwargs["run_command_id"],
-                kwargs["retry_failed"],
             ))
             if False:
                 yield None
@@ -410,7 +378,6 @@ async def test_product_resume_uses_persisted_replacement_and_saved_model_binding
             task_id="replacement-resume-task",
             run_command_id="replacement-resume-command",
             runtime=runtime,
-            retry_failed=False,
         )
         await asyncio.sleep(0)
     finally:
@@ -419,7 +386,6 @@ async def test_product_resume_uses_persisted_replacement_and_saved_model_binding
     assert calls == [(
         "replacement-resume-task",
         "replacement-resume-command",
-        False,
     )]
     assert receipt["commandStatus"] == "accepted"
     assert receipt["commandId"] == "replacement-resume-command"
@@ -537,7 +503,7 @@ async def test_source_only_follow_up_uses_replacement_read_tools(
         )
         prepared = await composition.prepare_request(request)
         tools = composition.profile(
-            NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
+            NOVEL_ANALYSIS_SCALABLE_PROFILE_ID
         ).adapter.tool_catalog.enabled_names(prepared)
         results = [
             update
@@ -572,51 +538,8 @@ async def test_source_only_follow_up_uses_replacement_read_tools(
     assert attributes["interactionKind"] == "follow_up"
     assert "analysisArtifactId" not in attributes
 
-
 @pytest.mark.asyncio
-async def test_product_follow_up_rejects_legacy_artifact_without_fallback(
-    temp_db,
-) -> None:
-    runtime = await _saved_runtime(temp_db)
-    await temp_db.execute(
-        "INSERT INTO ai_agent_artifacts "
-        "(id, namespace, kind, owner_id, owner_ref_kind, owner_ref_id, "
-        "created_by_run_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            "legacy-follow-up-artifact",
-            "purrtypos.novel_analysis",
-            "novel_source_analysis_candidate",
-            "revision-1",
-            "long_task_unit",
-            "legacy-task:artifact:review",
-            "legacy-root",
-            "finalized",
-        ],
-    )
-    composition = create_versioned_agent_composition(
-        temp_db,
-        agent_rollout_policy=AgentRolloutPolicy(
-            frozenset({AgentKind.NOVEL_ANALYSIS})
-        ),
-    )
-    try:
-        with pytest.raises(AppError, match="旧版小说分析仅供查看"):
-            await VersionedNovelAnalysisProductService(
-                temp_db,
-                composition,
-            ).follow_up(
-                source_revision_id="revision-1",
-                artifact_id="legacy-follow-up-artifact",
-                prompt="继续解释",
-                command_id="legacy-follow-up-command",
-                runtime=runtime,
-            )
-    finally:
-        await composition.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_follow_up_request_routes_by_artifact_owner_when_rollout_is_off(
+async def test_follow_up_request_reads_new_scalable_artifact(
     temp_db,
     monkeypatch,
 ) -> None:
@@ -630,48 +553,37 @@ async def test_follow_up_request_routes_by_artifact_owner_when_rollout_is_off(
     )
     await SqliteAgentImplementationStore(temp_db).bind(
         run_id,
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     task_id = "follow-up-source-task"
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
         "(id, namespace, kind, owner_id, created_by_run_id, status, total_units, "
         "completed_units) VALUES (?, 'purrtypos.novel_analysis', "
-        "'novel_analysis.purra-native', 'revision-1', ?, 'completed', 1, 1)",
+        "'novel_analysis.scalable.v2', 'revision-1', ?, 'completed', 1, 1)",
         [task_id, run_id],
     )
     review_payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 3,
         "kind": "review",
-        "sourceRevisionId": "revision-1",
-        "facts": [],
-        "observations": [],
-        "storyOverview": {
-            "summaryMarkdown": "潮水漫过旧城。",
-            "evidenceRefs": [{
-                "segmentId": "section-1:0:100",
-                "sourceSpanId": "S001",
-            }],
-        },
-        "techniqueResult": {"status": "empty", "reason": "材料不足。"},
-        "coverageReport": {"missingSegmentIds": []},
-        "evidenceIndex": [{
-            "segmentId": "section-1:0:100",
-            "sourceSpanId": "S001",
-            "sectionId": "section-1",
-            "sectionOrdinal": 0,
-            "startCharacter": 0,
-            "endCharacter": 8,
-            "text": "潮水漫过旧城。",
-        }],
-        "reviewStatus": "pending_review",
+        "childRunId": "follow-up-review-child",
+        "skillArtifactId": "skill-artifact",
+        "skillDigest": "skill-digest",
+        "coverageArtifactId": "coverage-artifact",
+        "coverageDigest": "coverage-digest",
+        "synthesisArtifactId": "synthesis-artifact",
+        "synthesisDigest": "synthesis-digest",
+        "summaryMarkdown": "潮水漫过旧城。",
+        "facts": [{"id": "fact-background", "claimNature": "fact", "factKind": "background", "subjectKey": "故事背景", "predicate": "环境", "value": "旧城受到潮水侵袭。", "lifecycleStatus": "active"}],
+        "craftCards": [],
+        "techniqueResult": {"status": "insufficient_material", "candidate": None, "evidenceRefs": [], "scopeNotes": [], "reason": "未提炼技法"},
     }
     receipt = await NovelAnalysisAttemptArtifactStore(temp_db).commit(
         task_id=task_id,
         unit_id="review:artifact",
         attempt=1,
         operation_id=f"{task_id}:review:artifact:1",
-        run_id=run_id,
+        run_id="scalable-review-child",
         payload=review_payload,
     )
     await temp_db.execute(
@@ -758,7 +670,7 @@ async def test_follow_up_request_routes_by_artifact_owner_when_rollout_is_off(
 
     assert owner_run_id == run_id
     assert prepared.metadata["hostAgentRuntimeProfile"] == (
-        "novel_analysis.purra-native.v1"
+        NOVEL_ANALYSIS_SCALABLE_PROFILE_ID
     )
     assert prepared.planning_mode.value == "reactive"
     assert provider_tools == [{
@@ -773,6 +685,199 @@ async def test_follow_up_request_routes_by_artifact_owner_when_rollout_is_off(
     )
     assert results[0].final_response == "故事背景是被潮水侵袭的旧城。"
 
+
+@pytest.mark.asyncio
+async def test_review_projection_exposes_publishable_canonical_materials(
+    temp_db,
+) -> None:
+    run_id = await create_run(
+        temp_db,
+        run_id="scalable-review-root",
+        session_id=None,
+        prompt="分析整部作品",
+        mode="novel_analysis",
+        binding=RunBinding(
+            namespace="purrtypos.novel_analysis",
+            aggregate_id="revision-1",
+            command_id="scalable-review-command",
+        ),
+    )
+    task_id = "scalable-review-task"
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, root_run_id, parent_run_id) "
+        "VALUES ('scalable-review-child', 'done', '', ?, ?)",
+        [run_id, run_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, status, total_units, "
+        "completed_units) VALUES (?, 'purrtypos.novel_analysis', "
+        "'novel_analysis.scalable.v2', 'revision-1', ?, 'completed', 1, 1)",
+        [task_id, run_id],
+    )
+    payload = {
+        "schemaVersion": 3,
+        "kind": "review",
+        "childRunId": "scalable-review-child",
+        "skillArtifactId": "skill-artifact",
+        "skillDigest": "skill-digest",
+        "coverageArtifactId": "coverage-artifact",
+        "coverageDigest": "coverage-digest",
+        "synthesisArtifactId": "synthesis-artifact",
+        "synthesisDigest": "synthesis-digest",
+        "summaryMarkdown": "这是整部作品的总结。",
+            "facts": [
+                {"id": "fact-character", "claimNature": "summary", "factKind": "character_summary", "subjectKey": "林澈", "predicate": "人物归纳", "value": {"name": "林澈", "tags": "守门人", "profile_md": "负责守门。"}, "lifecycleStatus": "active"},
+                {"id": "fact-background", "claimNature": "summary", "factKind": "background", "subjectKey": "故事背景", "predicate": "背景归纳", "value": {"content": "故事发生在一座封闭旧城。"}, "lifecycleStatus": "active"},
+            ],
+        "craftCards": [{"id": "craft-deadline", "cardKind": "technique", "title": "限时任务", "bodyMarkdown": "用送药时限制造压力。"}],
+        "techniqueResult": {"status": "generated", "candidate": {"techniqueId": "technique-1", "draftId": "draft-1", "versionId": "version-1"}, "evidenceRefs": ["craft-deadline"], "scopeNotes": [], "reason": ""},
+    }
+    receipt = await NovelAnalysisAttemptArtifactStore(temp_db).commit(
+        task_id=task_id,
+        unit_id="review:artifact",
+        attempt=1,
+        operation_id=f"{task_id}:review:artifact:1",
+        run_id="scalable-review-child",
+        payload=payload,
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status, output_ref, attempt, "
+        "run_id) VALUES (?, 'review:artifact', 'review:artifact', 0, "
+        "'completed', ?, 1, ?)",
+        [task_id, receipt.resource_ref, run_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) "
+        "VALUES (?, ?, 'created')",
+        [task_id, run_id],
+    )
+
+    projected = await NovelAnalysisReviewProjection(temp_db).load(
+        receipt.resource_ref
+    )
+
+    assert projected["artifactContract"] == "purrtypos.novel_analysis.review.v2"
+    assert projected["storyOverview"]["summaryMarkdown"] == (
+        "这是整部作品的总结。"
+    )
+    assert projected["facts"][0]["subjectKey"] == "林澈"
+    assert projected["craftCards"][0]["id"] == "craft-deadline"
+
+    publication = NovelAnalysisReplacementPublicationService(temp_db)
+    reviewed = await publication.review(
+        source_artifact_id=receipt.artifact_id,
+        command_id="review-canonical-materials",
+        payload={
+            "facts": projected["facts"],
+            "craftCards": projected["craftCards"],
+            "storyOverview": projected["storyOverview"],
+            "techniqueResult": projected["techniqueResult"],
+        },
+    )
+    published = await publication.publish(str(reviewed["artifactId"]))
+    preview = await ContinuationService(temp_db).preview_canon(
+        source_revision_id="revision-1",
+        source_analysis_id=str(published["id"]),
+        fork_section_id="section-1",
+    )
+    character = next(item for item in preview["records"] if item["factKind"] == "character_summary")
+    mapping = next(item for item in preview["materialMapping"] if item["sourceFactId"] == character["sourceFactId"])
+    assert character["subjectKey"] == "林澈"
+    assert mapping["kind"] == "character"
+
+    continuation_id = await create_run(
+        temp_db,
+        run_id="scalable-review-continuation",
+        session_id=None,
+        prompt="继续已暂停的来源分析。",
+        mode="novel_analysis",
+        binding=RunBinding(
+            namespace="purrtypos.novel_analysis",
+            aggregate_id="revision-1",
+            command_id="automatic-recovery-command",
+            attributes={"automaticRecovery": True},
+        ),
+    )
+    await temp_db.execute(
+        "UPDATE ai_agent_runs SET status = 'done' WHERE id = ?",
+        [continuation_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, status, prompt, root_run_id, parent_run_id) "
+        "VALUES ('scalable-review-continuation-child', 'done', '', ?, ?)",
+        [continuation_id, continuation_id],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) "
+        "VALUES (?, ?, 'continuation')",
+        [task_id, continuation_id],
+    )
+
+    composition = create_versioned_agent_composition(
+        temp_db,
+        agent_rollout_policy=AgentRolloutPolicy(),
+    )
+    try:
+        runs = await NovelAnalysisReplacementRunProjection(
+            temp_db,
+            long_tasks=composition.long_task_repository,
+        ).list_for_revision("revision-1")
+        stream_query = VersionedNovelAnalysisStreamQuery(
+            temp_db,
+            output_repository=composition.output_journal,
+            long_tasks=composition.long_task_repository,
+        )
+        stream_page = await stream_query.read_page("revision-1")
+        await temp_db.execute(
+            "INSERT INTO ai_agent_runs "
+            "(id, status, prompt, root_run_id, parent_run_id) "
+            "VALUES ('scalable-live-child', 'running', '', ?, ?)",
+            [continuation_id, continuation_id],
+        )
+        live_stream_page = await stream_query.read_page("revision-1")
+        await temp_db.execute(
+            "DELETE FROM ai_agent_runs WHERE id = 'scalable-live-child'"
+        )
+    finally:
+        await composition.shutdown()
+    assert len(runs) == 1
+    assert runs[0]["runId"] == continuation_id
+    assert runs[0]["commandId"] == "scalable-review-command"
+    assert runs[0]["prompt"] == "分析整部作品"
+    assert runs[0]["automaticRecovery"] is False
+    assert runs[0]["finalResponse"] == "这是整部作品的总结。"
+    related_runs = runs[0]["relatedRuns"]
+    assert related_runs[0] == {
+        "runId": "scalable-review-root",
+        "status": "running",
+        "role": "previous_root",
+    }
+    assert [
+        {key: item[key] for key in ("runId", "status", "role")}
+        for item in related_runs[1:]
+    ] == [
+        {
+            "runId": "scalable-review-child",
+            "status": "done",
+            "role": "child",
+        },
+        {
+            "runId": "scalable-review-continuation-child",
+            "status": "done",
+            "role": "child",
+        },
+    ]
+    assert all(item["createTime"] for item in related_runs[1:])
+    assert stream_page["runs"] == runs
+    assert live_stream_page["projectionVersion"] != stream_page["projectionVersion"]
+    assert any(
+        item["runId"] == "scalable-live-child" and item["status"] == "running"
+        for item in live_stream_page["runs"][0]["relatedRuns"]
+    )
 
 @pytest.mark.asyncio
 async def test_edit_lifecycle_archives_suffix_only_after_new_root_exists(
@@ -978,7 +1083,7 @@ async def test_product_edit_routes_follow_up_by_persisted_target_identity(
     )
     await SqliteAgentImplementationStore(temp_db).bind(
         target_id,
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     calls = []
 
@@ -1035,7 +1140,7 @@ async def test_entry_compiles_canonical_request_and_host_owned_runtime_binding(
     temp_db,
 ) -> None:
     runtime = await _saved_runtime(temp_db)
-    composition = create_isolated_novel_analysis_replacement_composition(temp_db)
+    composition = create_isolated_scalable_novel_analysis_composition(temp_db)
     try:
         service = NovelAnalysisReplacementExecutionService(temp_db, composition)
         request = await service.build_request(
@@ -1045,13 +1150,21 @@ async def test_entry_compiles_canonical_request_and_host_owned_runtime_binding(
             runtime=runtime,
         )
         prepared = await composition.prepare_request(request)
-        decision = await composition.profile(
-            NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
-        ).evaluate(
+        decision = await composition.profile(NOVEL_ANALYSIS_SCALABLE_PROFILE_ID).evaluate(
             prepared,
             ExecutionPlan(
                 title="分析并复核",
-                task_spec=TaskSpec(goal="形成可审核分析", operation="analyze"),
+                task_spec=TaskSpec(
+                    goal="形成可审核分析",
+                    operation="analyze",
+                    target={
+                        "schemaVersion": 1,
+                        "passes": [{"id": "story", "dimensions": ["characters"]}],
+                        "reduceFanIn": 2,
+                        "synthesisSections": ["人物"],
+                        "qualityChecks": ["整书覆盖"],
+                    },
+                ),
                 steps=(TaskStep(
                     id="analysis",
                     title="分析小说",
@@ -1067,19 +1180,15 @@ async def test_entry_compiles_canonical_request_and_host_owned_runtime_binding(
     assert set(request.domain_context.payload) == {
         "sourceRevisionId",
         "commandId",
-        "segments",
     }
     assert request.domain_context.payload["sourceRevisionId"] == "revision-1"
-    assert request.domain_context.payload["segments"][0]["sectionDigest"] == (
-        "section-digest"
-    )
     binding = request.metadata["runtimeBinding"]
     assert binding["modelConfigId"] == "analysis-model"
     assert "apiKey" not in json.dumps(thaw_json_mapping(binding))
     assert prepared.domain_context.namespace == (
         NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE
     )
-    assert composition.agent_profile_ids == (NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,)
+    assert composition.agent_profile_ids == (NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,)
     assert thaw_json_mapping(decision.metadata)["runtimeBinding"] == (
         thaw_json_mapping(binding)
     )
@@ -1100,7 +1209,7 @@ async def test_entry_delegates_to_canonical_run_service_with_replacement_executo
 ) -> None:
     runtime = await _saved_runtime(temp_db)
     runs = _CapturingRuns()
-    composition = create_isolated_novel_analysis_replacement_composition(temp_db)
+    composition = create_isolated_scalable_novel_analysis_composition(temp_db)
     try:
         service = NovelAnalysisReplacementExecutionService(
             temp_db,
@@ -1125,7 +1234,7 @@ async def test_entry_delegates_to_canonical_run_service_with_replacement_executo
     call = runs.calls[0]
     assert isinstance(
         call["long_task_executor"],
-        NovelAnalysisReplacementUnitExecutor,
+        ScalableNovelAnalysisUnitExecutor,
     )
     assert call["request"].domain_context.namespace == (
         NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE
@@ -1133,13 +1242,12 @@ async def test_entry_delegates_to_canonical_run_service_with_replacement_executo
     assert call["options"].binding.namespace == "purrtypos.novel_analysis"
     assert call["options"].binding.command_id == "command-1"
     assert call["options"].provenance.execution_intent.output_contract == (
-        "novel_analysis_review_artifact_v1"
+        "novel_analysis_scalable_review_v1"
     )
     assert call["options"].response_transaction_policy.public_presentation.value == (
         "none"
     )
-    assert replacement_implementation(
-        AgentKind.NOVEL_ANALYSIS,
+    assert scalable_novel_analysis_implementation(
         recipe_version=1,
     ).implementation_id == "purra-native"
 
@@ -1159,722 +1267,3 @@ def _tool_call(call_id: str, name: str, arguments: dict[str, object]):
             "finish_reason": "tool_calls",
         }],
     }
-
-
-def _unit_payload(messages):
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, str) and '"unitKind"' in content:
-            return json.loads(content.rsplit("\n", 1)[-1])
-    raise AssertionError("unit payload is unavailable")
-
-
-def _unit_result(kind: str, payload: dict[str, object]) -> dict[str, object]:
-    reference = {
-        "segmentId": "section-1:0:100",
-        "sourceSpanId": "S0-100",
-    }
-    if kind == "extract":
-        return {
-            "facts": [{
-                "factKind": "event",
-                "subjectKey": "旧城",
-                "predicate": "被潮水淹没",
-                "value": True,
-                "evidenceRefs": [reference],
-            }],
-            "observations": [{
-                "cardKind": "pacing",
-                "title": "潮水倒计时",
-                "bodyMarkdown": "用潮位形成时间压力。",
-                "evidenceRefs": [reference],
-            }],
-        }
-    dependency = payload["dependencyResults"][0]
-    if kind == "normalize":
-        fact = dict(dependency["facts"][0])
-        fact.pop("factId")
-        observation = dict(dependency["observations"][0])
-        observation_id = observation.pop("observationId")
-        return {
-            "facts": [fact],
-            "observations": [{
-                **observation,
-                "mergedObservationIds": [observation_id],
-            }],
-        }
-    if kind == "overview":
-        return {"storyOverview": {
-            "summaryMarkdown": "潮水淹没旧城。",
-            "evidenceRefs": [reference],
-        }}
-    if kind == "distill_technique":
-        return {"techniqueResult": {
-            "status": "empty",
-            "reason": "材料不足以形成独立技法。",
-        }}
-    raise AssertionError(f"unexpected model Unit: {kind}")
-
-
-@pytest.mark.asyncio
-async def test_entry_runs_full_root_recipe_through_real_core(
-    temp_db,
-    monkeypatch,
-) -> None:
-    runtime = await _saved_runtime(temp_db)
-
-    async def planner(_key, _messages, options, _provider, signal=None):
-        assert signal is not None
-        return {
-            "applied_generation_limit": options.get("max_tokens"),
-            "message": {"role": "assistant", "content": json.dumps({
-                "needsTodos": True,
-                "title": "分析并复核",
-                "goal": "形成可审核分析",
-                "taskSpec": {
-                    "goal": "形成可审核分析",
-                    "target": {},
-                    "operation": "analyze",
-                    "instruction": "核对来源并生成待审核成果",
-                    "constraints": [],
-                    "preserve": [],
-                    "deliverable": "来源分析 review artifact",
-                },
-                "todos": [{
-                    "id": "analysis",
-                    "title": "分析小说",
-                    "type": "analyze",
-                    "executor": "model",
-                    "expectedTools": [],
-                    "riskLevel": "read",
-                }, {
-                    "id": "review",
-                    "title": "复核分析",
-                    "type": "review",
-                    "executor": "model",
-                    "expectedTools": [],
-                    "dependsOn": ["analysis"],
-                    "riskLevel": "read",
-                }, {
-                    "id": "deliver",
-                    "title": "形成审核成果",
-                    "type": "review",
-                    "executor": "model",
-                    "expectedTools": [],
-                    "dependsOn": ["review"],
-                    "riskLevel": "read",
-                }],
-            }, ensure_ascii=False)},
-            "model": "fixture",
-            "finish_reason": "stop",
-        }
-
-    async def runtime_stream(_key, messages, options, _provider, signal=None):
-        assert signal is not None
-        payload = _unit_payload(messages)
-        kind = payload["unitKind"]
-        tools = [item for item in messages if item["role"] == "tool"]
-
-        async def stream():
-            if not tools:
-                name = (
-                    "readAnalysisSourceSegment"
-                    if kind == "extract"
-                    else "listAnalysisObservations"
-                )
-                arguments = (
-                    {"segmentId": "section-1:0:100"}
-                    if kind == "extract"
-                    else {"limit": 20}
-                )
-                yield _tool_call(f"read-{kind}", name, arguments)
-                return
-            if "artifactRef" not in json.loads(tools[-1]["content"]):
-                yield _tool_call(
-                    f"submit-{kind}",
-                    SUBMIT_NOVEL_ANALYSIS_UNIT_RESULT,
-                    {"result": _unit_result(kind, payload)},
-                )
-                return
-            yield {
-                "choices": [{
-                    "delta": {"content": "已提交。"},
-                    "finish_reason": "stop",
-                }],
-            }
-
-        return {
-            "applied_generation_limit": options.get("max_tokens"),
-            "stream": stream(),
-            "model": "fixture",
-        }
-
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_no_stream",
-        planner,
-    )
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_stream",
-        route_planning_stream(planner, runtime_stream),
-    )
-    composition = create_isolated_novel_analysis_replacement_composition(temp_db)
-    results = []
-    long_tasks = composition.long_task_repository
-    output_journal = composition.output_journal
-    try:
-        service = NovelAnalysisReplacementExecutionService(temp_db, composition)
-        async for update in service.run(
-            source_revision_id="revision-1",
-            command_id="root-entry-command",
-            prompt="分析人物与世界背景",
-            runtime=runtime,
-            signal=asyncio.Event(),
-        ):
-            if isinstance(update, AgentRunResult):
-                results.append(update)
-    finally:
-        await composition.shutdown()
-
-    assert len(results) == 1
-    assert results[0].status is RunStatus.DONE
-    assert results[0].final_response == ""
-    assert results[0].validated_result.startswith("novel-analysis-v1://")
-    artifact_id = results[0].validated_result.split("://", 1)[1]
-    review = await NovelAnalysisAttemptArtifactStore(temp_db).load_payload(
-        artifact_id
-    )
-    projected = await NovelAnalysisReviewProjection(temp_db).load(
-        results[0].validated_result
-    )
-    assert review["storyOverview"]["summaryMarkdown"] == "潮水淹没旧城。"
-    assert review["coverageReport"]["missingSegmentIds"] == []
-    assert projected["artifactContract"] == "purrtypos.novel_analysis.review.v1"
-    assert projected["storyOverview"]["summaryMarkdown"] == "潮水淹没旧城。"
-    assert projected["storyOverview"]["evidence"][0]["excerpt"].startswith(
-        "潮水漫过旧城"
-    )
-    assert projected["facts"][0]["evidence"][0]["sectionTitle"] == "第一章"
-    assert projected["publicationSupported"] is True
-    runs = await NovelAnalysisReplacementRunProjection(
-        temp_db,
-        long_tasks=long_tasks,
-    ).list_for_revision("revision-1")
-    assert len(runs) == 1
-    assert runs[0]["runId"] == results[0].run_id
-    assert runs[0]["workflowStatus"] == "completed"
-    assert runs[0]["artifactRef"] == results[0].validated_result
-    assert runs[0]["publishedAnalysisId"] is None
-    assert runs[0]["relatedRuns"] == []
-    assert runs[0]["analysisPlan"]["steps"][0]["id"] == "analysis"
-    assert {unit["kind"] for unit in runs[0]["units"]} >= {
-        "extract",
-        "overview",
-        "review",
-    }
-
-    class _NoLegacyRuns:
-        async def list_for_revision(self, _revision_id):
-            return []
-
-    page = await VersionedNovelAnalysisStreamQuery(
-        temp_db,
-        output_repository=output_journal,
-        historical_analysis=_NoLegacyRuns(),
-        long_tasks=long_tasks,
-    ).read_page("revision-1", after=0, limit=500)
-    assert page["runs"][0]["runId"] == results[0].run_id
-    assert all(chunk["runId"] == results[0].run_id for chunk in page["chunks"])
-
-    import routers.novel_sources as novel_sources_router
-
-    monkeypatch.setattr(novel_sources_router, "get_db", lambda: temp_db)
-    monkeypatch.setattr(
-        "application.agent_composition.get_agent_composition",
-        lambda: SimpleNamespace(long_task_repository=long_tasks),
-    )
-    route_runs = await novel_sources_router.list_analysis_runs("revision-1")
-    assert route_runs["data"][0]["artifactRef"] == results[0].validated_result
-    route_artifact = await novel_sources_router.get_analysis_artifact(artifact_id)
-    assert route_artifact["data"]["artifactContract"] == (
-        "purrtypos.novel_analysis.review.v1"
-    )
-    review_body = ReviewNovelAnalysisRequest.model_validate({
-        "facts": projected["facts"],
-        "craftCards": projected["craftCards"],
-        "storyOverview": projected["storyOverview"],
-        "analysisTechniqueResult": projected["analysisTechniqueResult"],
-    })
-    reviewed_response = await novel_sources_router.review_analysis_artifact(
-        artifact_id,
-        review_body,
-        "review-command-1",
-    )
-    reviewed = reviewed_response["data"]
-    assert reviewed["reviewStatus"] == "reviewed"
-    assert reviewed["publicationSupported"] is True
-    assert reviewed["sourceArtifactRef"] == results[0].validated_result
-    assert reviewed["artifactId"] != artifact_id
-    replayed_review = await novel_sources_router.review_analysis_artifact(
-        artifact_id,
-        review_body,
-        "review-command-1",
-    )
-    assert replayed_review["data"]["artifactId"] == reviewed["artifactId"]
-    loaded_review = await novel_sources_router.get_analysis_artifact(
-        reviewed["artifactId"]
-    )
-    assert loaded_review["data"]["facts"] == reviewed["facts"]
-
-    with pytest.raises(AppError, match="请先审核"):
-        await novel_sources_router.publish_analysis_artifact(artifact_id)
-    published_response = await novel_sources_router.publish_analysis_artifact(
-        reviewed["artifactId"]
-    )
-    published = published_response["data"]
-    assert published["schemaVersion"] == 4
-    assert published["summary"]["artifactId"] == reviewed["artifactId"]
-    assert published["facts"][0]["subjectKey"] == reviewed["facts"][0]["subjectKey"]
-    canon = await ContinuationService(temp_db).preview_canon(
-        source_revision_id="revision-1",
-        source_analysis_id=published["id"],
-        fork_section_id="section-1",
-    )
-    assert canon["records"][0]["subjectKey"] == reviewed["facts"][0]["subjectKey"]
-    replayed_publish = await novel_sources_router.publish_analysis_artifact(
-        reviewed["artifactId"]
-    )
-    assert replayed_publish["data"]["id"] == published["id"]
-    assert int((await temp_db.fetch_one(
-        "SELECT COUNT(*) AS count FROM novel_source_analysis_facts "
-        "WHERE analysis_id = ?",
-        [published["id"]],
-    ))["count"]) == len(reviewed["facts"])
-
-    updated_payload = {
-        "facts": json.loads(json.dumps(reviewed["facts"], ensure_ascii=False)),
-        "craftCards": reviewed["craftCards"],
-        "storyOverview": reviewed["storyOverview"],
-        "analysisTechniqueResult": reviewed["analysisTechniqueResult"],
-    }
-    updated_payload["facts"][0]["subjectKey"] = "被潮水淹没的旧城"
-    updated_body = ReviewNovelAnalysisRequest.model_validate(updated_payload)
-    with pytest.raises(AppError, match="identity conflicts"):
-        await novel_sources_router.review_analysis_artifact(
-            artifact_id,
-            updated_body,
-            "review-command-1",
-        )
-    updated_response = await novel_sources_router.review_analysis_artifact(
-        reviewed["artifactId"],
-        updated_body,
-        "review-command-2",
-    )
-    updated = updated_response["data"]
-    assert updated["sourceArtifactRef"] == results[0].validated_result
-    assert updated["facts"][0]["subjectKey"] == "被潮水淹没的旧城"
-    updated_publish = await novel_sources_router.publish_analysis_artifact(
-        updated["artifactId"]
-    )
-    assert updated_publish["data"]["versionNo"] == 2
-    published_runs = await novel_sources_router.list_analysis_runs("revision-1")
-    assert published_runs["data"][0]["publishedAnalysisId"] == (
-        updated_publish["data"]["id"]
-    )
-    assert published_runs["data"][0]["artifactRef"] == updated["artifactRef"]
-
-    tampered = json.loads(json.dumps(updated_payload, ensure_ascii=False))
-    tampered["facts"][0]["evidence"][0]["excerpt"] = "不存在的伪造引文"
-    with pytest.raises(AppError, match="does not match"):
-        await novel_sources_router.review_analysis_artifact(
-            artifact_id,
-            ReviewNovelAnalysisRequest.model_validate(tampered),
-            "review-command-tampered",
-        )
-    assert await SqliteAgentImplementationStore(temp_db).load(
-        results[0].run_id
-    ) == replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1)
-
-    winner = await temp_db.fetch_one(
-        "SELECT task_id, attempt FROM ai_agent_long_task_units "
-        "WHERE output_ref = ?",
-        [results[0].validated_result],
-    )
-    loser_attempt = int(winner["attempt"]) + 1
-    loser = await NovelAnalysisAttemptArtifactStore(temp_db).commit(
-        task_id=str(winner["task_id"]),
-        unit_id="review:artifact",
-        attempt=loser_attempt,
-        operation_id=(
-            f"{winner['task_id']}:review:artifact:{loser_attempt}"
-        ),
-        run_id=results[0].run_id,
-        payload=review,
-    )
-    with pytest.raises(
-        NovelAnalysisReviewProjectionError,
-        match="not the settled Unit winner",
-    ):
-        await NovelAnalysisReviewProjection(temp_db).load(loser.resource_ref)
-
-
-@pytest.mark.asyncio
-async def test_paused_task_resumes_through_real_continuation_core(
-    temp_db,
-    monkeypatch,
-) -> None:
-    runtime = await _saved_runtime(temp_db)
-    await temp_db.execute(
-        "INSERT INTO novel_analysis_sessions (id, revision_id, title) "
-        "VALUES ('resume-session', 'revision-1', '恢复测试')"
-    )
-    await temp_db.execute(
-        "INSERT INTO novel_analysis_session_commands "
-        "(command_id, session_id, revision_id) VALUES "
-        "('pause-then-resume-task', 'resume-session', 'revision-1')"
-    )
-    provider_state = {"fail_extract": True, "planner_calls": 0}
-
-    async def planner(_key, _messages, options, _provider, signal=None):
-        provider_state["planner_calls"] += 1
-        assert signal is not None
-        return {
-            "applied_generation_limit": options.get("max_tokens"),
-            "message": {"role": "assistant", "content": json.dumps({
-                "needsTodos": True,
-                "title": "分析并复核",
-                "goal": "形成可审核分析",
-                "taskSpec": {
-                    "goal": "形成可审核分析",
-                    "target": {},
-                    "operation": "analyze",
-                    "instruction": "核对来源并生成待审核成果",
-                    "constraints": [],
-                    "preserve": [],
-                    "deliverable": "来源分析 review artifact",
-                },
-                "todos": [{
-                    "id": "analysis",
-                    "title": "分析小说",
-                    "type": "analyze",
-                    "executor": "model",
-                    "expectedTools": [],
-                    "riskLevel": "read",
-                }, {
-                    "id": "review",
-                    "title": "复核分析",
-                    "type": "review",
-                    "executor": "model",
-                    "expectedTools": [],
-                    "dependsOn": ["analysis"],
-                    "riskLevel": "read",
-                }, {
-                    "id": "deliver",
-                    "title": "形成审核成果",
-                    "type": "review",
-                    "executor": "model",
-                    "expectedTools": [],
-                    "dependsOn": ["review"],
-                    "riskLevel": "read",
-                }],
-            }, ensure_ascii=False)},
-            "model": "fixture",
-            "finish_reason": "stop",
-        }
-
-    async def runtime_stream(_key, messages, options, _provider, signal=None):
-        assert signal is not None
-        payload = _unit_payload(messages)
-        kind = payload["unitKind"]
-        tools = [item for item in messages if item["role"] == "tool"]
-
-        async def stream():
-            if kind == "extract" and provider_state["fail_extract"]:
-                raise ModelGatewayError(
-                    "fixture provider is temporarily unavailable",
-                    code="provider_rate_limited",
-                    retryable=True,
-                )
-            if not tools:
-                yield _tool_call(
-                    f"read-{kind}",
-                    (
-                        "readAnalysisSourceSegment"
-                        if kind == "extract"
-                        else "listAnalysisObservations"
-                    ),
-                    (
-                        {"segmentId": "section-1:0:100"}
-                        if kind == "extract"
-                        else {"limit": 20}
-                    ),
-                )
-                return
-            if "artifactRef" not in json.loads(tools[-1]["content"]):
-                yield _tool_call(
-                    f"submit-{kind}",
-                    SUBMIT_NOVEL_ANALYSIS_UNIT_RESULT,
-                    {"result": _unit_result(kind, payload)},
-                )
-                return
-            yield {
-                "choices": [{
-                    "delta": {"content": "已提交。"},
-                    "finish_reason": "stop",
-                }],
-            }
-
-        return {
-            "applied_generation_limit": options.get("max_tokens"),
-            "stream": stream(),
-            "model": "fixture",
-        }
-
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_no_stream",
-        planner,
-    )
-    monkeypatch.setattr(
-        "infrastructure.models.provider_router.create_chat_stream",
-        route_planning_stream(planner, runtime_stream),
-    )
-    composition = create_isolated_novel_analysis_replacement_composition(temp_db)
-    try:
-        entry = NovelAnalysisReplacementExecutionService(temp_db, composition)
-        first_results = []
-        async for update in entry.run(
-            source_revision_id="revision-1",
-            command_id="pause-then-resume-task",
-            prompt="分析人物与世界背景",
-            runtime=runtime,
-            signal=asyncio.Event(),
-        ):
-            if isinstance(update, AgentRunResult):
-                first_results.append(update)
-
-        row = await temp_db.fetch_one(
-            "SELECT id FROM ai_agent_long_tasks WHERE owner_id = ?",
-            ["revision-1"],
-        )
-        assert row is not None
-        task_id = str(row["id"])
-        paused = await composition.long_task_repository.load(task_id)
-        assert paused.status is LongTaskStatus.PAUSED
-
-        provider_state["fail_extract"] = False
-        await ProviderHealthRepository(temp_db).record_success(
-            ProviderHealthScope(
-                provider="openai",
-                model="fixture",
-                endpoint_digest=digest_model_endpoint(runtime.baseURL),
-            )
-        )
-        recovery = NovelAnalysisReplacementRecoveryService(
-            temp_db,
-            composition,
-            entry_service=entry,
-        )
-        resumed_results = []
-        async for update in recovery.resume(
-            task_id=task_id,
-            run_command_id="resume-root-command",
-            runtime=runtime,
-            signal=asyncio.Event(),
-        ):
-            if isinstance(update, AgentRunResult):
-                resumed_results.append(update)
-        final_task = await composition.long_task_repository.load(task_id)
-        task_bindings = await composition.long_task_repository.list_run_bindings(
-            task_id
-        )
-        projected_runs = await NovelAnalysisReplacementRunProjection(
-            temp_db,
-            long_tasks=composition.long_task_repository,
-        ).list_for_revision("revision-1")
-    finally:
-        await composition.shutdown()
-
-    assert len(first_results) == 1
-    assert first_results[0].status is RunStatus.CANCELED
-    assert first_results[0].error == "long_task_paused"
-    assert len(resumed_results) == 1
-    assert resumed_results[0].status is RunStatus.DONE
-    assert resumed_results[0].validated_result.startswith(
-        "novel-analysis-v1://"
-    )
-    assert provider_state["planner_calls"] == 1
-    assert final_task.status is LongTaskStatus.COMPLETED
-    assert {
-        (binding.run_id, binding.relation)
-        for binding in task_bindings
-    } == {
-        (first_results[0].run_id, LongTaskRunRelation.CREATED),
-        (resumed_results[0].run_id, LongTaskRunRelation.CONTINUATION),
-    }
-    assert [item["runId"] for item in projected_runs] == [
-        resumed_results[0].run_id,
-        first_results[0].run_id,
-    ]
-    assert projected_runs[0]["artifactRef"] == resumed_results[0].validated_result
-    assert projected_runs[0]["conversationId"] == "resume-session"
-    assert projected_runs[0]["workflowStatus"] == "completed"
-    assert projected_runs[0]["units"]
-    assert projected_runs[1]["artifactRef"] is None
-    assert projected_runs[1]["conversationId"] == "resume-session"
-    assert projected_runs[1]["workflowStatus"] is None
-    assert projected_runs[1]["units"] == []
-    assert await SqliteAgentImplementationStore(temp_db).load(
-        resumed_results[0].run_id
-    ) == replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1)
-    completed = await NovelAnalysisAttemptArtifactStore(temp_db).load_payload(
-        resumed_results[0].validated_result.split("://", 1)[1]
-    )
-    assert completed["coverageReport"]["missingSegmentIds"] == []
-
-
-class _RecoveryTasks:
-    def __init__(self, task, units) -> None:
-        self.task = task
-        self.units = units
-
-    async def load(self, task_id):
-        return self.task if task_id == self.task.id else None
-
-    async def list_units(self, task_id):
-        assert task_id == self.task.id
-        return self.units
-
-
-class _RecoveryRouter:
-    async def for_run(self, run_id, **kwargs):
-        assert run_id == "source-run"
-        assert kwargs["expected_agent_kind"] is AgentKind.NOVEL_ANALYSIS
-        return SimpleNamespace(identity=replacement_implementation(
-            AgentKind.NOVEL_ANALYSIS,
-            recipe_version=1,
-        ))
-
-
-class _RecoveryEntry:
-    def __init__(self) -> None:
-        self.calls = []
-
-    async def continue_task(self, **kwargs):
-        self.calls.append(kwargs)
-        yield "continued"
-
-
-class _RecoveryRuns:
-    def __init__(self, snapshot) -> None:
-        self.snapshot = snapshot
-
-    async def get(self, run_id):
-        assert run_id == self.snapshot.run_id
-        return self.snapshot
-
-
-@pytest.mark.asyncio
-async def test_recovery_entry_keeps_task_and_run_commands_distinct(temp_db) -> None:
-    runtime = await _saved_runtime(temp_db)
-    runtime_binding = await capture_saved_model_binding(temp_db, runtime)
-    segment = AnalysisSegment(
-        id="section-1:0:100",
-        section_id="section-1",
-        section_digest="section-digest",
-        section_ordinal=0,
-        start_character=0,
-        end_character=100,
-    )
-    plan = ExecutionPlan(
-        title="分析并复核",
-        task_spec=TaskSpec(goal="形成可审核分析", operation="analyze"),
-        steps=(TaskStep(
-            id="analysis",
-            title="分析小说",
-            type=StepType.ANALYZE,
-            executor=StepExecutor.MODEL,
-        ),),
-    )
-    recipe = compile_analysis_recipe(
-        source_revision_id="revision-1",
-        segments=(segment,),
-        plan_step_ids=("analysis",),
-    )
-    task = LongTaskRecord(
-        id="task-1",
-        namespace=NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE,
-        kind=recipe.kind,
-        owner_id="revision-1",
-        created_by_run_id="source-run",
-        status=LongTaskStatus.PAUSED,
-        revision=2,
-        total_units=len(recipe.steps),
-        completed_units=1,
-        failed_units=0,
-        max_parallelism=recipe.max_parallelism,
-        metadata={
-            "sourceRevisionId": "revision-1",
-            "commandId": "original-task-command",
-            "segments": [segment.to_mapping()],
-            "recipeVersion": 1,
-            "recipeDigest": recipe.metadata["recipeDigest"],
-            "runtimeBinding": runtime_binding,
-        },
-    )
-    units = (LongTaskUnitRecord(
-        task_id=task.id,
-        id=recipe.steps[0].id,
-        position=0,
-        status=LongTaskUnitStatus.COMPLETED,
-        dependencies=(),
-        attempt=1,
-        max_attempts=2,
-        output_ref="novel-analysis-v1://completed",
-        metadata=recipe.steps[0].metadata,
-    ),)
-    snapshot = RunSnapshot(
-        run_id="source-run",
-        title=plan.title,
-        goal=plan.goal,
-        status=RunStatus.FAILED,
-        task_spec=plan.task_spec,
-        steps=plan.steps,
-        work_step_ids=plan.work_step_ids,
-    )
-    tasks = _RecoveryTasks(task, units)
-    entry = _RecoveryEntry()
-    composition = SimpleNamespace(
-        long_task_repository=tasks,
-        agent_implementation_router=_RecoveryRouter(),
-    )
-    service = NovelAnalysisReplacementRecoveryService(
-        temp_db,
-        composition,
-        entry_service=entry,
-    )
-    service._runs = _RecoveryRuns(snapshot)
-
-    updates = [
-        update
-        async for update in service.resume(
-            task_id="task-1",
-            run_command_id="resume-command",
-            runtime=runtime,
-            signal=asyncio.Event(),
-        )
-    ]
-
-    assert updates == ["continued"]
-    call = entry.calls[0]
-    assert call["task_command_id"] == "original-task-command"
-    assert call["run_command_id"] == "resume-command"
-    continuation = call["durable_continuation"]
-    assert continuation.receipt.task_id == "task-1"
-    assert continuation.continuation_command == "resume-command"
-    assert continuation.source.execution_plan.steps[0].status is StepStatus.PENDING
-
-    recovered_runtime = await service.resolve_automatic_runtime("task-1")
-    assert recovered_runtime.modelConfigId == "analysis-model"
-    assert recovered_runtime.apiKey.get_secret_value() == "fixture-key"
-    assert await capture_saved_model_binding(temp_db, recovered_runtime) == (
-        runtime_binding
-    )

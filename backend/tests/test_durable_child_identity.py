@@ -47,6 +47,6 @@ async def test_operation_retains_owner_and_requires_live_unit(tmp_path, failure)
             assert result.run_id == "root" and operation_id == "task:unit:1"
             assert calls[0]["request"].metadata["operationScopeId"] == operation_id
         assert (await tasks.list_units("task"))[0].run_id is None
-        assert await db.fetch_one("SELECT name FROM sqlite_master WHERE name='ai_agent_tree_commands_v3'") is None
+        assert await db.fetch_one("SELECT name FROM sqlite_master WHERE name='ai_agent_tree_commands_v4'") is None
     finally:
         await db.close()

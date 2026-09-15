@@ -103,6 +103,43 @@ test('runtime event text does not impersonate Provider deltas', () => {
   assert.equal(state.finalText, 'Provider text')
 })
 
+test('validated novel-analysis stage output is retained as public narration', () => {
+  const state = replayCanonicalOutput([
+    event(1, {
+      source: 'runtime',
+      kind: 'runtime.event',
+      channel: 'commentary',
+      payload: {
+        eventType: 'novel_analysis.stage_output',
+        data: {
+          stageId: 'task:map:extract',
+          text: '人物关系已经形成较稳定的判断。林月与苏文的双线由错位走向汇合。',
+        },
+      },
+    }),
+    event(2, {
+      source: 'runtime',
+      kind: 'runtime.event',
+      channel: 'commentary',
+      payload: {
+        eventType: 'novel_analysis.stage_output',
+        data: {
+          stageId: 'task:map:extract',
+          text: '人物关系已经复核。林月与苏文的双线汇合推动了组织线展开。',
+        },
+      },
+    }),
+  ])
+
+  assert.deepEqual(state.stageOutputs, [{
+    stageId: 'task:map:extract',
+    text: '人物关系已经复核。林月与苏文的双线汇合推动了组织线展开。',
+    sequence: 2,
+    occurredAt: '2026-08-12T08:00:02+00:00',
+  }])
+  assert.equal(state.finalText, '')
+})
+
 test('Provider delta batches replay as ordered public text', () => {
   const state = replayCanonicalOutput([
     event(1, {

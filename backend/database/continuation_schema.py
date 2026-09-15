@@ -55,11 +55,52 @@ async def init_continuation_schema(db) -> None:
         text_content TEXT NOT NULL,
         content_digest TEXT NOT NULL,
         locator_json TEXT NOT NULL DEFAULT '{}',
+        byte_count INTEGER NOT NULL DEFAULT 0,
+        character_count INTEGER NOT NULL DEFAULT 0,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(revision_id, ordinal)
     )""")
+    section_columns = {
+        str(row["name"])
+        for row in await db.fetch_all("PRAGMA table_info(novel_source_sections)")
+    }
+    if "byte_count" not in section_columns:
+        await db.execute(
+            "ALTER TABLE novel_source_sections "
+            "ADD COLUMN byte_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "character_count" not in section_columns:
+        await db.execute(
+            "ALTER TABLE novel_source_sections "
+            "ADD COLUMN character_count INTEGER NOT NULL DEFAULT 0"
+        )
+    # Source revisions are immutable, so missing legacy metrics can be derived
+    # without changing source content or identity.
+    await db.execute(
+        "UPDATE novel_source_sections SET "
+        "byte_count = length(CAST(text_content AS BLOB)), "
+        "character_count = length(text_content) "
+        "WHERE byte_count != length(CAST(text_content AS BLOB)) "
+        "OR character_count != length(text_content)"
+    )
+    await db.execute("""CREATE TABLE IF NOT EXISTS novel_source_section_token_metrics (
+        source_revision_id TEXT NOT NULL,
+        section_id TEXT NOT NULL,
+        tokenizer_id TEXT NOT NULL,
+        tokenizer_version TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        count_kind TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(section_id, tokenizer_id, tokenizer_version)
+    )""")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_source_revisions_work ON novel_source_revisions(work_id, version_no)")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_source_sections_revision ON novel_source_sections(revision_id, ordinal)")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_source_section_token_metrics_revision "
+        "ON novel_source_section_token_metrics("
+        "source_revision_id, tokenizer_id, tokenizer_version, section_id)"
+    )
 
     await db.execute("""CREATE TABLE IF NOT EXISTS novel_source_analyses (
         id TEXT PRIMARY KEY NOT NULL,

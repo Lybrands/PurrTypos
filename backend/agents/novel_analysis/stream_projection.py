@@ -1,4 +1,4 @@
-"""Version-aware SSE query spanning frozen and replacement analysis Runs."""
+"""SSE query for the single scalable-v2 Novel Analysis runtime."""
 
 from __future__ import annotations
 
@@ -14,17 +14,15 @@ from exceptions import NotFoundError
 from purra.output import OutputChannel, OutputVisibility
 
 
-_LEGACY_NAMESPACES = ("novel_source_analysis", "novel_source_analysis.unit")
-_EVENT_NAMESPACES = (*_LEGACY_NAMESPACES, NOVEL_ANALYSIS_REPLACEMENT_RUN_NAMESPACE)
+_EVENT_NAMESPACES = (NOVEL_ANALYSIS_REPLACEMENT_RUN_NAMESPACE,)
 
 
 class VersionedNovelAnalysisStreamQuery:
-    """Use one event cursor while projecting both implementation versions."""
+    """Project only scalable-v2 Runs and their real Agent-tree children."""
 
-    def __init__(self, db, *, output_repository, historical_analysis, long_tasks):
+    def __init__(self, db, *, output_repository, long_tasks):
         self._db = db
         self._output = output_repository
-        self._historical = historical_analysis
         self._replacement = NovelAnalysisReplacementRunProjection(
             db,
             long_tasks=long_tasks,
@@ -48,9 +46,9 @@ class VersionedNovelAnalysisStreamQuery:
             "LEFT JOIN novel_analysis_superseded_runs sr ON sr.run_id = r.id "
             "LEFT JOIN ai_agent_long_task_runs tr ON tr.run_id = r.id "
             "LEFT JOIN ai_agent_long_tasks t ON t.id = tr.task_id "
-            "WHERE r.binding_aggregate_id = ? AND r.binding_namespace IN (?,?,?) "
+            "WHERE r.binding_aggregate_id = ? AND r.binding_namespace = ? "
             "ORDER BY r.rowid",
-            [revision_id, *_EVENT_NAMESPACES],
+            [revision_id, NOVEL_ANALYSIS_REPLACEMENT_RUN_NAMESPACE],
         )
         units = await self._db.fetch_all(
             "SELECT u.task_id, u.unit_id, u.status, u.attempt, u.run_id, "
@@ -59,26 +57,40 @@ class VersionedNovelAnalysisStreamQuery:
             "SELECT tr.task_id FROM ai_agent_long_task_runs tr "
             "JOIN ai_agent_runs r ON r.id = tr.run_id "
             "WHERE r.binding_aggregate_id = ? "
-            "AND r.binding_namespace IN (?,?)) "
+            "AND r.binding_namespace = ?) "
             "ORDER BY u.task_id, u.position",
             [
                 revision_id,
-                "novel_source_analysis",
                 NOVEL_ANALYSIS_REPLACEMENT_RUN_NAMESPACE,
             ],
+        )
+        children = await self._db.fetch_all(
+            "SELECT child.id, child.root_run_id, child.status, "
+            "child.create_time, child.update_time "
+            "FROM ai_agent_runs child "
+            "JOIN ai_agent_long_task_runs binding "
+            "ON binding.run_id = child.root_run_id "
+            "JOIN ai_agent_runs root ON root.id = binding.run_id "
+            "WHERE root.binding_aggregate_id = ? "
+            "AND root.binding_namespace = ? "
+            "AND child.parent_run_id = child.root_run_id "
+            "ORDER BY child.rowid",
+            [revision_id, NOVEL_ANALYSIS_REPLACEMENT_RUN_NAMESPACE],
         )
         published = await self._db.fetch_one(
             "SELECT id FROM novel_source_analyses WHERE source_revision_id = ? "
             "ORDER BY version_no DESC LIMIT 1",
             [revision_id],
         )
-        version = projection_version([state, units, published])
+        # Child Runs are created after their durable Unit is claimed. Include
+        # their lifecycle in the projection fingerprint so the stream cannot
+        # cache the pre-spawn Unit snapshot until that Unit completes.
+        version = projection_version([state, units, children, published])
         changed = version != self._version
         if changed:
-            legacy = await self._historical.list_for_revision(revision_id)
             replacement = await self._replacement.list_for_revision(revision_id)
             self._runs = sorted(
-                [*legacy, *replacement],
+                replacement,
                 key=lambda item: (
                     str(item.get("createTime") or ""),
                     str(item.get("runId") or ""),

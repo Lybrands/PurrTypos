@@ -64,20 +64,50 @@ export function handleCanonicalOutput(
     ctx.acc.taskPlan = undefined
   }
 
+  const reductionBase = resumesPausedRun
+    ? {
+        ...currentState,
+        runId: chunk.runId,
+        runStatus: null,
+        runTerminal: false,
+      }
+    : currentState
+  const childDelegationId = relatedRun && !finalResponseRun
+    ? currentState.delegationOrder.find((delegationId) =>
+        currentState.delegations[delegationId]?.runId === chunk.runId)
+    : undefined
   const projectedChunk = relatedRun
-    ? projectRelatedRunEvent(chunk, finalResponseRun)
+    ? projectRelatedRunEvent(chunk, finalResponseRun || Boolean(childDelegationId))
     : chunk
-  const state = reduceCanonicalOutput(
-    resumesPausedRun
-      ? {
-          ...currentState,
-          runId: chunk.runId,
-          runStatus: null,
-          runTerminal: false,
-        }
-      : currentState,
-    projectedChunk,
-  )
+  let state: CanonicalOutputState
+  if (relatedRun && !finalResponseRun && childDelegationId) {
+    // Child output belongs to the child inspection view. The root only keeps
+    // envelope deduplication state and the delegation's current activity.
+    const trackedRoot = reduceCanonicalOutput(
+      reductionBase,
+      { ...chunk, visibility: 'private' },
+    )
+    const delegation = trackedRoot.delegations[childDelegationId]
+    if (delegation) {
+      const childOutput = reduceCanonicalOutput(
+        delegation.output.runId
+          ? delegation.output
+          : { ...delegation.output, runId: chunk.runId },
+        projectedChunk,
+      )
+      state = {
+        ...trackedRoot,
+        delegations: {
+          ...trackedRoot.delegations,
+          [childDelegationId]: { ...delegation, output: childOutput },
+        },
+      }
+    } else {
+      state = trackedRoot
+    }
+  } else {
+    state = reduceCanonicalOutput(reductionBase, projectedChunk)
+  }
 
   ctx.acc.canonicalOutput = state
   ctx.acc.agentRunId = state.runId ?? chunk.runId
@@ -383,6 +413,8 @@ function delegationView(
     delegationId: string
     firstSequence: number
     runId: string
+    agentId?: string | null
+    previousRunId?: string | null
     agentName: string
     agentTitle: string | null
     objective: string
@@ -393,6 +425,8 @@ function delegationView(
   return {
     delegationId: value.delegationId,
     runId: value.runId,
+    agentId: value.agentId ?? null,
+    previousRunId: value.previousRunId ?? null,
     agentName: value.agentName,
     agentTitle: value.agentTitle,
     objective: value.objective,

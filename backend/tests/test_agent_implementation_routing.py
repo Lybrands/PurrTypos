@@ -25,6 +25,11 @@ from agents.shared.implementation_router import (
 )
 from agents.shared.cancellation import VersionRoutedRunCancellationProjector
 from agents.shared.run_query import VersionedAgentRunQueryService
+from agents.novel_analysis.scalable_profile import (
+    NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
+    scalable_novel_analysis_implementation,
+    scalable_novel_analysis_implementation_profile,
+)
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from infrastructure.persistence.run_store import create_run
@@ -117,6 +122,39 @@ def test_profile_registration_cannot_pin_recipe_version() -> None:
             ),
             "invalid",
         )
+
+
+@pytest.mark.asyncio
+async def test_scalable_analysis_identity_routes_without_relabeling_native_v1(
+    temp_db,
+) -> None:
+    native_v1 = AgentImplementationProfile(
+        replacement_implementation(AgentKind.NOVEL_ANALYSIS),
+        "novel-analysis-native-v1",
+    )
+    scalable_v2 = scalable_novel_analysis_implementation_profile()
+    router = SqliteAgentImplementationRouter(
+        temp_db,
+        _registry(native_v1, scalable_v2),
+    )
+    v1_run = await create_run(
+        temp_db, run_id="analysis-native-v1", session_id=None,
+        prompt="old", mode="novel_analysis",
+    )
+    v2_run = await create_run(
+        temp_db, run_id="analysis-scalable-v2", session_id=None,
+        prompt="new", mode="novel_analysis",
+    )
+    from agents.shared.implementation_store import SqliteAgentImplementationStore
+    store = SqliteAgentImplementationStore(temp_db)
+    await store.bind(v1_run, replacement_implementation(AgentKind.NOVEL_ANALYSIS))
+    await store.bind(v2_run, scalable_novel_analysis_implementation())
+
+    v1_route = await router.for_run(v1_run, action=AgentLifecycleAction.REPLAY)
+    v2_route = await router.for_run(v2_run, action=AgentLifecycleAction.REPLAY)
+
+    assert v1_route.runtime_profile_id == "novel-analysis-native-v1"
+    assert v2_route.runtime_profile_id == NOVEL_ANALYSIS_SCALABLE_PROFILE_ID
 
 
 @pytest.mark.asyncio

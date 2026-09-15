@@ -9,7 +9,7 @@ import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 
-from application.agent_delegation_policy import DELEGATION_GUIDANCE, RESULT_PRESENTATION
+from application.agent_delegation_policy import DELEGATION_GUIDANCE
 from purra.contracts import (
     AgentMessage, MessageRole, MessageOrigin,
     AgentRunRequest,
@@ -133,6 +133,16 @@ def _uses_adapter_public_progress(request: AgentRunRequest) -> bool:
             or request.metadata.get("progressAudience") == "public"
         )
     )
+
+
+def _with_internal_child_audience(request: AgentRunRequest) -> AgentRunRequest:
+    if not str(request.metadata.get("parentRunId") or "").strip():
+        return request
+    return replace(request, metadata={
+        **request.metadata,
+        "responseAudience": "internal",
+        "progressAudience": "internal",
+    })
 
 
 def _model_task_identity(model_request: ModelRequest, reasoning_mode) -> dict:
@@ -329,6 +339,10 @@ class AgentComposition:
         return self._run_control_store
 
     @property
+    def run_tree_repository(self):
+        return self._run_tree_repository
+
+    @property
     def memory_resource(self):
         return self._memory_resource
 
@@ -368,6 +382,10 @@ class AgentComposition:
             "SELECT runtime_limits_json,deadline_at_ms,selected_context_window_tokens FROM ai_agent_runs WHERE id=?", [run_id])
         limits = runtime_limits_from_mapping(json.loads(run["runtime_limits_json"]))
         model = model_request_from_runtime(runtime)
+        model = replace(
+            model,
+            max_generation_tokens=min(model.max_generation_tokens or 512, 512),
+        )
         reasoning = reasoning_mode_from_options(model.options)
         manager = AgentModelInvocationManager(
             ProviderModelGateway(runtime.apiKey.get_secret_value(), request_observer=model_request_observer(self._db)),
@@ -472,9 +490,22 @@ class AgentComposition:
                     request, run_id,
                 )
 
+        # Child requests must be internal before a profile is allowed to build
+        # or inspect their context. Re-apply the boundary afterwards so a
+        # profile cannot accidentally restore the Root's public audience.
+        is_child_request = bool(
+            str(request.metadata.get("parentRunId") or "").strip()
+        )
+        request = _with_internal_child_audience(request)
         profile = self._profile_registry.for_request(request)
         prepared = await profile.prepare_request(request)
         resolved = request if prepared is None else prepared
+        if is_child_request:
+            resolved = replace(resolved, metadata={
+                **resolved.metadata,
+                "responseAudience": "internal",
+                "progressAudience": "internal",
+            })
         if (
             resolved.tools_enabled
             and resolved.metadata.get("responseAudience") != "internal"
@@ -656,9 +687,12 @@ class AgentComposition:
             runtime_limits=runtime_limits,
             recovery_policy=adapter.recovery_policy,
             component_bindings=_host_component_bindings(profile.id),
-            agent_tree_policy=AgentTreePolicy(
-                max_agents_per_root=16,
-                result_presentation_instruction=RESULT_PRESENTATION,
+            agent_tree_policy=(
+                getattr(adapter, "agent_tree_policy", None)
+                or AgentTreePolicy(
+                    max_agents_per_root=16,
+                    result_presentation_instruction=None,
+                )
             ) if agent_tree_enabled else None,
         )
         core = AgentCore(
@@ -681,6 +715,10 @@ class AgentComposition:
             execution_lease_duration_ms=self._repository.lease_duration_ms,
             evidence_validator=evidence_validator,
         )
+        if long_task_executor is not None:
+            bind_core = getattr(long_task_executor, "bind_agent_core", None)
+            if callable(bind_core):
+                bind_core(core)
         self._active_cores.add(core)
         return core
 

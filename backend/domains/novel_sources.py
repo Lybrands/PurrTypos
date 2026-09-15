@@ -122,11 +122,28 @@ def apply_source_section_layout(
 def _with_volume_structure(sections):
     from dataclasses import replace
     volume_id = volume_title = None
+    inferred_volumes: dict[str, str] = {}
     result = []
     for section in sections:
-        is_volume = bool(re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[卷部]", section.title))
+        # Whole-book TXT export prefixes leaf chapter headings with their
+        # volume label: `第一卷 ... · 第十二章 ...`. That is still a chapter,
+        # not twelve standalone volumes. Recover the hierarchy without adding
+        # pseudo-sections that do not exist in the source text.
+        prefix, separator, leaf = section.title.partition(" · ")
+        composite_chapter = bool(
+            separator
+            and re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[卷部]", prefix)
+            and re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[章节篇回]", leaf)
+        )
+        is_volume = bool(
+            not composite_chapter
+            and re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[卷部]", section.title)
+        )
         if is_volume:
             volume_id, volume_title = f"volume:{section.ordinal}", section.title
+        elif composite_chapter:
+            volume_title = prefix
+            volume_id = inferred_volumes.setdefault(prefix, f"volume:{len(inferred_volumes)}")
         result.append(replace(section, volume_id=volume_id, volume_title=volume_title, section_type="volume" if is_volume else "chapter"))
     return tuple(result)
 

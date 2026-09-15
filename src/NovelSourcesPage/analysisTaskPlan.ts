@@ -8,7 +8,7 @@ import type { NovelAnalysisRun } from '../types'
 const RUNNING_UNIT_STATUSES = new Set(['running', 'claimed'])
 const ACTIVE_RUN_STATUSES = new Set(['pending', 'running', 'claimed'])
 
-function backendTimestampMs(value?: string | null): number | null {
+export function backendTimestampMs(value?: string | null): number | null {
   const normalized = String(value || '').trim().replace(' ', 'T')
   if (!normalized) return null
   const timestamp = Date.parse(

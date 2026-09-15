@@ -99,7 +99,7 @@
     "src/purra/engine/__init__.py": "dea9b1bc9f22a49174bb5a83bfd4381cbe586a3d26d98c811e4bd5867a328e92",
     "src/purra/engine/agent_context.py": "601ea34cc034983f85417cd785a482a45ee036455de24affac30ce935cf21d65",
     "src/purra/engine/agent_result_delivery.py": "1f7765b3e58bd9f31553f9266b2b8a452ad9b30536b0ce5c5409a657214843e8",
-    "src/purra/engine/agent_tree_orchestrator.py": "f878eaf47e3a4ab19f953092ee6796be2fda34ce0c322c40e9e91e79ed2ed782",
+    "src/purra/engine/agent_tree_orchestrator.py": "755c08fbfcfe03697d18f6e3eb6c6ceb3f33e0146e65b75dc5769a43bd3c02bd",
     "src/purra/engine/canonical_sink.py": "a30d272e4bcb622a086a8a50ba97511926920530959217fa72af96202be919df",
     "src/purra/engine/compaction_phase.py": "ac5092f342cc2b42b02ff4e45da01ccbb063371ef71491b4fe04aa1b77d83616",
     "src/purra/engine/context_capability.py": "45dfd6211d32c0e1f7bac0858735f13776e4effc74dd2ed33ddaa09ee9dbeedc",
@@ -432,7 +432,7 @@
   "artifacts": [
     {
       "file": "purra-1.0.0-py3-none-any.whl",
-      "sha256": "9a3695b9fa2f37bc11b140c0077c5c1273c5b352fc2e13579af99ff859a03c2c",
+      "sha256": "d5b1f7803c21505c0b80d77eaa3c9e48ada66a7d7f2ad22ba9b582ee47a198f4",
       "source": "/Users/liuyubin/Lybrand_project/purra"
     },
     {

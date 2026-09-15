@@ -747,18 +747,6 @@ export interface NovelSourceImportPreview {
   }>;
 }
 
-export interface NovelAnalysisEvidence {
-  referenceKind?: 'quote' | 'chapter';
-  sectionId: string;
-  excerpt: string;
-  segmentStartCharacter?: number;
-  segmentEndCharacter?: number;
-  sectionOrdinal?: number;
-  sectionTitle?: string;
-  locator?: { start: number; end: number };
-  excerptDigest?: string;
-}
-
 export interface NovelAnalysisFact {
   claimNature?: 'fact' | 'summary' | 'inference';
   id?: string;
@@ -767,7 +755,6 @@ export interface NovelAnalysisFact {
   predicate: string;
   value: unknown;
   lifecycleStatus: string;
-  evidence: NovelAnalysisEvidence[];
 }
 
 export interface NovelAnalysisCraftCard {
@@ -775,28 +762,11 @@ export interface NovelAnalysisCraftCard {
   cardKind: string;
   title: string;
   bodyMarkdown: string;
-  evidence: NovelAnalysisEvidence[];
 }
 
 export interface NovelAnalysisStoryOverview {
   summaryMarkdown: string;
-  evidence: NovelAnalysisEvidence[];
   contentDigest?: string;
-}
-
-export interface DistilledWritingSkill {
-  name: string;
-  purpose: string;
-  markdown: string;
-}
-export interface WritingSkillTrials {
-  trials: Array<{ brief: string; baseline: string; application: string; stepApplications: Array<{ step: number; observation: string }> }>;
-}
-export interface WritingSkillDistillation {
-  revisionNotes: string[];
-  initialTrials: WritingSkillTrials;
-  transferTrials: WritingSkillTrials;
-  assessment: { checks: Array<{ dimension: string; passed: boolean; reason: string }> };
 }
 
 export interface WritingTechniqueResult {
@@ -805,28 +775,11 @@ export interface WritingTechniqueResult {
   evidenceRefs: string[]; scopeNotes: string[]; reason: string;
 }
 
-export type NovelAnalysisReplacementTechniqueResult = {
-  status: 'generated';
-  techniques: Array<{
-    title: string;
-    bodyMarkdown: string;
-    observationIds: string[];
-  }>;
-} | {
-  status: 'empty';
-  reason: string;
-};
-
 export interface NovelAnalysisArtifact {
-  analysisSchemaVersion?: number;
-  artifactContract?: 'purrtypos.novel_analysis.review.v1';
+  analysisSchemaVersion: number;
+  artifactContract: 'purrtypos.novel_analysis.review.v2';
   artifactRef?: string;
-  publicationSupported?: boolean;
-  analysisTechniqueResult?: NovelAnalysisReplacementTechniqueResult;
-  techniqueResult?: WritingTechniqueResult;
-  writingSkill?: DistilledWritingSkill;
-  distillation?: WritingSkillDistillation;
-  skillReviewStatus?: "pending_review" | "needs_revision";
+  techniqueResult: WritingTechniqueResult;
   artifactId: string;
   artifactKind: string;
   sourceRevisionId: string;
@@ -834,7 +787,6 @@ export interface NovelAnalysisArtifact {
   facts: NovelAnalysisFact[];
   craftCards: NovelAnalysisCraftCard[];
   storyOverview?: NovelAnalysisStoryOverview | null;
-  coverage: Record<string, unknown>;
   conflicts: unknown[];
   reviewStatus: 'pending' | 'reviewed';
 }
@@ -911,7 +863,19 @@ export interface NovelAnalysisRun {
   completedUnits: number;
   failedUnits: number;
   providerOutputEvents?: number;
-  relatedRuns?: Array<{ runId: string; status: string }>;
+  relatedRuns?: Array<{
+    runId: string;
+    status: string;
+    role?: 'child' | 'previous_root';
+    agentId?: string;
+    agentName?: string;
+    agentTitle?: string;
+    objective?: string;
+    previousRunId?: string | null;
+    createTime?: string;
+    unitId?: string | null;
+    attempt?: number | null;
+  }>;
   analysisPlan?: {
     title: string;
     goal?: string;
@@ -953,9 +917,6 @@ export interface NovelAnalysisRun {
 
 export interface PublishedNovelAnalysis {
   techniqueResult?: WritingTechniqueResult;
-  writingSkill?: DistilledWritingSkill;
-  distillation?: WritingSkillDistillation;
-  skillReviewStatus?: "pending_review" | "needs_revision";
   id: string;
   sourceRevisionId: string;
   versionNo: number;
@@ -1463,6 +1424,18 @@ export interface AiAgentRunSnapshot {
   hasMore: boolean;
 }
 
+export interface AiSubAgentConversation {
+  version: 2;
+  agentId: string;
+  selectedRunId: string;
+  turns: Array<{
+    runId: string;
+    prompt: string;
+    finalResponse: string;
+    status: AiAgentDelegation['status'];
+  }>;
+}
+
 export interface AiWritingChatRequestReceipt {
   requestId: string
   sessionId: number
@@ -1492,9 +1465,13 @@ export type AiLongTaskUnitStatus =
 export interface AiAgentDelegation {
   delegationId: string;
   runId: string;
+  agentId?: string | null;
+  previousRunId?: string | null;
   agentName: string;
   agentTitle?: string | null;
   objective: string;
+  /** Used only to place derived child Runs in the execution timeline. */
+  startedAt?: string | null;
   /** Planner step identity bound to a durable unit for this delegation. */
   unitId?: string | null;
   /** One-based execution attempt for the same durable unit. */
@@ -2170,10 +2147,10 @@ export interface ElectronAPI {
   followUpNovelAnalysis: (data: { replaceRunId?: string; commandId: string; revisionId: string; conversationId?: string; artifactId?: string; prompt: string; runtime: NovelAnalysisRuntimeInput }) => Promise<ApiResult<{ status: string; commandId: string }>>;
   listNovelAnalysisRuns: (data: { revisionId: string }) => Promise<ApiResult<NovelAnalysisRun[]>>;
   pauseNovelAnalysis: (data: { taskId: string; expectedTaskRevision?: number }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
-  resumeNovelAnalysis: (data: { commandId: string; taskId: string; retryFailed: boolean; runtime: NovelAnalysisRuntimeInput }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
+  resumeNovelAnalysis: (data: { commandId: string; taskId: string; runtime: NovelAnalysisRuntimeInput }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
   cancelNovelAnalysis: (data: { taskId: string }) => Promise<ApiResult<NovelAnalysisTaskControlReceipt>>;
   getNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<NovelAnalysisArtifact>>;
-  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null; techniqueResult?: WritingTechniqueResult; analysisTechniqueResult?: NovelAnalysisReplacementTechniqueResult }) => Promise<ApiResult<NovelAnalysisArtifact>>;
+  reviewNovelAnalysisArtifact: (data: { commandId: string; artifactId: string; facts: NovelAnalysisFact[]; craftCards: NovelAnalysisCraftCard[]; storyOverview?: NovelAnalysisStoryOverview | null; techniqueResult: WritingTechniqueResult }) => Promise<ApiResult<NovelAnalysisArtifact>>;
   publishNovelAnalysisArtifact: (data: { artifactId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
   listPublishedNovelAnalyses: (data: { revisionId: string }) => Promise<ApiResult<PublishedNovelAnalysis[]>>;
   getPublishedNovelAnalysis: (data: { analysisId: string }) => Promise<ApiResult<PublishedNovelAnalysis>>;
@@ -2445,6 +2422,9 @@ export interface ElectronAPI {
     after?: number;
     limit?: number;
   }) => Promise<ApiResult<AiAgentRunSnapshot>>;
+  getSubAgentConversation: (data: {
+    runId: string;
+  }) => Promise<ApiResult<AiSubAgentConversation>>;
   consumeAgentRunEvents: (data: {
     runId: string;
     sessionId: number;
@@ -2647,6 +2627,8 @@ export interface ElectronAPI {
 export interface GeneralSettings {
   model_descriptors?: Array<Record<string, unknown>>;
   sync_outline_chapter: boolean;
+  /** Agent 运行期间允许屏幕关闭，但阻止系统挂起本地任务。 */
+  agent_prevent_system_sleep?: boolean;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
   /** 按协议 Provider 与共享端点控制真实模型调用并发。 */

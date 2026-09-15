@@ -11,12 +11,12 @@ from tests.support.novel_source_fixtures import seed_novel_source
 async def seed(db, edited_kind="follow_up"):
     revision = (await seed_novel_source(db))['id']
     sessions = NovelAnalysisSessions(db)
-    identity = (await sessions.list(revision))[0]['id']
+    identity = (await sessions.create(revision))['id']
     other = (await sessions.create(revision))['id']
     for command, session in [('first', identity), ('edited', identity), ('later', identity), ('other', other)]:
         await sessions.bind(revision, session, command)
         await db.execute('INSERT INTO ai_agent_runs(id,status,prompt,final_response,binding_namespace,binding_aggregate_id,binding_command_id,binding_attributes_json) VALUES (?,?,?,?,?,?,?,?)',
-            [command, 'done', command, 'answer-' + command, 'novel_source_analysis', revision, command,
+            [command, 'done', command, 'answer-' + command, 'purrtypos.novel_analysis', revision, command,
              json.dumps({'interactionKind': edited_kind if command == 'edited' else 'follow_up'})])
     await sessions.bind(revision, identity, 'replacement')
     return revision, sessions, identity, other
@@ -30,16 +30,15 @@ async def seed(db, edited_kind="follow_up"):
 
 
 
-async def test_edit_http_contract_never_sends_replacement_run_to_frozen_service(
+async def test_edit_http_contract_routes_current_analysis_run(
     tmp_path,
     monkeypatch,
 ):
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from dependencies import set_db, clear_db
-    from agents.shared.implementation import (
-        AgentKind,
-        replacement_implementation,
+    from agents.novel_analysis.scalable_profile import (
+        scalable_novel_analysis_implementation,
     )
     from agents.shared.implementation_store import SqliteAgentImplementationStore
     import routers.novel_sources as routes
@@ -51,7 +50,7 @@ async def test_edit_http_contract_never_sends_replacement_run_to_frozen_service(
         revision, _, identity, _ = await seed(db)
         await SqliteAgentImplementationStore(db).bind(
             "edited",
-            replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+            scalable_novel_analysis_implementation(recipe_version=2),
         )
         control = type("Control", (), {})()
         control.replace_turn = AsyncMock(return_value={"status": "accepted"})
@@ -88,7 +87,7 @@ async def test_edit_http_contract_never_sends_replacement_run_to_frozen_service(
         clear_db(db)
         await db.close()
 
-async def test_follow_up_http_contract_never_sends_replacement_artifact_to_frozen_service(
+async def test_follow_up_http_contract_routes_current_analysis_artifact(
     tmp_path,
     monkeypatch,
 ):

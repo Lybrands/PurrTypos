@@ -43,7 +43,51 @@ def entry_metadata(content: str) -> dict:
             raise TechniqueError("invalid_entry", f"入口 {key} 必须为非空字符串，最多 {maximum} 字符")
     if "tags" in value and (not isinstance(value["tags"], list) or any(not isinstance(v, str) for v in value["tags"])):
         raise TechniqueError("invalid_entry", "入口 tags 必须为字符串列表")
-    return {key: value[key] for key in ("name", "description", "tags") if key in value}
+    result = {
+        key: value[key]
+        for key in ("name", "description", "tags")
+        if key in value
+    }
+    if "metadata" in value:
+        metadata = value["metadata"]
+        if not isinstance(metadata, dict):
+            raise TechniqueError("invalid_entry", "入口 metadata 必须为对象")
+        if "retrieval" in metadata:
+            result["retrieval"] = _retrieval_metadata(metadata["retrieval"])
+    return result
+
+
+def _retrieval_metadata(value: object) -> dict[str, list[str]]:
+    if not isinstance(value, dict):
+        raise TechniqueError("invalid_entry", "入口 metadata.retrieval 必须为对象")
+    supported = ("intents", "contexts", "objectives", "keywords", "exclusions")
+    result = {
+        key: _metadata_text_list(value[key], f"metadata.retrieval.{key}")
+        for key in supported
+        if key in value
+    }
+    if not any(result.get(key) for key in supported[:-1]):
+        raise TechniqueError(
+            "invalid_entry",
+            "入口 metadata.retrieval 至少需要一项可检索信息",
+        )
+    return result
+
+
+def _metadata_text_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > 24:
+        raise TechniqueError("invalid_entry", f"入口 {label} 必须为不超过 24 项的字符串列表")
+    normalized = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or len(item.strip()) > 200:
+            raise TechniqueError(
+                "invalid_entry",
+                f"入口 {label} 每项必须为不超过 200 字符的非空字符串",
+            )
+        text = item.strip()
+        if text not in normalized:
+            normalized.append(text)
+    return normalized
 
 
 def local_link(source: str, target: str) -> str | None:
@@ -116,5 +160,3 @@ def file_manifest(files: Mapping[str, str], *, validate: bool = True,
                             raise TechniqueError("invalid_reference", f"{path} 引用的文件不存在：{resolved}")
     tree = {"formatVersion": 1, "files": [{"path": e["path"], "sha256": e["sha256"]} for e in entries]}
     return {"formatVersion": 1, "versionId": digest(canonical_bytes(tree)), "files": entries, "metadata": metadata}
-
-

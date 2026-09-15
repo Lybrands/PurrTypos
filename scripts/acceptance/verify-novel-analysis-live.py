@@ -13,7 +13,7 @@ import urllib.request
 from uuid import uuid4
 
 
-REVIEW_REF_PREFIX = "novel-analysis-v1://"
+REVIEW_REF_PREFIX = "novel-analysis://"
 SOURCE_TEXT = (
     "# 月蚀港\n"
     "月蚀之夜，守门人林澈只认银色航标。潮钟敲响三次后，他打开北门，"
@@ -330,7 +330,7 @@ def main() -> None:
                     args.base_url,
                     "POST",
                     f"/api/novel-analysis-tasks/{args.resume_task}/resume",
-                    {"runtime": runtime_for(model), "retryFailed": True},
+                    {"runtime": runtime_for(model)},
                     headers={"Idempotency-Key": command_id},
                 ),
                 "resume Novel Analysis replacement",

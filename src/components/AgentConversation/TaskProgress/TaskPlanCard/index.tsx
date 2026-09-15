@@ -86,7 +86,7 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
   const stateKey = planKey || plan.title || "local-task-plan";
   const storedState = openStateStore.get(stateKey);
   const [expanded, setExpanded] = React.useState(
-    () => storedState?.open ?? !terminal,
+    () => !terminal || storedState?.open || false,
   );
   const manuallySetRef = React.useRef(storedState?.manuallySet ?? false);
   const previousTerminalRef = React.useRef(terminal);
@@ -100,7 +100,7 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
   React.useEffect(() => {
     const stored = openStateStore.get(stateKey);
     manuallySetRef.current = stored?.manuallySet ?? false;
-    setExpanded(stored?.open ?? !terminal);
+    setExpanded(!terminal || stored?.open || false);
     previousTerminalRef.current = terminal;
   }, [stateKey]);
 
@@ -114,6 +114,7 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
   }, [stateKey, terminal]);
 
   const toggleExpanded = () => {
+    if (!terminal) return;
     const nextOpen = !expanded;
     manuallySetRef.current = true;
     openStateStore.set(stateKey, { open: nextOpen, manuallySet: true });
@@ -128,6 +129,7 @@ function TaskPlanCard({ plan, planKey }: TaskPlanCardProps) {
         type="button"
         className="task-plan-card__header"
         onClick={toggleExpanded}
+        disabled={!terminal}
         aria-expanded={expanded}
       >
         <ChevronRightIcon className="task-plan-card__chevron" />

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage, clipboard } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage, clipboard, Notification, powerSaveBlocker } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
@@ -13,6 +13,7 @@ const { registerNovelSourceFileIpc } = require('./source_file_ipc')
 const { registerNovelKnowledgeIpc } = require('./novel_knowledge_ipc')
 const knowledgeHostSecret = require('node:crypto').randomBytes(32).toString('hex')
 const { configureAppIcon } = require('./app_icon')
+const { createAgentPowerSaveManager } = require('./agent_power_save')
 
 const replacementAcceptance = [
   'PURRTYPOS_NOVEL_ANALYSIS_REPLACEMENT_ACCEPTANCE',
@@ -42,6 +43,10 @@ if (!isDev) {
 let mainWindow = null
 let appIcon = null
 const backendProcess = createBackendProcessManager({ app, processEnv: { ...process.env, PURRTYPOS_KNOWLEDGE_HOST_SECRET: knowledgeHostSecret } })
+const agentPowerSave = createAgentPowerSaveManager({
+  powerSaveBlocker,
+  backendUrl: BACKEND_URL,
+})
 
 // ─── Python backend lifecycle ────────────────────────────────────
 
@@ -98,6 +103,7 @@ app.whenReady().then(async () => {
   try {
     await waitForBackend()
     console.log('Python backend is ready')
+    await agentPowerSave.start()
   } catch (err) {
     console.error('Failed to start Python backend:', err)
   }
@@ -121,10 +127,31 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  agentPowerSave.stop()
   stopPythonBackend()
 })
 
 registerNovelKnowledgeIpc({ ipcMain, dialog, shell, clipboard, getWindow: () => mainWindow, backendUrl: BACKEND_URL, secret: knowledgeHostSecret })
+
+ipcMain.handle('show-agent-notification', (_, data) => {
+  if (!Notification.isSupported() || mainWindow?.isFocused()) return
+  const title = String(data?.title || 'Agent 任务已完成').slice(0, 160)
+  const body = String(data?.body || '').slice(0, 500)
+  const notification = new Notification({
+    title,
+    body,
+    icon: appIcon || undefined,
+  })
+  notification.on('click', () => {
+    if (!mainWindow) createWindow()
+    if (mainWindow?.isMinimized()) mainWindow.restore()
+    mainWindow?.show()
+    mainWindow?.focus()
+  })
+  notification.show()
+})
+
+ipcMain.handle('refresh-agent-power-save-state', () => agentPowerSave.refresh())
 
 // ─── IPC: native file operations ─────────────────────────────────
 

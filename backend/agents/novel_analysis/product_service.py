@@ -23,11 +23,11 @@ from agents.novel_analysis.attempt_artifact import (
 from agents.novel_analysis.review_artifact import (
     NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE,
 )
-from agents.novel_analysis.recipe import NOVEL_ANALYSIS_REPLACEMENT_RECIPE_VERSION
-from agents.shared.implementation import (
-    AgentKind,
-    replacement_implementation,
+from agents.novel_analysis.planner_contract import SCALABLE_ANALYSIS_RECIPE_VERSION
+from agents.novel_analysis.scalable_profile import (
+    scalable_novel_analysis_implementation,
 )
+from agents.shared.implementation import AgentKind
 from agents.shared.implementation_registry import AgentLifecycleAction
 from agents.shared.saved_model_binding import capture_saved_model_binding
 from application.agent_cancellation_service import AgentCancellationService
@@ -40,11 +40,8 @@ from infrastructure.persistence.sqlite_artifact_repository import (
 
 
 _TASK_NAMESPACE = "purrtypos.novel_analysis"
-_REPLACEMENT_TASK_KIND = "novel_analysis.purra-native"
-_LEGACY_TASK_KIND = "novel_source_analysis"
-_LEGACY_READ_ONLY_MESSAGE = (
-    "旧版小说分析仅供查看，请发起新的分析后再进行此操作"
-)
+_REPLACEMENT_TASK_KIND = "novel_analysis.scalable.v2"
+_IMPLEMENTATION_MISMATCH_MESSAGE = "任务不属于当前小说分析实现"
 
 
 class VersionedNovelAnalysisProductService:
@@ -66,7 +63,7 @@ class VersionedNovelAnalysisProductService:
         runtime,
     ) -> dict[str, object]:
         route = self._router.for_create(AgentKind.NOVEL_ANALYSIS)
-        if route.identity != replacement_implementation(AgentKind.NOVEL_ANALYSIS):
+        if route.identity != scalable_novel_analysis_implementation():
             raise AppError("新版小说分析当前不可用", 503)
         existing = await self._db.fetch_one(
             "SELECT id FROM ai_agent_runs WHERE binding_namespace = ? "
@@ -148,9 +145,7 @@ class VersionedNovelAnalysisProductService:
         runtime,
     ) -> dict[str, object]:
         normalized_artifact_id = str(artifact_id or "").strip()
-        lookup_id = normalized_artifact_id.removeprefix(
-            "novel-analysis-v1://"
-        ).removeprefix("novel-analysis-artifact://")
+        lookup_id = normalized_artifact_id.removeprefix("novel-analysis://")
         artifact = None
         if lookup_id:
             artifact = await SqliteArtifactRepository(self._db).load(lookup_id)
@@ -160,10 +155,10 @@ class VersionedNovelAnalysisProductService:
                 NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE,
                 NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE,
             }:
-                raise AppError(_LEGACY_READ_ONLY_MESSAGE, 409)
+                raise AppError("来源分析结果类型不受支持", 409)
         elif self._router.for_create(
             AgentKind.NOVEL_ANALYSIS
-        ).identity != replacement_implementation(AgentKind.NOVEL_ANALYSIS):
+        ).identity != scalable_novel_analysis_implementation():
             raise AppError("新版小说分析当前不可用", 503)
         existing = await self._db.fetch_one(
             "SELECT id FROM ai_agent_runs WHERE binding_namespace = ? "
@@ -229,11 +224,10 @@ class VersionedNovelAnalysisProductService:
             action=AgentLifecycleAction.REPLAY,
             expected_agent_kind=AgentKind.NOVEL_ANALYSIS,
         )
-        if route.identity != replacement_implementation(
-            AgentKind.NOVEL_ANALYSIS,
-            recipe_version=NOVEL_ANALYSIS_REPLACEMENT_RECIPE_VERSION,
+        if route.identity != scalable_novel_analysis_implementation(
+            recipe_version=SCALABLE_ANALYSIS_RECIPE_VERSION,
         ):
-            raise AppError(_LEGACY_READ_ONLY_MESSAGE, 409)
+            raise AppError(_IMPLEMENTATION_MISMATCH_MESSAGE, 409)
         lifecycle = NovelAnalysisReplacementEditLifecycle(
             self._db,
             source_revision_id=source_revision_id,
@@ -322,14 +316,12 @@ class VersionedNovelAnalysisProductService:
         task_id: str,
         run_command_id: str,
         runtime,
-        retry_failed: bool,
     ) -> dict[str, object]:
         task = await self._require_replacement_task(
             task_id,
             AgentLifecycleAction.RESUME,
         )
-        expected = LongTaskStatus.FAILED if retry_failed else LongTaskStatus.PAUSED
-        if task.status is not expected:
+        if task.status is not LongTaskStatus.PAUSED:
             raise AppError(
                 "来源分析任务状态不允许按当前方式恢复",
                 409,
@@ -356,7 +348,6 @@ class VersionedNovelAnalysisProductService:
             run_command_id=run_command_id,
             runtime=runtime,
             signal=asyncio.Event(),
-            retry_failed=retry_failed,
         )))
         self._composition.track_background_run(background)
         return await self._task_receipt(
@@ -391,23 +382,18 @@ class VersionedNovelAnalysisProductService:
             action=action,
             expected_agent_kind=AgentKind.NOVEL_ANALYSIS,
         )
-        if route.identity != replacement_implementation(
-            AgentKind.NOVEL_ANALYSIS,
-            recipe_version=NOVEL_ANALYSIS_REPLACEMENT_RECIPE_VERSION,
+        if route.identity != scalable_novel_analysis_implementation(
+            recipe_version=SCALABLE_ANALYSIS_RECIPE_VERSION,
         ):
-            raise AppError(_LEGACY_READ_ONLY_MESSAGE, 409)
+            raise AppError(_IMPLEMENTATION_MISMATCH_MESSAGE, 409)
         return task
 
     async def _active_task(self, source_revision_id: str):
-        for kind in (_REPLACEMENT_TASK_KIND, _LEGACY_TASK_KIND):
-            active = await self._tasks.find_active(
-                namespace=_TASK_NAMESPACE,
-                owner_id=source_revision_id,
-                kind=kind,
-            )
-            if active is not None:
-                return active
-        return None
+        return await self._tasks.find_active(
+            namespace=_TASK_NAMESPACE,
+            owner_id=source_revision_id,
+            kind=_REPLACEMENT_TASK_KIND,
+        )
 
     async def _cancel_running_roots(self, task_id: str) -> None:
         for binding in await self._tasks.list_run_bindings(task_id):
@@ -477,7 +463,7 @@ class VersionedNovelAnalysisProductService:
             "workflowStatus": status,
             "workflowPauseKind": pause_kind,
             "workflowReasonCode": reason,
-            "workflowResumable": status in {"paused", "failed"},
+            "workflowResumable": status == "paused",
             "workflowAutoResumeAtMs": due,
             "workflowAutoRecoveryEligible": bool(
                 status == "paused"

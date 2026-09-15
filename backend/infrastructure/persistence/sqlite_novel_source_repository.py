@@ -45,7 +45,7 @@ class SqliteNovelSourceRepository:
             "FROM ai_agent_long_task_units u "
             "JOIN ai_agent_long_tasks t ON t.id=u.task_id "
             "JOIN novel_source_revisions r ON r.id=t.owner_id "
-            "JOIN ai_agent_artifacts a ON u.output_ref='novel-analysis-artifact://' || a.id "
+            "JOIN ai_agent_artifacts a ON u.output_ref='novel-analysis://' || a.id "
             "WHERE t.namespace='purrtypos.novel_analysis' AND t.status='completed' "
             "AND u.unit_id='artifact:review' AND u.status='completed' "
             "AND NOT EXISTS(SELECT 1 FROM saved WHERE saved.id=a.id) "
@@ -373,6 +373,11 @@ class SqliteNovelSourceRepository:
                     pass
             for revision in revisions:
                 await self._db.execute(
+                    "DELETE FROM novel_source_section_token_metrics "
+                    "WHERE source_revision_id = ?",
+                    [revision["id"]],
+                )
+                await self._db.execute(
                     "DELETE FROM novel_source_sections WHERE revision_id = ?",
                     [revision["id"]],
                 )
@@ -405,6 +410,11 @@ class SqliteNovelSourceRepository:
                     )
                 except Exception:
                     pass
+            await self._db.execute(
+                "DELETE FROM novel_source_section_token_metrics "
+                "WHERE source_revision_id = ?",
+                [revision_id],
+            )
             await self._db.execute(
                 "DELETE FROM novel_source_sections WHERE revision_id = ?", [revision_id]
             )
@@ -450,10 +460,12 @@ class SqliteNovelSourceRepository:
             }
             await self._db.execute(
                 "INSERT INTO novel_source_sections "
-                "(id, revision_id, ordinal, title, text_content, content_digest, locator_json, section_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(id, revision_id, ordinal, title, text_content, content_digest, "
+                "locator_json, section_type, byte_count, character_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [section_id, revision_id, section.ordinal, section.title,
-                 section.text, digest, _json(locator), section.section_type],
+                 section.text, digest, _json(locator), section.section_type,
+                 len(section.text.encode("utf-8")), len(section.text)],
             )
             try:
                 await self._db.execute(

@@ -1,9 +1,16 @@
 # 三类 Agent 的 PurrA 原生重建计划
 
 > 日期：2026-09-12
-> 状态：重构与 legacy retirement 已完成；三个产品的新建执行均只有 PurrA-native 路径，历史 legacy identity 仅保留只读查询。最终范围结论见[退役后范围复核](../migrations/2026-09-14-three-agent-retirement-scope-review.md)。
+> 状态：legacy retirement 已完成；三个产品的新建执行均只有 PurrA-native 路径，历史 legacy identity 仅保留只读查询。小说分析目标架构于 2026-09-15 因超长来源容量问题重新进入实施阶段。最终退役范围见[退役后范围复核](../migrations/2026-09-14-three-agent-retirement-scope-review.md)。
 > 适用范围：小说创作 Agent、小说分析 Agent、剧本 Agent。
 > 执行规则：本文是本次重构的唯一任务台账。开始一个阶段前先确认其前置条件；实现、验证、范围变化和失败证据都追加到本文，不以“代码已经写完”代替验收。
+
+> 2026-09-15 小说分析范围重开：真实 Provider 验收证明现行固定 5 Unit recipe
+> 会把全部 segment 重新合并进单次请求，无法扩展到数百万字来源；原 A1-A3 的“完成”
+> 只代表旧 replacement 合同曾通过确定性验收，不再代表目标架构完成。新的容量分片、
+> 真正 Planner DAG、Map/Reduce/Synthesize 和覆盖门禁以
+> [小说分析 Agent 可扩展编排设计](2026-09-15-novel-analysis-scalable-orchestration.md)
+> 为准；在该方案切流前不得删除现行 replacement 作为回滚路径。
 
 ## 1. 决策摘要
 
@@ -419,6 +426,8 @@ projected input
 | 2026-09-12 | 双版本 Profile 共用一个 `AgentComposition` | 两个独立 composition 即使共用 SQLite，进程内事件通知、审批、活跃 Core 与 shutdown 所有权仍会分裂；同一 composition 内按 host-owned route metadata 选 Profile 才能保持单写和统一生命周期 |
 | 2026-09-12 | W3 只把选择清单写入 ExecutionState/Run binding，正文必须经 READ 工具进入模型 | locator 是授权边界，不是模型事实；避免旧实现把缓存正文、选中资料和工具结果反复注入每个模型回合 |
 | 2026-09-12 | 删除 `allowWithoutTechniques`，不在 replacement 合同中实现 | 该参数从未改变创建行为，却进入幂等 digest；保留会制造“开关有效”的错误承诺和无意义的 409 冲突 |
+| 2026-09-15 | 小说分析的分片数量、每片章节和字符范围由 Host Slice Compiler 确定 | Planner 不读取正文且不得改变容量与覆盖边界；单片来源最多占所选 context window 的 40% token |
+| 2026-09-15 | 小说分析改为真实 Planner DAG + Map/Reduce/Synthesize/Coverage | 固定 5 Unit recipe 无法扩展到数百万字来源；新方案见独立可扩展编排设计 |
 
 ## 14. 变更记录
 
@@ -426,6 +435,12 @@ projected input
 | --- | --- | --- |
 | 2026-09-12 | F0 | 以当前工作树为准冻结 194 个旧 Agent production 文件；新增自动校验和 `backend/agents/` 四个 package 骨架。冻结测试与 Agent composition 定向测试通过。未修改生产路由，所有新 Run 仍走现有实现。 |
 | 2026-09-12 | 计划 | 建立本计划。正式重构尚未开始；下一步必须从 F1 合同 characterization inventory 开始。 |
+| 2026-09-15 | A4 重新规划 | 小说分析目标架构范围重开。确认 Host 在模型与窗口选定后，以 40% token 上限按章节优先、超长章节内部切分的算法生成不可变 SliceManifest；Planner 只规划真实 Map/Reduce/Synthesize DAG。下一实施项回到容量元数据和 Slice Compiler，不继续扩展固定 5 Unit recipe。 |
+| 2026-09-15 | A4 容量与 Slice Compiler | 来源 section 已持久化 byte/character metrics，新增按 tokenizer id/version 的 token metric 缓存和旧库 additive 回填。确定性 Slice Compiler 实现 40% token 上限、完整章节优先、超长章节内部切分、稳定 slice identity 与无丢失/无重复覆盖校验。20 项定向测试通过；500 万字合成单 section 在 1M 窗口下生成 13 片且最大片不超 400,000 token。尚未接入旧固定 recipe 或真实数据；下一项是 Planner Contract。 |
+| 2026-09-15 | A4 Planner Contract | 新增严格、版本化 AnalysisPlan，Planner 只决定允许维度内的语义 pass、Reduce fan-in、整书综合结构和质量检查；输入仅含 Source/SliceManifest 元数据，不含原文。Host 把该合同展开为 Map/分层 Reduce/Synthesize/Coverage/Review 真实 DAG，绑定 recipe digest，并在执行前拒绝超额 pass 和模型调用。尚未接入生产 Profile；下一项是 Map Child 执行。 |
+| 2026-09-15 | A4 Map Child 第一纵切 | 实现 Host-bound `readNovelSourceSlice`，模型无法提供 sliceId 或读取其他范围。Map executor 要求真实 Child Run，校验其 `root_run_id/parent_run_id`，并以 Child 作为 attempt Artifact 创建者；同 attempt 重放不重复调模型。模型输出错误归类为可重试，Run 归属冲突为不可重试。实施核对确认 PurrA 现行 Recipe dispatcher 显式禁止 Unit 使用独立 Run，下一小项必须是基于正式 Run-tree command 的 Tree-aware dispatcher，不允许手工插入 Run 冒充接入。 |
+| 2026-09-15 | A4 Map Run-tree 命令适配 | 进一步核对后纠正“必须复制 dispatcher”的假设：Unit executor 可以通过当前 AgentCore 的公开 `spawn_agents`/`join_agent_runs` 拥有真实 Child，Recipe settlement 仍留在原 dispatcher。Composition 新增可选 Core binder；Map runner 使用 task/unit/attempt 幂等 spawn key，Child 只获得单一 slice 读工具且无 spawn 权限，工具从 Run-tree `input_payload` 解析 Host scope。105 项相关回归通过。现行 v1 Profile 的 Child 会再次触发整书 admission，所以未将工具接入 v1；下一项是 v2 Profile 组装与 Root/Map Child 模式隔离。 |
+| 2026-09-15 | A4 Scalable v2 Profile 组装 | 新增隔离 `novel_analysis.scalable.v2` Profile/composition，未改生产 registry。Root 在 Planner 前以模型窗口编译 SliceManifest，只向 Planner 提供元数据，并将 AnalysisPlan 编译为 scalable recipe；Root 的 Map 工具 enablement 为空。Child 通过 Agent-tree metadata 识别，强制 Reactive，只能使用 `readNovelSourceSlice`，且 admission 失败关闭。同时删除 v2 对 v1 segments scope 的依赖：请求只保留 revision/command，不再在五百万字场景携带旧 16K segment 目录。109 项相关回归、compileall 和 diff check 通过。下一项是在隔离 composition 中以模拟 Provider 跑通 Root→Child→read tool→attempt Artifact；未切流。 |
 | 2026-09-12 | F1 | 主 Agent 与三个并行子 Agent 完成 shared、writing、novel-analysis、screenplay 四份 legacy 合同盘点；分别记录当前事实、禁止继承缺陷、待决策、数据兼容、测试资产和真实验收缺口。确认 Writing 背景/人物能力的主要断点是 knowledge purpose 动态授权，而非工具未注册；人物总数缺少宿主 `total`。冻结文件保持不变。 |
 | 2026-09-12 | S1 | 固定 replacement 使用的已安装 PurrA 1.0.0 本地候选及四个 wheel SHA-256，记录允许使用的公共模块和 Root Run + Durable Task + Operation 框架假设。该结论只具有 package/确定性证据，不代表发布、真实 Provider 或 Electron 验收。 |
 | 2026-09-12 | S2 | 开始实现纯新代码的 immutable implementation identity：支持 writing、novel-analysis、screenplay，缺少持久身份的历史 Run 只能解析为 dated legacy，不能默认进入 replacement。尚未接入数据库或生产路由。 |
@@ -596,5 +611,34 @@ projected input
 
 ### 当前可执行任务
 
-本重构计划没有剩余自动开发项。发布、公证、push/tag、真实 embedding Provider 兼容验收，
-以及并发测试 runner 调查都需要作为独立任务明确启动，不能继续挂在 Agent 重构名下。
+三 Agent 旧执行链退役已闭环，但 2026-09-15 重新打开了小说分析的可扩展架构改造。
+容量元数据、Slice Compiler、Planner Contract、Map Child、Run-tree 适配与隔离 v2 Profile 已完成。
+模拟 Provider Map 纵切也已在真实 AgentCore 中验证 Root/Child Run、`readNovelSourceSlice`、
+Child 结果收取与 attempt Artifact 结算。Hierarchical Reduce 已完成第一批 Host 输入编译：
+依赖 Artifact 的同 pass、fan-in、digest、无重叠 lineage 和输入预算均失败关闭，Child scope
+不携带 findings 内容。Reduce 受限 Tool、独立 Child、归并 Artifact、冲突字段和同 attempt
+重放已经完成确定性纵切。真实 AgentCore 的串行模拟 Provider 已跑通 4+ Map、fan-in=2 的
+至少两层 Reduce，每层只消费直接依赖，最终 lineage 覆盖全部 Slice。并行阻塞已确认是多个
+Unit 对同一 Root 并发 join 导致 waiting 状态竞争；现保留独立 spawn，并由 per-Root coordinator
+把同一批 Child 合并为一次 join。默认 maxParallelism=4 的多层模拟 Provider 已约 2 秒完成。
+Synthesize 已通过无参数受限 Tool 读取每个 pass 的最终根 Artifact，并在同一并行模拟
+Provider DAG 中形成非空整书 `summaryMarkdown`、Planner 指定 sections 和完整 Slice lineage。
+确定性 Coverage Gate 已从 Synthesis 反查各 pass 根 Artifact，重新核验全部 Slice lineage、
+digest、唯一输入与非空总结，并形成 Root-owned coverage receipt。Review Child 现只通过无参数
+受限 Tool 读取 Coverage 批准的 Synthesis，提交独立 Artifact；审核后的 `summaryMarkdown` 已作为
+Root `finalResponse` 返回。
+
+第一段恢复门禁已完成：进程中断或重启后，新 attempt 会优先收敛上一 attempt 已 finalized
+的 Map/Reduce/Synthesize/Coverage/Review Artifact，跨 continuation Root 不重复调用模型；普通
+模型失败不复用旧输出。join batch 被取消后 coordinator 仍可服务后续 batch。
+
+第二段恢复门禁已完成：通用 orphan recovery 和无 live executor 的显式取消都会先持久化
+取消 Root 的完整 Agent subtree，再结算 SQL Root，因此旧 Child 不会在 continuation 启动后
+继续消耗 Provider。新鲜 Run-tree repository 重放确认 unfinished Root/Child 均为 canceled；
+相关 startup/recovery/scalable 联合回归 163 项通过。
+
+隔离真实 Provider 纵切已经完成：32K 窗口下 Host 将合成来源编译为 2 个 slice，Planner、
+2 Map、Reduce、Synthesize、Coverage、Review 全部完成；持久事件确认每个 Child 只调用自身
+获授权的绑定读取 Tool，Root 返回非空整书总结，Provider lease 归零。该证据不等于生产接入：
+下一项先完成 scalable v2 的唯一生产新建入口和旧新建路径关闭，再以重启后的全新 Run 做
+Electron 验收；256K/1M 与 500 万字合成门禁仍需补齐。

@@ -83,6 +83,10 @@ export const KNOWN_TOOL_CALL_LABELS = {
   readSourceBackground: "读取故事背景",
   querySourceStoryFacts: "检索故事事实",
   readSourceOutline: "读取原作大纲",
+  readNovelSourceSlice: "读取小说分片",
+  readNovelAnalysisReduceInputs: "读取待归并分析",
+  readNovelAnalysisSynthesisInputs: "读取整书分析结果",
+  readNovelAnalysisReviewInput: "审核整书分析",
   writeScreenplayCandidatePart: "写入剧本候选稿",
   inspectScreenplayCandidate: "检查剧本候选稿",
   appendSceneListBatch: "追加场景表批次",
@@ -127,7 +131,7 @@ export function resolveLocalizedToolDisplayName(
 function staticToolCallLabel(name: string, displayName?: string): string {
   if (displayName) return displayName;
   return KNOWN_TOOL_CALL_LABELS[name as keyof typeof KNOWN_TOOL_CALL_LABELS]
-    || "执行 Agent 工具操作";
+    || `执行工具 ${name}`;
 }
 
 function resolveChapterTitleInCatalog(

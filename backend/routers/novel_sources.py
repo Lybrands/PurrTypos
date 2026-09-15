@@ -21,9 +21,6 @@ from schemas.novel_sources import (
     ReviewNovelAnalysisRequest,
     StartNovelAnalysisRequest,
 )
-from agents.novel_analysis.legacy_contracts import (
-    LEGACY_NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX,
-)
 from agents.novel_analysis.attempt_artifact import (
     NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE,
 )
@@ -47,9 +44,6 @@ from agents.novel_analysis.publication_service import (
 from agents.novel_analysis.product_service import (
     VersionedNovelAnalysisProductService,
 )
-from agents.novel_analysis.legacy_read_adapter import (
-    NovelAnalysisLegacyReadAdapter,
-)
 from agents.novel_analysis.sessions import NovelAnalysisSessions
 from agents.novel_analysis.published_query import NovelAnalysisPublishedQuery
 from infrastructure.persistence.sqlite_artifact_repository import (
@@ -71,16 +65,6 @@ def _analysis_control_service() -> VersionedNovelAnalysisProductService:
     return VersionedNovelAnalysisProductService(
         get_db(),
         composition,
-    )
-
-
-def _historical_analysis() -> NovelAnalysisLegacyReadAdapter:
-    from application.agent_composition import get_agent_composition
-
-    composition = get_agent_composition()
-    return NovelAnalysisLegacyReadAdapter(
-        get_db(),
-        long_tasks=composition.long_task_repository,
     )
 
 
@@ -240,13 +224,12 @@ async def list_analysis_runs(revision_id: str):
     from application.agent_composition import get_agent_composition
 
     composition = get_agent_composition()
-    legacy = await _historical_analysis().list_for_revision(revision_id)
     replacement = await NovelAnalysisReplacementRunProjection(
         get_db(),
         long_tasks=composition.long_task_repository,
     ).list_for_revision(revision_id)
     return _ok(sorted(
-        [*legacy, *replacement],
+        replacement,
         key=lambda item: (
             str(item.get("createTime") or ""),
             str(item.get("runId") or ""),
@@ -266,7 +249,6 @@ async def stream_analysis_events(
     composition = get_agent_composition()
     query = VersionedNovelAnalysisStreamQuery(
         get_db(), output_repository=composition.output_journal,
-        historical_analysis=_historical_analysis(),
         long_tasks=composition.long_task_repository,
     )
     # Validate scope before opening the response so a deleted source is a 404,
@@ -304,7 +286,6 @@ async def resume_analysis(
         task_id=task_id,
         run_command_id=idempotency_key,
         runtime=body.runtime,
-        retry_failed=body.retryFailed,
     ))
 
 
@@ -338,9 +319,7 @@ async def get_analysis_artifact(artifact_id: str):
             )
         except (NovelAnalysisPublicationError, ValueError) as error:
             raise AppError(str(error), 409) from error
-    return _ok(await _historical_analysis().get_artifact(
-        LEGACY_NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + artifact_id
-    ))
+    raise NotFoundError("来源分析结果不存在")
 
 
 @router.post("/novel-analysis-artifacts/{artifact_id}/review")
@@ -369,7 +348,7 @@ async def review_analysis_artifact(
             raise AppError(str(error), 422) from error
     if artifact is None:
         raise AppError("来源分析结果不存在", 404)
-    raise AppError("旧版小说分析仅供查看，请重新发起分析后再审核", 409)
+    raise AppError("来源分析结果类型不支持审核", 409)
 
 
 @router.post("/novel-analysis-artifacts/{artifact_id}/publish")
@@ -379,7 +358,7 @@ async def publish_analysis_artifact(artifact_id: str):
         artifact is not None
         and artifact.namespace == NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE
     ):
-        raise AppError("请先审核 replacement 分析结果再发布", 409)
+        raise AppError("请先审核分析结果再发布", 409)
     if (
         artifact is not None
         and artifact.namespace == NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE
@@ -392,7 +371,7 @@ async def publish_analysis_artifact(artifact_id: str):
             raise AppError(str(error), 409) from error
     if artifact is None:
         raise AppError("来源分析结果不存在", 404)
-    raise AppError("旧版小说分析仅供查看，不能发布新的正式资料", 409)
+    raise AppError("来源分析结果类型不支持发布", 409)
 
 
 @router.get("/novel-source-revisions/{revision_id}/analyses")
@@ -420,4 +399,34 @@ async def create_analysis_conversation(revision_id: str):
 @router.patch("/novel-source-revisions/{revision_id}/conversations/{identity}")
 async def update_analysis_conversation(revision_id: str, identity: str, body: AnalysisSessionUpdate):
     await NovelAnalysisSessions(get_db()).update(revision_id, identity, body.title, body.closed)
+    return _ok()
+
+
+@router.delete("/novel-source-revisions/{revision_id}/conversations/{identity}")
+async def delete_analysis_conversation(revision_id: str, identity: str):
+    from application.agent_cancellation_service import AgentCancellationService
+    from application.agent_composition import get_agent_composition
+
+    db = get_db()
+    sessions = NovelAnalysisSessions(get_db())
+    active_run_ids = await sessions.active_run_ids(revision_id, identity)
+    active_task_ids = await sessions.active_task_ids(revision_id, identity)
+    cancellation = (
+        AgentCancellationService(db, get_agent_composition())
+        if active_run_ids else None
+    )
+    for run_id in active_run_ids:
+        row = await db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if (
+            cancellation is not None
+            and row is not None
+            and row.get("status") == "running"
+        ):
+            await cancellation.cancel(run_id)
+    for task_id in active_task_ids:
+        await _analysis_control_service().cancel(task_id)
+    await sessions.delete(revision_id, identity)
     return _ok()

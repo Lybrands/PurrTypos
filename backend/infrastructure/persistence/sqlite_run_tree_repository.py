@@ -4,7 +4,7 @@ Only tree state transitions are replayed, never tools or model invocations.
 Transactions serialize workers; a warm instance applies only the journal tail.
 The codec is explicit and versioned: incompatible journals fail closed.
 """
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 import json
 import time
@@ -14,6 +14,7 @@ from purra.api import (
     ContinueAgentCommand, InMemoryRunTreeRepository, SpawnAgentsCommand,
 )
 from purra.errors import ContractViolationError
+from purra.adapter_state import AgentTreeState
 
 _TYPES = {cls.__name__: cls for cls in (
     AgentCapabilityGrant, BeginRootAgentCommand, ChildAgentSpec,
@@ -26,7 +27,7 @@ _MUTATIONS = frozenset((
 ))
 # Replay is bound to the exact reference transition implementation, not just
 # its package version. A future implementation needs an explicit migration.
-_SCHEMA = "purrtypos.run-tree/v3:f299728c25054ba5fac541c7c74a6cfd941ef79dd1bcf6fec1d73b5562fc3718"
+_SCHEMA = "purrtypos.run-tree/v4:f299728c25054ba5fac541c7c74a6cfd941ef79dd1bcf6fec1d73b5562fc3718"
 
 
 def _encode(value):
@@ -36,7 +37,7 @@ def _encode(value):
         }}
     if isinstance(value, Mapping):
         return {"map": {key: _encode(item) for key, item in value.items()}}
-    if isinstance(value, (tuple, list)):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return {"list": [_encode(item) for item in value]}
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
@@ -61,21 +62,51 @@ class SqliteRunTreeRepository:
         self._clock = clock_ms or (lambda: int(time.time() * 1000))
         self._reset()
 
-    def _reset(self):
+    def _reset(self, run_sequence=0):
         self._now = 0
         self._revision = 0
-        self._tree = InMemoryRunTreeRepository(clock_ms=lambda: self._now)
+        self._tree = InMemoryRunTreeRepository(
+            clock_ms=lambda: self._now,
+            state=AgentTreeState(run_sequence=run_sequence),
+        )
+
+    async def _load_initial_run_sequence(self):
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS ai_agent_tree_state_v4 ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+            "initial_run_sequence INTEGER NOT NULL)"
+        )
+        row = await self._db.fetch_one(
+            "SELECT initial_run_sequence FROM ai_agent_tree_state_v4 "
+            "WHERE singleton = 1"
+        )
+        if row is None:
+            maximum = await self._db.fetch_one(
+                "SELECT COALESCE(MAX(CASE WHEN id GLOB 'agent-run-[0-9]*' "
+                "THEN CAST(substr(id, 11) AS INTEGER) END), 0) AS value "
+                "FROM ai_agent_runs"
+            )
+            seed = int(maximum["value"] or 0)
+            await self._db.execute(
+                "INSERT INTO ai_agent_tree_state_v4 "
+                "(singleton, initial_run_sequence) VALUES (1, ?)",
+                [seed],
+            )
+            return seed
+        return int(row["initial_run_sequence"])
 
     async def _call(self, method, *args, **kwargs):
         try:
             async with self._db.transaction(cancellation_linearizable=True):
                 await self._db.execute(
-                    "CREATE TABLE IF NOT EXISTS ai_agent_tree_commands_v3 ("
+                    "CREATE TABLE IF NOT EXISTS ai_agent_tree_commands_v4 ("
                     "sequence INTEGER PRIMARY KEY AUTOINCREMENT, schema TEXT NOT NULL, "
                     "clock_ms INTEGER NOT NULL, method TEXT NOT NULL, arguments TEXT NOT NULL)"
                 )
+                if self._revision == 0:
+                    self._reset(await self._load_initial_run_sequence())
                 rows = await self._db.fetch_all(
-                    "SELECT * FROM ai_agent_tree_commands_v3 WHERE sequence > ? ORDER BY sequence",
+                    "SELECT * FROM ai_agent_tree_commands_v4 WHERE sequence > ? ORDER BY sequence",
                     [self._revision],
                 )
                 for row in rows:
@@ -90,10 +121,10 @@ class SqliteRunTreeRepository:
                 result = await getattr(self._tree, method)(*args, **kwargs)
                 if method in _MUTATIONS:
                     await self._db.execute(
-                        "INSERT INTO ai_agent_tree_commands_v3(schema, clock_ms, method, arguments) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO ai_agent_tree_commands_v4(schema, clock_ms, method, arguments) VALUES (?, ?, ?, ?)",
                         [_SCHEMA, self._now, method, arguments],
                     )
-                    row = await self._db.fetch_one("SELECT MAX(sequence) AS revision FROM ai_agent_tree_commands_v3")
+                    row = await self._db.fetch_one("SELECT MAX(sequence) AS revision FROM ai_agent_tree_commands_v4")
                     self._revision = row["revision"]
                 return result
         except BaseException:

@@ -971,7 +971,10 @@ class SqliteAgentOutputRepository:
         rows = await self._db.fetch_all(
             "SELECT e.* FROM ai_agent_run_events e "
             "JOIN ai_agent_runs r ON r.id = e.run_id "
-            f"WHERE r.binding_namespace IN ({marks}) AND r.binding_aggregate_id = ? "
+            "JOIN ai_agent_runs root ON root.id = "
+            "COALESCE(r.root_run_id, r.id) "
+            f"WHERE root.binding_namespace IN ({marks}) "
+            "AND root.binding_aggregate_id = ? "
             "AND e.event_id IS NOT NULL AND e.visibility = 'public' "
             "AND e.id > ? ORDER BY e.id LIMIT ?",
             [*namespaces, aggregate_id, non_negative_int(after_cursor, "after cursor"),

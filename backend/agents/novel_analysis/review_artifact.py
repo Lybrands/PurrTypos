@@ -26,7 +26,7 @@ from purra.json_values import canonical_json_digest, thaw_json_mapping
 
 
 NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE = (
-    "purrtypos.novel_analysis.review.v1"
+    "purrtypos.novel_analysis.review.v2"
 )
 NOVEL_ANALYSIS_REVIEWED_ARTIFACT_KIND = "user_reviewed_result"
 
@@ -76,7 +76,7 @@ class NovelAnalysisReviewedArtifactStore:
                     owner_id=revision,
                     owner_ref=owner_ref,
                     created_by_run_id=_required(run_id, "source Run id"),
-                    schema_version=1,
+                    schema_version=2,
                     expected_item_count=1,
                     metadata={
                         "sourceArtifactId": source_id,
@@ -137,7 +137,7 @@ class NovelAnalysisReviewedArtifactStore:
             or artifact.status is not ArtifactStatus.FINALIZED
             or artifact.namespace != NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE
             or artifact.kind != NOVEL_ANALYSIS_REVIEWED_ARTIFACT_KIND
-            or artifact.schema_version != 1
+            or artifact.schema_version != 2
         ):
             raise ValueError("reviewed analysis Artifact is unavailable")
         batches = await self._repository.list_batches(artifact.id)

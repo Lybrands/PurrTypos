@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from agents.novel_analysis.recipe import AnalysisSegment
+from agents.novel_analysis.source_segment import AnalysisSegment
 from purra.contracts import AgentRunRequest
 from purra.json_values import thaw_json_mapping
 
@@ -88,7 +88,7 @@ class NovelAnalysisRequestScope:
             frozenset((*base, "unit")),
         }:
             raise ValueError(
-                "replacement analysis domain payload must use the canonical v1 shape"
+                "novel analysis domain payload must use the canonical shape"
             )
         raw_segments = payload.get("segments")
         if not isinstance(raw_segments, list):

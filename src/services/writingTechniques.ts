@@ -2,13 +2,26 @@ import { apiDelete, apiGet, apiPost, apiPut, backendBaseUrl, requestJson } from 
 
 export type TechniqueKind = 'technique' | 'scheme'
 export interface TechniqueRef { kind: TechniqueKind; id: string; versionId: string }
+export interface TechniqueRetrievalMetadata {
+  intents?: string[]
+  contexts?: string[]
+  objectives?: string[]
+  keywords?: string[]
+  exclusions?: string[]
+}
+export interface TechniqueMetadata {
+  name: string
+  description: string
+  tags?: string[]
+  retrieval?: TechniqueRetrievalMetadata
+}
 export interface WritingTechniqueSelection { mode: 'manual' | 'auto'; refs: TechniqueRef[] }
 export interface WritingTechniqueChoice { ref: TechniqueRef; name: string; description: string; uploaded?: boolean }
-export interface WritingTechniqueGrant { grantId: string; generation: number; ref: TechniqueRef; available?: boolean; metadata: {name: string; description: string} }
+export interface WritingTechniqueGrant { grantId: string; generation: number; ref: TechniqueRef; available?: boolean; metadata: TechniqueMetadata }
 export interface TechniqueManifest {
   versionId: string
   files: Array<{ path: string; size: number; sha256: string }>
-  metadata: { name: string; description: string; tags?: string[] } | null
+  metadata: TechniqueMetadata | null
 }
 export interface SchemeContent {
   schemaVersion: 1; name: string; description: string; composition: string; members: TechniqueRef[]
@@ -23,7 +36,7 @@ export interface TechniqueDraft {
 export interface TechniqueObject {
   kind: TechniqueKind; id: string; status: 'active' | 'archived'; publishedHead: string | null
   publishedVersions?: string[]; draftHead: string; draftIds: string[]
-  metadata?: { name: string; description: string }; draft?: TechniqueDraft
+  metadata?: TechniqueMetadata; draft?: TechniqueDraft
 }
 export interface TechniqueFile { path: string; content: string; sha256: string; versionId: string }
 export interface TechniqueDeletionPreview {

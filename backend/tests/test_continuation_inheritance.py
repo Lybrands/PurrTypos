@@ -106,7 +106,7 @@ async def test_plot_materials_are_not_setting_entities_and_overview_is_not_canon
     assert len(rows) == 1
     assert '红门' in rows[0]['body'] and '钥匙' not in rows[0]['body']
     assert '甲打开红门。' not in rows[0]['body']
-    assert '甲打开红门。' in rows[0]['records_json']
+    assert '"evidence"' not in rows[0]['records_json']
 
 
 async def test_creation_file_failure_rolls_back_and_retry_recovers(db, monkeypatch):
@@ -274,6 +274,22 @@ async def test_analysis_background_and_world_settings_match_material_destination
     mapping = await db.fetch_one('SELECT path FROM creation_material_files WHERE book_id=? AND kind=? AND entity_id=?', [book, material_kind, baseline['entity_id']])
     assert mapping['path'].startswith('背景/' if fact_kind == 'background' else '设定/')
     assert '红门' in baseline['body']
+
+
+async def test_canonical_character_material_keeps_creation_fields_during_inheritance(db):
+    revision = await _published_analysis(db)
+    value = {"name": "林澈", "tags": "主角, 守门人", "profile_md": "## 基本信息\n负责看守红门。"}
+    await db.execute(
+        "UPDATE novel_source_analysis_facts SET fact_kind='character_summary', "
+        "subject_key='林澈', predicate='人物归纳', value_json=? WHERE id='fact-before'",
+        [json.dumps(value, ensure_ascii=False)],
+    )
+    created = await create(db, revision, operation='structured-character')
+    character = (await get_characters(db, created['book']['id']))[0]
+    assert character['name'] == '林澈'
+    assert character['tags'] == '主角, 守门人'
+    assert character['profile_md'] == ''
+    assert '负责看守红门' in character['inheritedBaseline']
 
 
 async def test_explicit_no_techniques_omits_available_source_defaults(db):

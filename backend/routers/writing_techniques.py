@@ -46,9 +46,12 @@ async def run_usage(run_id: str):
 async def save_analysis_technique(analysis_id: str, body: TechniqueRequest):
     async def save():
         import json
+        from agents.novel_analysis.publication_service import (
+            NOVEL_ANALYSIS_PUBLISHED_SCHEMA_VERSION,
+        )
         db = get_db()
         row = await db.fetch_one("SELECT source_revision_id,schema_version,summary_json FROM novel_source_analyses WHERE id=?", [analysis_id])
-        if not row or row["schema_version"] != 3:
+        if not row or row["schema_version"] != NOVEL_ANALYSIS_PUBLISHED_SCHEMA_VERSION:
             raise TechniqueError("invalid_reference", "请选择新版本的已保存分析")
         result = json.loads(row["summary_json"]).get("techniqueResult") or {}
         if result.get("status") != "generated":

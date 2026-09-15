@@ -6,9 +6,9 @@ const { buildNovelAnalysisMessages, hydrateNovelAnalysisHistory, NovelAnalysisCo
   path.join(__dirname, 'analysisConversation.ts'),
 )
 
-test('artifact ids accept only legacy and replacement analysis references', () => {
-  assert.equal(novelAnalysisArtifactId('novel-analysis-artifact://legacy-id'), 'legacy-id')
-  assert.equal(novelAnalysisArtifactId('novel-analysis-v1://replacement-id'), 'replacement-id')
+test('artifact ids accept only the current analysis reference', () => {
+  assert.equal(novelAnalysisArtifactId('novel-analysis-artifact://retired-id'), '')
+  assert.equal(novelAnalysisArtifactId('novel-analysis://artifact-id'), 'artifact-id')
   assert.equal(novelAnalysisArtifactId('plain-id'), 'plain-id')
   assert.equal(novelAnalysisArtifactId('unknown://artifact'), '')
 })
@@ -83,7 +83,7 @@ test('history hydration reads every root and related Run page before exposing it
   const root = run({
     runStatus: 'done',
     finalResponse: '完整恢复的公开答复',
-    relatedRuns: [{ runId: 'analysis-unit', status: 'done' }],
+    relatedRuns: [{ runId: 'analysis-unit', status: 'done', role: 'child' }],
   })
   const hydrated = await hydrateNovelAnalysisHistory({
     run: root,
@@ -112,7 +112,33 @@ test('history hydration reads every root and related Run page before exposing it
   assert.equal(hydrated.message.content, '完整恢复的公开答复')
 })
 
-test('one analysis stream catches up dynamic units without re-reading snapshots', () => {
+test('completed resume combines restored history with a persisted continuation reply', async () => {
+  const root = run({
+    runId: 'continued-root', runStatus: 'done', finalResponse: '这是重试后的回复。',
+    relatedRuns: [{ runId: 'failed-root', status: 'failed', role: 'previous_root' }],
+  })
+  const hydrated = await hydrateNovelAnalysisHistory({
+    run: root,
+    model: { id: 'model', name: 'model', apiKey: '', baseUrl: '' },
+    isCurrent: () => true,
+    getRunSnapshot: async ({ runId }) => {
+      if (runId === root.runId) return {
+        success: true,
+        data: snapshot(runId, { run: { finalResponse: root.finalResponse } }),
+      }
+      return {
+        success: true,
+        data: snapshot(runId, { events: [
+          event(1, { eventId: 'failed-root-text', runId, payload: { delta: '这是失败前的回复。' } }),
+          event(2, { eventId: 'failed-root-commit', runId, kind: 'stream.committed', channel: 'final', payload: {} }),
+        ] }),
+      }
+    },
+  })
+  assert.equal(hydrated.message.content, '这是失败前的回复。\n\n这是重试后的回复。')
+})
+
+test('one analysis stream catches up dynamic child membership without merging child output', () => {
   const stream = new NovelAnalysisConversationStream()
   const cfg = { id: 'model', name: 'model', apiKey: '', baseUrl: '' }
   const root = run()
@@ -127,10 +153,10 @@ test('one analysis stream catches up dynamic units without re-reading snapshots'
   }).chunk }
   stream.apply({ ...page, runs: undefined, chunks: [child], nextCursor: 2 }, cfg)
   const result = stream.apply({ ...page, nextCursor: 2, chunks: [],
-    runs: [run({ relatedRuns: [{ runId: 'unit-1', status: 'running' }] })] }, cfg)
-  assert.equal(result.message.canonicalOutput.commentaryBlocks[0].text, '来自模型的证据说明')
+    runs: [run({ relatedRuns: [{ runId: 'unit-1', status: 'running', role: 'child' }] })] }, cfg)
+  assert.equal(result.message.canonicalOutput.commentaryBlocks.length, 0)
   const repeated = stream.apply({ ...page, runs: undefined, chunks: [child], nextCursor: 2 }, cfg)
-  assert.equal(repeated.message.canonicalOutput.commentaryBlocks[0].text, '来自模型的证据说明')
+  assert.equal(repeated.message.canonicalOutput.commentaryBlocks.length, 0)
   assert.equal(repeated.message.canonicalOutput.runStatus, 'running')
 })
 
@@ -143,8 +169,8 @@ test('history remains readable without a configured model or a creation timestam
   assert.equal(Number.isNaN(result.message.durationMs), false)
 })
 
-test('related unit commentary and tools replay without private results or a false root terminal', () => {
-  const input = run({ relatedRuns: [{ runId: 'unit-run', status: 'failed' }] })
+test('related child output stays outside the root timeline', () => {
+  const input = run({ relatedRuns: [{ runId: 'unit-run', status: 'failed', role: 'child' }] })
   const childEvent = (sequence, overrides) => event(sequence, { runId: 'unit-run', ...overrides })
   const child = [
     childEvent(1, { channel: 'commentary', outputStreamId: 'unit-commentary', payload: { delta: '核对原文中的人物关系' } }),
@@ -164,11 +190,38 @@ test('related unit commentary and tools replay without private results or a fals
   ])
   assert.equal(message.content, '')
   assert.equal(message.canonicalOutput.runStatus, 'running')
-  assert.equal(message.canonicalOutput.operations['read-input'].status, 'failed')
-  assert.equal(message.canonicalOutput.commentaryBlocks[0].text, '核对原文中的人物关系')
-  assert.ok(message.canonicalOutput.operations['read-input'].firstSequence > 20)
-  assert.equal(message.canonicalOutput.lastSequenceByRun['unit-run'], 5)
+  assert.equal(message.canonicalOutput.operations['read-input'], undefined)
+  assert.equal(message.canonicalOutput.commentaryBlocks.length, 0)
   assert.equal(JSON.stringify(message).includes('PRIVATE_'), false)
+})
+
+test('a resumed analysis retains the previous root reply and appends the continuation', () => {
+  const input = run({
+    runId: 'continuation-run',
+    relatedRuns: [{ runId: 'failed-run', status: 'failed', role: 'previous_root' }],
+  })
+  const previous = event(1, {
+    eventId: 'previous-text', runId: 'failed-run', payload: { delta: '失败前已经生成。' },
+  })
+  const current = event(1, {
+    eventId: 'continued-text', runId: 'continuation-run', payload: { delta: '重试后继续生成。' },
+  })
+  const message = replayAnalysisEvents(input, [previous, current])
+  assert.equal(message.canonicalOutput.finalText, '失败前已经生成。重试后继续生成。')
+})
+
+test('analysis child Runs are presented as clickable delegation records', () => {
+  const [message] = buildNovelAnalysisMessages(run({
+    relatedRuns: [{
+      runId: 'child-run', status: 'running', role: 'child',
+      agentName: 'evidence-reader', agentTitle: '证据读取 Agent', objective: '核对第一章',
+    }],
+  }), 'model').slice(-1)
+  assert.deepEqual(message.delegations, [{
+    delegationId: 'run:child-run', runId: 'child-run', agentName: 'evidence-reader',
+    agentTitle: '证据读取 Agent', objective: '核对第一章', status: 'running',
+    required: true, priority: 0,
+  }])
 })
 
 test('analysis stream merges overlapping pages without duplicating public text', () => {
@@ -300,6 +353,17 @@ test('failure is kept as an error notice rather than an assistant answer', () =>
   assert.equal(assistant.content, '')
   assert.equal(assistant.isError, true)
   assert.match(assistant.error, /超过当前时限/)
+})
+
+test('child failure is a terminal Root error without a resume instruction', () => {
+  const assistant = buildNovelAnalysisMessages(run({
+    runStatus: 'failed', taskStatus: 'failed', workflowStatus: 'failed',
+    error: 'max_model_rounds', workflowResumable: false,
+  }), 'model').at(-1)
+  assert.equal(assistant.content, '')
+  assert.equal(assistant.isError, true)
+  assert.match(assistant.error, /子 Agent 达到模型轮次上限/)
+  assert.doesNotMatch(assistant.error, /继续|恢复|重试/)
 })
 
 test('publishes each chunk while more analysis pages are still pending', () => {

@@ -16,6 +16,12 @@ from purra.contracts import (
     RunStatus,
 )
 from purra.errors import RunCommitProjectionError
+from purra.api import (
+    AgentCapabilityGrant,
+    BeginRootAgentCommand,
+    ChildAgentSpec,
+    SpawnAgentsCommand,
+)
 from purra.events import AgentEvent, CoreEventType
 from purra.execution import AgentRunSupervisor
 from purra.long_tasks import LongTaskCreateCommand, LongTaskUnitSpec
@@ -256,6 +262,43 @@ async def test_cancellation_service_completes_after_competing_done_status(db):
     assert result is not None
     assert result["status"] == "done"
     assert result["cancellationStatus"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_without_live_executor_cancels_agent_tree(db):
+    run_id = await _unowned_run(db)
+    composition = create_agent_composition(db)
+    tree = composition.run_tree_repository
+    try:
+        await tree.begin_root(BeginRootAgentCommand(
+            run_id=run_id,
+            agent_id="cancel-root-agent",
+            name="root",
+            title="Root",
+            instruction="test",
+            objective="test",
+            capability_grant=AgentCapabilityGrant(can_spawn_agents=True),
+            idempotency_key=f"begin:{run_id}",
+        ))
+        spawned = await tree.spawn_agents(SpawnAgentsCommand(
+            parent_run_id=run_id,
+            idempotency_key="spawn-before-cancel",
+            children=(ChildAgentSpec(
+                name="unfinished",
+                title="Unfinished Child",
+                instruction="test",
+                objective="test",
+            ),),
+        ))
+        child_id = spawned.items[0].run.run_id
+
+        result = await AgentCancellationService(db, composition).cancel(run_id)
+
+        assert result is not None and result["status"] == "canceled"
+        assert (await tree.get_run(run_id)).status.value == "canceled"
+        assert (await tree.get_run(child_id)).status.value == "canceled"
+    finally:
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio
@@ -610,6 +653,41 @@ async def test_cancel_requested_orphan_recovers_as_canceled(
 
 
 @pytest.mark.asyncio
+async def test_cancel_requested_retired_orphan_skips_removed_projector(db):
+    control = SqliteRunControlStore(db)
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="retired analysis orphan",
+        mode="novel_analysis",
+        binding=RunBinding(
+            namespace="novel_source_analysis",
+            aggregate_id="retired-revision",
+            command_id="retired-command",
+        ),
+        execution_owner_id="dead-worker",
+        heartbeat_at_ms=1,
+        lease_expires_at_ms=2,
+    )
+    assert await control.request_cancellation(run_id)
+    composition = create_agent_composition(db)
+    try:
+        recovered = await AgentOrphanRecoveryService(db, composition).recover()
+    finally:
+        await composition.shutdown()
+
+    assert recovered == (run_id,)
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_runs WHERE id = ?",
+        [run_id],
+    ) == {"status": "canceled"}
+    assert await db.fetch_one(
+        "SELECT status FROM ai_agent_run_cancellations WHERE run_id = ?",
+        [run_id],
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_concurrent_orphan_monitors_have_one_recovery_owner(db):
     run_id = await run_store.create_run(
         db,
@@ -671,6 +749,56 @@ async def test_restart_recovery_terminalizes_even_unexpired_previous_owner(
         assert events[-1]["payload"]["reason"] == (
             "execution_recovery_after_restart"
         )
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_cancels_unfinished_agent_tree_children(db):
+    run_id = await run_store.create_run(
+        db,
+        session_id=None,
+        prompt="root with unfinished child",
+        mode="agent",
+        execution_owner_id="previous-process",
+        heartbeat_at_ms=10_000,
+        lease_expires_at_ms=99_999,
+    )
+    composition = create_agent_composition(db)
+    tree = composition.run_tree_repository
+    try:
+        await tree.begin_root(BeginRootAgentCommand(
+            run_id=run_id,
+            agent_id="root-agent",
+            name="root",
+            title="Root",
+            instruction="test",
+            objective="test",
+            capability_grant=AgentCapabilityGrant(can_spawn_agents=True),
+            idempotency_key=f"begin:{run_id}",
+        ))
+        spawned = await tree.spawn_agents(SpawnAgentsCommand(
+            parent_run_id=run_id,
+            idempotency_key="spawn-before-restart",
+            children=(ChildAgentSpec(
+                name="unfinished",
+                title="Unfinished Child",
+                instruction="test",
+                objective="test",
+            ),),
+        ))
+        child_id = spawned.items[0].run.run_id
+
+        assert await AgentOrphanRecoveryService(
+            db, composition
+        ).recover(after_restart=True) == (run_id,)
+
+        fresh_tree = type(tree)(db)
+        assert (await fresh_tree.get_run(run_id)).status.value == "canceled"
+        assert (await fresh_tree.get_run(child_id)).status.value == "canceled"
+        aggregation = await fresh_tree.aggregate_runs(run_id, (child_id,))
+        assert aggregation.pending_run_ids == ()
+        assert aggregation.required_failures == (child_id,)
+    finally:
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio

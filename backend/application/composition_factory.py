@@ -26,9 +26,10 @@ from agents.writing.profile import (
     build_writing_replacement_profile,
     writing_replacement_implementation_profile,
 )
-from agents.novel_analysis.profile import (
-    build_novel_analysis_replacement_profile,
-    novel_analysis_replacement_implementation_profile,
+from agents.novel_analysis.scalable_profile import (
+    build_scalable_novel_analysis_profile,
+    scalable_novel_analysis_implementation,
+    scalable_novel_analysis_implementation_profile,
 )
 from agents.screenplay.profile import (
     build_screenplay_replacement_profile,
@@ -72,14 +73,20 @@ def create_agent_composition(
     rollout_policy = kwargs.pop("agent_rollout_policy", AgentRolloutPolicy())
     # None of the three legacy runtimes is a valid create target. A partial
     # host/test policy must not silently reopen a retired implementation.
-    rollout_policy = AgentRolloutPolicy(frozenset({
-        *rollout_policy.replacement_agent_kinds,
-        *AgentKind,
-    }))
-    implementation_profiles = list(legacy_implementation_profiles())
+    rollout_policy = AgentRolloutPolicy(
+        frozenset({*rollout_policy.replacement_agent_kinds, *AgentKind}),
+        tuple(
+            item for item in rollout_policy.create_identity_overrides
+            if item.agent_kind is not AgentKind.NOVEL_ANALYSIS
+        ) + (scalable_novel_analysis_implementation(),),
+    )
+    implementation_profiles = [
+        profile for profile in legacy_implementation_profiles()
+        if profile.identity.agent_kind is not AgentKind.NOVEL_ANALYSIS
+    ]
     implementation_profiles.extend((
         writing_replacement_implementation_profile(),
-        novel_analysis_replacement_implementation_profile(),
+        scalable_novel_analysis_implementation_profile(),
         screenplay_replacement_implementation_profile(),
     ))
     implementation_registry = AgentImplementationRegistry(
@@ -125,7 +132,7 @@ def create_agent_composition(
         ),
         profile_factories=(
             build_writing_replacement_profile,
-            build_novel_analysis_replacement_profile,
+            build_scalable_novel_analysis_profile,
             build_screenplay_replacement_profile,
         ),
         profile_registry_factory=partial(
@@ -133,7 +140,7 @@ def create_agent_composition(
             default_profile_ids={
                 "purrtypos.writing": "writing.purra-native.v1",
                 "purrtypos.novel_analysis": (
-                    "novel_analysis.purra-native.v1"
+                    "novel_analysis.scalable.v2"
                 ),
                 "purrtypos.screenplay": "screenplay.purra-native.v1",
             },
@@ -150,8 +157,8 @@ def create_agent_composition(
 def create_versioned_agent_composition(db, **kwargs) -> AgentComposition:
     """Install the single production runtime for every product Agent.
 
-    Legacy implementation records remain registry tombstones for historical
-    query labeling. No legacy runtime Profile is installed for execution.
+    Novel Analysis has no legacy runtime or registry tombstone. Its production
+    read and execution paths both resolve only scalable v2.
     """
 
     return create_agent_composition(db, **kwargs)

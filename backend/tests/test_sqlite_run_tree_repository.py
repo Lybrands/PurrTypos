@@ -35,10 +35,10 @@ async def test_restart_preserves_receipts_leases_and_checkpoints(tmp_path):
         node=await fresh.get_agent(child.agent_id)
         assert (await fresh.get_checkpoint(node.context_checkpoint_id)).fingerprint=='hash'
         assert (await fresh.aggregate_runs(root.run_id,[child.run_id])).results[0]['status']=='done'
-        before=await db.fetch_one('SELECT COUNT(*) AS n FROM ai_agent_tree_commands_v3')
+        before=await db.fetch_one('SELECT COUNT(*) AS n FROM ai_agent_tree_commands_v4')
         with pytest.raises(ContractViolationError):
             await fresh.spawn_agents(SpawnAgentsCommand(parent_run_id=root.run_id,idempotency_key='evil',children=(ChildAgentSpec(name='evil',title='Evil',instruction='x',objective='x',capability_grant=AgentCapabilityGrant(can_spawn_agents=True,allowed_tools=('unauthorized',))),)))
-        assert await db.fetch_one('SELECT COUNT(*) AS n FROM ai_agent_tree_commands_v3')==before
+        assert await db.fetch_one('SELECT COUNT(*) AS n FROM ai_agent_tree_commands_v4')==before
     finally: await db.close()
 
 
@@ -53,7 +53,7 @@ async def test_two_connections_serialize_claims_and_reject_unknown_journal(tmp_p
         child=(await x.list_descendants('root'))[0]
         claims=await asyncio.gather(x.claim_run(child.run_id,owner_id='a'),y.claim_run(child.run_id,owner_id='b'))
         assert sum(c is not None for c in claims)==1
-        await a.execute("UPDATE ai_agent_tree_commands_v3 SET schema='future/v2'")
+        await a.execute("UPDATE ai_agent_tree_commands_v4 SET schema='future/v2'")
         with pytest.raises(ContractViolationError,match='Unsupported tree journal'):
             await SqliteRunTreeRepository(a).get_run('root')
     finally: await a.close(); await b.close()
@@ -71,5 +71,39 @@ async def test_older_journal_is_preserved_without_replay(tmp_path):
             title="Root", instruction="Own", objective="Work", capability_grant=AgentCapabilityGrant(), idempotency_key="root"))
         assert await db.fetch_all("SELECT * FROM ai_agent_tree_commands") == [{"evidence": "old evidence"}]
         assert await tree.list_agent_descendants("agent") == ()
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_child_run_sequence_starts_after_existing_sql_run_ids_and_survives_replay(tmp_path):
+    db = DatabaseConnection(tmp_path)
+    await db.init()
+    try:
+        await db.execute(
+            "INSERT INTO ai_agent_runs (id, status, prompt) VALUES (?, 'done', 'legacy')",
+            ["agent-run-71"],
+        )
+        tree = SqliteRunTreeRepository(db)
+        root = await tree.begin_root(BeginRootAgentCommand(
+            run_id="root", agent_id="agent", name="root", title="Root",
+            instruction="Own", objective="Work",
+            capability_grant=AgentCapabilityGrant(can_spawn_agents=True),
+            idempotency_key="root",
+        ))
+        first = await tree.spawn_agents(SpawnAgentsCommand(
+            parent_run_id=root.run_id,
+            idempotency_key="spawn-1",
+            children=(ChildAgentSpec(name="first", title="First", instruction="x", objective="x"),),
+        ))
+        assert tuple(item.run.run_id for item in first.items) == ("agent-run-72",)
+
+        restarted = SqliteRunTreeRepository(db)
+        second = await restarted.spawn_agents(SpawnAgentsCommand(
+            parent_run_id=root.run_id,
+            idempotency_key="spawn-2",
+            children=(ChildAgentSpec(name="second", title="Second", instruction="x", objective="x"),),
+        ))
+        assert tuple(item.run.run_id for item in second.items) == ("agent-run-73",)
     finally:
         await db.close()

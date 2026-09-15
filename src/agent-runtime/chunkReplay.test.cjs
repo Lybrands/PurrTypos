@@ -963,6 +963,44 @@ test('screenplay replay projects authorized unit work and final-response text un
   )
 })
 
+test('delegated child output is isolated from the root and remains inspectable', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-child-inspection', rootRunId: 'root-child-inspection',
+    sessionId: 540, userContent: '检查资料', model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+  replay.dispatch({ ...seed, eventRunId: seed.rootRunId, runRole: 'root' }, canonical(seed.rootRunId, 1, {
+    kind: 'delegation.event', channel: 'delegation', payload: {
+      eventType: 'status', delegationId: 'delegation-reader', runId: 'child-reader',
+      agentName: 'reader', agentTitle: '资料核对 Agent', objective: '核对第一章', status: 'running',
+    },
+  }), dependencies)
+  const childSeed = { ...seed, eventRunId: 'child-reader', runRole: 'unit' }
+  replay.dispatch(childSeed, canonical('child-reader', 1, {
+    outputStreamId: 'child-commentary', source: 'provider',
+    kind: 'provider.content_delta', channel: 'commentary', payload: { delta: '正在核对原文。' },
+  }), dependencies)
+  replay.dispatch(childSeed, canonical('child-reader', 2, {
+    outputStreamId: 'child-final', source: 'provider',
+    kind: 'provider.content_delta', channel: 'final', payload: { delta: '核对完成。' },
+  }), dependencies)
+  replay.dispatch(childSeed, canonical('child-reader', 3, {
+    outputStreamId: 'child-final', kind: 'stream.committed', channel: 'final', payload: {},
+  }), dependencies)
+
+  const assistant = replay.assistant(seed.turnId)
+  assert.equal(assistant?.content, '')
+  assert.equal(assistant?.commentaryBlocks, undefined)
+  assert.equal(assistant?.subAgentActivities?.[0]?.message.content, '核对完成。')
+  assert.deepEqual(assistant?.subAgentActivities?.[0]?.message.commentaryBlocks, undefined)
+  assert.equal(
+    assistant?.subAgentActivities?.[0]?.message.canonicalOutput?.commentaryBlocks[0]?.text,
+    '正在核对原文。',
+  )
+})
+
 test('raw Provider events are visible before transport completion', () => {
   const replay = new AgentChunkReplay()
   const seed = {

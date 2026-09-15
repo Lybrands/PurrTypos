@@ -12,7 +12,10 @@ from application.agent_run_queries import AgentRunQueryService
 from application.writing_proposal_read_model import (
     SqliteWritingProposalReadModel,
 )
-from application.agent_composition import set_agent_composition
+from application.agent_composition import (
+    get_agent_composition,
+    set_agent_composition,
+)
 from application.composition_factory import create_agent_composition
 from database.connection import DatabaseConnection
 from database.crud.screenplay_project_deletion import (
@@ -43,7 +46,17 @@ from purra.output import (
     OutputSource,
     OutputVisibility,
 )
-from purra.contracts import RunBinding
+from purra.contracts import RunBinding, RunStatus
+from purra.events import AgentEvent, CoreEventType
+from purra.ports import RunCommit
+from purra.output import RunLifecycleOutputDraft
+from purra.api import (
+    AgentCapabilityGrant,
+    BeginRootAgentCommand,
+    ChildAgentSpec,
+    ContinueAgentCommand,
+    SpawnAgentsCommand,
+)
 
 
 pytestmark = pytest.mark.asyncio
@@ -221,6 +234,42 @@ async def test_run_snapshot_route_uses_the_same_resume_contract(temp_db):
         json_body=None,
     )
     assert invalid.status_code == 422
+
+
+async def test_child_run_snapshot_does_not_route_as_a_product_agent(
+    temp_db, monkeypatch,
+):
+    root_run_id = await _seed_run(temp_db)
+    child_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="子 Agent 任务",
+        mode="agent",
+        root_run_id=root_run_id,
+        parent_run_id=root_run_id,
+        agent_id="child-agent",
+    )
+
+    async def reject_product_routing(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("Child Run must not use product implementation routing")
+
+    monkeypatch.setattr(
+        get_agent_composition().agent_implementation_router,
+        "for_run",
+        reject_product_routing,
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+    response = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{child_run_id}",
+        json_body=None,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["run"]["runId"] == child_run_id
 
 
 async def test_run_snapshot_reuses_canonical_live_serializer_for_replay(temp_db):
@@ -476,6 +525,167 @@ async def test_latest_session_run_route_returns_prompt_and_snapshot(temp_db):
     assert payload["prompt"] == "private prompt must not be exposed by snapshots"
     assert payload["snapshot"]["run"]["runId"] == run_id
     assert "prompt" not in payload["snapshot"]["run"]
+
+
+async def test_sub_agent_conversation_returns_prompt_and_private_result(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    composition = get_agent_composition()
+    child_run_id = await create_run(
+        temp_db,
+        session_id=7,
+        prompt="检查人物动机是否连续。",
+        mode="agent",
+        root_run_id=root_run_id,
+        parent_run_id=root_run_id,
+        execution_owner_id=composition.execution_owner_id,
+        lease_expires_at_ms=now_ms() + 60_000,
+    )
+    result = '{"finding":"人物动机连续"}'
+    await composition.output_repository.commit_run_lifecycle(
+        child_run_id,
+        RunCommit(
+            terminal_status=RunStatus.DONE,
+            final_response="",
+            validated_result=result,
+            events=(AgentEvent(
+                type=CoreEventType.RUN_COMPLETED,
+                run_id=child_run_id,
+                payload={"status": RunStatus.DONE.value},
+            ),),
+        ),
+        RunLifecycleOutputDraft(
+            source_event_key=f"run:{child_run_id}:done",
+            status=RunStatus.DONE,
+            payload={"status": RunStatus.DONE.value},
+            occurred_at=datetime.now(timezone.utc),
+        ),
+    )
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{child_run_id}/sub-agent-conversation",
+        json_body=None,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": True,
+        "data": {
+            "version": 2,
+            "agentId": child_run_id,
+            "selectedRunId": child_run_id,
+            "turns": [{
+                "runId": child_run_id,
+                "prompt": "检查人物动机是否连续。",
+                "finalResponse": "人物动机连续",
+                "status": "done",
+            }],
+        },
+    }
+
+
+async def test_sub_agent_conversation_rejects_root_runs(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+
+    response = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{root_run_id}/sub-agent-conversation",
+        json_body=None,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "success": False,
+        "error": "该 Run 不是子 Agent 对话",
+    }
+
+
+async def test_sub_agent_conversation_returns_continued_agent_history(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    composition = get_agent_composition()
+    tree = composition.run_tree_repository
+    await tree.begin_root(BeginRootAgentCommand(
+        run_id=root_run_id,
+        agent_id="root-agent-history",
+        name="root",
+        title="Root",
+        instruction="test",
+        objective="test",
+        capability_grant=AgentCapabilityGrant(can_spawn_agents=True),
+        idempotency_key="begin-history-root",
+    ))
+    spawned = await tree.spawn_agents(SpawnAgentsCommand(
+        parent_run_id=root_run_id,
+        idempotency_key="spawn-history-child",
+        children=(ChildAgentSpec(
+            name="slice-agent",
+            title="分片分析",
+            instruction="test",
+            objective="先分析人物。",
+        ),),
+    ))
+    first = spawned.items[0]
+    claimed = await tree.claim_run(first.run.run_id)
+    assert claimed is not None
+    await tree.complete_run(
+        first.run.run_id,
+        expected_context_version=0,
+        result={"content": "人物结果"},
+        content_ref="result:first",
+        fingerprint="first",
+        lease_owner_id=claimed.lease_owner_id,
+        lease_epoch=claimed.lease_epoch,
+    )
+    continued = await tree.continue_agent(ContinueAgentCommand(
+        requester_run_id=root_run_id,
+        idempotency_key="continue-history-child",
+        agent_id=first.agent.agent_id,
+        expected_context_version=1,
+        message="继续分析设定。",
+    ))
+    for tree_run, prompt, result in (
+        (first.run, "先分析人物。", "人物结果"),
+        (continued.run, "继续分析设定。", "设定结果"),
+    ):
+        await create_run(
+            temp_db,
+            run_id=tree_run.run_id,
+            session_id=7,
+            prompt=prompt,
+            mode="agent",
+            root_run_id=root_run_id,
+            parent_run_id=root_run_id,
+            agent_id=first.agent.agent_id,
+        )
+        await temp_db.execute(
+            "UPDATE ai_agent_runs SET status = 'done', final_response = ? WHERE id = ?",
+            [result, tree_run.run_id],
+        )
+
+    app = FastAPI()
+    app.include_router(ai_router, prefix="/api")
+    response = await request_json(
+        app,
+        method="GET",
+        path=f"/api/ai/agent-runs/{continued.run.run_id}/sub-agent-conversation",
+        json_body=None,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["agentId"] == first.agent.agent_id
+    assert [turn["prompt"] for turn in data["turns"]] == [
+        "先分析人物。", "继续分析设定。",
+    ]
+    assert [turn["finalResponse"] for turn in data["turns"]] == [
+        "人物结果", "设定结果",
+    ]
 
 
 async def test_latest_session_run_breaks_same_timestamp_ties_by_insertion(temp_db):

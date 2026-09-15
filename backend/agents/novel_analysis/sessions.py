@@ -19,11 +19,6 @@ class NovelAnalysisSessions:
             [revision_id],
         ) is None:
             raise AppError("来源版本不存在", 404)
-        await self._db.execute(
-            "INSERT OR IGNORE INTO novel_analysis_sessions "
-            "(id, revision_id, title) VALUES (?, ?, ?)",
-            [f"legacy:{revision_id}", revision_id, "来源对话"],
-        )
         return await self._db.fetch_all(
             "SELECT id, title, closed, created_at AS createdAt "
             "FROM novel_analysis_sessions WHERE revision_id = ? "
@@ -63,6 +58,104 @@ class NovelAnalysisSessions:
                 [int(closed), identity],
             )
 
+    async def delete(self, revision_id: str, identity: str) -> None:
+        async with self._db.transaction(cancellation_linearizable=True):
+            await self.require(revision_id, identity)
+            active = await self._db.fetch_one(
+                "WITH direct_runs AS ("
+                "SELECT r.id FROM ai_agent_runs r "
+                "JOIN novel_analysis_session_commands sc "
+                "ON sc.command_id = r.binding_command_id "
+                "WHERE sc.session_id = ?"
+                "), owned_tasks AS ("
+                "SELECT DISTINCT ltr.task_id FROM ai_agent_long_task_runs ltr "
+                "JOIN direct_runs owner ON owner.id = ltr.run_id"
+                ") "
+                "SELECT r.id FROM ai_agent_runs r "
+                "WHERE r.status IN ('pending', 'queued', 'running', 'paused') "
+                "AND (r.id IN (SELECT id FROM direct_runs) "
+                "OR EXISTS (SELECT 1 FROM ai_agent_long_task_runs ltr "
+                "WHERE ltr.run_id = r.id "
+                "AND ltr.task_id IN (SELECT task_id FROM owned_tasks)) "
+                "OR r.root_run_id IN ("
+                "SELECT ltr.run_id FROM ai_agent_long_task_runs ltr "
+                "WHERE ltr.task_id IN (SELECT task_id FROM owned_tasks)"
+                ")) LIMIT 1",
+                [identity],
+            )
+            active_task = await self._db.fetch_one(
+                "WITH direct_runs AS ("
+                "SELECT r.id FROM ai_agent_runs r "
+                "JOIN novel_analysis_session_commands sc "
+                "ON sc.command_id = r.binding_command_id "
+                "WHERE sc.session_id = ?"
+                ") "
+                "SELECT task.id FROM ai_agent_long_tasks task "
+                "WHERE task.status IN ('pending', 'queued', 'running', 'paused') "
+                "AND (task.created_by_run_id IN (SELECT id FROM direct_runs) "
+                "OR EXISTS (SELECT 1 FROM ai_agent_long_task_runs ltr "
+                "WHERE ltr.task_id = task.id "
+                "AND ltr.run_id IN (SELECT id FROM direct_runs))) LIMIT 1",
+                [identity],
+            )
+            if active or active_task:
+                raise AppError(
+                    "运行中、排队中或已暂停的对话不能删除，请先完成或终止任务。",
+                    409,
+                )
+            await self._db.execute(
+                "DELETE FROM novel_analysis_session_commands "
+                "WHERE session_id = ? AND revision_id = ?",
+                [identity, revision_id],
+            )
+            await self._db.execute(
+                "DELETE FROM novel_analysis_sessions "
+                "WHERE id = ? AND revision_id = ?",
+                [identity, revision_id],
+            )
+
+    async def active_task_ids(
+        self,
+        revision_id: str,
+        identity: str,
+    ) -> tuple[str, ...]:
+        """Return resumable or executing tasks owned by one conversation."""
+
+        await self.require(revision_id, identity)
+        rows = await self._db.fetch_all(
+            "WITH direct_runs AS ("
+            "SELECT r.id FROM ai_agent_runs r "
+            "JOIN novel_analysis_session_commands sc "
+            "ON sc.command_id = r.binding_command_id "
+            "WHERE sc.session_id = ?"
+            ") "
+            "SELECT DISTINCT task.id FROM ai_agent_long_tasks task "
+            "WHERE task.status IN ('pending', 'queued', 'running', 'paused') "
+            "AND (task.created_by_run_id IN (SELECT id FROM direct_runs) "
+            "OR EXISTS (SELECT 1 FROM ai_agent_long_task_runs ltr "
+            "WHERE ltr.task_id = task.id "
+            "AND ltr.run_id IN (SELECT id FROM direct_runs)))",
+            [identity],
+        )
+        return tuple(str(row["id"]) for row in rows)
+
+    async def active_run_ids(
+        self,
+        revision_id: str,
+        identity: str,
+    ) -> tuple[str, ...]:
+        """Return executing root Runs directly bound to one conversation."""
+
+        await self.require(revision_id, identity)
+        rows = await self._db.fetch_all(
+            "SELECT r.id FROM ai_agent_runs r "
+            "JOIN novel_analysis_session_commands sc "
+            "ON sc.command_id = r.binding_command_id "
+            "WHERE sc.session_id = ? AND r.status IN ('pending', 'queued', 'running', 'paused')",
+            [identity],
+        )
+        return tuple(str(row["id"]) for row in rows)
+
     async def require(self, revision_id: str, identity: str) -> dict:
         row = await self._db.fetch_one(
             "SELECT * FROM novel_analysis_sessions "
@@ -81,7 +174,9 @@ class NovelAnalysisSessions:
     ) -> None:
         async with self._db.transaction():
             await self.list(revision_id)
-            session_id = identity or f"legacy:{revision_id}"
+            session_id = str(identity or "").strip()
+            if not session_id:
+                raise AppError("请选择来源分析对话", 422)
             row = await self.require(revision_id, session_id)
             if row["closed"]:
                 raise AppError("请先重新打开该对话", 409)

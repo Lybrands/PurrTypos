@@ -160,9 +160,10 @@ async def lifespan(application: FastAPI):
                 ", ".join(recovered_long_tasks),
             )
         orphan_recovery = AgentOrphanRecoveryService(db, composition)
-        recovered_runs = await orphan_recovery.recover(
-            after_restart=True,
-        )
+        # Startup does not prove that another process holding a live lease is
+        # dead. Normal orphan recovery honours persisted lease deadlines and
+        # will reclaim genuinely abandoned work after expiry.
+        recovered_runs = await orphan_recovery.recover(after_restart=False)
         from infrastructure.persistence.run_conversation_store import (
             materialize_terminal_writing_run_holes,
         )
@@ -218,6 +219,7 @@ async def lifespan(application: FastAPI):
         from agents.novel_analysis.automatic_recovery import (
             NovelAnalysisReplacementAutomaticRecovery,
             monitor_novel_analysis_replacement_recovery,
+            retire_misclassified_failure_pauses,
         )
         from agents.novel_analysis.reliability_baseline import (
             NovelAnalysisReliabilityBaselineService,
@@ -227,6 +229,13 @@ async def lifespan(application: FastAPI):
             db,
             composition,
         )
+        retired_failure_pauses = await retire_misclassified_failure_pauses(db)
+        if retired_failure_pauses:
+            logging.getLogger(__name__).warning(
+                "Retired %s misclassified novel-analysis failure pause(s): %s",
+                len(retired_failure_pauses),
+                ", ".join(retired_failure_pauses),
+            )
         novel_analysis_baseline = NovelAnalysisReliabilityBaselineService(db)
         recovered_novel_analyses = await novel_analysis_recovery.recover_due()
         if recovered_novel_analyses:

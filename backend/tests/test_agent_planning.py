@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from agents.novel_analysis.profile import NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID
+from agents.novel_analysis.scalable_profile import NOVEL_ANALYSIS_SCALABLE_PROFILE_ID
 from application.composition_factory import create_agent_composition
 from application.model_runtime import model_request_from_runtime
 from infrastructure.persistence.run_store import create_run
@@ -43,7 +43,7 @@ async def test_novel_analysis_replacement_uses_the_core_planner_without_a_host_w
     composition = create_agent_composition(temp_db)
     core = composition.create_core(
         "test-key",
-        agent_profile=NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,
+        agent_profile=NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
     )
     try:
         assert isinstance(core._planner, AgentPlanner)
@@ -93,7 +93,7 @@ async def test_novel_analysis_replacement_planner_uses_the_versioned_provider_st
     )
     core = composition.create_core(
         "test-key",
-        agent_profile=NOVEL_ANALYSIS_REPLACEMENT_PROFILE_ID,
+        agent_profile=NOVEL_ANALYSIS_SCALABLE_PROFILE_ID,
     )
     try:
         core._planner._result_validator = None

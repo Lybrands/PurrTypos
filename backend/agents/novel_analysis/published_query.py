@@ -37,30 +37,6 @@ class NovelAnalysisPublishedQuery:
             "WHERE analysis_id = ? ORDER BY id",
             [analysis_id],
         )
-        evidence = await self._db.fetch_all(
-            "SELECT e.*, s.ordinal AS section_ordinal, "
-            "s.title AS section_title "
-            "FROM novel_source_analysis_evidence AS e "
-            "LEFT JOIN novel_source_sections AS s ON s.id = e.section_id "
-            "WHERE e.analysis_id = ? ORDER BY e.id",
-            [analysis_id],
-        )
-        by_owner: dict[tuple[str, str], list[dict]] = {}
-        for item in evidence:
-            locator = json.loads(str(item["locator_json"]))
-            by_owner.setdefault(
-                (str(item["owner_type"]), str(item["owner_id"])),
-                [],
-            ).append({
-                "id": item["id"],
-                "sectionId": item["section_id"],
-                "sectionOrdinal": item.get("section_ordinal"),
-                "sectionTitle": item.get("section_title"),
-                "referenceKind": locator.get("referenceKind", "quote"),
-                "excerpt": item["excerpt"],
-                "locator": locator,
-                "excerptDigest": item["excerpt_digest"],
-            })
         summary = json.loads(str(analysis["summary_json"]))
         return {
             "id": analysis["id"],
@@ -73,9 +49,6 @@ class NovelAnalysisPublishedQuery:
             "contentDigest": analysis["content_digest"],
             "summary": summary,
             "storyOverview": summary.get("storyOverview"),
-            "distillation": summary.get("distillation"),
-            "writingSkill": summary.get("writingSkill"),
-            "skillReviewStatus": summary.get("skillReviewStatus"),
             "facts": [
                 {
                     "id": item["id"],
@@ -88,7 +61,6 @@ class NovelAnalysisPublishedQuery:
                     "firstSectionOrdinal": item["first_section_ordinal"],
                     "lastSectionOrdinal": item["last_section_ordinal"],
                     "contentDigest": item["content_digest"],
-                    "evidence": by_owner.get(("fact", str(item["id"])), []),
                 }
                 for item in facts
             ],
@@ -100,10 +72,6 @@ class NovelAnalysisPublishedQuery:
                     "bodyMarkdown": item["body_markdown"],
                     "status": item["status"],
                     "contentDigest": item["content_digest"],
-                    "evidence": by_owner.get(
-                        ("craft_card", str(item["id"])),
-                        [],
-                    ),
                 }
                 for item in cards
             ],

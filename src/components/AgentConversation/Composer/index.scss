@@ -44,6 +44,14 @@
   transform: translateY(-50%);
 }
 
+.agent-composer__floating-content {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+}
+
 .agent-composer__input.purr-input,
 textarea.agent-composer__input.purr-input {
   width: 100%;

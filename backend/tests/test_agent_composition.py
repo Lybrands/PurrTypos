@@ -88,6 +88,7 @@ class _FakeAgentProfile:
 
     def __init__(self, factory_dependencies: dict[str, object]):
         self.factory_dependencies = factory_dependencies
+        self.prepare_input: AgentRunRequest | None = None
         self.context_provider = object()
         self.context_factory = lambda _model_tasks: self.context_provider
         self.judge_policy = object()
@@ -107,6 +108,7 @@ class _FakeAgentProfile:
         self,
         request: AgentRunRequest,
     ) -> AgentRunRequest:
+        self.prepare_input = request
         return replace(request, metadata={"prepared": True})
 
     def context_provider_factory(self):
@@ -435,6 +437,40 @@ async def test_composition_enables_real_provider_progress_only_for_public_scopes
     assert prepared.model.capability_snapshot.protocol.public_progress is expected
 
 
+@pytest.mark.asyncio
+async def test_child_request_does_not_inherit_root_public_output_audience(
+    temp_db: DatabaseConnection,
+):
+    profile = _FakeAgentProfile({})
+    composition = AgentComposition(
+        temp_db,
+        profile_factories=(lambda **_kwargs: profile,),
+    )
+    request = replace(
+        _fake_request(),
+        tools_enabled=True,
+        metadata={
+            "parentRunId": "root-run",
+            "responseAudience": "public",
+            "progressAudience": "public",
+        },
+    )
+    try:
+        prepared = await composition.prepare_request(request)
+    finally:
+        await composition.shutdown()
+
+    assert prepared.metadata["responseAudience"] == "internal"
+    assert prepared.metadata["progressAudience"] == "internal"
+    assert profile.prepare_input is not None
+    assert profile.prepare_input.metadata["responseAudience"] == "internal"
+    assert profile.prepare_input.metadata["progressAudience"] == "internal"
+    assert (
+        prepared.model.capability_snapshot.protocol.public_progress
+        is FeatureSupport.UNKNOWN
+    )
+
+
 def test_profile_registry_stores_the_profile_as_the_registration():
     profile = StaticAgentProfile(
         id="fake",
@@ -455,7 +491,7 @@ async def test_product_profiles_all_enforce_public_tool_operation_presentation(
     try:
         assert composition.agent_profile_ids == (
             "writing.purra-native.v1",
-            "novel_analysis.purra-native.v1",
+            "novel_analysis.scalable.v2",
             "screenplay.purra-native.v1",
         )
         for profile_id in composition.agent_profile_ids:
@@ -480,7 +516,7 @@ async def test_product_composition_registers_product_profiles(
     try:
         assert composition.agent_profile_ids == (
             "writing.purra-native.v1",
-            "novel_analysis.purra-native.v1",
+            "novel_analysis.scalable.v2",
             "screenplay.purra-native.v1",
         )
         for profile_id in composition.agent_profile_ids:

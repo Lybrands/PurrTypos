@@ -8,6 +8,7 @@ import pytest_asyncio
 
 from agents.novel_analysis.automatic_recovery import (
     NovelAnalysisReplacementAutomaticRecovery,
+    retire_misclassified_failure_pauses,
 )
 from agents.novel_analysis.reliability_baseline import (
     NovelAnalysisReliabilityBaselineService,
@@ -15,13 +16,18 @@ from agents.novel_analysis.reliability_baseline import (
 from agents.novel_analysis.recovery_service import (
     NovelAnalysisReplacementContinuationLifecycle,
 )
+from agents.novel_analysis.scalable_profile import (
+    scalable_novel_analysis_implementation,
+)
 from agents.shared.implementation import (
     AgentKind,
     legacy_implementation,
-    replacement_implementation,
 )
 from agents.shared.implementation_store import SqliteAgentImplementationStore
 from database.connection import DatabaseConnection
+from infrastructure.persistence.sqlite_long_task_repository import (
+    SqliteLongTaskRepository,
+)
 from infrastructure.persistence.run_store import create_run
 
 
@@ -81,7 +87,7 @@ async def test_automatic_recovery_filters_task_kind_and_persisted_identity(
     replacement_run = await _run(
         temp_db,
         "replacement-run",
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     legacy_run = await _run(
         temp_db,
@@ -92,7 +98,7 @@ async def test_automatic_recovery_filters_task_kind_and_persisted_identity(
         temp_db,
         task_id="replacement-task",
         run_id=replacement_run,
-        kind="novel_analysis.purra-native",
+        kind="novel_analysis.scalable.v2",
         owner_id="revision-replacement",
     )
     await _paused_task(
@@ -106,7 +112,7 @@ async def test_automatic_recovery_filters_task_kind_and_persisted_identity(
         temp_db,
         task_id="legacy-owner-task",
         run_id=legacy_run,
-        kind="novel_analysis.purra-native",
+        kind="novel_analysis.scalable.v2",
         owner_id="revision-legacy-owner",
     )
     composition = _Composition()
@@ -146,13 +152,13 @@ async def test_automatic_recovery_does_not_double_dispatch_an_inflight_task(
     run_id = await _run(
         temp_db,
         "replacement-run",
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     await _paused_task(
         temp_db,
         task_id="replacement-task",
         run_id=run_id,
-        kind="novel_analysis.purra-native",
+        kind="novel_analysis.scalable.v2",
         owner_id="revision-replacement",
     )
     blocker = asyncio.Event()
@@ -181,7 +187,7 @@ async def test_replacement_reliability_baseline_keeps_existing_storage_contract(
     run_id = await _run(
         temp_db,
         "replacement-run",
-        replacement_implementation(AgentKind.NOVEL_ANALYSIS, recipe_version=1),
+        scalable_novel_analysis_implementation(recipe_version=2),
     )
     await temp_db.execute(
         "INSERT INTO ai_agent_long_tasks "
@@ -190,7 +196,7 @@ async def test_replacement_reliability_baseline_keeps_existing_storage_contract(
         [
             "completed-task",
             "purrtypos.novel_analysis",
-            "novel_analysis.purra-native",
+            "novel_analysis.scalable.v2",
             "revision-1",
             run_id,
         ],
@@ -215,13 +221,145 @@ async def test_automatic_continuation_records_automatic_recovery_source() -> Non
     lifecycle = NovelAnalysisReplacementContinuationLifecycle(
         repository,
         task_id="replacement-task",
-        retry_failed=False,
         recovery_source="automatic",
     )
 
     await lifecycle.before_submit()
 
     assert repository.calls == [("replacement-task", 0, "automatic")]
+
+
+@pytest.mark.asyncio
+async def test_legacy_failure_pause_is_retired_as_terminal_failure(
+    temp_db,
+) -> None:
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, status, total_units, "
+        "completed_units, failed_units) VALUES "
+        "('legacy-output-task', 'purrtypos.novel_analysis', "
+        "'novel_analysis.scalable.v2', 'revision-1', 'root-run', 'paused', 2, 0, 0)"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status, error_code, disposition, failure_json) "
+        "VALUES "
+        "('legacy-output-task', 'skill:create', 'skill:create', 0, 'blocked', "
+        "'novel_analysis_skill_output_invalid', 'pause_recoverable', "
+        "'{\"category\":\"transient_provider\"}'), "
+        "('legacy-output-task', 'review:artifact', 'review:artifact', 1, 'pending', NULL, NULL, '{}')"
+    )
+
+    assert await retire_misclassified_failure_pauses(temp_db) == (
+        "legacy-output-task",
+    )
+    assert await retire_misclassified_failure_pauses(temp_db) == ()
+    task = await temp_db.fetch_one(
+        "SELECT status, failed_units FROM ai_agent_long_tasks "
+        "WHERE id = 'legacy-output-task'"
+    )
+    units = await temp_db.fetch_all(
+        "SELECT unit_id, status, disposition, failure_json "
+        "FROM ai_agent_long_task_units WHERE task_id = 'legacy-output-task' "
+        "ORDER BY position"
+    )
+
+    assert task == {"status": "failed", "failed_units": 1}
+    assert units[0]["status"] == "failed"
+    assert units[0]["disposition"] == "fail_permanent"
+    assert json.loads(units[0]["failure_json"])["category"] == "tool_execution"
+    assert units[1]["status"] == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_legacy_generic_child_failure_recovers_the_child_error_code(
+    temp_db,
+) -> None:
+    await temp_db.execute(
+        "INSERT INTO ai_agent_runs (id, status, prompt, parent_run_id, error) VALUES "
+        "('legacy-root', 'canceled', '', NULL, NULL), "
+        "('legacy-child', 'failed', '', 'legacy-root', 'max_model_rounds')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, status, total_units, "
+        "completed_units, failed_units) VALUES "
+        "('legacy-child-task', 'purrtypos.novel_analysis', "
+        "'novel_analysis.scalable.v2', 'revision-1', 'legacy-root', 'paused', 1, 0, 0)"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) VALUES "
+        "('legacy-child-task', 'legacy-root', 'created')"
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status, error_code, disposition, failure_json) "
+        "VALUES ('legacy-child-task', 'skill:create', 'skill:create', 0, "
+        "'blocked', 'RuntimeError', 'pause_recoverable', "
+        "'{\"category\":\"transient_provider\",\"code\":\"RuntimeError\"}')"
+    )
+
+    assert await retire_misclassified_failure_pauses(temp_db) == (
+        "legacy-child-task",
+    )
+    unit = await temp_db.fetch_one(
+        "SELECT status, error_code, disposition, failure_json "
+        "FROM ai_agent_long_task_units WHERE task_id = 'legacy-child-task'"
+    )
+    assert unit["status"] == "failed"
+    assert unit["error_code"] == "max_model_rounds"
+    assert unit["disposition"] == "fail_permanent"
+    assert json.loads(unit["failure_json"])["code"] == "max_model_rounds"
+
+
+@pytest.mark.asyncio
+async def test_repeated_automatic_pause_preserves_and_increments_backoff(
+    temp_db,
+) -> None:
+    run_id = await _run(
+        temp_db,
+        "replacement-run",
+        scalable_novel_analysis_implementation(recipe_version=2),
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_tasks "
+        "(id, namespace, kind, owner_id, created_by_run_id, status, "
+        "state_reason_code, state_reason_scope, total_units, metadata_json) "
+        "VALUES ('replacement-task', 'purrtypos.novel_analysis', "
+        "'novel_analysis.scalable.v2', 'revision-1', ?, 'paused', "
+        "'provider_unavailable', 'system', 1, ?)",
+        [
+            run_id,
+            json.dumps({
+                "automaticRecoveryAttempt": 2,
+                "automaticRecoveryWaitSpentMs": 3_000,
+                "autoResumeNotBeforeMs": 100,
+                "autoRecoveryReasonCode": "provider_unavailable",
+            }),
+        ],
+    )
+    await temp_db.execute(
+        "INSERT INTO ai_agent_long_task_units "
+        "(task_id, unit_id, semantic_key, position, status) "
+        "VALUES ('replacement-task', 'unit-1', 'unit-1', 0, 'blocked')"
+    )
+    repository = SqliteLongTaskRepository(temp_db)
+
+    resumed = await repository.resume(
+        "replacement-task",
+        recovery_source="automatic",
+    )
+    assert resumed.metadata["automaticRecoveryAttempt"] == 2
+    assert resumed.metadata["automaticRecoveryWaitSpentMs"] == 3_000
+    assert "autoResumeNotBeforeMs" not in resumed.metadata
+
+    paused = await repository.pause(
+        "replacement-task",
+        reason_code="provider_unavailable",
+    )
+    assert paused.metadata["automaticRecoveryAttempt"] == 3
+    assert paused.metadata["automaticRecoveryWaitSpentMs"] > 3_000
+    assert paused.metadata["autoResumeNotBeforeMs"] > 0
 
 
 async def _run(temp_db, run_id: str, identity) -> str:

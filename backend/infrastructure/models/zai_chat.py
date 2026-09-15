@@ -23,14 +23,14 @@ from utils.url import normalize_base_url
 _END = object()
 _REAPERS: set[asyncio.Task] = set()
 
-# The source-analysis runtime declares a 120s activity window.  The transport
+# Agent Runs currently own a 300s provider invocation deadline.  The transport
 # may still protect connects and pool acquisition aggressively, but its stream
 # read deadline must not preempt that runtime policy.  Keep a small margin so
 # cancellation/cleanup is owned by the runtime first.
 _ZAI_CONNECT_TIMEOUT_SECONDS = 15.0
 _ZAI_WRITE_TIMEOUT_SECONDS = 30.0
 _ZAI_POOL_TIMEOUT_SECONDS = 30.0
-_ZAI_STREAM_READ_TIMEOUT_SECONDS = 125.0
+_ZAI_STREAM_READ_TIMEOUT_SECONDS = 305.0
 
 
 def _create_client(api_key: str, base_url: str | None):

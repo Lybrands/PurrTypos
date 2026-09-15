@@ -91,22 +91,6 @@ class ContinuationService:
             fact_kind = str(fact["fact_kind"])
             if fact_kind not in CANON_FACT_KINDS:
                 continue
-            evidence = await self._db.fetch_all(
-                "SELECT e.section_id, e.excerpt_digest, e.excerpt, e.locator_json, s.ordinal, s.title "
-                "FROM novel_source_analysis_evidence AS e "
-                "JOIN novel_source_sections AS s ON s.id = e.section_id "
-                "WHERE e.analysis_id = ? AND e.owner_type = 'fact' "
-                "AND e.owner_id = ? AND s.revision_id = ? AND s.ordinal <= ? "
-                "ORDER BY s.ordinal, e.id",
-                [
-                    source_analysis_id,
-                    fact["id"],
-                    source_revision_id,
-                    fork_ordinal,
-                ],
-            )
-            if not evidence:
-                raise AppError("正史事实缺少分叉点以前的合法证据", 409)
             records.append({
                 "sourceFactId": str(fact["id"]),
                 "factKind": fact_kind,
@@ -116,14 +100,8 @@ class ContinuationService:
                 "value": json.loads(str(fact["value_json"])),
                 "lifecycleStatus": str(fact.get("lifecycle_status") or "active"),
                 "contentDigest": str(fact["content_digest"]),
-                "evidence": [{
-                    "sectionId": str(item["section_id"]),
-                    "sectionOrdinal": int(item["ordinal"]),
-                    "excerptDigest": str(item["excerpt_digest"]),
-                    "sectionTitle": str(item["title"]),
-                    "excerpt": str(item["excerpt"]),
-                    "referenceKind": json.loads(item["locator_json"]).get("referenceKind", "quote"),
-                } for item in evidence],
+                "firstSectionOrdinal": int(fact["first_section_ordinal"]),
+                "lastSectionOrdinal": int(fact["last_section_ordinal"]),
             })
         from application.source_analysis_techniques import results
         techniques = await results(self._db, source_analysis_id, fork_ordinal, include_candidates=True)

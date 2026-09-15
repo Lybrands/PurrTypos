@@ -98,12 +98,14 @@ export default function App() {
     [modelConfigs],
   )
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
+  const [agentPreventSystemSleep, setAgentPreventSystemSleep] = React.useState(false)
 
   React.useEffect(() => {
     services.settings.getSettings().then((res) => {
       if (!res.success || !res.data) return
       if (res.data.model_descriptors) installModelDescriptors(res.data.model_descriptors)
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
+      setAgentPreventSystemSleep(res.data.agent_prevent_system_sleep === true)
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
       }
@@ -172,6 +174,17 @@ export default function App() {
     setSyncOutlineChapter(value)
     services.settings.setSettings({ sync_outline_chapter: value })
   }, [])
+
+  const handleAgentPreventSystemSleepChange = React.useCallback(async (value: boolean) => {
+    setAgentPreventSystemSleep(value)
+    const result = await services.settings.setSettings({ agent_prevent_system_sleep: value })
+    if (!result.success) {
+      setAgentPreventSystemSleep(!value)
+      appMessage.error('保存后台运行设置失败')
+      return
+    }
+    await window.purrDesktop?.refreshAgentPowerSaveState?.().catch(() => undefined)
+  }, [appMessage])
 
   const loadBooks = React.useCallback(async () => {
     setBooksStatus('loading')
@@ -381,6 +394,8 @@ export default function App() {
               onHome={() => navigate('/', { replace: true })}
               syncOutlineChapter={syncOutlineChapter}
               onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
+              agentPreventSystemSleep={agentPreventSystemSleep}
+              onAgentPreventSystemSleepChange={handleAgentPreventSystemSleepChange}
             />
           </Suspense>
         </div>
