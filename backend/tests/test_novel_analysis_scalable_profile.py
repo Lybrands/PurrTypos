@@ -96,23 +96,33 @@ from tests.support.planning_stream import route_planning_stream
 
 def test_planner_contract_ignores_non_authoritative_explanatory_fields():
     raw = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "passes": [{
             "id": "story",
             "dimensions": ["plot"],
+            "executionMode": "root",
             "reason": "聚合主线",
         }],
         "reduceFanIn": 4,
         "synthesisSections": ["故事大纲"],
         "qualityChecks": ["覆盖整书"],
+        "executionModes": {
+            "synthesize": "root", "review": "root",
+        },
         "explanation": "分析计划说明",
     }
     assert ScalableAnalysisPlan.from_mapping(raw).to_mapping() == {
-        "schemaVersion": 1,
-        "passes": [{"id": "story", "dimensions": ["plot"]}],
+        "schemaVersion": 2,
+        "passes": [{
+            "id": "story", "dimensions": ["plot"],
+            "executionMode": "root",
+        }],
         "reduceFanIn": 4,
         "synthesisSections": ["故事大纲"],
         "qualityChecks": ["覆盖整书"],
+        "executionModes": {
+            "synthesize": "root", "review": "root",
+        },
     }
 
 

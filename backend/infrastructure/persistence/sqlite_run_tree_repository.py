@@ -14,7 +14,6 @@ from purra.api import (
     ContinueAgentCommand, InMemoryRunTreeRepository, SpawnAgentsCommand,
 )
 from purra.errors import ContractViolationError
-from purra.adapter_state import AgentTreeState
 
 _TYPES = {cls.__name__: cls for cls in (
     AgentCapabilityGrant, BeginRootAgentCommand, ChildAgentSpec,
@@ -67,7 +66,7 @@ class SqliteRunTreeRepository:
         self._revision = 0
         self._tree = InMemoryRunTreeRepository(
             clock_ms=lambda: self._now,
-            state=AgentTreeState(run_sequence=run_sequence),
+            initial_run_sequence=run_sequence,
         )
 
     async def _load_initial_run_sequence(self):

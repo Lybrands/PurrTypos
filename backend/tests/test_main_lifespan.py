@@ -10,6 +10,9 @@ import dependencies
 import main
 from application.agent_composition import get_agent_composition
 from agents.shared.implementation import AgentKind, replacement_implementation
+from agents.novel_analysis.scalable_profile import (
+    scalable_novel_analysis_implementation,
+)
 from database import connection as database_connection
 from exceptions import DatabaseNotReadyError
 from infrastructure.persistence import run_store
@@ -94,7 +97,7 @@ async def test_lifespan_shutdown_clears_composition_and_global_db(
         assert dependencies.get_db() is created[0]
         assert get_agent_composition().agent_profile_ids == (
             "writing.purra-native.v1",
-            "novel_analysis.purra-native.v1",
+            "novel_analysis.scalable.v2",
             "screenplay.purra-native.v1",
         )
         assert (
@@ -123,7 +126,7 @@ async def test_lifespan_defaults_new_analysis_runs_to_replacement(
             get_agent_composition()
             .agent_implementation_router.for_create(AgentKind.NOVEL_ANALYSIS)
             .identity
-            == replacement_implementation(AgentKind.NOVEL_ANALYSIS)
+            == scalable_novel_analysis_implementation()
         )
 
 
@@ -205,7 +208,7 @@ async def test_lifespan_execution_heartbeat_is_not_blocked_by_primary_connection
 
 
 @pytest.mark.asyncio
-async def test_lifespan_startup_terminalizes_run_abandoned_by_previous_process(
+async def test_lifespan_startup_preserves_run_with_live_lease_from_another_process(
     monkeypatch,
     tmp_path,
 ):
@@ -225,29 +228,12 @@ async def test_lifespan_startup_terminalizes_run_abandoned_by_previous_process(
     created = _capture_database(monkeypatch, tmp_path)
     async with main.lifespan(_RecordingApplication()):
         run = await run_store.get_run(created[0], run_id)
-        events = await run_store.get_run_events(created[0], run_id)
-        assert run is not None and run["status"] == "failed"
-        assert events[-1]["eventType"] == "run.lifecycle"
-        assert events[-1]["payload"]["reason"] == (
-            "execution_recovery_after_restart"
-        )
-        terminal = await created[0].fetch_one(
-            "SELECT source_event_key, event_id FROM ai_agent_run_events "
-            "WHERE run_id = ? AND source_event_key = ?",
-            [run_id, f"run:{run_id}:failed"],
-        )
-        assert terminal is not None
-        assert terminal["source_event_key"] == f"run:{run_id}:failed"
-        assert str(terminal["event_id"] or "")
-        assert await created[0].fetch_one(
-            "SELECT COUNT(*) AS count FROM ai_agent_run_events "
-            "WHERE run_id = ? AND event_id IS NULL",
-            [run_id],
-        ) == {"count": 0}
+        assert run is not None and run["status"] == "running"
+        assert await run_store.get_run_events(created[0], run_id) == []
 
 
 @pytest.mark.asyncio
-async def test_lifespan_startup_materializes_abandoned_writing_run(
+async def test_lifespan_startup_preserves_writing_run_with_live_lease(
     monkeypatch,
     tmp_path,
 ):
@@ -276,21 +262,13 @@ async def test_lifespan_startup_materializes_abandoned_writing_run(
     created = _capture_database(monkeypatch, tmp_path)
     async with main.lifespan(_RecordingApplication()):
         assert await created[0].fetch_one(
-            "SELECT r.status, r.conversation_id, c.prompt, c.response "
-            "FROM ai_agent_runs AS r "
-            "JOIN ai_conversations AS c ON c.id = r.conversation_id "
-            "WHERE r.id = ?",
+            "SELECT status, conversation_id FROM ai_agent_runs WHERE id = ?",
             [run_id],
-        ) == {
-            "status": "failed",
-            "conversation_id": 1,
-            "prompt": "abandoned Writing turn",
-            "response": "",
-        }
+        ) == {"status": "running", "conversation_id": None}
 
 
 @pytest.mark.asyncio
-async def test_lifespan_startup_checkpoints_long_task_abandoned_by_previous_process(
+async def test_lifespan_startup_preserves_long_task_with_live_lease(
     monkeypatch,
     tmp_path,
 ):
@@ -330,19 +308,15 @@ async def test_lifespan_startup_checkpoints_long_task_abandoned_by_previous_proc
         recovered = await recovered_repository.load(task.id)
         unit = (await recovered_repository.list_units(task.id))[0]
         assert recovered is not None
-        assert recovered.status is LongTaskStatus.PAUSED
-        assert unit.status.value == "pending"
+        assert recovered.status is LongTaskStatus.RUNNING
+        assert unit.status.value == "claimed"
         assert unit.attempt == 1
-        assert unit.max_attempts == 2
-        assert unit.worker_id is None
-        assert unit.lease_expires_at_ms is None
-        assert unit.error_code == "execution_recovery_after_restart"
+        assert unit.max_attempts == 1
+        assert unit.worker_id == "previous-process"
+        assert unit.lease_expires_at_ms is not None
+        assert unit.error_code is None
         creator_run = await run_store.get_run(created[0], creator_run_id)
-        creator_events = await run_store.get_run_events(created[0], creator_run_id)
-        assert creator_run is not None and creator_run["status"] == "canceled"
-        assert creator_events[-1]["payload"]["reason"] == (
-            "durable_task_interrupted"
-        )
+        assert creator_run is not None and creator_run["status"] == "running"
 
 
 @pytest.mark.asyncio

@@ -72,6 +72,12 @@ async def build_writing_context_snapshot(
     continuation = await ContinuationContextService(db).load_for_writing(
         scope.book_id
     )
+    from application.novel_knowledge_service import get_novel_knowledge_service
+
+    knowledge_scope = await get_novel_knowledge_service(db).scope_snapshot(
+        scope.book_id,
+        scope.chapter_id,
+    )
     binding = continuation.get("binding")
     return {
         "schemaVersion": 1,
@@ -81,6 +87,7 @@ async def build_writing_context_snapshot(
             "missingIds": missing_memory_ids,
         },
         "writingTechniqueInput": technique,
+        "novelKnowledgeScope": knowledge_scope or None,
         "continuation": {
             "creationMode": continuation["creationMode"],
             "binding": dict(binding) if isinstance(binding, dict) else None,

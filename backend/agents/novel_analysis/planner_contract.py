@@ -16,8 +16,9 @@ from agents.novel_analysis.creator_skill_resource import (
 from purra.contracts import ExecutionRecipe, ExecutionRecipeStep
 
 
-SCALABLE_ANALYSIS_PLAN_SCHEMA_VERSION = 1
+SCALABLE_ANALYSIS_PLAN_SCHEMA_VERSION = 2
 SCALABLE_ANALYSIS_RECIPE_VERSION = 2
+_EXECUTION_MODES = frozenset({"root", "agent"})
 _ALLOWED_DIMENSIONS = frozenset({
     "characters",
     "relationships",
@@ -38,6 +39,7 @@ class NovelAnalysisPlannerContractError(ValueError):
 class AnalysisPass:
     id: str
     dimensions: tuple[str, ...]
+    execution_mode: str = "agent"
 
     def __post_init__(self) -> None:
         pass_id = str(self.id or "").strip()
@@ -48,6 +50,7 @@ class AnalysisPass:
             or not dimensions
             or len(set(dimensions)) != len(dimensions)
             or any(item not in _ALLOWED_DIMENSIONS for item in dimensions)
+            or self.execution_mode not in _EXECUTION_MODES
         ):
             raise NovelAnalysisPlannerContractError(
                 "analysis Planner pass is invalid"
@@ -56,7 +59,11 @@ class AnalysisPass:
         object.__setattr__(self, "dimensions", dimensions)
 
     def to_mapping(self) -> dict[str, object]:
-        return {"id": self.id, "dimensions": list(self.dimensions)}
+        return {
+            "id": self.id,
+            "dimensions": list(self.dimensions),
+            "executionMode": self.execution_mode,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,11 +72,16 @@ class ScalableAnalysisPlan:
     reduce_fan_in: int
     synthesis_sections: tuple[str, ...]
     quality_checks: tuple[str, ...]
+    execution_modes: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         passes = tuple(self.passes)
         synthesis = _canonical_text_items(self.synthesis_sections)
         checks = _canonical_text_items(self.quality_checks)
+        execution_modes = dict(self.execution_modes or {
+            "synthesize": "agent",
+            "review": "agent",
+        })
         if (
             not passes
             or len({item.id for item in passes}) != len(passes)
@@ -77,6 +89,8 @@ class ScalableAnalysisPlan:
             or not 2 <= self.reduce_fan_in <= 16
             or not synthesis
             or not checks
+            or set(execution_modes) != {"synthesize", "review"}
+            or any(value not in _EXECUTION_MODES for value in execution_modes.values())
         ):
             raise NovelAnalysisPlannerContractError(
                 "analysis Planner output is incomplete"
@@ -84,6 +98,7 @@ class ScalableAnalysisPlan:
         object.__setattr__(self, "passes", passes)
         object.__setattr__(self, "synthesis_sections", synthesis)
         object.__setattr__(self, "quality_checks", checks)
+        object.__setattr__(self, "execution_modes", execution_modes)
 
     def to_mapping(self) -> dict[str, object]:
         return {
@@ -92,6 +107,7 @@ class ScalableAnalysisPlan:
             "reduceFanIn": self.reduce_fan_in,
             "synthesisSections": list(self.synthesis_sections),
             "qualityChecks": list(self.quality_checks),
+            "executionModes": dict(self.execution_modes),
         }
 
     @classmethod
@@ -102,6 +118,7 @@ class ScalableAnalysisPlan:
             "reduceFanIn",
             "synthesisSections",
             "qualityChecks",
+            "executionModes",
         }
         if not isinstance(value, Mapping) or not required.issubset(value):
             raise NovelAnalysisPlannerContractError(
@@ -118,7 +135,9 @@ class ScalableAnalysisPlan:
             )
         passes = []
         for raw in raw_passes:
-            if not isinstance(raw, Mapping) or not {"id", "dimensions"}.issubset(raw):
+            if not isinstance(raw, Mapping) or not {
+                "id", "dimensions", "executionMode"
+            }.issubset(raw):
                 raise NovelAnalysisPlannerContractError(
                     "analysis Planner pass must use the canonical shape"
                 )
@@ -130,10 +149,16 @@ class ScalableAnalysisPlan:
             passes.append(AnalysisPass(
                 id=raw.get("id"),
                 dimensions=tuple(dimensions),
+                execution_mode=raw.get("executionMode"),
             ))
         sections = value.get("synthesisSections")
         checks = value.get("qualityChecks")
-        if not _is_json_sequence(sections) or not _is_json_sequence(checks):
+        execution_modes = value.get("executionModes")
+        if (
+            not _is_json_sequence(sections)
+            or not _is_json_sequence(checks)
+            or not isinstance(execution_modes, Mapping)
+        ):
             raise NovelAnalysisPlannerContractError(
                 "analysis Planner synthesis contract must use lists"
             )
@@ -142,6 +167,7 @@ class ScalableAnalysisPlan:
             reduce_fan_in=value.get("reduceFanIn"),
             synthesis_sections=tuple(sections),
             quality_checks=tuple(checks),
+            execution_modes=execution_modes,
         )
 
 
@@ -201,6 +227,7 @@ def compile_scalable_analysis_recipe(
                     "slicePosition": source_slice.position,
                     "sourceTokenLimit": manifest.source_token_limit,
                     "sliceTokenCount": source_slice.token_count,
+                    "executionMode": analysis_pass.execution_mode,
                 },
             })
         reduce_level = 0
@@ -220,6 +247,7 @@ def compile_scalable_analysis_recipe(
                         "dimensions": list(analysis_pass.dimensions),
                         "reduceLevel": reduce_level,
                         "fanIn": len(dependencies),
+                        "executionMode": analysis_pass.execution_mode,
                     },
                 })
             level = next_level
@@ -235,6 +263,7 @@ def compile_scalable_analysis_recipe(
         "metadata": {
             "sections": list(plan.synthesis_sections),
             "wholeWork": True,
+            "executionMode": plan.execution_modes["synthesize"],
         },
     })
     coverage_id = "coverage:gate"
@@ -268,7 +297,11 @@ def compile_scalable_analysis_recipe(
         "kind": "review",
         "dependsOn": ("skill:create",),
         "maxAttempts": 2,
-        "metadata": {"wholeWork": True, "publishAfterCoverage": True},
+        "metadata": {
+            "wholeWork": True,
+            "publishAfterCoverage": True,
+            "executionMode": plan.execution_modes["review"],
+        },
     })
 
     model_call_count = sum(item["kind"] != "coverage" for item in specs)
@@ -325,18 +358,27 @@ def planner_context_mapping(
         "planTarget": {
             "placement": "plan.taskSpec.target",
             "shape": {
-                "schemaVersion": 1,
-                "passes": [{"id": "short-id", "dimensions": ["allowed dimension"]}],
+                "schemaVersion": 2,
+                "passes": [{
+                    "id": "short-id",
+                    "dimensions": ["allowed dimension"],
+                    "executionMode": "root or agent",
+                }],
                 "reduceFanIn": "integer 2..16",
                 "synthesisSections": ["report section"],
                 "qualityChecks": ["whole-work quality goal"],
+                "executionModes": {
+                    "synthesize": "root or agent",
+                    "review": "root or agent",
+                },
             },
             "maxPasses": limits.max_passes,
         },
         "rules": [
             "Choose whole-work analysis dimensions and report sections from the user's goal.",
             "Return one to three semantic todos; never make todos for slices or chapters.",
-            "The Host owns slicing, ordering, reduction execution, concurrency, and budgets.",
+            "Choose root when the main Agent can complete a phase clearly within its context; choose agent only when independent context or parallel work materially helps.",
+            "The Host owns slicing, ordering, concurrency, budgets, persistence, retry, and final validation; executionModes decides who performs the model reasoning.",
         ],
     }
 

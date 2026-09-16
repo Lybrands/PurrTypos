@@ -65,21 +65,15 @@ export default function ExecutionLog({
   children,
 }: ExecutionLogProps) {
   const [openState, setOpenState] = React.useState(() =>
-    active
-      ? { open: true, manuallySet: false }
-      : getInitialExecutionLogOpenState(
-          openStateStore.get(logKey),
-          autoOpen,
-        ),
+    getInitialExecutionLogOpenState(
+      openStateStore.get(logKey),
+      autoOpen,
+    ),
   );
   const contentId = React.useId();
   const now = useTicker(active && startedAt != null);
 
   React.useEffect(() => {
-    if (active) {
-      setOpenState({ open: true, manuallySet: false });
-      return;
-    }
     setOpenState(getInitialExecutionLogOpenState(
       readExecutionLogOpenState(openStateStore, logKey),
       autoOpen,
@@ -107,7 +101,6 @@ export default function ExecutionLog({
       ? formatDuration(elapsedMs)
       : null;
   const toggleOpen = () => {
-    if (active) return;
     const nextState = toggleExecutionLogOpenState(openState);
     writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
@@ -117,7 +110,7 @@ export default function ExecutionLog({
     <section
       className={`work-log ${openState.open ? "work-log--open" : ""} ${active ? "work-log--active" : ""} ${hasError ? "work-log--error" : ""}`}
     >
-      {hasDetails && !active ? (
+      {hasDetails ? (
         <button
           type="button"
           className="work-log__toggle"
@@ -175,16 +168,17 @@ export function ExecutionLogStepGroup({
   children,
 }: ExecutionLogStepGroupProps) {
   const [open, setOpen] = React.useState(
-    () => stepGroupOpenStateStore.get(groupKey) ?? false,
+    () => active || stepGroupOpenStateStore.get(groupKey) || false,
   );
   const contentId = React.useId();
   const now = useTicker(active && activeStartedAt != null);
 
   React.useEffect(() => {
-    setOpen(stepGroupOpenStateStore.get(groupKey) ?? false);
-  }, [groupKey]);
+    setOpen(active || stepGroupOpenStateStore.get(groupKey) || false);
+  }, [active, groupKey]);
 
   const toggleOpen = () => {
+    if (active) return;
     const nextOpen = !open;
     stepGroupOpenStateStore.set(groupKey, nextOpen);
     setOpen(nextOpen);
@@ -204,6 +198,7 @@ export function ExecutionLogStepGroup({
         onClick={toggleOpen}
         aria-expanded={open}
         aria-controls={contentId}
+        disabled={active}
       >
         <ChevronRightIcon className="work-log-step-group__chevron" />
         {hasError ? (

@@ -9,7 +9,6 @@ export function createAnalysisConversationController(
     capabilities: getAgentConversationCapabilities({
       running: bindings.conversation.running,
       readOnly: false,
-      sessionLoading: bindings.conversation.initializing,
     }),
   }
 }

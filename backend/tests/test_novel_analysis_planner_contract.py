@@ -49,12 +49,20 @@ def _manifest(*, characters=900, context_window=1_000):
 def _plan():
     return ScalableAnalysisPlan(
         passes=(
-            AnalysisPass("story", ("characters", "relationships", "plot")),
-            AnalysisPass("craft", ("structure", "style", "techniques")),
+            AnalysisPass(
+                "story", ("characters", "relationships", "plot"), "root"
+            ),
+            AnalysisPass(
+                "craft", ("structure", "style", "techniques"), "agent"
+            ),
         ),
         reduce_fan_in=2,
         synthesis_sections=("人物与关系", "故事与结构", "写作技法"),
         quality_checks=("覆盖全部分片", "结论面向整部作品"),
+        execution_modes={
+            "synthesize": "root",
+            "review": "root",
+        },
     )
 
 
@@ -77,6 +85,10 @@ def test_planner_context_contains_only_source_scale_and_semantic_choices():
     assert "maxModelCalls" not in repr(context)
     assert "maxParallelism" not in repr(context)
     assert "exactShape" not in repr(context)
+    assert context["planTarget"]["shape"]["schemaVersion"] == 2
+    assert context["planTarget"]["shape"]["passes"][0]["executionMode"] == (
+        "root or agent"
+    )
 
 
 def test_planner_output_normalizes_to_canonical_schema():
@@ -90,7 +102,11 @@ def test_planner_output_normalizes_to_canonical_schema():
     with pytest.raises(NovelAnalysisPlannerContractError, match="pass is invalid"):
         ScalableAnalysisPlan.from_mapping({
             **raw,
-            "passes": [{"id": "quote", "dimensions": ["evidence"]}],
+            "passes": [{
+                "id": "quote",
+                "dimensions": ["evidence"],
+                "executionMode": "root",
+            }],
         })
 
 
@@ -107,12 +123,15 @@ def test_compiler_expands_planner_semantics_into_real_bounded_dag():
     assert recipe.max_parallelism == 2
     assert len([item for item in recipe.steps if item.kind == "map"]) == 6
     assert steps["map:story:0"].metadata["sliceId"] == manifest.slices[0].id
+    assert steps["map:story:0"].metadata["executionMode"] == "root"
     assert steps["reduce:story:0:0"].depends_on == (
         "map:story:0", "map:story:1"
     )
     assert steps["synthesize:whole-work"].depends_on == (
         "reduce:story:1:0", "reduce:craft:1:0"
     )
+    assert steps["synthesize:whole-work"].metadata["executionMode"] == "root"
+    assert steps["review:artifact"].metadata["executionMode"] == "root"
     assert steps["coverage:gate"].metadata["expectedSliceIds"] == [
         item.id for item in manifest.slices
     ]

@@ -73,10 +73,29 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
             signal=signal,
         )
 
-    async def global_outline(state, arguments, signal=None):
+    async def read_chapters(state, arguments, signal=None):
         return await _read(
-            repository.global_outline,
+            repository.writing_chapter_contents,
             state,
+            chapter_ids=arguments.get("chapterIds", ()),
+            max_text_length=arguments.get("maxTextLength", 32_000),
+            signal=signal,
+        )
+
+    async def list_outlines(state, arguments, signal=None):
+        return await _read(
+            repository.writing_outlines,
+            state,
+            offset=arguments.get("offset", 0),
+            limit=arguments.get("limit", 50),
+            signal=signal,
+        )
+
+    async def read_outlines(state, arguments, signal=None):
+        return await _read(
+            repository.writing_outline_contents,
+            state,
+            outline_ids=arguments.get("outlineIds", ()),
             max_text_length=arguments.get("maxTextLength", 32_000),
             signal=signal,
         )
@@ -148,17 +167,51 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
             list_chapters,
         ),
         _registration(
-            "getGlobalOutline",
-            "读取当前书自己的全局大纲；不回退读取其他书或无归属的大纲。",
-            "查看全局大纲",
+            "readWritingChapters",
+            "读取当前书内指定章节正文；省略 chapterIds 时读取当前绑定章节。目录返回的章节 ID 均可读取。",
+            "读取章节正文",
             {
+                "chapterIds": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "maxItems": 32,
+                    "uniqueItems": True,
+                },
                 "maxTextLength": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 64_000,
                 },
             },
-            global_outline,
+            read_chapters,
+        ),
+        _registration(
+            "listWritingOutlines",
+            "分页列出当前书的大纲目录，不返回大纲正文。",
+            "查看大纲目录",
+            _PAGE_PROPERTIES,
+            list_outlines,
+        ),
+        _registration(
+            "readWritingOutlines",
+            "读取当前书内指定大纲正文。目录返回的大纲 ID 均可读取。",
+            "读取大纲正文",
+            {
+                "outlineIds": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 512},
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "uniqueItems": True,
+                },
+                "maxTextLength": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 64_000,
+                },
+            },
+            read_outlines,
+            required=("outlineIds",),
         ),
         _registration(
             "listSettingEntities",
@@ -239,6 +292,8 @@ def _registration(
     display_name: str,
     properties: Mapping[str, object],
     handler,
+    *,
+    required: tuple[str, ...] = (),
 ) -> ToolRegistration:
     model_owned_paths = tuple(properties)
     return ToolRegistration(
@@ -248,6 +303,7 @@ def _registration(
             parameters={
                 "type": "object",
                 "properties": dict(properties),
+                **({"required": list(required)} if required else {}),
                 "additionalProperties": False,
             },
             display_names={"zh-CN": display_name, "en": name},

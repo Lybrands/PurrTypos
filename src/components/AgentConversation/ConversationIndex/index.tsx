@@ -31,7 +31,6 @@ interface AgentConversationIndexProps<
   editingSessionId: TSession['id'] | null
   editingTitle: string
   isCurrentSessionEmpty?: boolean
-  disabled?: boolean
   context?: React.ReactNode
   extraActions?: React.ReactNode
   sessionActivities?: Partial<Record<AgentSessionId, AgentConversationActivity>>
@@ -84,7 +83,6 @@ export default function AgentConversationIndex<
   editingSessionId,
   editingTitle,
   isCurrentSessionEmpty = false,
-  disabled = false,
   context,
   extraActions,
   sessionActivities = {},
@@ -125,7 +123,7 @@ export default function AgentConversationIndex<
               type="text"
               size="small"
               icon={<PlusIcon />}
-              disabled={disabled || hasBlankSession}
+              disabled={hasBlankSession}
               onClick={onNewSession}
               aria-label="新建对话"
             />
@@ -144,13 +142,10 @@ export default function AgentConversationIndex<
               key={session.id}
               className={`agent-conversation-index__item${active ? ' is-active' : ''}${activity ? ` is-${activity.state}` : ''}`}
               role="button"
-              tabIndex={disabled ? -1 : 0}
-              aria-disabled={disabled}
-              onClick={() => {
-                if (!disabled) onActiveSessionChange(session.id)
-              }}
+              tabIndex={0}
+              onClick={() => onActiveSessionChange(session.id)}
               onKeyDown={(event) => {
-                if (disabled || (event.key !== 'Enter' && event.key !== ' ')) return
+                if (event.key !== 'Enter' && event.key !== ' ') return
                 event.preventDefault()
                 onActiveSessionChange(session.id)
               }}
@@ -173,7 +168,6 @@ export default function AgentConversationIndex<
                     className="agent-conversation-index__title"
                     title={session.title || '新对话'}
                     onDoubleClick={(event) => {
-                      if (disabled) return
                       event.stopPropagation()
                       onEditingSessionIdChange(session.id)
                       onEditingTitleChange(session.title || '新对话')
@@ -203,7 +197,6 @@ export default function AgentConversationIndex<
                   size="small"
                   icon={<CloseIcon />}
                   className="agent-conversation-index__close"
-                  disabled={disabled}
                   onClick={(event) => {
                     event.stopPropagation()
                     onCloseSession(session)

@@ -187,6 +187,9 @@ class WritingReplacementProfile:
             "writingContextSnapshot": dict(
                 payload.get("replacement_context_snapshot") or {}
             ),
+            "novelKnowledgeScope": (
+                payload.get("replacement_context_snapshot") or {}
+            ).get("novelKnowledgeScope"),
             "agentImplementation": replacement_implementation(
                 AgentKind.WRITING
             ).to_mapping(),

@@ -88,14 +88,15 @@ def _request(arguments: dict[str, object]) -> ToolBatchRequest:
 @pytest.mark.asyncio
 async def test_chapter_read_returns_host_revision_and_complete_json(chapter_db) -> None:
     profile = WritingReplacementProfile(chapter_db)
-    registration = profile.adapter.tool_catalog.get("getChapterContent")
+    registration = profile.adapter.tool_catalog.get("readWritingChapters")
 
     result = await registration.handler(_state(), {})
     payload = json.loads(result.content)
 
-    assert payload["content"] == "原始正文"
-    assert payload["baseRevision"].startswith("sha256:")
-    assert payload["truncated"] is False
+    chapter = payload["items"][0]
+    assert chapter["content"] == "原始正文"
+    assert chapter["baseRevision"].startswith("sha256:")
+    assert chapter["truncated"] is False
 
 
 def test_edit_schema_requires_content_and_revision(chapter_db) -> None:

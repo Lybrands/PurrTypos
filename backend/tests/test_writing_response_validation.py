@@ -809,7 +809,7 @@ def _grounding_messages(
             content="",
             tool_calls=(ToolCall(
                 id="read-chapter",
-                name="getChapterContent",
+                name="readWritingChapters",
                 arguments_json="{}",
             ),),
             origin=MessageOrigin.MODEL,
@@ -817,12 +817,11 @@ def _grounding_messages(
         AgentMessage(
             role="tool",
             content=json.dumps({
-                "chapterId": "chapter-1",
-                "plainText": chapter,
+                "items": [{"id": "chapter-1", "content": chapter}],
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"purra_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "readWritingChapters"},
         ),
     )
 
@@ -1088,12 +1087,14 @@ def test_atomic_grounding_rejects_real_host_receipts_outside_request_scope():
         AgentMessage(
             role="tool",
             content=json.dumps({
-                "chapterId": "chapter-not-current",
-                "plainText": "其他章节值一、其他章节值二",
+                "items": [{
+                    "id": "chapter-not-current",
+                    "content": "其他章节值一、其他章节值二",
+                }],
             }, ensure_ascii=False),
             tool_call_id="host-call",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"purra_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "readWritingChapters"},
         ),
     )
 
@@ -1127,24 +1128,26 @@ def test_atomic_grounding_accepts_scoped_query_outline_tool_receipt():
             content=json.dumps({
                 "success": True,
                 "bookId": "book-1",
-                "outlines": [{
+                "items": [{
                     "id": "outline-1",
                     "markdown": "本章发生在清晨，二人已合作三年。",
                 }],
             }, ensure_ascii=False),
             tool_call_id="query-outline",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"purra_tool_name": "queryOutline"},
+            host_metadata={"purra_tool_name": "readWritingOutlines"},
         ),
         AgentMessage(
             role="tool",
             content=json.dumps({
-                "chapterId": "chapter-1",
-                "plainText": "钟声在午夜响起，二人从未见过。",
+                "items": [{
+                    "id": "chapter-1",
+                    "content": "钟声在午夜响起，二人从未见过。",
+                }],
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"purra_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "readWritingChapters"},
         ),
     )
 

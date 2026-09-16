@@ -7,8 +7,11 @@ import {
   RobotIcon,
   type PurrPopoverProps,
 } from "@/purr-components";
-import { services } from "../../../services";
-import type { AiAgentDelegation, AiSubAgentConversation } from "../../../types";
+import type {
+  AiAgentDelegation,
+  AiAgentRunSnapshot,
+  AiSubAgentConversation,
+} from "../../../types";
 import {
   loadCompleteAgentRunSnapshot,
   replayAgentRunSnapshotAsync,
@@ -39,11 +42,23 @@ const rejectReadOnlyApproval = async () => ({
   error: "只读对话不能处理审批",
 });
 
+export interface SubAgentReader {
+  getSubAgentConversation(input: {
+    runId: string;
+  }): Promise<{ success: boolean; data?: AiSubAgentConversation; error?: string }>;
+  getAgentRunSnapshot(input: {
+    runId: string;
+    after?: number;
+    limit?: number;
+  }): Promise<{ success: boolean; data?: AiAgentRunSnapshot; error?: string }>;
+}
+
 interface DelegationStatusProps {
   items: AiAgentDelegation[];
   activities?: AiSubAgentActivity[];
   variant?: "timeline" | "overview";
   placement?: PurrPopoverProps["placement"];
+  reader?: SubAgentReader;
 }
 
 export default function DelegationStatus({
@@ -51,6 +66,7 @@ export default function DelegationStatus({
   activities = [],
   variant = "timeline",
   placement = "topLeft",
+  reader,
 }: DelegationStatusProps) {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [overviewOpen, setOverviewOpen] = React.useState(false);
@@ -80,7 +96,7 @@ export default function DelegationStatus({
   }, []);
 
   React.useEffect(() => {
-    if (!selected) {
+    if (!selected || !reader) {
       setLoadedByRunId(new Map());
       setConversation(undefined);
       setLoadError("");
@@ -90,14 +106,14 @@ export default function DelegationStatus({
     setLoading(true);
     setLoadError("");
     setConversation(undefined);
-    void services.ai.getSubAgentConversation({ runId: selected.runId })
+    void reader.getSubAgentConversation({ runId: selected.runId })
     .then(async (conversationResult) => {
       if (!conversationResult.success || !conversationResult.data) {
         throw new Error(conversationResult.error || "无法读取子 Agent 对话");
       }
       const loaded = await Promise.all(conversationResult.data.turns.map(async (turn) => {
         const snapshot = await loadCompleteAgentRunSnapshot(turn.runId, {
-          getRunSnapshot: (input) => services.ai.getAgentRunSnapshot(input),
+          getRunSnapshot: reader.getAgentRunSnapshot,
           isCurrent: () => current,
         }).catch(() => undefined);
         if (!snapshot || !current) return null;
@@ -131,7 +147,7 @@ export default function DelegationStatus({
       if (current) setLoading(false);
     });
     return () => { current = false; };
-  }, [selected?.delegationId, selected?.runId, selected?.status]);
+  }, [reader, selected?.delegationId, selected?.runId, selected?.status]);
 
   const rows = (
     <div className="work-log__subagent-list">

@@ -52,7 +52,7 @@
     "src/purra/adapters/__init__.py": "94069a5a3882b6a8c658eee664ad04abfb0aac69ae05167da464412d1b387ea8",
     "src/purra/adapters/_long_task_mixins.py": "7349bb6fc8bc7ea26564887cbda62355e9b8283be4e0038c02f25ffe57b8c482",
     "src/purra/adapters/_store_kit.py": "2d204dc392b4fbe21549c0907f59f4e479609af0f42f1fa33ad047e451e391f8",
-    "src/purra/adapters/durable_memory.py": "c56ad5970810d79dce1bbb8e369f69680f1d4da1df418d43e6c499d9c5a3c1d2",
+    "src/purra/adapters/durable_memory.py": "89c1f9c9a5e770a71e45bec993572d96eb37f414cfd37a81fa0c5627ac5c0ad6",
     "src/purra/adapters/memory.py": "0e923f43d6db79a3bd15b6cc2ef22ff95adf2cf8ee42f37bc0d8279a75467725",
     "src/purra/agent_execution_checkpoint.py": "cce9657927ab072ac10c1eedf8520c0a803d3b2fcb3471429c60cd2256475a3f",
     "src/purra/agent_presets.py": "7778f62d30ebd1742cbd3b8cdd21b6c693ad2ea4df319a2ab1197e980d91186a",
@@ -60,7 +60,7 @@
     "src/purra/agent_tree/contracts.py": "05987be045e31039e7cf399d33bd106d8fffc1d97de6d7066f86ebe2aa65f2cb",
     "src/purra/agent_tree/delivery.py": "d988d2402de0e45dd81137d9b6fe04c88d69c6afffd3ef7029aef8bb4acac1a2",
     "src/purra/agent_tree/lease.py": "be46727b4e4edf2342534b54c69fe9b67d3b04dd67e3d93856e39fe1f8495ad6",
-    "src/purra/agent_tree/memory.py": "031672d11855e2b47726af33d0e66025236a8ee19985436483506331f34c8e1f",
+    "src/purra/agent_tree/memory.py": "4937c00ff3b8bcb15a9a7e48f86175da3e1ceec8611dfa400e1a5fc171485041",
     "src/purra/agent_tree/ports.py": "4a61650cb13eea436b47f249a0668456bf1bc31ded9647905d9efcc86df43300",
     "src/purra/agent_tree/query.py": "0f3d0e5913f1a45512fa33841bda5e690e36750237b18de32759869553efa081",
     "src/purra/agent_tree/receiver.py": "ddf2db724e59f909815b3b90c576f1fbb51168f99999c3b3959a5672e851efa6",
@@ -137,7 +137,7 @@
     "src/purra/long_tasks/coordinator.py": "aab6ab10500c07b39a969f81f76cb89ccbf9fbc3ef6341044c17d8fe2969a178",
     "src/purra/long_tasks/dispatcher.py": "ca8988388883fee7303a2d5026db8fb53ddc71ec40fd89f713907e8552230d6b",
     "src/purra/long_tasks/failure_policy.py": "9081ebcb11cf607cc8d2ae2e3b898099eb10a867de2375e65566c196297046b7",
-    "src/purra/long_tasks/ports.py": "b9757496cd07a80ed8ecae18d82aa719feb727185a5461079376163d6516cc65",
+    "src/purra/long_tasks/ports.py": "c41aac626c1f237abf7b1143e7ae34d45fc98cc3ddb294feee2eb1ec14dbb569",
     "src/purra/long_tasks/progress.py": "f91c2aa9cac5162e34fd6f9876ca97252a31fe7c580a53eca42ddab2704cc781",
     "src/purra/long_tasks/recipe_compiler.py": "2bce2979d4f0cd26a0849cfe9d33d78e9ac0acaa1aefbf270a534f33a24c04d6",
     "src/purra/media.py": "a1558f8855782a935ab476439e993598e045c7deaae6ca7b0ab6c24b9f0d4d78",
@@ -209,7 +209,7 @@
     "src/purra/run_state.py": "8d4b840d91338ddfe571add842c12a3ca4c5b8af5a7af7f0785206499eebf745",
     "src/purra/runtime/__init__.py": "e2bfcd548e8f444bf500e8cd33ed6b802447ecc29ccea45bad6ba67b73951710",
     "src/purra/runtime/model_round.py": "94e2a658b308ccb4a0a71ca30ca58e6bb6b8c7169ffcc6ecbfab20f21c6d3536",
-    "src/purra/runtime/orchestrator.py": "e8c1decfef6f036b9eb9064d4d85e3f78f201106c1a9e08bc6d7ae2f76012ad8",
+    "src/purra/runtime/orchestrator.py": "3756ecb13f6032a370d8bbeb5e16f74401e279125ff24f5147892fc8392c23d3",
     "src/purra/runtime/response_finalization.py": "a7c543a54259d203f0e788945e0bc3d5e1b23ecb3d7395899d04adb56b052c9c",
     "src/purra/runtime/tool_authorization.py": "eb3c124c268048271c6b5c3faa7fb25c2e78601968fac31f3c215331c6e0afbc",
     "src/purra/runtime/tool_recovery.py": "c487513ab7d7e3b89676de992f4433087b559bc1e0516d009dc469b920bc19ef",
@@ -229,7 +229,7 @@
     "src/purra/task_admission/__init__.py": "c11df503b528c2f7a8346a3d9f8e65ff48495b10043202488fcff4e08e7fac52",
     "src/purra/task_admission/contracts.py": "18bb4ec0773956772e955ada64e00089d4978fd5d7abb47841b78206531ad299",
     "src/purra/task_admission/ports.py": "d6b30c9230ccdfef975b2494d0bc2fa8f23a0a49e131f81a0e563c94e6066fac",
-    "src/purra/testing.py": "37fb41fdcfadd1e1b7b7381ac4e03bf83366e221edda53eac53dd50fa920cb97",
+    "src/purra/testing.py": "ac7954a071331bac08841be3c767121d6cc202c8669dcc5271658f8101712885",
     "src/purra/timing.py": "0ad3914e4b05fc1048a8ee0d96ef6205a4d513a7fea134d2346eb1ec0a7c97df",
     "src/purra/tools/__init__.py": "9f8a519d139bc89a94c8ab3fee0e575ba530c198ce811225ab1b1e5c12668c63",
     "src/purra/tools/approval.py": "364e2e1b7b5fa570acd76fcffb092be09d4865bc884e7ba1fa1f01bc9b313553",
@@ -432,7 +432,7 @@
   "artifacts": [
     {
       "file": "purra-1.0.0-py3-none-any.whl",
-      "sha256": "6d215d3b10f8c17af26dbac006864cc32bf95784f6d4ce35dc4037c5380a1bf1",
+      "sha256": "e2bc8814a61cd150cc79c21c1941ac87f3d5fb946364378b88c25ae5ee08f485",
       "source": "/Users/liuyubin/Lybrand_project/purra"
     },
     {

@@ -12,7 +12,6 @@ from agents.writing.context_contract import (
 )
 from agents.writing.read_model import WritingReadScope
 from agents.writing.read_tools import WRITING_READ_SCOPE_STATE_KEY
-from agents.writing.revisions import text_revision
 from agents.writing.context_snapshot import (
     snapshot_from_state_or_run_attributes,
 )
@@ -26,103 +25,105 @@ from purra.contracts import (
     ToolSchema,
 )
 from purra.ports import ToolRegistration
-from utils.text import extract_text_from_lexical
 
 
-async def _associated(db, state, arguments, signal=None) -> ToolHandlerResult:
-    raise_if_stopped(signal)
-    try:
-        scope, selection = _state_contracts(state)
-        maximum = _max_text_length(arguments)
-        chapter_ids = _requested_subset(
-            arguments.get("chapterIds"),
-            selection.associated_chapter_ids,
-            "chapterIds",
-        )
-        outline_ids = _requested_subset(
-            arguments.get("outlineIds"),
-            selection.associated_outline_ids,
-            "outlineIds",
-        )
-        chapters = []
-        if chapter_ids:
-            placeholders = ",".join("?" for _ in chapter_ids)
-            rows = await db.fetch_all(
-                "SELECT c.id, c.title, COALESCE(a.content, '') AS content "
-                "FROM outline_chapters AS c "
-                "JOIN outlines AS o ON o.id = c.outline_id "
-                "LEFT JOIN articles AS a ON a.chapter_id = c.id "
-                f"WHERE o.book_id = ? AND o.type = 'writing' "
-                f"AND c.id IN ({placeholders})",
-                [scope.book_id, *chapter_ids],
-            )
-            by_id = {str(row["id"]): row for row in rows}
-            for item_id in chapter_ids:
-                row = by_id.get(item_id)
-                if row is None:
-                    continue
-                raw = str(row.get("content") or "")
-                try:
-                    text = extract_text_from_lexical(raw) if raw else ""
-                except Exception:
-                    text = ""
-                chapters.append(_text_item(row, text, maximum))
-
-        outlines = []
-        if outline_ids:
-            placeholders = ",".join("?" for _ in outline_ids)
-            rows = await db.fetch_all(
-                "SELECT id, title, type, markdown_content FROM outlines "
-                f"WHERE book_id = ? AND id IN ({placeholders}) "
-                "AND type IN ('global', 'volume', 'chapter', 'writing')",
-                [scope.book_id, *outline_ids],
-            )
-            by_id = {str(row["id"]): row for row in rows}
-            for item_id in outline_ids:
-                row = by_id.get(item_id)
-                if row is not None:
-                    outlines.append(
-                        _text_item(
-                            row,
-                            str(row.get("markdown_content") or ""),
-                            maximum,
-                            extra={"outlineType": str(row.get("type") or "")},
-                        )
-                    )
-        return _result(scope, {
-            "chapters": chapters,
-            "outlines": outlines,
-            "missingChapterIds": [
-                item for item in chapter_ids
-                if item not in {entry["id"] for entry in chapters}
-            ],
-            "missingOutlineIds": [
-                item for item in outline_ids
-                if item not in {entry["id"] for entry in outlines}
-            ],
-        })
-    except (ValueError, WritingContextSelectionError) as error:
-        return _error(error)
-
-
-async def _selected_local(
+async def _search_memories(
     db, memory_operations, state, arguments, signal=None
 ) -> ToolHandlerResult:
     raise_if_stopped(signal)
     try:
         scope, selection = _state_contracts(state)
+        query = str(arguments.get("query") or "").strip()
+        limit = _limit(arguments.get("limit", 20))
+        pattern = f"%{query}%"
+        sparks = await db.fetch_all(
+            "SELECT id, layer, content, chapter_id, character_id "
+            "FROM ai_memories WHERE book_id = ? AND (? = '' OR content LIKE ?) "
+            "ORDER BY id DESC LIMIT ?",
+            [scope.book_id, query, pattern, limit],
+        )
+        foreshadowing = await db.fetch_all(
+            "SELECT id, content, type, status, chapter_id, expected_chapter_id, "
+            "resolved_chapter_id FROM ai_foreshadowing WHERE book_id = ? "
+            "AND (? = '' OR content LIKE ?) ORDER BY id DESC LIMIT ?",
+            [scope.book_id, query, pattern, limit],
+        )
+        long_term = ()
+        long_term_error = None
+        try:
+            long_term = await memory_operations.list_records(
+                book_id=scope.book_id,
+                states=("active",),
+                query=query,
+                limit=limit,
+            )
+        except Exception as error:
+            raise_if_stopped(signal)
+            long_term_error = str(
+                getattr(error, "code", "long_term_memory_unavailable")
+            )
+        return _result(scope, {
+            "preferred": {
+                "sparkIds": list(selection.selected_spark_ids),
+                "longTermMemoryIds": list(
+                    selection.selected_long_term_memory_ids
+                ),
+                "foreshadowingIds": list(
+                    selection.selected_foreshadowing_ids
+                ),
+            },
+            "sparks": [
+                _memory_search_item(dict(row), kind="spark", field="content")
+                for row in sparks
+            ],
+            "foreshadowing": [
+                _memory_search_item(
+                    dict(row), kind="foreshadowing", field="content"
+                )
+                for row in foreshadowing
+            ],
+            "longTermMemory": {
+                "available": long_term_error is None,
+                "items": [
+                    _memory_search_item(
+                        dict(item), kind="longTerm", field="text"
+                    )
+                    for item in long_term
+                ],
+                "reason": long_term_error,
+            },
+        })
+    except (ValueError, WritingContextSelectionError) as error:
+        return _error(error)
+
+
+async def _read_memories(
+    db, memory_operations, state, arguments, signal=None
+) -> ToolHandlerResult:
+    raise_if_stopped(signal)
+    try:
+        scope, _selection = _state_contracts(state)
+        refs = _memory_refs(arguments.get("refs"))
+        maximum = _max_text_length(arguments)
+        spark_ids = tuple(ref["id"] for ref in refs if ref["kind"] == "spark")
+        foreshadowing_ids = tuple(
+            ref["id"] for ref in refs if ref["kind"] == "foreshadowing"
+        )
+        long_term_ids = tuple(
+            ref["id"] for ref in refs if ref["kind"] == "longTerm"
+        )
         sparks = await _rows_by_ids(
             db,
             table="ai_memories",
             book_id=scope.book_id,
-            ids=selection.selected_spark_ids,
+            ids=spark_ids,
             columns="id, layer, content, chapter_id, character_id",
         )
         foreshadowing = await _rows_by_ids(
             db,
             table="ai_foreshadowing",
             book_id=scope.book_id,
-            ids=selection.selected_foreshadowing_ids,
+            ids=foreshadowing_ids,
             columns=(
                 "id, content, type, status, chapter_id, "
                 "expected_chapter_id, resolved_chapter_id"
@@ -130,78 +131,112 @@ async def _selected_local(
         )
         long_term = []
         long_term_error = None
-        if selection.selected_long_term_memory_ids:
+        if long_term_ids:
             try:
-                frozen = await snapshot_from_state_or_run_attributes(db, state)
-                frozen_memory = frozen.get("longTermMemory", {})
-                if frozen_memory.get("state") not in (None, "available"):
-                    raise ValueError(str(frozen_memory["state"]))
-                records = await memory_operations.get_many(
+                long_term = list(await memory_operations.get_many(
                     book_id=scope.book_id,
-                    item_ids=selection.selected_long_term_memory_ids,
+                    item_ids=long_term_ids,
                     include_inactive=False,
-                )
-                expected_versions = {
-                    str(item["id"]): int(item["version"])
-                    for item in frozen_memory.get("refs", ())
-                }
-                if frozen_memory.get("state") == "available" and (
-                    {str(record["id"]) for record in records}
-                    != set(expected_versions)
-                    or any(
-                        expected_versions.get(str(record["id"]))
-                        != int(record["version"])
-                        for record in records
-                    )
-                ):
-                    raise ValueError("long_term_memory_snapshot_changed")
-                remaining = _max_text_length(arguments)
-                for record in records:
-                    text = str(record.get("text") or "")
-                    returned = text[:remaining]
-                    long_term.append({
-                        **{key: record.get(key) for key in (
-                            "id", "version", "state", "metadata", "source"
-                        )},
-                        "text": returned,
-                        "truncated": len(returned) < len(text),
-                        "totalCharacters": len(text),
-                    })
-                    remaining = max(0, remaining - len(returned))
+                ))
             except Exception as error:
                 raise_if_stopped(signal)
                 long_term_error = str(
-                    getattr(
-                        error,
-                        "code",
-                        (
-                            str(error)
-                            if str(error) in {
-                                "long_term_memory_snapshot_changed",
-                            }
-                            else "long_term_memory_unavailable"
-                        ),
-                    )
+                    getattr(error, "code", "long_term_memory_unavailable")
                 )
+        by_ref = {
+            **{("spark", str(item["id"])): dict(item) for item in sparks},
+            **{
+                ("foreshadowing", str(item["id"])): dict(item)
+                for item in foreshadowing
+            },
+            **{
+                ("longTerm", str(item["id"])): dict(item)
+                for item in long_term
+            },
+        }
+        remaining = maximum
+        items = []
+        missing = []
+        for ref in refs:
+            item = by_ref.get((ref["kind"], ref["id"]))
+            if item is None:
+                missing.append(ref)
+                continue
+            field = "text" if ref["kind"] == "longTerm" else "content"
+            text = str(item.get(field) or "")
+            returned = text[:remaining]
+            item[field] = returned
+            item.update({
+                "kind": ref["kind"],
+                "truncated": len(returned) < len(text),
+                "returnedCharacters": len(returned),
+                "totalCharacters": len(text),
+            })
+            items.append(item)
+            remaining -= len(returned)
         return _result(scope, {
-            "sparks": sparks,
-            "foreshadowing": foreshadowing,
-            "missingSparkIds": _missing(selection.selected_spark_ids, sparks),
-            "missingForeshadowingIds": _missing(
-                selection.selected_foreshadowing_ids, foreshadowing
-            ),
+            "items": items,
+            "missing": missing,
             "longTermMemory": {
-                "requestedIds": list(selection.selected_long_term_memory_ids),
                 "available": long_term_error is None,
-                "items": long_term,
-                "missingIds": _missing(
-                    selection.selected_long_term_memory_ids, long_term
-                ),
                 "reason": long_term_error,
             },
+            "maxTextLength": maximum,
+            "returnedCharacters": maximum - remaining,
         })
     except (ValueError, WritingContextSelectionError) as error:
         return _error(error)
+
+
+async def _novel_knowledge(
+    db, state, arguments, *, read: bool, signal=None
+) -> ToolHandlerResult:
+    from application.novel_knowledge_service import get_novel_knowledge_service
+
+    raise_if_stopped(signal)
+    try:
+        scope, _selection = _state_contracts(state)
+        frozen = await snapshot_from_state_or_run_attributes(db, state)
+        knowledge_scope = frozen.get("novelKnowledgeScope")
+        if not isinstance(knowledge_scope, dict):
+            raise ValueError("novel_knowledge_not_configured")
+        query = str(arguments.get("query") or "").strip()
+        if not read and not query:
+            raise ValueError("query is required")
+        kwargs = {}
+        context_block = "searchNovelKnowledge"
+        if read:
+            kwargs = {
+                "document_id": str(arguments.get("documentId") or "").strip(),
+                "revision": str(arguments.get("revision") or "").strip(),
+                "chunk_id": (
+                    str(arguments.get("chunkId") or "").strip() or None
+                ),
+            }
+            if not kwargs["document_id"] or not kwargs["revision"]:
+                raise ValueError("documentId and revision are required")
+            context_block = "readNovelKnowledge"
+        result = await get_novel_knowledge_service(db).search(
+            scope.book_id,
+            query,
+            scope=knowledge_scope,
+            limit=_knowledge_limit(arguments.get("limit", 12)),
+            token_budget=_knowledge_budget(arguments.get("tokenBudget", 3_000)),
+            signal=signal,
+            context_block=context_block,
+            **kwargs,
+        )
+        return ToolHandlerResult(
+            content=json.dumps({
+                "schemaVersion": 1,
+                "scope": scope.to_mapping(),
+                **{key: value for key, value in result.items() if key != "receipts"},
+            }, ensure_ascii=False, allow_nan=False),
+            context_evidence=tuple(result["receipts"]),
+        )
+    except Exception as error:
+        raise_if_stopped(signal)
+        return _error(error, fallback_code="novel_knowledge_unavailable")
 
 
 async def _techniques(
@@ -211,51 +246,52 @@ async def _techniques(
     try:
         scope, selection = _state_contracts(state)
         if not selection.writing_technique_input_id:
-            return _result(scope, {"selected": False, "entries": []})
+            return _result(scope, {"selected": False, "file": None})
         snapshot = await _load_technique_snapshot(
             db, technique_access, state, scope, selection
         )
-        automatic_refs = _technique_refs(arguments.get("automaticRefs"))
         prior = state.domain.get("writingTechniqueAutomaticRefs")
+        automatic_refs = (
+            tuple(prior)
+            if prior is not None and "automaticRefs" not in arguments
+            else _technique_refs(arguments.get("automaticRefs"))
+        )
         if prior is not None and prior != list(automatic_refs):
             raise ValueError("writing_technique_automatic_selection_changed")
         state.domain["writingTechniqueAutomaticRefs"] = list(automatic_refs)
         resolution = technique_access.resolve(snapshot, list(automatic_refs))
         maximum = _max_text_length(arguments)
-        remaining = maximum
-        entries = []
-        for member in resolution["members"]:
-            content = await technique_access.read(
-                snapshot,
-                member["ref"],
-                "SKILL.md",
-                automatic_refs=list(automatic_refs),
-                max_characters=maximum,
-            )
-            if len(content["content"]) > remaining:
-                raise ValueError(
-                    "selected writing technique entries exceed maxTextLength"
-                )
-            entries.append({
-                "ref": member["ref"],
-                "sources": member["sources"],
-                "path": "SKILL.md",
-                "content": content["content"],
-                "sha256": content["sha256"],
-            })
-            remaining -= len(content["content"])
+        ref = _technique_ref(arguments.get("ref"), "ref")
+        member = next(
+            (item for item in resolution["members"] if item["ref"] == ref),
+            None,
+        )
+        if member is None:
+            raise ValueError("writing technique file is outside the selected set")
+        path = str(arguments.get("path") or "").strip()
+        if not path:
+            raise ValueError("path is required")
+        entry_refs = tuple(state.domain.get("writingTechniqueEntryRefs") or ())
+        content = await technique_access.read(
+            snapshot,
+            ref,
+            path,
+            automatic_refs=list(automatic_refs),
+            entry_refs=entry_refs,
+            max_characters=maximum,
+        )
+        if path == "SKILL.md" and ref not in entry_refs:
+            state.domain["writingTechniqueEntryRefs"] = [*entry_refs, ref]
         return _result(scope, {
             "selected": True,
             "mode": snapshot["mode"],
-            "entries": entries,
-            "schemes": [
-                {
-                    "ref": item["ref"],
-                    "composition": item["composition"],
-                }
-                for item in resolution["selected"]
-                if item["ref"]["kind"] == "scheme"
-            ],
+            "file": {
+                "ref": ref,
+                "sources": member["sources"],
+                "path": path,
+                "content": content["content"],
+                "sha256": content["sha256"],
+            },
         })
     except Exception as error:
         raise_if_stopped(signal)
@@ -282,8 +318,13 @@ async def _technique_candidates(
                     "ref": item["ref"],
                     "metadata": item["metadata"],
                     "entryBytes": item["entryBytes"],
+                    "members": item["members"],
+                    "selection": item.get("selection", "candidate"),
                 }
-                for item in snapshot.get("candidates", ())
+                for item in (
+                    *snapshot.get("manual", ()),
+                    *snapshot.get("candidates", ()),
+                )
             ],
         })
     except Exception as error:
@@ -333,12 +374,24 @@ async def _continuation_section(
 def build_writing_context_tool_registrations(
     db, *, memory_operations, technique_access
 ) -> tuple[ToolRegistration, ...]:
-    async def associated(state, arguments, signal=None):
-        return await _associated(db, state, arguments, signal)
-
-    async def selected_local(state, arguments, signal=None):
-        return await _selected_local(
+    async def search_memories(state, arguments, signal=None):
+        return await _search_memories(
             db, memory_operations, state, arguments, signal
+        )
+
+    async def read_memories(state, arguments, signal=None):
+        return await _read_memories(
+            db, memory_operations, state, arguments, signal
+        )
+
+    async def search_knowledge(state, arguments, signal=None):
+        return await _novel_knowledge(
+            db, state, arguments, read=False, signal=signal
+        )
+
+    async def read_knowledge(state, arguments, signal=None):
+        return await _novel_knowledge(
+            db, state, arguments, read=True, signal=signal
         )
 
     async def techniques(state, arguments, signal=None):
@@ -359,28 +412,69 @@ def build_writing_context_tool_registrations(
 
     return (
         _registration(
-            "readAssociatedWritingContext",
-            "读取本轮由用户明确选择的关联章节或大纲。只能读取宿主冻结清单内的 ID。",
-            "读取关联写作资料",
+            "searchWritingMemories",
+            "检索当前书的灵感、伏笔和长期记忆。用户预选项仅作为优先提示，不限制检索范围。",
+            "检索写作记忆",
             {
-                "chapterIds": _id_array(),
-                "outlineIds": _id_array(),
-                "maxTextLength": {
-                    "type": "integer", "minimum": 1, "maximum": 64_000
-                },
+                "query": {"type": "string", "maxLength": 4_000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             },
-            associated,
+            search_memories,
         ),
         _registration(
-            "readSelectedWritingContext",
-            "读取本轮明确选择的灵感和伏笔；语义长期记忆未接入时返回稳定诊断，不伪装为空结果。",
-            "读取已选写作记忆",
+            "readWritingMemories",
+            "读取当前书内指定的灵感、伏笔或长期记忆；检索结果中的任意引用均可读取。",
+            "读取写作记忆",
             {
+                "refs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["spark", "foreshadowing", "longTerm"],
+                            },
+                            "id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        },
+                        "required": ["kind", "id"],
+                        "additionalProperties": False,
+                    },
+                    "minItems": 1,
+                    "maxItems": 32,
+                },
                 "maxTextLength": {
                     "type": "integer", "minimum": 1, "maximum": 64_000
                 },
             },
-            selected_local,
+            read_memories,
+            required=("refs",),
+        ),
+        _registration(
+            "searchNovelKnowledge",
+            "检索当前书绑定的 Novel Knowledge，返回带版本证据的匹配内容。",
+            "检索创作资料",
+            {
+                "query": {"type": "string", "minLength": 1, "maxLength": 4_000},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                "tokenBudget": {"type": "integer", "minimum": 1, "maximum": 12_000},
+            },
+            search_knowledge,
+            required=("query",),
+        ),
+        _registration(
+            "readNovelKnowledge",
+            "按检索结果中的文档、版本和可选分片标识读取当前书绑定的 Novel Knowledge。",
+            "读取创作资料",
+            {
+                "documentId": {"type": "string", "minLength": 1, "maxLength": 512},
+                "revision": {"type": "string", "minLength": 1, "maxLength": 512},
+                "chunkId": {"type": "string", "minLength": 1, "maxLength": 512},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 12},
+                "tokenBudget": {"type": "integer", "minimum": 1, "maximum": 12_000},
+            },
+            read_knowledge,
+            required=("documentId", "revision"),
         ),
         _registration(
             "listWritingTechniqueCandidates",
@@ -390,10 +484,21 @@ def build_writing_context_tool_registrations(
             technique_candidates,
         ),
         _registration(
-            "readWritingTechniqueContext",
-            "读取本轮冻结的写作技法入口文件；技法正文只通过本工具进入当前模型回合。",
-            "读取本轮写作技法",
+            "readWritingTechniqueFile",
+            "读取本轮已选写作技法的文件。必须先读取同一技法的 SKILL.md，再读取其中引用的辅助文件。",
+            "读取写作技法文件",
             {
+                "ref": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["technique"]},
+                        "id": {"type": "string", "minLength": 1},
+                        "versionId": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["kind", "id", "versionId"],
+                    "additionalProperties": False,
+                },
+                "path": {"type": "string", "minLength": 1, "maxLength": 512},
                 "maxTextLength": {
                     "type": "integer", "minimum": 1, "maximum": 64_000
                 },
@@ -417,6 +522,7 @@ def build_writing_context_tool_registrations(
                 },
             },
             techniques,
+            required=("ref", "path"),
         ),
         _registration(
             "listContinuationSourceSections",
@@ -452,24 +558,61 @@ def _state_contracts(state) -> tuple[WritingReadScope, WritingContextSelection]:
     )
 
 
-def _requested_subset(value, allowed: tuple[str, ...], field: str) -> tuple[str, ...]:
-    if value is None:
-        return allowed
-    if not isinstance(value, (list, tuple)):
-        raise ValueError(f"{field} must be an array")
-    requested = tuple(dict.fromkeys(str(item).strip() for item in value))
-    if any(not item for item in requested) or len(requested) > 32:
-        raise ValueError(f"{field} contains invalid identifiers")
-    if not set(requested).issubset(allowed):
-        raise ValueError(f"{field} contains identifiers outside the frozen selection")
-    return requested
-
-
 def _max_text_length(arguments) -> int:
     value = arguments.get("maxTextLength", 32_000)
     if type(value) is not int or not 1 <= value <= 64_000:
         raise ValueError("maxTextLength must be between 1 and 64000")
     return value
+
+
+def _limit(value) -> int:
+    if type(value) is not int or not 1 <= value <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    return value
+
+
+def _knowledge_limit(value) -> int:
+    if type(value) is not int or not 1 <= value <= 12:
+        raise ValueError("limit must be between 1 and 12")
+    return value
+
+
+def _knowledge_budget(value) -> int:
+    if type(value) is not int or not 1 <= value <= 12_000:
+        raise ValueError("tokenBudget must be between 1 and 12000")
+    return value
+
+
+def _memory_refs(value) -> tuple[dict[str, str], ...]:
+    if not isinstance(value, (list, tuple)) or not 1 <= len(value) <= 32:
+        raise ValueError("refs must contain between 1 and 32 references")
+    result = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"kind", "id"}:
+            raise ValueError("refs contains an invalid reference")
+        ref = {
+            "kind": str(item["kind"]).strip(),
+            "id": str(item["id"]).strip(),
+        }
+        if (
+            ref["kind"] not in {"spark", "foreshadowing", "longTerm"}
+            or not ref["id"]
+            or len(ref["id"]) > 512
+        ):
+            raise ValueError("refs contains an invalid reference")
+        if ref not in result:
+            result.append(ref)
+    return tuple(result)
+
+
+def _memory_search_item(item, *, kind: str, field: str) -> dict[str, object]:
+    text = str(item.pop(field, "") or "")
+    return {
+        **item,
+        "kind": kind,
+        "preview": text[:240],
+        "totalCharacters": len(text),
+    }
 
 
 async def _rows_by_ids(db, *, table, book_id, ids, columns):
@@ -483,25 +626,6 @@ async def _rows_by_ids(db, *, table, book_id, ids, columns):
     )
     by_id = {str(row["id"]): dict(row) for row in rows}
     return [by_id[item_id] for item_id in ids if item_id in by_id]
-
-
-def _text_item(row, text: str, maximum: int, *, extra=None) -> dict[str, object]:
-    returned = text[:maximum]
-    return {
-        "id": str(row["id"]),
-        "title": str(row.get("title") or ""),
-        "text": returned,
-        "truncated": len(returned) < len(text),
-        "returnedCharacters": len(returned),
-        "totalCharacters": len(text),
-        "baseRevision": text_revision(text),
-        **(extra or {}),
-    }
-
-
-def _missing(requested, rows) -> list[str]:
-    present = {str(row["id"]) for row in rows}
-    return [item for item in requested if item not in present]
 
 
 async def _load_technique_snapshot(
@@ -542,16 +666,23 @@ def _technique_refs(value) -> tuple[dict[str, str], ...]:
         raise ValueError("automaticRefs must contain at most 16 references")
     result = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != {"kind", "id", "versionId"}:
-            raise ValueError("automaticRefs contains an invalid reference")
-        normalized = {key: str(item[key]).strip() for key in item}
-        if normalized["kind"] not in {"technique", "scheme"} or not all(
-            normalized.values()
-        ):
-            raise ValueError("automaticRefs contains an invalid reference")
+        normalized = _technique_ref(item, "automaticRefs")
         if normalized not in result:
             result.append(normalized)
     return tuple(result)
+
+
+def _technique_ref(value, field: str) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"kind", "id", "versionId"}:
+        raise ValueError(f"{field} contains an invalid reference")
+    normalized = {
+        key: str(value[key]).strip()
+        for key in ("kind", "id", "versionId")
+    }
+    allowed = {"technique", "scheme"} if field == "automaticRefs" else {"technique"}
+    if normalized["kind"] not in allowed or not all(normalized.values()):
+        raise ValueError(f"{field} contains an invalid reference")
+    return normalized
 
 
 async def _validate_continuation_snapshot(db, state, book_id: str) -> None:
@@ -629,15 +760,6 @@ def _registration(
             "displayNames": {"zh-CN": display_name, "en": name},
         },
     )
-
-
-def _id_array():
-    return {
-        "type": "array",
-        "items": {"type": "string", "minLength": 1, "maxLength": 512},
-        "maxItems": 32,
-        "uniqueItems": True,
-    }
 
 
 __all__ = ["build_writing_context_tool_registrations"]

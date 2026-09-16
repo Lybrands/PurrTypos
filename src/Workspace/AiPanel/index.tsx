@@ -878,6 +878,7 @@ export default function AiPanel({
         <AgentConversationPanel
           controller={bookConversationController}
           extensions={bookConversationExtensions}
+          subAgentReader={services.ai}
           indexOpen={conversationSidebarOpen}
           onIndexOpenChange={onConversationSidebarOpenChange}
           className="book-agent-conversation-panel"

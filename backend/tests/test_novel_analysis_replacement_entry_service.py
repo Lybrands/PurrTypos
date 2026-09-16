@@ -1158,11 +1158,18 @@ async def test_entry_compiles_canonical_request_and_host_owned_runtime_binding(
                     goal="形成可审核分析",
                     operation="analyze",
                     target={
-                        "schemaVersion": 1,
-                        "passes": [{"id": "story", "dimensions": ["characters"]}],
+                        "schemaVersion": 2,
+                        "passes": [{
+                            "id": "story",
+                            "dimensions": ["characters"],
+                            "executionMode": "root",
+                        }],
                         "reduceFanIn": 2,
                         "synthesisSections": ["人物"],
                         "qualityChecks": ["整书覆盖"],
+                        "executionModes": {
+                            "synthesize": "root", "review": "root",
+                        },
                     },
                 ),
                 steps=(TaskStep(

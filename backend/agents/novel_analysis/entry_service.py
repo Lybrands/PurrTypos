@@ -223,9 +223,25 @@ class NovelAnalysisReplacementExecutionService:
         model = request.model
         context_window = request.context_window
         profile_digest = _request_profile_digest(request)
+        reasoning_mode = reasoning_mode_from_options(model.options)
+
+        async def root_model_runner(context):
+            return await self._composition.create_model_task_runner(
+                api_key=runtime.apiKey.get_secret_value(),
+                run_id=context.run_id,
+                turn_id=(
+                    f"novel-analysis-unit:{context.task.id}:"
+                    f"{context.unit.id}:{context.unit.attempt}"
+                ),
+                reasoning_mode=reasoning_mode,
+                model_request=model,
+            )
+
         executor = ScalableNovelAnalysisUnitExecutor(
             self._db,
             model_name=model.model,
+            model_request=model,
+            root_model_runner_factory=root_model_runner,
             stage_output=NovelAnalysisStageOutput(
                 self._db,
                 reporter=self._composition.report_operation_result,
@@ -240,7 +256,7 @@ class NovelAnalysisReplacementExecutionService:
                 default_context_window_tokens=context_window,
                 force_planned_tool_choice=False,
                 require_tool_call=False,
-                reasoning_mode=reasoning_mode_from_options(model.options),
+                reasoning_mode=reasoning_mode,
                 provenance=RunProvenance(
                     model_provider=model.provider,
                     model_name=model.model,
@@ -252,7 +268,7 @@ class NovelAnalysisReplacementExecutionService:
                     ),
                     execution_intent=run_execution_intent(
                         model,
-                        reasoning_mode_from_options(model.options),
+                        reasoning_mode,
                         output_contract="novel_analysis_scalable_review_v1",
                         tool_protocol_contract="novel_analysis_scalable_tools_v2",
                     ),

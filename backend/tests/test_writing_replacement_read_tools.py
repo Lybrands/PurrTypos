@@ -240,7 +240,9 @@ def test_read_catalog_is_static_and_not_removed_by_knowledge_purpose(temp_db) ->
         "listBookCharacters",
         "getBookCharacters",
         "listWritingChapters",
-        "getGlobalOutline",
+        "readWritingChapters",
+        "listWritingOutlines",
+        "readWritingOutlines",
         "listSettingEntities",
         "getSettingEntities",
     }
@@ -358,6 +360,26 @@ async def test_replacement_profile_binds_scope_and_implementation(temp_db) -> No
     assert attributes["contextSelection"] == state.domain[
         WRITING_CONTEXT_SELECTION_STATE_KEY
     ]
+    assert {
+        "searchNovelKnowledge",
+        "readNovelKnowledge",
+        "searchWritingMemories",
+        "readWritingMemories",
+    }.issubset(profile.adapter.tool_catalog.names)
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_novel_knowledge_returns_stable_error(temp_db) -> None:
+    profile = WritingReplacementProfile(temp_db)
+    prepared = await profile.prepare_request(_request())
+    state = profile.adapter.execution_state_factory.create(prepared)
+
+    result = await profile.adapter.tool_catalog.get(
+        "searchNovelKnowledge"
+    ).handler(state, {"query": "灯塔"})
+
+    assert result.error_code == "novel_knowledge_unavailable"
+    assert "novel_knowledge_not_configured" in result.content
 
 
 @pytest.mark.asyncio
@@ -407,30 +429,44 @@ async def test_selected_context_bodies_enter_only_through_explicit_tools(
     request = _request()
     state = profile.adapter.execution_state_factory.create(request)
 
-    associated = await profile.adapter.tool_catalog.get(
-        "readAssociatedWritingContext"
-    ).handler(state, {"maxTextLength": 100})
-    selected = await profile.adapter.tool_catalog.get(
-        "readSelectedWritingContext"
-    ).handler(state, {})
-    associated_payload = json.loads(associated.content)
-    selected_payload = json.loads(selected.content)
+    chapters = await profile.adapter.tool_catalog.get(
+        "readWritingChapters"
+    ).handler(state, {"chapterIds": ["chapter-1"], "maxTextLength": 100})
+    outlines = await profile.adapter.tool_catalog.get(
+        "readWritingOutlines"
+    ).handler(state, {"outlineIds": ["global-1"], "maxTextLength": 100})
+    memories = await profile.adapter.tool_catalog.get(
+        "searchWritingMemories"
+    ).handler(state, {"query": "灯塔"})
+    chapter_payload = json.loads(chapters.content)
+    outline_payload = json.loads(outlines.content)
+    memory_payload = json.loads(memories.content)
 
-    assert associated_payload["chapters"][0]["text"] == "正文"
-    assert associated_payload["outlines"][0]["text"].startswith(
+    assert chapter_payload["items"][0]["content"] == "正文"
+    assert outline_payload["items"][0]["markdown"].startswith(
         "潮汐门必须在终章关闭"
     )
-    assert selected_payload["sparks"][0]["content"] == "潮汐钥匙曾经断裂"
-    assert selected_payload["foreshadowing"][0]["content"] == (
+    assert memory_payload["foreshadowing"][0]["preview"] == (
         "灯塔将在第三夜熄灭"
     )
-    assert selected_payload["longTermMemory"] == {
-        "requestedIds": ["memory-1"],
+    assert memory_payload["preferred"]["sparkIds"] == ["1"]
+    assert memory_payload["longTermMemory"] == {
         "available": False,
         "items": [],
-        "missingIds": ["memory-1"],
         "reason": "memory_component_unavailable",
     }
+
+    read = await profile.adapter.tool_catalog.get(
+        "readWritingMemories"
+    ).handler(state, {"refs": [
+        {"kind": "spark", "id": "1"},
+        {"kind": "foreshadowing", "id": "1"},
+    ]})
+    read_payload = json.loads(read.content)
+    assert [item["content"] for item in read_payload["items"]] == [
+        "潮汐钥匙曾经断裂",
+        "灯塔将在第三夜熄灭",
+    ]
 
 
 @pytest.mark.asyncio
@@ -493,13 +529,12 @@ async def test_selected_long_term_memory_uses_configured_component(
         )
 
         result = await profile.adapter.tool_catalog.get(
-            "readSelectedWritingContext"
-        ).handler(state, {})
+            "readWritingMemories"
+        ).handler(state, {"refs": [{"kind": "longTerm", "id": created["id"]}]})
         payload = json.loads(result.content)
 
         assert payload["longTermMemory"]["available"] is True
-        assert payload["longTermMemory"]["missingIds"] == []
-        assert payload["longTermMemory"]["items"][0]["text"] == (
+        assert payload["items"][0]["text"] == (
             "旧灯塔只在无月夜开启。"
         )
 
@@ -512,13 +547,11 @@ async def test_selected_long_term_memory_uses_configured_component(
             metadata=None,
         )
         changed = await profile.adapter.tool_catalog.get(
-            "readSelectedWritingContext"
-        ).handler(state, {})
+            "readWritingMemories"
+        ).handler(state, {"refs": [{"kind": "longTerm", "id": created["id"]}]})
         changed_payload = json.loads(changed.content)
-        assert changed_payload["longTermMemory"]["available"] is False
-        assert changed_payload["longTermMemory"]["reason"] == (
-            "long_term_memory_snapshot_changed"
-        )
+        assert changed_payload["longTermMemory"]["available"] is True
+        assert changed_payload["items"][0]["text"] == "旧灯塔改为只在满月夜开启。"
     finally:
         await resource.close()
 
@@ -550,14 +583,21 @@ async def test_writing_technique_tool_reads_frozen_input_and_detects_change(
         draft["draftId"],
         expected_revision=0,
         operation_id="w3-technique-content",
-        changes=[{
-            "action": "put",
-            "path": "SKILL.md",
-            "content": (
-                "---\nname: 行动留白\ndescription: 用动作承载判断\n---\n"
-                "先写动作，再揭示人物判断。"
-            ),
-        }],
+        changes=[
+            {
+                "action": "put",
+                "path": "SKILL.md",
+                "content": (
+                    "---\nname: 行动留白\ndescription: 用动作承载判断\n---\n"
+                    "先读 [细节](details.md)，再写动作。"
+                ),
+            },
+            {
+                "action": "put",
+                "path": "details.md",
+                "content": "先写动作，再揭示人物判断。",
+            },
+        ],
     )
     sealed = await access.library.seal(
         "technique",
@@ -596,13 +636,22 @@ async def test_writing_technique_tool_reads_frozen_input_and_detects_change(
     prepared = await profile.prepare_request(request)
     state = profile.adapter.execution_state_factory.create(prepared)
 
-    result = await profile.adapter.tool_catalog.get(
-        "readWritingTechniqueContext"
+    candidates = await profile.adapter.tool_catalog.get(
+        "listWritingTechniqueCandidates"
     ).handler(state, {})
+    candidate_payload = json.loads(candidates.content)
+    assert candidate_payload["items"][0]["ref"] == ref
+    result = await profile.adapter.tool_catalog.get(
+        "readWritingTechniqueFile"
+    ).handler(state, {"ref": ref, "path": "SKILL.md"})
     payload = json.loads(result.content)
 
     assert payload["selected"] is True
-    assert "行动留白" in payload["entries"][0]["content"]
+    assert "行动留白" in payload["file"]["content"]
+    details = await profile.adapter.tool_catalog.get(
+        "readWritingTechniqueFile"
+    ).handler(state, {"ref": ref, "path": "details.md"})
+    assert "人物判断" in json.loads(details.content)["file"]["content"]
 
     await access.grant("book-1", ref)
     automatic = await access.reserve_input(
@@ -622,21 +671,31 @@ async def test_writing_technique_tool_reads_frozen_input_and_detects_change(
     ))
     auto_prepared = await profile.prepare_request(auto_request)
     auto_state = profile.adapter.execution_state_factory.create(auto_prepared)
-    candidates = await profile.adapter.tool_catalog.get(
+    auto_candidates = await profile.adapter.tool_catalog.get(
         "listWritingTechniqueCandidates"
     ).handler(auto_state, {})
-    candidate_payload = json.loads(candidates.content)
-    assert candidate_payload["mode"] == "auto"
-    assert candidate_payload["items"][0]["ref"] == ref
+    auto_candidate_payload = json.loads(auto_candidates.content)
+    assert auto_candidate_payload["mode"] == "auto"
+    assert auto_candidate_payload["items"][0]["ref"] == ref
     automatic_read = await profile.adapter.tool_catalog.get(
-        "readWritingTechniqueContext"
-    ).handler(auto_state, {"automaticRefs": [ref]})
-    assert "行动留白" in json.loads(automatic_read.content)["entries"][0][
+        "readWritingTechniqueFile"
+    ).handler(auto_state, {
+        "ref": ref,
+        "path": "SKILL.md",
+        "automaticRefs": [ref],
+    })
+    assert "行动留白" in json.loads(automatic_read.content)["file"][
+        "content"
+    ]
+    automatic_details = await profile.adapter.tool_catalog.get(
+        "readWritingTechniqueFile"
+    ).handler(auto_state, {"ref": ref, "path": "details.md"})
+    assert "人物判断" in json.loads(automatic_details.content)["file"][
         "content"
     ]
     changed_selection = await profile.adapter.tool_catalog.get(
-        "readWritingTechniqueContext"
-    ).handler(auto_state, {"automaticRefs": []})
+        "readWritingTechniqueFile"
+    ).handler(auto_state, {"ref": ref, "path": "SKILL.md", "automaticRefs": []})
     assert changed_selection.error_code == "tool_input_invalid"
     assert "writing_technique_automatic_selection_changed" in (
         changed_selection.content
@@ -648,8 +707,8 @@ async def test_writing_technique_tool_reads_frozen_input_and_detects_change(
         [reserved["inputId"]],
     )
     changed = await profile.adapter.tool_catalog.get(
-        "readWritingTechniqueContext"
-    ).handler(state, {})
+        "readWritingTechniqueFile"
+    ).handler(state, {"ref": ref, "path": "SKILL.md"})
     assert changed.error_code == "tool_input_invalid"
     assert "writing_technique_snapshot_changed" in changed.content
 
@@ -715,18 +774,20 @@ async def test_continuation_tool_enforces_run_snapshot(temp_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_associated_context_rejects_ids_outside_frozen_selection(
+async def test_chapter_read_is_not_limited_to_preselected_context(
     temp_db,
 ) -> None:
     profile = WritingReplacementProfile(temp_db)
     state = profile.adapter.execution_state_factory.create(_request())
 
     result = await profile.adapter.tool_catalog.get(
-        "readAssociatedWritingContext"
+        "readWritingChapters"
     ).handler(state, {"chapterIds": ["chapter-2"]})
 
-    assert result.error_code == "tool_input_invalid"
-    assert "outside the frozen selection" in result.content
+    payload = json.loads(result.content)
+    assert result.error_code is None
+    assert payload["items"][0]["id"] == "chapter-2"
+    assert payload["items"][0]["content"] == ""
 
 
 def test_replacement_profile_is_independently_installable(temp_db) -> None:

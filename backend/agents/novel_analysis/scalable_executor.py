@@ -24,6 +24,7 @@ from agents.novel_analysis.review_execution import (
     ScalableReviewOutputError,
     ScalableReviewUnitExecutor,
 )
+from agents.novel_analysis.root_model_execution import RootNovelAnalysisModelRunner
 from agents.novel_analysis.skill_creation import (
     PurrAScalableSkillChildRunner,
     ScalableSkillCreationError,
@@ -48,19 +49,41 @@ class NovelAnalysisStageOutputError(RuntimeError):
 class ScalableNovelAnalysisUnitExecutor:
     """Route Host-expanded Units without introducing another execution path."""
 
-    def __init__(self, db, *, model_name: str, stage_output=None) -> None:
+    def __init__(
+        self,
+        db,
+        *,
+        model_name: str,
+        stage_output=None,
+        model_request=None,
+        root_model_runner_factory=None,
+    ) -> None:
         self._stage_output = stage_output
+        root_runner = (
+            RootNovelAnalysisModelRunner(
+                model_request=model_request,
+                runner_factory=root_model_runner_factory,
+            )
+            if model_request is not None and root_model_runner_factory is not None
+            else None
+        )
         self._map = ScalableMapUnitExecutor(
             db,
-            child_runner=PurrAScalableMapChildRunner(db, model_name=model_name),
+            child_runner=PurrAScalableMapChildRunner(
+                db, model_name=model_name, root_runner=root_runner
+            ),
         )
         self._reduce = ScalableReduceUnitExecutor(
             db,
-            child_runner=PurrAScalableReduceChildRunner(db, model_name=model_name),
+            child_runner=PurrAScalableReduceChildRunner(
+                db, model_name=model_name, root_runner=root_runner
+            ),
         )
         self._synthesis = ScalableSynthesisUnitExecutor(
             db,
-            child_runner=PurrAScalableSynthesisChildRunner(db, model_name=model_name),
+            child_runner=PurrAScalableSynthesisChildRunner(
+                db, model_name=model_name, root_runner=root_runner
+            ),
         )
         self._coverage = ScalableCoverageUnitExecutor(db)
         self._skill = ScalableSkillUnitExecutor(
@@ -69,7 +92,9 @@ class ScalableNovelAnalysisUnitExecutor:
         )
         self._review = ScalableReviewUnitExecutor(
             db,
-            child_runner=PurrAScalableReviewChildRunner(db, model_name=model_name),
+            child_runner=PurrAScalableReviewChildRunner(
+                db, model_name=model_name, root_runner=root_runner
+            ),
         )
 
     def bind_agent_core(self, core) -> None:

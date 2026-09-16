@@ -87,7 +87,7 @@ def test_material_update_tools_are_confirm_only_and_read_before_write(material_d
         "editStoryBackground": "getStoryBackground",
         "updateCharacter": "getBookCharacters",
         "updateSettingEntity": "getSettingEntities",
-        "editGlobalOutline": "getGlobalOutline",
+        "editGlobalOutline": "readWritingOutlines",
     }
 
     for name, prerequisite in expected.items():

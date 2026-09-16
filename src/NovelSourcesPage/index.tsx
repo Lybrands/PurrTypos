@@ -1497,6 +1497,7 @@ export default function NovelSourcesPage({
       className="novel-analysis-agent-panel"
       controller={analysisController}
       extensions={analysisExtensions}
+      subAgentReader={services.ai}
     />
   </section>
 

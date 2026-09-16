@@ -1279,6 +1279,12 @@ async def test_partial_progress_cannot_exceed_progress_round_cap():
             outcome=ToolBatchOutcome.PROGRESSED,
             content='{"remaining":1}',
         ),
+        _batch(
+            "call-not-executed",
+            "appendBatch",
+            outcome=ToolBatchOutcome.PROGRESSED,
+            content='{"remaining":0}',
+        ),
     ])
     class _ProgressObserver(RecordingObserver):
         async def on_tool_round_completed(
@@ -1311,7 +1317,7 @@ async def test_partial_progress_cannot_exceed_progress_round_cap():
 
     assert _result(updates).outcome is RuntimeOutcome.FAILED
     assert _result(updates).error_code == "max_model_rounds"
-    assert len(tools.requests) == 1
+    assert len(tools.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -3720,9 +3726,9 @@ async def test_runtime_fails_closed_when_textual_tool_call_repeats_after_decline
 
 
 @pytest.mark.asyncio
-async def test_runtime_does_not_execute_tools_on_the_last_model_round():
+async def test_runtime_executes_tools_on_the_last_model_round_before_failing():
     model = ScriptedModelGateway([_tool_call("call-a", "readA")])
-    tools = ScriptedToolGateway([])
+    tools = ScriptedToolGateway([_batch("call-a", "readA")])
     observer = RecordingObserver([{"readA"}])
     runtime = AgentRuntime(
         model_gateway=model,
@@ -3738,9 +3744,9 @@ async def test_runtime_does_not_execute_tools_on_the_last_model_round():
         force_tool_choice=True,
     )
 
-    assert tools.requests == []
+    assert len(tools.requests) == 1
     assert _result(updates).error_code == "max_model_rounds"
-    assert not any(
+    assert any(
         isinstance(update, AgentEvent)
         and update.type == CoreEventType.TOOL_CALLS_STARTED
         for update in updates

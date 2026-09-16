@@ -73,7 +73,7 @@ async def project_replacement_writing_technique_usage(db, run_id: str):
         for result in results:
             if (
                 not isinstance(result, dict)
-                or result.get("tool_name") != "readWritingTechniqueContext"
+                or result.get("tool_name") != "readWritingTechniqueFile"
                 or result.get("error")
             ):
                 continue
@@ -81,7 +81,7 @@ async def project_replacement_writing_technique_usage(db, run_id: str):
                 payload = json.loads(result.get("content") or "{}")
             except (TypeError, json.JSONDecodeError):
                 continue
-            for entry in payload.get("entries") or []:
+            for entry in (payload.get("file"),):
                 if not isinstance(entry, dict):
                     continue
                 member = entry.get("ref")

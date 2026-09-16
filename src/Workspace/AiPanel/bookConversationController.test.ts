@@ -459,7 +459,6 @@ test('book adapter derives queue capabilities and chapter send availability', ()
 
   assert.deepEqual(running.capabilities, {
     inputDisabled: false,
-    sessionNavigationDisabled: false,
     submitMode: 'queue',
   })
   assert.equal(unavailable.composer.submitDisabled, true)

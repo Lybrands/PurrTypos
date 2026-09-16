@@ -28,16 +28,6 @@ from purra.ports import ToolRegistration
 def build_writing_chapter_tool_registrations(db) -> tuple[ToolRegistration, ...]:
     repository = SqliteWritingChapterRepository(db)
 
-    async def get_content(state, arguments, signal=None):
-        try:
-            payload = await repository.read(
-                _scope(state),
-                max_text_length=arguments.get("maxTextLength", 48_000),
-            )
-            return ToolHandlerResult(json.dumps(payload, ensure_ascii=False))
-        except WritingChapterMutationError as error:
-            return _error(error)
-
     async def validate_edit(state, arguments, signal=None):
         del signal
         try:
@@ -80,48 +70,10 @@ def build_writing_chapter_tool_registrations(db) -> tuple[ToolRegistration, ...]
     return (
         ToolRegistration(
             schema=ToolSchema(
-                name="getChapterContent",
-                description=(
-                    "读取当前绑定章节正文和 baseRevision。编辑前必须先调用。"
-                ),
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "maxTextLength": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 48_000,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-                display_names={"zh-CN": "读取当前章节正文", "en": "Read Chapter"},
-            ),
-            handler=get_content,
-            policy=ToolPolicy(
-                ToolExecutionMode.READ,
-                "读取当前章节正文",
-                ToolRiskLevel.READ,
-            ),
-            concurrency_safe=True,
-            data_contract=ToolDataContract(
-                model_owned_paths=("maxTextLength",),
-                host_bound_paths=("bookId", "sessionId", "chapterId"),
-                host_derived_paths=("baseRevision",),
-            ),
-            operation_display_params=lambda state, arguments, call: {
-                "displayNames": {
-                    "zh-CN": "读取当前章节正文",
-                    "en": "Read Chapter",
-                },
-            },
-        ),
-        ToolRegistration(
-            schema=ToolSchema(
                 name="editChapterContent",
                 description=(
                     "提议并在用户明确批准后替换当前绑定章节正文。必须使用"
-                    " getChapterContent 返回的 baseRevision。空正文只有在"
+                    " readWritingChapters 返回的当前章节 baseRevision。空正文只有在"
                     " clearContent=true 时才表示清空。"
                 ),
                 parameters={
@@ -152,7 +104,7 @@ def build_writing_chapter_tool_registrations(db) -> tuple[ToolRegistration, ...]
             scope_validator=validate_edit,
             cancellation_linearizable=True,
             context_contract=ToolContextContract(
-                prerequisite_tools=("getChapterContent",),
+                prerequisite_tools=("readWritingChapters",),
                 mandatory_context_keys=("binding.bookId", "binding.chapterId"),
                 produces=("chapter.contentUpdated",),
             ),

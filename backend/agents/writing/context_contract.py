@@ -145,15 +145,24 @@ class WritingContextSelection:
                     self.writing_technique_input_id is not None
                 ),
             },
+            "preferredContext": {
+                "chapterIds": list(self.associated_chapter_ids),
+                "outlineIds": list(self.associated_outline_ids),
+            },
             "policy": {
                 "sourceBodiesRequireTools": True,
-                "selectedLocalSourcesTool": "readSelectedWritingContext",
-                "associatedSourcesTool": "readAssociatedWritingContext",
-                "longTermMemoryTool": "readSelectedWritingContext",
+                "memorySearchTool": "searchWritingMemories",
+                "memoryReadTool": "readWritingMemories",
+                "novelKnowledgeSearchTool": "searchNovelKnowledge",
+                "novelKnowledgeReadTool": "readNovelKnowledge",
+                "chapterDirectoryTool": "listWritingChapters",
+                "chapterReadTool": "readWritingChapters",
+                "outlineDirectoryTool": "listWritingOutlines",
+                "outlineReadTool": "readWritingOutlines",
                 "writingTechniqueCandidateTool": (
                     "listWritingTechniqueCandidates"
                 ),
-                "writingTechniqueTool": "readWritingTechniqueContext",
+                "writingTechniqueTool": "readWritingTechniqueFile",
                 "continuationDirectoryTool": "listContinuationSourceSections",
                 "continuationSectionTool": "readContinuationSourceSection",
             },

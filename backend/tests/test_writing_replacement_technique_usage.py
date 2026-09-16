@@ -80,8 +80,8 @@ async def test_projects_frozen_auto_selection_without_technique_body(tmp_path):
             "(run_id,event_type,payload_json) "
             "VALUES ('replacement-run','tool.results',?)",
             [json.dumps({"results": [{
-                "tool_name": "readWritingTechniqueContext",
-                "content": json.dumps({"entries": [entry]}),
+                "tool_name": "readWritingTechniqueFile",
+                "content": json.dumps({"file": entry}),
             }]})],
         )
 
