@@ -54,13 +54,17 @@ class SqliteWritingChapterRepository:
         content: str,
         base_revision: str,
         clear_content: bool,
+        chapter_id: str | None = None,
+        created_ids: tuple[str, ...] | frozenset[str] = (),
     ) -> None:
         _validate_edit_arguments(
             content=content,
             base_revision=base_revision,
             clear_content=clear_content,
         )
-        chapter = await self._require_chapter(scope)
+        chapter = await self._require_chapter(
+            scope, chapter_id=chapter_id, created_ids=created_ids,
+        )
         actual = _content_revision(str(chapter.get("content") or ""))
         desired = _content_revision(content)
         if actual not in {base_revision, desired}:
@@ -76,6 +80,8 @@ class SqliteWritingChapterRepository:
         content: str,
         base_revision: str,
         clear_content: bool,
+        chapter_id: str | None = None,
+        created_ids: tuple[str, ...] | frozenset[str] = (),
         signal=None,
     ) -> dict[str, Any]:
         _validate_edit_arguments(
@@ -87,20 +93,26 @@ class SqliteWritingChapterRepository:
         async with self._db.transaction(
             cancellation_linearizable=not self._db.current_task_owns_transaction()
         ):
-            chapter = await self._require_chapter(scope)
+            chapter = await self._require_chapter(
+                scope, chapter_id=chapter_id, created_ids=created_ids,
+            )
+            target_chapter_id = str(chapter["id"])
             previous = str(chapter.get("content") or "")
             previous_revision = _content_revision(previous)
             desired_revision = _content_revision(content)
 
             # An exact replay after a committed-but-unacknowledged attempt is
             # successful and does not perform a second write.
+            first_content = not str(previous or "").strip()
             if previous_revision == desired_revision:
                 return _commit_receipt(
                     scope,
+                    chapter_id=target_chapter_id,
                     previous_revision=base_revision,
                     committed_revision=desired_revision,
                     content=content,
                     noop=True,
+                    first_content=first_content,
                 )
             if previous_revision != base_revision:
                 raise WritingChapterMutationError(
@@ -113,12 +125,12 @@ class SqliteWritingChapterRepository:
                 await self._db.execute(
                     "UPDATE articles SET content = ?, "
                     "update_time = CURRENT_TIMESTAMP WHERE chapter_id = ?",
-                    [content, scope.chapter_id],
+                    [content, target_chapter_id],
                 )
             else:
                 await self._db.execute(
                     "INSERT INTO articles (chapter_id, content) VALUES (?, ?)",
-                    [scope.chapter_id, content],
+                    [target_chapter_id, content],
                 )
             await self._record_word_delta(
                 scope.book_id,
@@ -127,17 +139,34 @@ class SqliteWritingChapterRepository:
             )
             return _commit_receipt(
                 scope,
+                chapter_id=target_chapter_id,
                 previous_revision=previous_revision,
                 committed_revision=desired_revision,
                 content=content,
                 noop=False,
+                first_content=first_content,
             )
 
-    async def _require_chapter(self, scope: WritingReadScope) -> dict[str, Any]:
-        if not scope.chapter_id:
+    async def _require_chapter(
+        self,
+        scope: WritingReadScope,
+        *,
+        chapter_id: str | None = None,
+        created_ids: tuple[str, ...] | frozenset[str] = (),
+    ) -> dict[str, Any]:
+        target = str(chapter_id or "").strip() or scope.chapter_id
+        if not target:
             raise WritingChapterMutationError(
                 "writing_chapter_required",
                 "Chapter operation requires a bound chapter",
+            )
+        # 章节绑定会话只能写绑定的章节或本 Run 由工具新建的章节；
+        # 无章节绑定的全局对话不设此限制。
+        if scope.chapter_id and target != scope.chapter_id and target not in created_ids:
+            raise WritingChapterMutationError(
+                "writing_chapter_scope_conflict",
+                "Chapter-bound sessions may only edit the bound chapter or "
+                "chapters created in this Run",
             )
         row = await self._db.fetch_one(
             "SELECT c.id, c.title, a.id AS article_id, a.content "
@@ -145,7 +174,7 @@ class SqliteWritingChapterRepository:
             "JOIN outlines AS o ON o.id = c.outline_id "
             "LEFT JOIN articles AS a ON a.chapter_id = c.id "
             "WHERE c.id = ? AND o.book_id = ? AND o.type = 'writing'",
-            [scope.chapter_id, scope.book_id],
+            [target, scope.book_id],
         )
         if row is None:
             raise WritingChapterMutationError(
@@ -163,7 +192,12 @@ class SqliteWritingChapterRepository:
                     "Session does not belong to the bound book",
                 )
             session_chapter = str(session.get("chapter_id") or "").strip()
-            if session_chapter and session_chapter != scope.chapter_id:
+            target_allowed = (
+                target == scope.chapter_id
+                or target in created_ids
+                or not scope.chapter_id
+            )
+            if session_chapter and session_chapter != target and not target_allowed:
                 raise WritingChapterMutationError(
                     "writing_chapter_scope_conflict",
                     "Chapter conflicts with the bound session",
@@ -239,25 +273,29 @@ def _content_revision(content: str) -> str:
 def _commit_receipt(
     scope: WritingReadScope,
     *,
+    chapter_id: str | None = None,
     previous_revision: str,
     committed_revision: str,
     content: str,
     noop: bool,
+    first_content: bool = False,
 ) -> dict[str, Any]:
+    receipt_chapter_id = str(chapter_id or scope.chapter_id)
     intent = hashlib.sha256(
-        "\0".join((scope.book_id, str(scope.chapter_id), previous_revision, content))
+        "\0".join((scope.book_id, receipt_chapter_id, previous_revision, content))
         .encode("utf-8")
     ).hexdigest()
     return {
         "schemaVersion": 1,
         "success": True,
         "bookId": scope.book_id,
-        "chapterId": scope.chapter_id,
+        "chapterId": receipt_chapter_id,
         "previousRevision": previous_revision,
         "committedRevision": committed_revision,
         "intentDigest": f"sha256:{intent}",
         "contentCharacters": len(content),
         "noop": noop,
+        "firstContent": first_content,
     }
 
 

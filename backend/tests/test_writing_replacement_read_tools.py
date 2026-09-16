@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
+from agents.writing.display_params import display_arguments
 from agents.writing.read_model import (
     SqliteWritingReadRepository,
     WritingReadScope,
@@ -202,6 +203,29 @@ async def test_background_chapters_and_outline_return_complete_json_shapes(temp_
 
 
 @pytest.mark.asyncio
+async def test_chapter_manifest_window_centers_chapter_beyond_first_page(temp_db) -> None:
+    for index in range(3, 131):
+        await temp_db.execute(
+            "INSERT INTO outline_chapters "
+            "(id, outline_id, title, level, progress, sort, parent_id) "
+            "VALUES (?, 'writing-1', ?, 1, 'todo', ?, NULL)",
+            [f"chapter-{index}", f"第{index}章", index],
+        )
+    repository = SqliteWritingReadRepository(temp_db)
+
+    result = await repository.writing_chapter_window(
+        WritingReadScope("book-1", chapter_id="chapter-120"),
+        limit=25,
+    )
+
+    ids = [item["id"] for item in result["items"]]
+    assert result["total"] == 130
+    assert result["offset"] > 100
+    assert "chapter-120" in ids
+    assert len(ids) == 25
+
+
+@pytest.mark.asyncio
 async def test_global_outline_never_falls_back_to_unowned_legacy_row(temp_db) -> None:
     repository = SqliteWritingReadRepository(temp_db)
 
@@ -353,6 +377,15 @@ async def test_replacement_profile_binds_scope_and_implementation(temp_db) -> No
         "refs": [],
         "missingIds": ["memory-1"],
     }
+    manifest = state.domain["writingContextSnapshot"]["workspaceManifest"]
+    assert manifest["chapters"]["total"] == 2
+    assert [item["id"] for item in manifest["chapters"]["items"]] == [
+        "chapter-1",
+        "chapter-2",
+    ]
+    assert manifest["outlines"]["total"] == 2
+    assert manifest["characters"]["total"] == 3
+    assert "profileMd" not in json.dumps(manifest, ensure_ascii=False)
     assert attributes["agentImplementation"] == replacement_implementation(
         AgentKind.WRITING
     ).to_mapping()
@@ -383,9 +416,9 @@ async def test_unconfigured_novel_knowledge_returns_stable_error(temp_db) -> Non
 
 
 @pytest.mark.asyncio
-async def test_replacement_context_contains_policy_not_book_facts(temp_db) -> None:
+async def test_replacement_context_contains_bounded_manifest_without_bodies(temp_db) -> None:
     profile = WritingReplacementProfile(temp_db)
-    request = _request()
+    request = await profile.prepare_request(_request())
     budget = ContextBudget(
         window_tokens=4096,
         output_reserve_tokens=512,
@@ -401,6 +434,7 @@ async def test_replacement_context_contains_policy_not_book_facts(temp_db) -> No
     assert len(bundle.blocks) == 1
     content = json.loads(bundle.blocks[0].content)
     assert content["policy"]["characterCountField"] == "total"
+    assert content["policy"]["batchIndependentReads"] is True
     assert content["contextSelection"]["selectionCounts"][
         "associatedChapters"
     ] == 1
@@ -408,7 +442,7 @@ async def test_replacement_context_contains_policy_not_book_facts(temp_db) -> No
         "sourceBodiesRequireTools"
     ] is True
     assert "群岛被永夜覆盖" not in bundle.blocks[0].content
-    assert "阿澈" not in bundle.blocks[0].content
+    assert content["workspaceManifest"]["characters"]["items"][0]["name"] == "阿澈"
     assert "正文" not in bundle.blocks[0].content
 
 
@@ -1012,3 +1046,37 @@ async def test_deterministic_provider_tool_roundtrip_uses_host_total(
     assert await SqliteAgentImplementationStore(temp_db).load(
         results[0].run_id
     ) == replacement_implementation(AgentKind.WRITING)
+
+
+def test_display_arguments_projects_whitelisted_model_arguments() -> None:
+    arguments = {
+        "chapterIds": ["ch-1", "ch-2"],
+        "maxTextLength": 4096,
+        "content": "很长" * 500,
+    }
+    projected = display_arguments(arguments, ("chapterIds", "maxTextLength", "content"))
+    assert projected == {"chapterIds": ["ch-1", "ch-2"]}
+
+
+def test_display_arguments_truncates_and_bounds_projection() -> None:
+    long_query = "谜" * 500
+    projected = display_arguments(
+        {"query": long_query, "refs": [{"kind": "spark", "id": str(i)} for i in range(40)]},
+        ("query", "refs"),
+    )
+    assert projected["query"].endswith("…")
+    assert len(projected["query"]) <= 121
+    assert len(projected["refs"]) == 8
+
+
+def test_read_catalog_projects_tool_arguments_for_display() -> None:
+    catalog = build_writing_read_tool_catalog(db=None)
+    registration = catalog.get("readWritingChapters")
+    assert registration is not None
+    params = registration.operation_display_params(
+        state=SimpleNamespace(),
+        arguments={"chapterIds": ["ch-7"]},
+        call=SimpleNamespace(name="readWritingChapters"),
+    )
+    assert params["toolArguments"] == {"chapterIds": ["ch-7"]}
+    assert params["displayNames"]["zh-CN"]

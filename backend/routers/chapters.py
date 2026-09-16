@@ -154,17 +154,57 @@ async def delete_chapter(chapterId: str):
                 book_id=str(owner["book_id"]),
                 chapter_id=chapterId,
             )
-            await db.execute(
-                "DELETE FROM outline_chapters WHERE id = ?",
-                [chapterId],
-            )
+            await _delete_chapter_and_conversations(db, chapterId)
     else:
-        await db.execute("DELETE FROM outline_chapters WHERE id = ?", [chapterId])
+        async with db.transaction(cancellation_linearizable=True):
+            await _delete_chapter_and_conversations(db, chapterId)
     deliveries = await memory_deposition_service.deliver_recorded(db, delivery_keys)
     return {
         "success": True,
         "memoryDelivery": [item.to_dict() for item in deliveries],
     }
+
+
+async def _delete_chapter_and_conversations(db, chapterId: str) -> None:
+    """删除章节并级联清理挂在该章上的全部会话与对话（不可恢复）。"""
+
+    chapter_session_ids = (
+        "SELECT id FROM ai_sessions WHERE chapter_id = ?"
+    )
+    await db.execute(
+        "DELETE FROM ai_agent_run_events WHERE run_id IN ("
+        "SELECT id FROM ai_agent_runs WHERE session_id IN ("
+        + chapter_session_ids + "))",
+        [chapterId],
+    )
+    await db.execute(
+        "DELETE FROM ai_agent_runs WHERE session_id IN ("
+        + chapter_session_ids + ")",
+        [chapterId],
+    )
+    await db.execute(
+        "DELETE FROM ai_conversations WHERE session_id IN ("
+        + chapter_session_ids + ")",
+        [chapterId],
+    )
+    await db.execute(
+        "DELETE FROM ai_conversation_summaries WHERE session_id IN ("
+        + chapter_session_ids + ")",
+        [chapterId],
+    )
+    await db.execute(
+        "DELETE FROM ai_local_conversation_turn_receipts WHERE session_id IN ("
+        + chapter_session_ids + ")",
+        [chapterId],
+    )
+    await db.execute(
+        "DELETE FROM ai_sessions WHERE chapter_id = ?",
+        [chapterId],
+    )
+    await db.execute(
+        "DELETE FROM outline_chapters WHERE id = ?",
+        [chapterId],
+    )
 
 
 @router.put("/chapters/{chapterId}/rename")

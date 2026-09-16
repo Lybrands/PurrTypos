@@ -799,7 +799,7 @@ export type NovelAnalysisWorkflowStatus =
   | 'completed'
   | 'failed'
   | 'canceled';
-export type NovelAnalysisWorkflowPauseKind = 'system' | 'user' | 'budget' | 'unknown';
+export type NovelAnalysisWorkflowPauseKind = 'system' | 'user' | 'unknown';
 export type NovelAnalysisUnitStatus =
   | 'pending'
   | 'waiting_retry'
@@ -812,7 +812,6 @@ export type NovelAnalysisUnitStatus =
   | 'failed'
   | 'canceled';
 
-/** Result of a pause, resume, or cancel command; it is not a conversation Run. */
 export interface NovelAnalysisTaskControlReceipt {
   commandStatus: 'accepted' | 'completed';
   taskId: string;
@@ -832,30 +831,21 @@ export interface NovelAnalysisTaskControlReceipt {
 export interface NovelAnalysisRun {
   runId: string;
   runStatus: string;
-  /** Chat delivery lifecycle; it intentionally differs from workflowStatus. */
   conversationStatus: NovelAnalysisConversationStatus;
   commandId: string;
   interactionKind?: 'analysis' | 'follow_up';
-  /** A scheduler-owned continuation; no synthetic user prompt is rendered. */
   automaticRecovery?: boolean;
   conversationId?: string;
   analysisArtifactRef?: string | null;
   prompt?: string;
   finalResponse?: string;
-  /** Root delivered a persisted checkpoint; the underlying task is incomplete. */
   partialCompletion?: boolean;
   taskId: string | null;
-  /** Raw persistence fact for diagnostics; workflowStatus drives the UI. */
   taskStatus: string | null;
-  /** Stable durable-workflow projection used by the UI. */
   workflowStatus: NovelAnalysisWorkflowStatus | null;
-  /** Why a paused workflow stopped; budget requires an explicit bounded resume. */
   workflowPauseKind: NovelAnalysisWorkflowPauseKind | null;
-  /** Stable public error code explaining the durable workflow state. */
   workflowReasonCode: string | null;
-  /** Whether a resume command is valid for the durable workflow. */
   workflowResumable: boolean;
-  /** Persisted due time for a system-owned automatic continuation. */
   workflowAutoResumeAtMs?: number | null;
   workflowAutoRecoveryEligible?: boolean;
   taskRevision: number | null;
@@ -2157,6 +2147,7 @@ export interface ElectronAPI {
   previewContinuationCanon: (data: { sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string }) => Promise<ApiResult<ContinuationCanonPreview>>;
   createContinuation: (data: { title: string; sourceRevisionId: string; sourceAnalysisId: string; forkSectionId: string; expectedSnapshotDigest: string; operationId: string; useSourceTechniques?: boolean; enableVolume?: boolean }) => Promise<ApiResult<ContinuationWorkspace>>;
   getContinuation: (data: { bookId: string }) => Promise<ApiResult<ContinuationWorkspace>>;
+  getContinuationPlotMaterials: (data: { bookId: string }) => Promise<ApiResult<Array<{ sourceKey: string; body: string }>>>;
   // Chapter diff history
   commitChapterDiff: (data: {
     chapterId: EntityId;
@@ -2496,6 +2487,7 @@ export interface ElectronAPI {
     };
     /** 是否允许三层 Writing Agent 暴露当前书籍范围内的工具。 */
     enableAgentTools?: boolean;
+    operationMode?: import('./agentOperationMode').AgentOperationMode;
     bookId?: EntityId | null;
     chapterId?: EntityId | null;
     currentChapterTitle?: string;
@@ -2580,6 +2572,27 @@ export interface ElectronAPI {
       };
       /** AI 工具 updateCharacter / editStoryBackground 提交的设定差异提议 */
       proposedSettingDiff?: ProposedSettingDiff;
+      /**
+       * 写作 Agent 的 editChapterContent 已获批准并落库：
+       * 仅通知刷新（不含正文），编辑器据此重新拉取当前章节。
+       */
+      chapterContentUpdated?: {
+        bookId?: EntityId;
+        chapterId: EntityId;
+        committedRevision?: string;
+        /** 本次保存是该章节的首笔正文（后端按保存前是否有正文判定） */
+        firstContent?: boolean;
+      };
+      /** 写作 Agent 批量创建章节/卷成功（仅通知；含章名供目录刷新与定位） */
+      chaptersCreated?: {
+        bookId?: EntityId;
+        chapters: Array<{
+          chapterId: EntityId;
+          title: string;
+          isVolume?: boolean;
+          order?: number;
+        }>;
+      };
       longTaskDispatched?: {
         runId: string;
         taskId: string;
@@ -2629,6 +2642,7 @@ export interface GeneralSettings {
   sync_outline_chapter: boolean;
   /** Agent 运行期间允许屏幕关闭，但阻止系统挂起本地任务。 */
   agent_prevent_system_sleep?: boolean;
+  agent_operation_mode?: import('./agentOperationMode').AgentOperationMode;
   /** 自定义 AI 模型配置列表，用于对话与模型选择 */
   ai_model_configs?: AiModelConfig[];
   /** 按协议 Provider 与共享端点控制真实模型调用并发。 */

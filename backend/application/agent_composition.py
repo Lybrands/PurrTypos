@@ -21,6 +21,7 @@ from purra.contracts import (
     ReasoningMode,
     ToolExecutionLimits,
     ToolExecutionMode,
+    ToolRiskLevel,
 )
 from purra.context_budget import resolve_context_budget_claims
 from purra.errors import ContractViolationError
@@ -88,6 +89,8 @@ from infrastructure.models.model_conversation_summarizer import (
 )
 from infrastructure.models.provider_capabilities import ProviderCapabilityCache
 from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
+from application.domain_effect_bridge import init_broadcaster
+from application.sse_mapping import bridge_chunk_for_effect
 from infrastructure.persistence.sqlite_agent_output_repository import (
     SqliteAgentOutputRepository,
 )
@@ -143,6 +146,50 @@ def _with_internal_child_audience(request: AgentRunRequest) -> AgentRunRequest:
         "responseAudience": "internal",
         "progressAudience": "internal",
     })
+
+
+class _OperationModeToolCatalog:
+    def __init__(self, catalog: ToolCatalog, mode: str) -> None:
+        self._catalog = catalog
+        self._mode = mode
+
+    @property
+    def names(self):
+        return self._catalog.names
+
+    def registrations(self):
+        return tuple(self._registration(item) for item in self._catalog.registrations())
+
+    def enabled_names(self, request):
+        return self._catalog.enabled_names(request)
+
+    def get(self, name):
+        item = self._catalog.get(name)
+        return self._registration(item) if item is not None else None
+
+    def schemas(self, names=None):
+        return self._catalog.schemas(names)
+
+    def _registration(self, item: ToolRegistration) -> ToolRegistration:
+        policy = item.policy
+        if not _auto_approves_policy(self._mode, policy):
+            return item
+        # PROPOSE keeps the write-path guarantees in purra 1.0.1 (idempotency
+        # gateway, no parallel read-only batching) while skipping approval.
+        return replace(item, policy=replace(policy, mode=ToolExecutionMode.PROPOSE))
+
+
+def _auto_approves_policy(mode: str, policy) -> bool:
+    return (
+        policy.mode is ToolExecutionMode.CONFIRM
+        and (
+            mode == "full_access"
+            or (
+                mode == "auto_approve"
+                and policy.risk_level is not ToolRiskLevel.DESTRUCTIVE
+            )
+        )
+    )
 
 
 def _model_task_identity(model_request: ModelRequest, reasoning_mode) -> dict:
@@ -249,6 +296,7 @@ class AgentComposition:
         self._conversation_compaction_repository = (
             SqliteConversationCompactionRepository(db)
         )
+        self._domain_effect_broadcaster = init_broadcaster(bridge_chunk_for_effect)
         self._repository = SqliteRunRepository(
             db,
         )
@@ -353,6 +401,10 @@ class AgentComposition:
     @property
     def output_repository(self) -> AgentOutputRepository:
         return self._output_repository
+
+    @property
+    def domain_effect_broadcaster(self) -> DomainEffectBroadcaster:
+        return self._domain_effect_broadcaster
 
     @property
     def output_journal(self) -> AgentOutputJournalQuery:
@@ -563,6 +615,7 @@ class AgentComposition:
         public_progress_from_content: bool = False,
         public_progress_requirement=None,
         runtime_limits_override=None,
+        operation_mode: str = "request_approval",
     ) -> AgentCore:
         if self._closed:
             raise RuntimeError("Agent composition has been shut down")
@@ -637,6 +690,8 @@ class AgentComposition:
             extras=extras,
             allowed_modes=normalized_modes,
         )
+        if operation_mode != "request_approval":
+            tool_catalog = _OperationModeToolCatalog(tool_catalog, operation_mode)
         if public_progress_requirement is not None:
             tool_catalog = public_progress_requirement.wrap_tools(tool_catalog)
         resolved_context_strategy = getattr(
@@ -752,6 +807,10 @@ class AgentComposition:
         kwargs.setdefault(
             "public_progress_from_content",
             _uses_adapter_public_progress(request),
+        )
+        kwargs.setdefault(
+            "operation_mode",
+            str(request.metadata.get("operationMode") or "request_approval"),
         )
         kwargs.setdefault("agent_tree_enabled",
             request.tools_enabled

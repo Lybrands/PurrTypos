@@ -1,4 +1,3 @@
-import React from 'react'
 import {
   CheckCircleIcon,
   CloseCircleIcon,
@@ -11,7 +10,6 @@ import {
 import type { AiTaskPlan } from '../../../agent-runtime'
 import {
   getTaskPlanLabel,
-  isTaskPlanTerminal,
   TaskPlanSteps,
 } from './TaskPlanCard'
 import {
@@ -26,13 +24,6 @@ interface AgentTaskProgressProps {
   placement?: PurrPopoverProps['placement']
 }
 
-export function resolveTaskProgressOpenChange(
-  _terminal: boolean,
-  nextOpen: boolean,
-): boolean {
-  return nextOpen
-}
-
 function TaskPlanStatusIcon({ plan }: AgentTaskProgressProps) {
   if (plan.status === 'done') return <CheckCircleIcon />
   if (plan.status === 'blocked' || plan.status === 'paused') return <PauseCircleIcon />
@@ -45,8 +36,6 @@ export default function AgentTaskProgress({
   placement = 'bottomRight',
 }: AgentTaskProgressProps) {
   const displayPlan = localizeTaskPlan(plan)
-  const terminal = isTaskPlanTerminal(displayPlan)
-  const [open, setOpen] = React.useState(false)
   const {
     runningSteps,
     currentStep,
@@ -65,10 +54,6 @@ export default function AgentTaskProgress({
     <PurrPopover
       trigger="click"
       placement={placement}
-      open={open}
-      onOpenChange={(nextOpen) => {
-        setOpen(resolveTaskProgressOpenChange(terminal, nextOpen))
-      }}
       content={(
         <div className="ai-task-progress-popover">
           <div className="ai-task-progress-popover__header">

@@ -45,6 +45,8 @@ export function useAiSessions({
   /** 当前 book+scope(+chapter) 维度的会话列表是否已完成首次拉取 */
   const [sessionsLoaded, setSessionsLoaded] = React.useState(false);
   const loadKeyRef = React.useRef<string>("");
+  /** 建会话的去重：自动建默认会话与手动 +/发送兜底并发时只建一个 */
+  const createInFlightRef = React.useRef<Promise<number | null> | null>(null);
   const setActiveSessionId = React.useCallback<
     React.Dispatch<React.SetStateAction<number | null>>
   >((next) => {
@@ -57,6 +59,45 @@ export function useAiSessions({
       return resolved;
     });
   }, []);
+
+  /**
+   * 写作范围的建会话（自动默认会话与手动 + 共用）：
+   * - 同一时刻只允许一个创建请求在途（并发去重）；
+   * - 请求返回时校验 loadKey 未变化，避免切书/切章后把会话挂到旧范围。
+   */
+  const createSessionOnce = React.useCallback(
+    async (
+      bookIdValue: NonNullable<typeof bookId>,
+      chapterIdValue: EntityId | null,
+      expectedLoadKey: string,
+    ): Promise<number | null> => {
+      if (createInFlightRef.current) return createInFlightRef.current;
+      const task = (async () => {
+        try {
+          if (loadKeyRef.current !== expectedLoadKey) return null;
+          const res = await services.sessions.createSession({
+            bookId: bookIdValue,
+            chapterId: chapterIdValue,
+          });
+          if (!res.success || !res.data) return null;
+          if (loadKeyRef.current !== expectedLoadKey) return null;
+          const created = res.data;
+          setSessions((prev) =>
+            prev.some((session) => session.id === created.id)
+              ? prev
+              : [...prev, created],
+          );
+          setActiveSessionIdState(created.id);
+          return created.id;
+        } finally {
+          createInFlightRef.current = null;
+        }
+      })();
+      createInFlightRef.current = task;
+      return task;
+    },
+    [],
+  );
 
   React.useEffect(() => {
     const isSettingScope = scope === "setting";
@@ -99,31 +140,38 @@ export function useAiSessions({
           setActiveSessionIdState(nextSessionId);
         } else if (res.success) {
           activeSessionByLoadKey.delete(key);
+          // 默认存在一个对话：首次拉取为空时静默创建默认会话，
+          // 会话出现后列表正常呈现（仅零会话时才显示空态，见 composerPolicy）。
+          if (!isSettingScope && bookId != null) {
+            void createSessionOnce(bookId, chapterId ?? null, key)
+              .catch(() => undefined);
+          }
         }
         setSessionsLoaded(true);
       });
-  }, [bookId, chapterId, scope, setConversations, setLoading]);
+  }, [bookId, chapterId, scope, setConversations, setLoading, createSessionOnce]);
 
   React.useEffect(() => {
     setPrependedHistory([]);
   }, [activeSessionId]);
 
-  const handleNewSession = React.useCallback(async () => {
-    if (bookId == null) return;
+  const handleNewSession = React.useCallback(async (): Promise<number | null> => {
+    if (bookId == null) return null;
     const isSettingScope = scope === "setting";
     if (!isSettingScope && chapterId == null) {
       appMessage.warning("请选择一个章节，再创建对话");
-      return;
+      return null;
     }
-    if (sessions.length > 0 && conversations.length === 0) return;
+    if (sessions.length > 0 && conversations.length === 0) return null;
     const res = await services.sessions.createSession({
       bookId,
       chapterId: isSettingScope ? null : chapterId,
       ...(isSettingScope ? { scope: "setting" as const } : {}),
     });
-    if (!res.success || !res.data) return;
+    if (!res.success || !res.data) return null;
     setSessions((prev) => [...prev, res.data]);
     setActiveSessionId(res.data.id);
+    return res.data.id;
   }, [
     bookId,
     chapterId,

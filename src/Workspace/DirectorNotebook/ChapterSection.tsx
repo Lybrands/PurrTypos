@@ -31,7 +31,7 @@ export interface ChapterSectionProps {
 
 type DeleteModal = {
   chapter: Chapter
-  onConfirm: (checked: boolean) => void
+  onConfirm: () => void
   checkboxLabel?: string
 }
 
@@ -98,6 +98,7 @@ export default function ChapterSection({
     activeChapterId: chapterId,
     enableVolume,
     chaptersById,
+    chapters,
     onChapterSelect,
     onChaptersChange,
     onItemCreated,
@@ -162,11 +163,11 @@ export default function ChapterSection({
     const ids = getItemAndDescendantIds(chapter, enableVolume, chaptersByVolumeId)
     setDeleteModal({
       chapter,
-      onConfirm: async (checked) => {
+      // 大纲与章节已不再分离：删除始终联动清理对应大纲
+      onConfirm: async () => {
         setDeleteModal(null)
-        await deleteByIds(ids, checked)
+        await deleteByIds(ids, true)
       },
-      checkboxLabel: '同时删除对应大纲',
     })
   }
 
@@ -249,7 +250,6 @@ export default function ChapterSection({
         <ConfirmModal
           title={enableVolume && deleteModal.chapter.parent_id == null ? '删除卷' : '删除章节'}
           message={`确认删除${enableVolume && deleteModal.chapter.parent_id == null ? '卷' : '章节'}「${deleteModal.chapter.title}」？${enableVolume && deleteModal.chapter.parent_id == null ? '卷内章节将一并删除。' : ''}删除后无法恢复。`}
-          checkboxLabel={deleteModal.checkboxLabel}
           onConfirm={deleteModal.onConfirm}
           onCancel={() => setDeleteModal(null)}
         />

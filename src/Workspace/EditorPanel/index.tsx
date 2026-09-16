@@ -152,6 +152,15 @@ export default function EditorPanel({
   const lastChapterIdRef = React.useRef<EntityId | null>(null)
   const nextSaveSourceRef = React.useRef<string | null>(null)
   const lexicalEditorRef = React.useRef<LexicalEditorHandle>(null)
+  const lexicalInstanceRef = React.useRef<import('lexical').LexicalEditor | null>(null)
+
+  const handleLexicalEditor = React.useCallback(
+    (editor: import('lexical').LexicalEditor | null) => {
+      lexicalInstanceRef.current = editor
+      onLexicalEditor?.(editor)
+    },
+    [onLexicalEditor],
+  )
 
   const refreshArticle = React.useCallback((cid: EntityId) => {
     services.articles.getArticle({ chapterId: cid }).then((res) => {
@@ -170,8 +179,9 @@ export default function EditorPanel({
 
   React.useEffect(() => {
     const handler = (e: Event) => {
-      const { chapterId: updatedId } = (e as CustomEvent<{ chapterId: EntityId }>).detail ?? {}
-      if (updatedId != null && updatedId === chapterId) refreshArticle(updatedId)
+      const updatedId = (e as CustomEvent<{ chapterId: EntityId }>).detail?.chapterId
+      if (updatedId == null) return
+      if (updatedId === chapterId) refreshArticle(updatedId)
     }
     window.addEventListener('chapter-content-updated', handler)
     return () => window.removeEventListener('chapter-content-updated', handler)
@@ -468,7 +478,7 @@ export default function EditorPanel({
               onKeyTrigger={handleKeyTrigger}
               placeholder={`开始写作「${chapterTitle}」... 提示：输入 / 可唤起 AI 助手`}
               className="editor-lexical-wrap"
-              onLexicalEditor={onLexicalEditor}
+              onLexicalEditor={handleLexicalEditor}
               onSelectionChange={inlineEditEnabled ? handleSelectionChange : undefined}
               ghostEnabled={inlineEditEnabled}
               onGhostIdle={inlineEditEnabled ? handleGhostIdle : undefined}

@@ -237,7 +237,6 @@ function analysisErrorMessage(run: NovelAnalysisRun) {
   if (code === 'provider_insufficient_balance') return '模型账户余额或额度不足，请处理后重试。'
   if (code === 'model_invocation_deadline_exceeded') return '模型单次分析超过当前时限，本次分析已结束。你可以重新分析或更换响应更快的模型。'
   if (code === 'model_invocation_failed') return '模型调用中断，本次分析已结束。请由你决定是否重新分析。'
-  if (code === 'max_model_rounds') return '子 Agent 达到模型轮次上限，仍未提交最终结果。本次分析已结束，请由你决定如何处理。'
   if (code === 'novel_analysis_child_failed') return '子 Agent 未能完成任务，本次分析已结束，请由你决定如何处理。'
   if (code === 'model_reasoning_mode_conflict') return '模型请求的推理配置发生冲突，请检查模型调用链路。'
   if (code === 'user_paused_novel_analysis') return '任务由你暂停，恢复后会从未完成的步骤继续。'

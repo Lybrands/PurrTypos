@@ -51,6 +51,7 @@ import {
 } from '../agent-runtime'
 import { normalizeApiProvider } from '../modelCatalog'
 import { createScopedComposer } from '../components/AgentConversation/scopedComposer'
+import { generateSessionTitleFromText, isUntitledSessionTitle } from '../components/AgentConversation/sessionTitle'
 import { createAnalysisConversationController } from './analysisController'
 import { prepareAgentCompletionNotifications } from '../platform/agentNotifications'
 import type {
@@ -159,12 +160,6 @@ function resumableAnalysisWorkflowNotice(run?: NovelAnalysisRun) {
         hour: '2-digit', minute: '2-digit', hour12: false,
       }).format(new Date(dueAt))} 再次尝试。`
     : ''
-  if (run.workflowPauseKind === 'budget') {
-    return {
-      text: `本轮模型调用预算已用完，分析已安全暂停。${progress}继续执行只会为这些未完成步骤补充一轮受限调用额度。`,
-      resumeLabel: '继续并补充一轮预算',
-    }
-  }
   if (run.workflowPauseKind === 'user') {
     return {
       text: `分析已按你的要求暂停。${progress}恢复后会从未完成步骤继续。`,
@@ -744,6 +739,20 @@ export default function NovelSourcesPage({
       })
       if (!result.success) throw new Error(result.error || '启动分析失败')
       accepted = true
+      // 与打字发送一致：全新会话首次被「快速/重新分析」使用时也自动生成标题。
+      if (activeSession && isUntitledSessionTitle(sessions.find((item) => item.id === activeSession)?.title)
+        && selectedAnalysisModel) {
+        generateSessionTitleFromText({
+          userText: prompt,
+          model: selectedAnalysisModel,
+          requestTitle: (request) => services.ai.generateSessionTitle(request),
+          logLabel: '来源分析',
+          persistTitle: (title) => analysisSessions.update(revisionId, activeSession, { title }),
+          onTitle: (title) => setSessions((current) => current.map(
+            (item) => item.id === activeSession ? { ...item, title } : item,
+          )),
+        })
+      }
       if (!isCurrent()) return true
       if (import.meta.env.DEV) setAiDebugInspectorVisible(true)
       setAnalysisRevisionId(revisionId)
@@ -1025,6 +1034,20 @@ export default function NovelSourcesPage({
     analysisComposer.enqueue(analysisScope, `novel-analysis-queue-${crypto.randomUUID()}`,
       prompt, { replaceRunId, revisionId: analysisRevisionId, conversationId: activeSession, runtime: runtime() }, content == null)
     refreshComposer()
+    // 与写作/剧本 Agent 一致：全新会话的首条消息发出后自动生成会话标题。
+    if (isUntitledSessionTitle(sessions.find((item) => item.id === activeSession)?.title)
+      && sessionRuns.length === 0) {
+      generateSessionTitleFromText({
+        userText: prompt,
+        model: selectedAnalysisModel,
+        requestTitle: (request) => services.ai.generateSessionTitle(request),
+        logLabel: '来源分析',
+        persistTitle: (title) => analysisSessions.update(analysisRevisionId, activeSession, { title }),
+        onTitle: (title) => setSessions((current) => current.map(
+          (item) => item.id === activeSession ? { ...item, title } : item,
+        )),
+      })
+    }
   }
   React.useEffect(() => {
     if (!analysisReady || hasActiveAnalysis || waitingForRun || busy) return

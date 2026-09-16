@@ -135,6 +135,7 @@ test('screenplay adapter derives archived conversation capabilities', () => {
   assert.deepEqual(controller.capabilities, {
     inputDisabled: true,
     submitMode: 'queue',
+    sessionlessSend: false,
   })
 })
 

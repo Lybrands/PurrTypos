@@ -9,6 +9,9 @@ export function createAnalysisConversationController(
     capabilities: getAgentConversationCapabilities({
       running: bindings.conversation.running,
       readOnly: false,
+      // 发送路径（sendAnalysisMessage）要求已有会话；零会话只出现在加载
+      // 间隙（initializing 已禁发），loadSessions 会自动补建默认会话。
+      sessionlessSend: false,
     }),
   }
 }

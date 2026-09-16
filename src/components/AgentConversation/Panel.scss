@@ -37,17 +37,22 @@
 
 .agent-conversation-panel__footer {
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
 }
 
 .agent-conversation-panel__footer-leading,
 .agent-conversation-panel__footer-actions {
-  gap: 8px;
+  gap: 4px;
 }
 
 .agent-conversation-panel__footer-leading {
   flex: 1;
   overflow: hidden;
+}
+
+.agent-conversation-panel__operation-mode {
+  width: 112px;
+  flex: 0 0 112px;
 }
 
 .agent-conversation-panel__footer-actions {

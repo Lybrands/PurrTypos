@@ -1000,6 +1000,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
   React.useEffect(() => setOpen(false), [run.id]);
   const isRoot = Boolean(rootRunId && run.agentRunId === rootRunId);
   const isChild = Boolean(run.parentRunId && run.agentId);
+  const isRequest = !run.agentRunId;
   const elapsed = (run.finishedAt ?? now) - run.startedAt;
   const modelCallRows = [
     ...run.modelCalls.map((call) => ({
@@ -1033,7 +1034,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
       >
         <summary>
           <div>
-            <span>{isRoot ? "主 AGENT" : isChild ? "子 AGENT" : "历史 RUN · 关系未确认"}</span>
+            <span>{isRoot ? "主 AGENT" : isChild ? "子 AGENT" : isRequest ? "请求记录" : "历史 RUN · 关系未确认"}</span>
             <strong>{isRoot ? "统一输出与工具执行" : run.source || run.taskType}</strong>
             <small title={usage ? tokenUsageTitle(usage) : undefined}>
               {isRoot ? `${run.source} · ` : ""}{formatTime(run.startedAt)}
@@ -1402,7 +1403,7 @@ function VisibleAiDevInspector() {
           </div>
 
           <footer className="ai-dev-inspector__footer">
-            <span>本轮 Root Run ID</span>
+            <span>{aiDebugTurnRootRunId(currentTurn) ? "本轮 Root Run ID" : "本轮请求 ID"}</span>
             <code title={aiDebugTurnDiagnosticId(currentTurn)}>
               {aiDebugTurnDiagnosticId(currentTurn)}
             </code>

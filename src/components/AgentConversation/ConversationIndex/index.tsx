@@ -1,12 +1,9 @@
 import React from 'react'
 import {
-  CheckCircleIcon,
   CloseIcon,
-  ClockIcon,
   LoadingIcon,
   MessageIcon,
   PanelToggleIcon,
-  PauseCircleIcon,
   PlusIcon,
   PurrButton,
   PurrEmpty,
@@ -34,7 +31,6 @@ interface AgentConversationIndexProps<
   context?: React.ReactNode
   extraActions?: React.ReactNode
   sessionActivities?: Partial<Record<AgentSessionId, AgentConversationActivity>>
-  getActivityLabel?: (activity: AgentConversationActivity) => string
   emptyDescription?: React.ReactNode
   onActiveSessionChange: (sessionId: TSession['id']) => void
   onEditingSessionIdChange: (sessionId: TSession['id'] | null) => void
@@ -43,15 +39,6 @@ interface AgentConversationIndexProps<
   onNewSession: () => void
   onCloseSession: (session: TSession) => void
   onCollapse: () => void
-}
-
-function ActivityIcon({ activity }: { activity: AgentConversationActivity }) {
-  if (activity.state === 'running') return <LoadingIcon spin />
-  if (activity.state === 'queued') return <ClockIcon />
-  if (activity.state === 'paused') return <PauseCircleIcon />
-  if (activity.state === 'completed') return <CheckCircleIcon />
-  if (activity.state === 'canceled') return <PauseCircleIcon />
-  return <CloseIcon />
 }
 
 function formatSessionTime(value?: string) {
@@ -66,15 +53,6 @@ function formatSessionTime(value?: string) {
   }).format(date)
 }
 
-function defaultActivityLabel(activity: AgentConversationActivity) {
-  if (activity.state === 'running') return '生成中'
-  if (activity.state === 'queued') return '等待发送'
-  if (activity.state === 'paused') return '任务已暂停'
-  if (activity.state === 'completed') return '已完成'
-  if (activity.state === 'failed') return '生成失败'
-  return '已终止'
-}
-
 export default function AgentConversationIndex<
   TSession extends AgentConversationSession = AgentConversationSession,
 >({
@@ -86,7 +64,6 @@ export default function AgentConversationIndex<
   context,
   extraActions,
   sessionActivities = {},
-  getActivityLabel = defaultActivityLabel,
   emptyDescription = '暂无对话',
   onActiveSessionChange,
   onEditingSessionIdChange,
@@ -180,13 +157,13 @@ export default function AgentConversationIndex<
                   <span className="agent-conversation-index__time">
                     {formatSessionTime(session.createdAt)}
                   </span>
-                  {activity ? (
+                  {activity?.state === 'running' ? (
                     <span
-                      className={`agent-conversation-index__status agent-conversation-index__status--${activity.state}`}
+                      className="agent-conversation-index__status agent-conversation-index__status--running"
                       role="status"
+                      aria-label="对话进行中"
                     >
-                      <ActivityIcon activity={activity} />
-                      <span>{getActivityLabel(activity)}</span>
+                      <LoadingIcon spin />
                     </span>
                   ) : null}
                 </div>

@@ -443,6 +443,29 @@ def build_screenplay_replacement_read_registrations(db):
     )
 
 
+def _screenplay_display_params(state, arguments, name, label):
+    """富展示参数：复用 legacy 细粒度标签逻辑，按写作端 toolArguments 契约
+    投影（searchQuery/readTargets/targetDetail 等），前端据此渲染工具行。"""
+    from agents.screenplay.legacy_tool_labels import (
+        legacy_screenplay_operation_display_params,
+    )
+
+    domain: dict = {}
+    for key in (SCREENPLAY_ROOT_SCOPE_STATE_KEY, SCREENPLAY_OPERATION_SCOPE_STATE_KEY):
+        raw = getattr(state, "domain", {}).get(key)
+        if isinstance(raw, dict):
+            domain = {**domain, **raw}
+    params = legacy_screenplay_operation_display_params(domain, arguments, name)
+    display_names = params.get("displayNames") or {"zh-CN": label, "en": name}
+    tool_arguments = {
+        key: value for key, value in params.items() if key != "displayNames"
+    }
+    return {
+        "displayNames": display_names,
+        **({"toolArguments": tool_arguments} if tool_arguments else {}),
+    }
+
+
 def _registration(name, description, label, properties, required, handler, host_paths):
     return ToolRegistration(
         schema=ToolSchema(
@@ -463,9 +486,9 @@ def _registration(name, description, label, properties, required, handler, host_
             model_owned_paths=tuple(properties),
             host_bound_paths=host_paths,
         ),
-        operation_display_params=lambda state, arguments, call: {
-            "displayNames": {"zh-CN": label, "en": name},
-        },
+        operation_display_params=lambda state, arguments, call, name=name, label=label: (
+            _screenplay_display_params(state, arguments, name, label)
+        ),
     )
 
 

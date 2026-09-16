@@ -34,6 +34,7 @@ import {
   type TimelineOperationPart,
   type TimelineCanonicalOperationGroupPart,
   type TimelineStepPart,
+  type ToolLabelContext,
 } from "./timeline";
 import "./index.scss";
 
@@ -53,6 +54,7 @@ export interface AssistantOutputProps {
     reportId: string,
   ) => Promise<{ success: boolean; error?: string }>;
   subAgentReader?: SubAgentReader;
+  toolLabelContext?: ToolLabelContext;
 }
 
 const PROCESSING_STANDBY_DELAY_MS = 1000;
@@ -321,6 +323,7 @@ function AssistantOutputInner({
   onResolveToolApproval,
   onSubmitErrorReport,
   subAgentReader,
+  toolLabelContext,
 }: AssistantOutputProps) {
   const isStreaming = loading && isLastAssistant;
   const handleWheelUp = () =>
@@ -333,8 +336,9 @@ function AssistantOutputInner({
         isStreaming,
         isLastAssistant,
         loading,
+        toolLabelContext,
       }),
-    [message, index, isStreaming, isLastAssistant, loading],
+    [message, index, isStreaming, isLastAssistant, loading, toolLabelContext],
   );
 
   const answerParts = timeline.filter((part) => part.type === "text");

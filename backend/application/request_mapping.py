@@ -124,6 +124,7 @@ def to_writing_agent_request(
         metadata={
             **conversation_input_metadata(source="client_public_messages", scope=f"writing:{body.bookId}:{body.sessionId}"),
             "locale": body.locale,
+            "operationMode": body.operationMode,
             **({"streamId": body.streamId} if body.streamId else {}),
         },
     )

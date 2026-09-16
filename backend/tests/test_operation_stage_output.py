@@ -10,7 +10,7 @@ from purra.errors import ContractViolationError
 from purra.model_invocation import AgentModelInvocationManager, ModelInvocationContext
 from application.composition_factory import create_agent_composition
 from application.operation_stage_output import OperationStageOutput
-from application.sse_mapping import canonical_output_to_sse_chunk
+from application.sse_mapping import bridge_chunk_for_effect, canonical_output_to_sse_chunk
 from database.connection import DatabaseConnection
 from tests.test_parent_result_window import request
 
@@ -108,3 +108,38 @@ async def test_operation_stage_is_early_serial_public_and_not_replayed(tmp_path,
             await asyncio.wait_for(frontend.wait(), 5)
         await composition.shutdown()
         await db.close()
+
+def test_bridge_chunk_for_chapter_content_effect() -> None:
+    chunk = bridge_chunk_for_effect("writing.chapter_content_updated", {
+        "bookId": 1, "chapterId": 7, "committedRevision": "r2",
+        "noop": False, "firstContent": True,
+    })
+    assert chunk == {
+        "chapterContentUpdated": {
+            "bookId": 1, "chapterId": 7, "committedRevision": "r2",
+            "firstContent": True,
+        },
+    }
+    assert bridge_chunk_for_effect("writing.chapter_content_updated", {
+        "bookId": 1, "chapterId": 7, "noop": True,
+    }) is None
+    assert bridge_chunk_for_effect("writing.unknown_effect", {
+        "chapterId": 7,
+    }) is None
+
+
+def test_bridge_chunk_accepts_frozen_purra_containers() -> None:
+    """purra 冻结容器为 FrozenList/FrozenDict（非原生 list/dict）。"""
+    from purra.json_values import FrozenDict, FrozenList
+
+    chunk = bridge_chunk_for_effect(
+        "writing.chapters_created",
+        FrozenDict({
+            "bookId": 1,
+            "chapters": FrozenList([
+                FrozenDict({"chapterId": "a1", "title": "第55章"}),
+            ]),
+        }),
+    )
+    assert chunk is not None
+    assert chunk["chaptersCreated"]["chapters"][0]["title"] == "第55章"

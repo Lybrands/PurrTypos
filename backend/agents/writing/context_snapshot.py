@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 
 from agents.writing.context_contract import WritingContextSelection
+from agents.writing.read_model import SqliteWritingReadRepository
 from application.continuation_context import ContinuationContextService
 
 
@@ -72,6 +74,12 @@ async def build_writing_context_snapshot(
     continuation = await ContinuationContextService(db).load_for_writing(
         scope.book_id
     )
+    repository = SqliteWritingReadRepository(db)
+    chapters, outlines, characters = await asyncio.gather(
+        repository.writing_chapter_window(scope, limit=25),
+        repository.writing_outlines(scope, limit=24),
+        repository.characters(scope, limit=32),
+    )
     from application.novel_knowledge_service import get_novel_knowledge_service
 
     knowledge_scope = await get_novel_knowledge_service(db).scope_snapshot(
@@ -91,6 +99,19 @@ async def build_writing_context_snapshot(
         "continuation": {
             "creationMode": continuation["creationMode"],
             "binding": dict(binding) if isinstance(binding, dict) else None,
+        },
+        "workspaceManifest": {
+            "chapters": _manifest_view(chapters, (
+                "id", "title", "level", "progress", "sort", "parentId",
+                "articleExists", "storedContentNonempty",
+            )),
+            "outlines": _manifest_view(outlines, (
+                "id", "title", "outlineType", "sort", "storedContentNonempty",
+            )),
+            "characters": _manifest_view(
+                characters,
+                ("id", "name", "tags"),
+            ),
         },
     }
 
@@ -117,6 +138,25 @@ async def snapshot_from_state_or_run_attributes(db, state):
 
 def _digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _manifest_view(
+    page: dict[str, object],
+    fields: tuple[str, ...],
+) -> dict[str, object]:
+    raw_items = page.get("items")
+    items = [item for item in raw_items if isinstance(item, dict)] if isinstance(
+        raw_items, list
+    ) else []
+    return {
+        "total": int(page.get("total") or 0),
+        "offset": int(page.get("offset") or 0),
+        "truncated": page.get("nextOffset") is not None,
+        "items": [
+            {field: item.get(field) for field in fields if field in item}
+            for item in items
+        ],
+    }
 
 
 __all__ = [

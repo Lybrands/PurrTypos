@@ -34,82 +34,6 @@ _REPLACEMENT_IDENTITY = scalable_novel_analysis_implementation(
 )
 
 
-async def retire_misclassified_failure_pauses(db) -> tuple[str, ...]:
-    """Settle legacy Unit failures that were mislabeled as recoverable pauses."""
-
-    rows = await db.fetch_all(
-        "SELECT t.id AS task_id, u.unit_id, u.error_code, u.failure_json "
-        "FROM ai_agent_long_tasks AS t "
-        "JOIN ai_agent_long_task_units AS u ON u.task_id = t.id "
-        "WHERE t.namespace = ? AND t.kind = ? AND t.status = 'paused' "
-        "AND u.status = 'blocked' AND u.disposition = 'pause_recoverable' "
-        "AND u.error_code IS NOT NULL "
-        "ORDER BY t.id, u.position",
-        [NOVEL_ANALYSIS_REPLACEMENT_DOMAIN_NAMESPACE, _REPLACEMENT_TASK_KIND],
-    )
-    retired: list[str] = []
-    async with db.transaction(cancellation_linearizable=True):
-        for row in rows:
-            task_id = str(row["task_id"])
-            if task_id in retired:
-                continue
-            error_code = str(row["error_code"])
-            if error_code == "RuntimeError":
-                child = await db.fetch_one(
-                    "SELECT child.error FROM ai_agent_long_task_runs AS ltr "
-                    "JOIN ai_agent_runs AS child ON child.parent_run_id = ltr.run_id "
-                    "WHERE ltr.task_id = ? AND child.status = 'failed' "
-                    "AND child.error IS NOT NULL AND child.error <> '' "
-                    "ORDER BY child.update_time DESC, child.rowid DESC LIMIT 1",
-                    [task_id],
-                )
-                error_code = str((child or {}).get("error") or "").strip() or (
-                    "novel_analysis_child_failed"
-                )
-            failure = _metadata(row.get("failure_json"))
-            if failure.get("category") == "transient_provider":
-                failure["category"] = "tool_execution"
-            failure["code"] = error_code
-            await db.execute(
-                "UPDATE ai_agent_long_task_units SET status = 'failed', "
-                "error_code = ?, failure_json = ?, disposition = 'fail_permanent', "
-                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ? "
-                "AND status = 'blocked' AND disposition = 'pause_recoverable'",
-                [
-                    error_code,
-                    json.dumps(failure, ensure_ascii=False, separators=(",", ":")),
-                    task_id,
-                    row["unit_id"],
-                ],
-            )
-            await db.execute(
-                "UPDATE ai_agent_long_task_units SET status = 'canceled', "
-                "worker_id = NULL, lease_expires_at_ms = NULL, "
-                "error_code = COALESCE(error_code, 'task_failed_dependency'), "
-                "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
-                "AND unit_id <> ? AND status IN ('pending', 'claimed', 'running')",
-                [task_id, row["unit_id"]],
-            )
-            await db.execute(
-                "UPDATE ai_agent_long_tasks SET status = 'failed', "
-                "failed_units = failed_units + 1, revision = revision + 1, "
-                "state_reason_code = NULL, state_reason_scope = NULL, "
-                "update_time = CURRENT_TIMESTAMP WHERE id = ? AND status = 'paused'",
-                [task_id],
-            )
-            await append_long_task_event(
-                db,
-                task_id=task_id,
-                event_type="misclassified_failure_pause_retired",
-                reason_code=error_code,
-                reason_scope="local",
-                source_key=f"{task_id}:misclassified-failure-pause-retired:v1",
-                payload={"unitId": str(row["unit_id"])},
-            )
-            retired.append(task_id)
-    return tuple(retired)
-
-
 class NovelAnalysisReplacementAutomaticRecovery:
     """Dispatch only due tasks owned by the exact replacement identity."""
 
@@ -345,5 +269,4 @@ def _non_negative_int(value: object) -> int:
 __all__ = [
     "NovelAnalysisReplacementAutomaticRecovery",
     "monitor_novel_analysis_replacement_recovery",
-    "retire_misclassified_failure_pauses",
 ]

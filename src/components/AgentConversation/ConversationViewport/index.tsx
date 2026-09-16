@@ -48,6 +48,7 @@ import {
 } from '../viewportSession'
 import './index.scss'
 import type { SubAgentReader } from '../DelegationStatus'
+import type { ToolLabelContext } from '../AssistantOutput/timeline'
 
 export interface AgentConversationProps {
   sessionIdentity: string
@@ -76,6 +77,7 @@ export interface AgentConversationProps {
     reportId: string,
   ) => Promise<{ success: boolean; error?: string }>
   subAgentReader?: SubAgentReader
+  toolLabelContext?: ToolLabelContext
 }
 
 const VirtuosoList = React.forwardRef<HTMLDivElement, ListProps>(
@@ -161,6 +163,7 @@ export default function ConversationViewport({
   onResolveToolApproval,
   onSubmitErrorReport,
   subAgentReader,
+  toolLabelContext,
 }: AgentConversationProps) {
   const virtuosoRef = React.useRef<VirtuosoHandle>(null)
   const scrollerCleanupRef = React.useRef<(() => void) | null>(null)
@@ -423,6 +426,7 @@ export default function ConversationViewport({
             onResolveToolApproval={onResolveToolApproval}
             onSubmitErrorReport={onSubmitErrorReport}
             subAgentReader={subAgentReader}
+            toolLabelContext={toolLabelContext}
           />
         ) : null}
         {attachment ? (

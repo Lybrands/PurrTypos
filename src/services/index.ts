@@ -144,6 +144,7 @@ export const services = {
     previewCanon: backendApi.previewContinuationCanon,
     create: backendApi.createContinuation,
     get: backendApi.getContinuation,
+    getPlotMaterials: backendApi.getContinuationPlotMaterials,
   },
   history: {
     commitChapterDiff: backendApi.commitChapterDiff,

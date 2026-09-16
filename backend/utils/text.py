@@ -9,6 +9,17 @@ import re
 from typing import Any
 
 
+def fold_blank_lines(text: str) -> str:
+    """应用正文规范：段落之间用单个换行分隔，把连续换行（空行）折叠为一个。
+
+    Agent 写入边界使用（editChapterContent / 章节正文 diff 提交）；
+    人工编辑器保存路径不折叠，保留作者手动输入的空行。
+    """
+    if not isinstance(text, str):
+        return text
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
 def extract_text_from_lexical(raw: str | Any) -> str:
     """Extract plain text from a Lexical editor JSON state."""
     try:

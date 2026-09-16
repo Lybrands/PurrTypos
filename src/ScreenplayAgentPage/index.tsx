@@ -78,6 +78,7 @@ import {
   type AgentConversationMessage,
 } from '../agent-runtime'
 import { buildStreamOptions } from '../agent-runtime/streamOptions'
+import { generateSessionTitleFromText, isUntitledSessionTitle } from '../components/AgentConversation/sessionTitle'
 import { getActiveTaskPlan } from '../agent-runtime/taskPlan'
 import {
   buildDraftBatchActions,
@@ -2377,6 +2378,14 @@ export default function ScreenplayAgentPage({
       onOpenSettings()
       return
     }
+    // 与写作 Agent 一致：全新会话的首条消息提交后自动生成会话标题。
+    // 剧本对话轮次是异步执行的（202），因此只依据输入消息，不等待回复。
+    const isUntitledSession = isUntitledSessionTitle(
+      agentSessions.find((item) => item.id === agentSessionId)?.title,
+    )
+    const hasHistoryBeforeThisQuestion = (agentConversationState?.messages ?? [])
+      .some((item) => item.role === 'user')
+    const needsTitle = isUntitledSession && !hasHistoryBeforeThisQuestion
     const runtime = runtimeOverride || runtimeForModel(model!)
     if (agentRunning || agentSubmitting || agentQueueRef.current.some(item => item.projectId === openedProject.id
       && item.sessionId === agentSessionId && item.editing)) {
@@ -2417,6 +2426,22 @@ export default function ScreenplayAgentPage({
         runtime,
         ...(stageCommand ? { stageCommand } : {}),
       })
+      // 首条消息已受理即生成标题，不等待异步完成的回复。
+      if (needsTitle && model) {
+        generateSessionTitleFromText({
+          userText: prompt,
+          model,
+          requestTitle: (request) => services.ai.generateSessionTitle(request),
+          logLabel: '剧本 Agent',
+          persistTitle: (title) => services.sessions.updateSessionTitle({
+            sessionId: agentSessionId,
+            title,
+          }),
+          onTitle: (title) => setAgentSessions((current) => current.map(
+            (item) => item.id === agentSessionId ? { ...item, title } : item,
+          )),
+        })
+      }
       if (!agentSessionLifecycleRef.current.isCurrent(actionToken)) return
       if (import.meta.env.DEV) setAiDebugInspectorVisible(true)
       const next = await conversationClient.load(openedProject.id, agentSessionId)
@@ -2447,6 +2472,7 @@ export default function ScreenplayAgentPage({
     agentRunning,
     agentPrompt,
     agentSessionId,
+    agentSessions,
     agentSubmitting,
     agentConversationState,
     conversationClient,
@@ -2457,6 +2483,7 @@ export default function ScreenplayAgentPage({
     pausedConversationOperation,
     runtimeForModel,
     selectedModelId,
+    setAgentSessions,
     updateAgentPrompt,
   ])
 

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createScopedComposer } from './components/AgentConversation/scopedComposer.ts'
-import { isComposerSubmitDisabled } from './components/AgentConversation/composerPolicy.ts'
+import {
+  isComposerSubmitDisabled,
+  isEmptyConversationPresentation,
+} from './components/AgentConversation/composerPolicy.ts'
 import { createAnalysisConversationController } from './NovelSourcesPage/analysisController.ts'
 import { createBookConversationController } from './Workspace/AiPanel/useBookConversationController.ts'
 import { createScreenplayConversationController } from './ScreenplayAgentPage/useScreenplayConversationController.ts'
@@ -53,9 +56,16 @@ for (const [name, create] of Object.entries(factories)) {
     assert.equal(isComposerSubmitDisabled(structured, '结构化回答'), false)
     structured.composer.ready = false
     assert.equal(isComposerSubmitDisabled(structured, '结构化回答'), true)
+    // 零会话发送按面板能力区分：能力默认放开（发送路径自动创建会话），
+    // 写作面板的 useChatSubmit ensureSession 支持该约定；剧本/分析面板
+    // 显式关闭 sessionlessSend，保持禁发。
     const missingSession = create({})
     missingSession.conversation.activeSessionId = null
-    assert.equal(isComposerSubmitDisabled(missingSession), true)
+    assert.equal(
+      isComposerSubmitDisabled(missingSession),
+      name !== 'writing',
+      `${name}: zero-session admission must follow the controller capability`,
+    )
   })
 }
 
@@ -136,4 +146,56 @@ test('pending queue edits preserve identity, order and runtime; claimed items ca
   assert.equal(store.updateQueued('A', claimed.id, null), false)
   assert.equal(store.draft('A'), '输入框草稿')
   assert.equal(first.content, '第一条')
+})
+
+test('conversation empty presentation boundaries', () => {
+  const mkConversation = () => {
+    const controller = factories.writing({})
+    controller.conversation.initializing = false
+    controller.conversation.running = false
+    controller.conversation.messages = []
+    return controller.conversation
+  }
+  const withSessions = (ids: number[]) => ids.map((id) => ({
+    id, title: `会话 ${id}`, createdAt: '2026-09-17 00:00:00',
+  }))
+
+  // 零会话（默认会话创建在途或唯一会话被关闭后的间隙）且加载完成 → 引导空态
+  const none = mkConversation()
+  none.sessions = []
+  none.activeSessionId = null
+  assert.equal(isEmptyConversationPresentation(none), true)
+
+  // 唯一会话（哪怕尚无消息）→ 正常呈现对话列表
+  const sole = mkConversation()
+  sole.sessions = withSessions([1])
+  sole.activeSessionId = 1
+  assert.equal(isEmptyConversationPresentation(sole), false)
+
+  // 多个会话 → 正常呈现
+  const renewed = mkConversation()
+  renewed.sessions = withSessions([1, 2])
+  renewed.activeSessionId = 2
+  assert.equal(isEmptyConversationPresentation(renewed), false)
+
+  // 已有消息 → 正常呈现
+  const active = mkConversation()
+  active.sessions = withSessions([1])
+  active.activeSessionId = 1
+  active.messages = [{ role: 'user', content: 'hi' }]
+  assert.equal(isEmptyConversationPresentation(active), false)
+
+  // 运行中 → 正常呈现
+  const running = mkConversation()
+  running.sessions = withSessions([1])
+  running.activeSessionId = 1
+  running.running = true
+  assert.equal(isEmptyConversationPresentation(running), false)
+
+  // 加载中 → 正常呈现（不闪空态）
+  const loading = mkConversation()
+  loading.sessions = []
+  loading.activeSessionId = null
+  loading.initializing = true
+  assert.equal(isEmptyConversationPresentation(loading), false)
 })

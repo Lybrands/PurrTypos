@@ -18,7 +18,7 @@ import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "1.0.0"
+PURRA_VERSION = "1.0.1"
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
     "httpx2>=2.7.0,<3",
@@ -116,7 +116,7 @@ def test_purra_is_loaded_from_the_exact_local_candidate(package):
 
     manifest = json.loads((BACKEND_DIR / "purra-candidate.json").read_text())
     artifact = next(item for item in manifest["artifacts"] if item["file"].startswith(name + "-"))
-    wheel = BACKEND_DIR / "vendor" / "purra-1.0.0" / artifact["file"]
+    wheel = BACKEND_DIR / "vendor" / "purra-1.0.1" / artifact["file"]
     assert hashlib.sha256(wheel.read_bytes()).hexdigest() == artifact["sha256"]
     assert any(artifact["file"] in line for line in requirements)
     assert distribution.version == PURRA_VERSION

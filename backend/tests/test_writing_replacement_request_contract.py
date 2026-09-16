@@ -78,6 +78,15 @@ def test_replacement_request_context_preserves_host_locators():
     assert "writing_technique_snapshot" not in request.domain_context.payload
 
 
+def test_request_mapping_freezes_operation_mode_in_run_metadata():
+    body = _body("修改当前章节。")
+    body.operationMode = "auto_approve"
+
+    request = to_writing_agent_request(body, {"model": "model"})
+
+    assert request.metadata["operationMode"] == "auto_approve"
+
+
 def test_replacement_options_own_validated_response_facts():
     request = _request("读取当前章节，给出一个 150 字以内的摘要。")
     options = writing_run_options(request, {})

@@ -1,7 +1,7 @@
 import React from 'react'
 import { PurrCollapse } from '@/purr-components'
 import './ContinuationPanels.scss'
-import { apiGet } from '../services/httpClient'
+import { services } from '@/services'
 import Markdown from '../components/Markdown'
 import type { EntityId } from '../types'
 
@@ -12,7 +12,7 @@ export default function InheritedPlotMaterials({bookId}: {bookId: EntityId | nul
     let current = true
     setItems([]); setError('')
     if (bookId == null) return
-    void apiGet<Array<{sourceKey: string; body: string}>>(`/continuations/${bookId}/plot-materials`).then(result => {
+    void services.continuations.getPlotMaterials({ bookId: String(bookId) }).then(result => {
       if (current) { setItems(result.data || []); setError(result.success ? '' : result.error || '继承情节资料读取失败') }
     })
     return () => {current = false}

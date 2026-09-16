@@ -41,6 +41,7 @@ class ChatStreamRequest(BaseModel):
     writingTechniqueInputId: str | None = Field(default=None, max_length=128)
     chatAgentMode: Optional[str] = None
     planningMode: Optional[Literal["reactive", "planned"]] = None
+    operationMode: Literal["request_approval", "auto_approve", "full_access"] = "request_approval"
     contextWindow: Optional[str] = None
     # Enhanced renderer history fence. These immutable IDs are part of the
     # request digest and are rechecked both when reserving and claiming.

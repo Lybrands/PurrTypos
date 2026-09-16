@@ -70,9 +70,8 @@ export default function ToolApproval({ approval, onResolve }: ToolApprovalProps)
         </PurrTag>
       </div>
       <div className="tool-approval-card__hint">
-        Agent 正在请求执行此操作。请核对参数后决定；未批准前后端不会执行。
+        Agent 正在请求执行此操作。未批准前后端不会执行。
       </div>
-      <pre className="tool-approval-card__summary">{approval.summary}</pre>
       {state === "approved" ? (
         <div className="tool-approval-card__resolved">已批准，正在继续执行。</div>
       ) : state === "rejected" ? (

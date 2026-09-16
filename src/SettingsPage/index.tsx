@@ -23,6 +23,10 @@ import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
 import { useMemoryAutosave, type MemoryConfigurationPatch } from './useMemoryAutosave'
 import './index.scss'
+import {
+  AGENT_OPERATION_MODE_OPTIONS,
+  type AgentOperationMode,
+} from '../agentOperationMode'
 
 type SettingsTab = 'general' | 'models' | 'shortcuts' | 'data'
 const NAV_ITEMS: { key: SettingsTab; label: string }[] = [
@@ -52,6 +56,8 @@ interface SettingsPageProps {
   onSyncOutlineChapterChange: (value: boolean) => void
   agentPreventSystemSleep: boolean
   onAgentPreventSystemSleepChange: (value: boolean) => void
+  agentOperationMode: AgentOperationMode
+  onAgentOperationModeChange: (value: AgentOperationMode) => void
 }
 
 export default function SettingsPage({
@@ -68,6 +74,8 @@ export default function SettingsPage({
   onSyncOutlineChapterChange,
   agentPreventSystemSleep,
   onAgentPreventSystemSleepChange,
+  agentOperationMode,
+  onAgentOperationModeChange,
 }: SettingsPageProps) {
   const { message } = useAppFeedback()
   const [activeTab, setActiveTab] = React.useState<SettingsTab>('general')
@@ -473,6 +481,19 @@ export default function SettingsPage({
                   checked={agentPreventSystemSleep}
                   onChange={onAgentPreventSystemSleepChange}
                   aria-label="Agent 运行时防止系统休眠"
+                />
+              </div>
+              <div className="settings-preference-row">
+                <div className="settings-preference-copy">
+                  <strong>默认操作类型</strong>
+                  <p>请求批准会逐次确认；帮我批准只自动执行普通写入；完全访问也会自动执行高风险操作。每轮仍可在输入框旁单独切换。</p>
+                </div>
+                <PurrSelect<AgentOperationMode>
+                  aria-label="默认操作类型"
+                  value={agentOperationMode}
+                  options={AGENT_OPERATION_MODE_OPTIONS}
+                  onChange={(value) => onAgentOperationModeChange(value as AgentOperationMode)}
+                  style={{ width: 132 }}
                 />
               </div>
             </div>
