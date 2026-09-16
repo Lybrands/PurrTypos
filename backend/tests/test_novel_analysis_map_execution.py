@@ -628,13 +628,26 @@ class _RootRunner:
 
 
 @pytest.mark.asyncio
-async def test_map_executor_rejects_root_owned_model_execution(temp_db):
+async def test_map_executor_accepts_root_owned_model_execution_when_planned(temp_db):
     _, manifest = await _seed_source(temp_db)
     await _root(temp_db)
-    with pytest.raises(ScalableMapExecutionError, match="requires a Child Run"):
-        await ScalableMapUnitExecutor(
-            temp_db, child_runner=_RootRunner()
-        ).execute(_context(manifest, _recipe(manifest)))
+    recipe = compile_scalable_analysis_recipe(
+        manifest=manifest,
+        plan=ScalableAnalysisPlan(
+            passes=(AnalysisPass("story", ("characters", "plot"), "root"),),
+            reduce_fan_in=2,
+            synthesis_sections=("整书分析",),
+            quality_checks=("覆盖全部分片",),
+            execution_modes={
+                "synthesize": "root", "review": "root",
+            },
+        ),
+    )
+    result = await ScalableMapUnitExecutor(
+        temp_db, child_runner=_RootRunner()
+    ).execute(_context(manifest, recipe))
+
+    assert result.validation_receipt["childRunId"] == "root-run"
 
 
 class _InvalidOutputRunner(_Runner):

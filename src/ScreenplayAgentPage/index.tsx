@@ -4342,6 +4342,7 @@ export default function ScreenplayAgentPage({
                     <AgentConversationPanel
                       controller={screenplayConversationController}
                       extensions={screenplayConversationExtensions}
+                      subAgentReader={services.ai}
                     />
                   ) : null}
                 </div>

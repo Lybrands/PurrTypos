@@ -220,7 +220,6 @@ export function createBookConversationController(
     capabilities: getAgentConversationCapabilities({
       running: bindings.running,
       readOnly: false,
-      sessionLoading: bindings.initializing,
     }),
     conversation: {
       identity: bindings.conversationIdentity

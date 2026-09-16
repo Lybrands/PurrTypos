@@ -59,7 +59,7 @@ def _source_messages() -> tuple[AgentMessage, ...]:
             role="assistant",
             tool_calls=(ToolCall(
                 id="read-chapter",
-                name="getChapterContent",
+                name="readWritingChapters",
                 arguments_json="{}",
             ),),
             origin=MessageOrigin.MODEL,
@@ -67,12 +67,14 @@ def _source_messages() -> tuple[AgentMessage, ...]:
         AgentMessage(
             role="tool",
             content=json.dumps({
-                "chapterId": "chapter-1",
-                "plainText": "正文发生在晴夜，使用银色铜钥匙。",
+                "items": [{
+                    "id": "chapter-1",
+                    "content": "正文发生在晴夜，使用银色铜钥匙。",
+                }],
             }, ensure_ascii=False),
             tool_call_id="read-chapter",
             origin=MessageOrigin.HOST_TOOL_RESULT,
-            host_metadata={"purra_tool_name": "getChapterContent"},
+            host_metadata={"purra_tool_name": "readWritingChapters"},
         ),
     )
 

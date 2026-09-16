@@ -47,6 +47,7 @@ import {
   type ViewportEditTarget,
 } from '../viewportSession'
 import './index.scss'
+import type { SubAgentReader } from '../DelegationStatus'
 
 export interface AgentConversationProps {
   sessionIdentity: string
@@ -74,6 +75,7 @@ export interface AgentConversationProps {
   onSubmitErrorReport?: (
     reportId: string,
   ) => Promise<{ success: boolean; error?: string }>
+  subAgentReader?: SubAgentReader
 }
 
 const VirtuosoList = React.forwardRef<HTMLDivElement, ListProps>(
@@ -158,6 +160,7 @@ export default function ConversationViewport({
   onStructuredAnswer,
   onResolveToolApproval,
   onSubmitErrorReport,
+  subAgentReader,
 }: AgentConversationProps) {
   const virtuosoRef = React.useRef<VirtuosoHandle>(null)
   const scrollerCleanupRef = React.useRef<(() => void) | null>(null)
@@ -419,6 +422,7 @@ export default function ConversationViewport({
             onStructuredAnswer={onStructuredAnswer}
             onResolveToolApproval={onResolveToolApproval}
             onSubmitErrorReport={onSubmitErrorReport}
+            subAgentReader={subAgentReader}
           />
         ) : null}
         {attachment ? (

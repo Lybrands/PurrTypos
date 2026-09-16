@@ -12,7 +12,7 @@ import {
   UndoIcon,
   UnorderedListIcon,
 } from '@/purr-components'
-import { htmlToMarkdown, markdownToHtml } from '@/utils/markdown'
+import { htmlToMarkdown, markdownToHtml, markdownToYamlFrontmatter, yamlFrontmatterToMarkdown } from '@/utils/markdown'
 import { looksLikeMarkdown } from './markdown'
 import './index.scss'
 
@@ -44,6 +44,7 @@ export interface KnowledgeMarkdownEditorProps {
   onChange: (value: string) => void
   className?: string
   ariaLabel?: string
+  yamlFrontmatter?: boolean
 }
 
 interface ToolbarState {
@@ -82,6 +83,7 @@ const KnowledgeMarkdownEditor = React.forwardRef<
   onChange,
   className,
   ariaLabel = '资料内容',
+  yamlFrontmatter = false,
 }, ref) {
   const editorRef = React.useRef<Editor | null>(null)
   const onChangeRef = React.useRef(onChange)
@@ -99,7 +101,7 @@ const KnowledgeMarkdownEditor = React.forwardRef<
       }),
       TableKit,
     ],
-    content: markdownToHtml(value),
+    content: markdownToHtml(yamlFrontmatter ? yamlFrontmatterToMarkdown(value) : value),
     editorProps: {
       attributes: {
         class: 'knowledge-markdown-editor__editable',
@@ -111,12 +113,13 @@ const KnowledgeMarkdownEditor = React.forwardRef<
         if (!looksLikeMarkdown(text)) return false
 
         event.preventDefault()
-        editorRef.current?.commands.insertContent(markdownToHtml(text))
+        editorRef.current?.commands.insertContent(markdownToHtml(yamlFrontmatter ? yamlFrontmatterToMarkdown(text) : text))
         return true
       },
     },
     onUpdate: ({ editor: currentEditor }) => {
-      onChangeRef.current(htmlToMarkdown(currentEditor.getHTML()))
+      const markdown = htmlToMarkdown(currentEditor.getHTML())
+      onChangeRef.current(yamlFrontmatter ? markdownToYamlFrontmatter(markdown) : markdown)
     },
   }, [documentKey])
 
@@ -126,16 +129,19 @@ const KnowledgeMarkdownEditor = React.forwardRef<
 
   React.useEffect(() => {
     if (!editor) return
-    const currentMarkdown = htmlToMarkdown(editor.getHTML())
+    const currentValue = htmlToMarkdown(editor.getHTML())
+    const currentMarkdown = yamlFrontmatter ? markdownToYamlFrontmatter(currentValue) : currentValue
     if (currentMarkdown === value) return
-    editor.commands.setContent(markdownToHtml(value), { emitUpdate: false })
-  }, [editor, value])
+    editor.commands.setContent(markdownToHtml(yamlFrontmatter ? yamlFrontmatterToMarkdown(value) : value), { emitUpdate: false })
+  }, [editor, value, yamlFrontmatter])
 
   React.useImperativeHandle(ref, () => ({
     focus: () => editorRef.current?.commands.focus(),
     getMarkdown: () => {
       const currentEditor = editorRef.current
-      return currentEditor ? htmlToMarkdown(currentEditor.getHTML()) : value
+      if (!currentEditor) return value
+      const markdown = htmlToMarkdown(currentEditor.getHTML())
+      return yamlFrontmatter ? markdownToYamlFrontmatter(markdown) : markdown
     },
     setMarkdown: (markdown) => {
       const currentEditor = editorRef.current
@@ -143,9 +149,9 @@ const KnowledgeMarkdownEditor = React.forwardRef<
         onChangeRef.current(markdown)
         return
       }
-      currentEditor.commands.setContent(markdownToHtml(markdown))
+      currentEditor.commands.setContent(markdownToHtml(yamlFrontmatter ? yamlFrontmatterToMarkdown(markdown) : markdown))
     },
-  }), [value])
+  }), [value, yamlFrontmatter])
 
   const toolbarState = useEditorState({
     editor,

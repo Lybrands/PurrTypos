@@ -12,6 +12,7 @@ import ToolCallStatus from "../ToolCallStatus";
 import ToolApproval from "../ToolApproval";
 import ExecutionLog, { ExecutionLogStepGroup } from "../ExecutionLog";
 import DelegationStatus from "../DelegationStatus";
+import type { SubAgentReader } from "../DelegationStatus";
 import StructuredQuestion from "../StructuredQuestion";
 import ErrorReportNotice from "../ErrorReportNotice";
 import { parseStructuredQuestions } from "../StructuredQuestion/parser";
@@ -51,6 +52,7 @@ export interface AssistantOutputProps {
   onSubmitErrorReport?: (
     reportId: string,
   ) => Promise<{ success: boolean; error?: string }>;
+  subAgentReader?: SubAgentReader;
 }
 
 const PROCESSING_STANDBY_DELAY_MS = 1000;
@@ -318,6 +320,7 @@ function AssistantOutputInner({
   onStructuredAnswer,
   onResolveToolApproval,
   onSubmitErrorReport,
+  subAgentReader,
 }: AssistantOutputProps) {
   const isStreaming = loading && isLastAssistant;
   const handleWheelUp = () =>
@@ -469,6 +472,7 @@ function AssistantOutputInner({
           key={key}
           items={part.items}
           activities={message.subAgentActivities}
+          reader={subAgentReader}
         />
       );
     }

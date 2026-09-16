@@ -243,3 +243,40 @@ async def test_error_report_derives_specific_failure_from_agent_run_events(
     detail = await get_ai_error_report(captured["data"]["id"])
     assert detail["data"]["diagnostics"] == diagnosis
     assert "原始提示词" not in str(detail["data"]["diagnostics"])
+
+
+async def test_error_report_keeps_terminal_failure_distinct_from_prior_tool_error(
+    report_db: DatabaseConnection,
+):
+    from infrastructure.persistence.run_store import append_event, create_run
+    from infrastructure.persistence.error_report_store import capture_error_report
+
+    run_id = await create_run(
+        report_db,
+        session_id=None,
+        prompt="content-free",
+        mode="agent",
+    )
+    await append_event(report_db, run_id, "tool.call_completed", {
+        "toolCallId": "call-old",
+        "toolName": "readWritingChapters",
+        "outcome": "failed",
+        "errorCode": "tool_input_invalid",
+    })
+    await append_event(report_db, run_id, "run.failed", {
+        "status": "failed",
+        "error": "max_model_rounds",
+    })
+
+    report = await capture_error_report(
+        report_db,
+        stream_id="terminal-distinct",
+        agent_run_id=run_id,
+        error_message="failed",
+    )
+    diagnosis = report["diagnostics"]
+
+    assert diagnosis["failureErrorCode"] == "max_model_rounds"
+    assert diagnosis["failureStage"] == "agent_runtime"
+    assert diagnosis["lastToolFailureErrorCode"] == "tool_input_invalid"
+    assert diagnosis["lastToolFailureTool"] == "readWritingChapters"

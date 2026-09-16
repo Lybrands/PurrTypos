@@ -22,6 +22,10 @@ from agents.novel_analysis.map_execution import (
     inherited_agent_input_payload,
     raise_child_run_failure,
 )
+from agents.novel_analysis.root_model_execution import (
+    is_root_model_producer,
+    uses_root_model,
+)
 from agents.novel_analysis.reduce_execution import _artifact_id, _validate_dependency_payload
 from infrastructure.persistence.sqlite_run_tree_repository import SqliteRunTreeRepository
 from purra.agent_tree import AgentCapabilityGrant, ChildAgentSpec
@@ -195,12 +199,42 @@ def build_synthesis_input_tool_catalog(db, *, run_tree_repository=None):
     ),))
 
 
+def _synthesis_result_instruction(scope) -> str:
+    required_sections = json.dumps(
+        list(scope.sections), ensure_ascii=False, allow_nan=False
+    )
+    fact_kinds = "、".join(sorted(NOVEL_ANALYSIS_PUBLISHABLE_FACT_KINDS))
+    claim_natures = "、".join(sorted(CANONICAL_CLAIM_NATURES))
+    return (
+        "只综合整部作品，不按分片罗列，不引用原文。"
+        f"Planner 要求覆盖的主题为：{required_sections}。这些是分析范围，不是输出字段。"
+        "直接生成续写所消费的规范资料：facts 是独立人物、背景、设定、事件、"
+        "时间线、未决情节或伏笔；craftCards 是独立写作技法观察。"
+        f"factKind 使用以下一种：{fact_kinds}。"
+        f"claimNature 使用 {claim_natures}；未决情节由 factKind=unresolved_plot 表达。"
+        "每个 fact/card 使用本次结果内唯一且稳定的短 id。"
+        "必须且只能输出一条 background；原文明示不足时基于全文给出 inference 背景归纳。"
+        "人物按单个角色分别输出 character_summary，value 使用 "
+        '{"name":"与 subjectKey 完全一致","tags":"人物标签",'
+        '"profile_md":"完整 Markdown 人物档案"}。'
+        "background 的 value 使用 "
+        '{"content":"完整 Markdown 背景"}。'
+        "setting/location/faction/item/world_rule 的 value 使用 "
+        '{"entity_type":"location、faction、item 或 other",'
+        '"name":"与 subjectKey 完全一致","tags":"逗号分隔标签",'
+        '"profile_md":"完整 Markdown 档案"}；setting 和 world_rule 使用 other。'
+        "只返回 summaryMarkdown、facts、craftCards。"
+    )
+
+
 class PurrAScalableSynthesisChildRunner:
-    def __init__(self, db=None, *, model_name, submissions=None):
+    def __init__(self, db=None, *, model_name, submissions=None, root_runner=None):
         self._model_name = str(model_name or "").strip()
         if not self._model_name:
             raise ValueError("Synthesis Child runner requires a model name")
         self._core = None
+        self._root_runner = root_runner
+        self._artifacts = NovelAnalysisAttemptArtifactStore(db) if db is not None else None
         self._children = PurrAReusableChildCoordinator()
         if submissions is None and db is None:
             raise ValueError("Synthesis Child runner requires a submission store")
@@ -211,30 +245,34 @@ class PurrAScalableSynthesisChildRunner:
         self._children.bind_agent_core(core)
 
     async def run(self, *, scope, context, signal=None):
+        if uses_root_model(context):
+            if self._root_runner is None or self._artifacts is None:
+                raise RuntimeError("Synthesis Root runner is unavailable")
+            inputs = [
+                {
+                    "passId": locator.pass_id,
+                    "payload": await self._artifacts.load_payload(locator.artifact_id),
+                }
+                for locator in scope.artifacts
+            ]
+            payload = await self._root_runner.complete(
+                context=context,
+                instruction=_synthesis_result_instruction(scope),
+                inputs={"sections": list(scope.sections), "inputs": inputs},
+                signal=signal,
+            )
+            return context.run_id, payload
         if self._core is None:
             raise RuntimeError("Synthesis Child runner has no active Agent Core")
         operation_id = f"{context.task.id}:{context.unit.id}:{context.unit.attempt}"
-        required_sections = json.dumps(list(scope.sections), ensure_ascii=False, allow_nan=False)
-        fact_kinds = "、".join(sorted(NOVEL_ANALYSIS_PUBLISHABLE_FACT_KINDS))
-        claim_natures = "、".join(sorted(CANONICAL_CLAIM_NATURES))
         child = ChildAgentSpec(
             name="synthesize-whole-work", title="形成整书分析总结",
-            instruction=(
-                f"必须调用 {READ_NOVEL_ANALYSIS_SYNTHESIS_INPUTS} 一次。"
-                "只综合整部作品，不按分片罗列，不读取或引用原文。"
-                f"Planner 要求覆盖的主题为：{required_sections}。这些是分析范围，不是输出字段。"
-                "必须直接生成创建续写所消费的规范资料：facts 是独立人物、背景、设定、事件、时间线、未决情节或伏笔；craftCards 是独立写作技法观察。"
-                f"factKind 使用以下一种：{fact_kinds}。"
-                f"claimNature 只表示证据性质，使用 {claim_natures}；未决情节仍填 fact，类型由 factKind=unresolved_plot 表达。"
-                "每个 fact/card 使用本次结果内唯一且稳定的短 id。不要把多个对象塞进一段 Markdown。"
-                "必须且只能输出一条 background；原文明示不足时也要基于全文给出 claimNature=inference 的背景归纳，不能省略故事背景。"
-                "人物资料按作品中的单个角色生成，每个角色分别输出一条 character_summary，其 value 必须直接使用创作人物表单的数据结构 {\"name\":\"与 subjectKey 完全一致\",\"tags\":\"人物标签\",\"profile_md\":\"完整 Markdown 人物档案\"}。"
-                "background 的 value 必须是创作背景表单结构 {\"content\":\"完整 Markdown 背景\"}。"
-                "setting/location/faction/item/world_rule 的 value 必须是创作世界设定表单结构 {\"entity_type\":\"location、faction、item 或 other\",\"name\":\"与 subjectKey 完全一致\",\"tags\":\"逗号分隔标签\",\"profile_md\":\"完整 Markdown 档案\"}；setting 和 world_rule 使用 other，同名设定只保留一条。"
-                f"完成后必须调用 {SUBMIT_NOVEL_ANALYSIS_CHILD_RESULT} 提交结果；"
-                "最终回复不要承载分析数据。提交的 result 只包含 summaryMarkdown、facts、craftCards："
-                '{"summaryMarkdown":"整书总结","facts":[{"id":"fact-character-linyue","claimNature":"summary","factKind":"character_summary","subjectKey":"林月","predicate":"人物归纳","value":{"name":"林月","tags":"主角","profile_md":"## 基本信息\\n..."}},{"id":"fact-background","claimNature":"summary","factKind":"background","subjectKey":"故事背景","predicate":"背景归纳","value":{"content":"## 时空与社会\\n..."}}],"craftCards":[{"id":"craft-tension","cardKind":"technique","title":"技法名","bodyMarkdown":"可执行说明"}]}。'
-            ),
+                instruction=(
+                    f"必须调用 {READ_NOVEL_ANALYSIS_SYNTHESIS_INPUTS} 一次。"
+                    + _synthesis_result_instruction(scope)
+                    + f"完成后必须调用 {SUBMIT_NOVEL_ANALYSIS_CHILD_RESULT} 提交结果；"
+                    "最终回复不要承载分析数据。"
+                ),
             objective="形成整书人物、背景、设定、情节与技法总结。",
             input_payload={
                 "synthesisInputScope": scope.to_mapping(),
@@ -275,12 +313,12 @@ class ScalableSynthesisUnitExecutor:
         recovered_operation_id = None
         if recovery is None:
             child_id, raw = await self._runner.run(scope=scope, context=context, signal=signal)
-            await _require_child(self._db, context.run_id, child_id)
+            await _require_model_run(self._db, context, child_id)
             payload = _validate_output(raw, scope, child_id)
         else:
             recovered, recovered_operation_id = recovery
             child_id = str(recovered.get("childRunId") or "")
-            await _require_child(self._db, context.run_id, child_id, allow_previous_root=recovered_operation_id != operation_id)
+            await _require_model_run(self._db, context, child_id, allow_previous_root=recovered_operation_id != operation_id)
             payload = _validate_committed(recovered, scope)
         receipt = await self._store.commit(task_id=context.task.id, unit_id=context.unit.id, attempt=context.unit.attempt, operation_id=operation_id, run_id=child_id, payload=payload)
         return LongTaskUnitResult(output_ref=receipt.resource_ref, artifact_digest=canonical_json_digest(payload), validation_receipt={"schemaVersion": 1, "unitKind": "synthesize", "childRunId": child_id, "artifactReplayed": receipt.replayed, **({"recoveredOperationId": recovered_operation_id} if recovered_operation_id is not None and recovered_operation_id != operation_id else {})}, metadata={"artifactId": receipt.artifact_id, "summaryMarkdown": payload["summaryMarkdown"]})
@@ -305,6 +343,19 @@ def _validate_output(raw, scope, child_id):
     except CanonicalAnalysisMaterialError as error:
         raise ScalableSynthesisOutputError(str(error)) from error
     return {"schemaVersion": SYNTHESIS_OUTPUT_SCHEMA_VERSION, "kind": "synthesize", "childRunId": child_id, "inputArtifactIds": [item.artifact_id for item in scope.artifacts], "coveredSliceIds": list(scope.expected_slice_ids), **materials}
+
+
+async def _require_model_run(db, context, run_id, *, allow_previous_root=False):
+    if await is_root_model_producer(
+        db, context, run_id, allow_previous_root=allow_previous_root
+    ):
+        return
+    await _require_child(
+        db,
+        context.run_id,
+        run_id,
+        allow_previous_root=allow_previous_root,
+    )
 
 
 def _validate_committed(payload, scope):

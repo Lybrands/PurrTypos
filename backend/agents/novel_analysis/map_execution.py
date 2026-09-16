@@ -13,6 +13,10 @@ from agents.novel_analysis.child_submission import (
     NovelAnalysisChildSubmissionStore,
     SUBMIT_NOVEL_ANALYSIS_CHILD_RESULT,
 )
+from agents.novel_analysis.root_model_execution import (
+    is_root_model_producer,
+    uses_root_model,
+)
 from infrastructure.persistence.sqlite_run_tree_repository import (
     SqliteRunTreeRepository,
 )
@@ -431,13 +435,15 @@ class PurrAReusableChildCoordinator:
 
 
 class PurrAScalableMapChildRunner:
-    """Execute one Map through PurrA's public Agent-tree command surface."""
+    """Execute one Map on the Root model or through the Agent tree."""
 
-    def __init__(self, db=None, *, model_name: str, submissions=None) -> None:
+    def __init__(self, db=None, *, model_name: str, submissions=None, root_runner=None) -> None:
         self._model_name = str(model_name or "").strip()
         if not self._model_name:
             raise ValueError("Map Child runner requires a model name")
         self._core = None
+        self._root_runner = root_runner
+        self._slice_reader = SqliteNovelSourceSliceReader(db) if db is not None else None
         self._children = PurrAReusableChildCoordinator()
         if submissions is None and db is None:
             raise ValueError("Map Child runner requires a submission store")
@@ -458,6 +464,25 @@ class PurrAScalableMapChildRunner:
         context: DurableUnitExecutionContext,
         signal=None,
     ) -> MapChildRunResult:
+        if uses_root_model(context):
+            if self._root_runner is None or self._slice_reader is None:
+                raise RuntimeError("Map Root runner is unavailable")
+            source = await self._slice_reader.read(scope)
+            payload = await self._root_runner.complete(
+                context=context,
+                instruction=(
+                    "分析 Host 绑定的小说分片。仅围绕允许维度形成局部判断；"
+                    "characters 维度按具体人物分别生成 finding，不合并多人。"
+                    "返回 {findings:[{dimension,subject,analysis}]}。"
+                ),
+                inputs={
+                    "passId": pass_id,
+                    "allowedDimensions": list(dimensions),
+                    "sourceSlice": source,
+                },
+                signal=signal,
+            )
+            return MapChildRunResult(child_run_id=context.run_id, payload=payload)
         if self._core is None:
             raise RuntimeError("Map Child runner has no active Agent Core")
         operation_id = f"{context.task.id}:{context.unit.id}:{context.unit.attempt}"
@@ -553,8 +578,8 @@ class ScalableMapUnitExecutor:
         if recovery is not None:
             recovered, recovered_operation_id = recovery
             child_run_id = str(recovered.get("childRunId") or "")
-            await self._validate_child_ownership(
-                context.run_id,
+            await self._validate_model_ownership(
+                context,
                 child_run_id,
                 allow_previous_root=recovered_operation_id != operation_id,
             )
@@ -574,7 +599,7 @@ class ScalableMapUnitExecutor:
                 signal=signal,
             )
             child_run_id = str(result.child_run_id or "").strip()
-            await self._validate_child_ownership(context.run_id, child_run_id)
+            await self._validate_model_ownership(context, child_run_id)
             payload = _validate_map_payload(
                 result.payload,
                 pass_id=pass_id,
@@ -610,13 +635,21 @@ class ScalableMapUnitExecutor:
             metadata={"artifactId": receipt.artifact_id, "childRunId": child_run_id},
         )
 
-    async def _validate_child_ownership(
+    async def _validate_model_ownership(
         self,
-        root_run_id: str,
+        context,
         child_run_id: str,
         *,
         allow_previous_root: bool = False,
     ) -> None:
+        root_run_id = context.run_id
+        if await is_root_model_producer(
+            self._db,
+            context,
+            child_run_id,
+            allow_previous_root=allow_previous_root,
+        ):
+            return
         if not child_run_id or child_run_id == root_run_id:
             raise ScalableMapExecutionError("Map model execution requires a Child Run")
         row = await self._db.fetch_one(

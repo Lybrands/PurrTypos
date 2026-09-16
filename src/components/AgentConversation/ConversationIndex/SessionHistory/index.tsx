@@ -31,7 +31,6 @@ export interface AgentConversationHistoryController {
 
 export interface SessionHistoryProps {
   controller: AgentConversationHistoryController
-  disabled?: boolean
 }
 
 function parseUTCDate(dateStr: string): Date {
@@ -56,7 +55,6 @@ const DATE_GROUP_ORDER = ['今天', '昨天', '近 7 天', '更早']
 
 export default function SessionHistory({
   controller,
-  disabled = false,
 }: SessionHistoryProps) {
   const [popoverOpen, setPopoverOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
@@ -66,13 +64,12 @@ export default function SessionHistory({
   const deleteDisabledSessionIds = new Set(history?.deleteDisabledSessionIds ?? [])
 
   const handleOpenChange = React.useCallback((open: boolean) => {
-    if (disabled) return
     setPopoverOpen(open)
     if (open) {
       setSearch('')
       void controller.actions.loadSessionHistory?.()
     }
-  }, [controller.actions, disabled])
+  }, [controller.actions])
 
   const handleOpen = React.useCallback((id: AgentSessionId) => {
     if (deletingSessionIds.has(id)) return
@@ -190,7 +187,7 @@ export default function SessionHistory({
             icon={<HistoryIcon />}
             className="session-new-btn"
             aria-label="打开历史对话"
-            disabled={disabled || !history || !controller.actions.loadSessionHistory}
+            disabled={!history || !controller.actions.loadSessionHistory}
           />
         </PurrPopover>
       </span>

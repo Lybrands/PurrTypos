@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from agents.writing.revisions import record_revision, text_revision
+from utils.text import extract_text_from_lexical
 
 
 WRITING_READ_SCHEMA_VERSION = 1
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
+MAX_BATCH_READ_ITEMS = 32
 
 
 class WritingReadScopeError(ValueError):
@@ -240,6 +242,169 @@ class SqliteWritingReadRepository:
             _page_result(items, total, normalized_offset, normalized_limit),
         )
 
+    async def writing_chapter_contents(
+        self,
+        scope: WritingReadScope,
+        *,
+        chapter_ids: Iterable[str] = (),
+        max_text_length: int = 64_000,
+    ) -> dict[str, Any]:
+        scope = await self.validate_scope(scope)
+        ids = _text_ids(chapter_ids, "chapterIds")
+        if not ids:
+            if not scope.chapter_id:
+                raise ValueError("chapterIds is required without a bound chapter")
+            ids = (scope.chapter_id,)
+        maximum = _positive_int(
+            max_text_length,
+            "maxTextLength",
+            maximum=64_000,
+        )
+        placeholders = ",".join("?" for _ in ids)
+        rows = await self._db.fetch_all(
+            "SELECT c.id, c.title, COALESCE(a.content, '') AS content, "
+            "CASE WHEN a.id IS NULL THEN 0 ELSE 1 END AS article_exists "
+            "FROM outline_chapters AS c "
+            "JOIN outlines AS o ON o.id = c.outline_id "
+            "LEFT JOIN articles AS a ON a.chapter_id = c.id "
+            f"WHERE o.book_id = ? AND o.type = 'writing' "
+            f"AND c.id IN ({placeholders})",
+            [scope.book_id, *ids],
+        )
+        by_id = {str(row["id"]): row for row in rows}
+        remaining = maximum
+        items = []
+        for chapter_id in ids:
+            row = by_id.get(chapter_id)
+            if row is None:
+                continue
+            stored = str(row.get("content") or "")
+            try:
+                plain = extract_text_from_lexical(stored) if stored else ""
+            except Exception:
+                plain = ""
+            returned = plain[:remaining]
+            items.append({
+                "id": chapter_id,
+                "title": _one_line(row.get("title")) or "未命名章节",
+                "content": returned,
+                "hasContent": bool(plain.strip()),
+                "articleExists": bool(row.get("article_exists")),
+                "truncated": len(returned) < len(plain),
+                "returnedCharacters": len(returned),
+                "totalCharacters": len(plain),
+                "baseRevision": text_revision(stored),
+            })
+            remaining -= len(returned)
+        return self._result(scope, {
+            "items": items,
+            "missingChapterIds": [
+                chapter_id for chapter_id in ids if chapter_id not in by_id
+            ],
+            "maxTextLength": maximum,
+            "returnedCharacters": sum(
+                int(item["returnedCharacters"]) for item in items
+            ),
+        })
+
+    async def writing_outlines(
+        self,
+        scope: WritingReadScope,
+        *,
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_LIMIT,
+    ) -> dict[str, Any]:
+        scope = await self.validate_scope(scope)
+        normalized_offset, normalized_limit = _page(offset, limit)
+        allowed_types = ("global", "volume", "chapter", "writing")
+        placeholders = ",".join("?" for _ in allowed_types)
+        count = await self._db.fetch_one(
+            f"SELECT COUNT(*) AS total FROM outlines WHERE book_id = ? "
+            f"AND type IN ({placeholders})",
+            [scope.book_id, *allowed_types],
+        )
+        rows = await self._db.fetch_all(
+            "SELECT id, title, type, sort, "
+            "CASE WHEN COALESCE(markdown_content, '') = '' THEN 0 ELSE 1 END "
+            "AS stored_content_nonempty FROM outlines WHERE book_id = ? "
+            f"AND type IN ({placeholders}) "
+            "ORDER BY sort ASC, id ASC LIMIT ? OFFSET ?",
+            [
+                scope.book_id,
+                *allowed_types,
+                normalized_limit,
+                normalized_offset,
+            ],
+        )
+        items = [{
+            "id": str(row["id"]),
+            "title": _one_line(row.get("title")) or "未命名大纲",
+            "outlineType": str(row.get("type") or ""),
+            "sort": int(row.get("sort") or 0),
+            "storedContentNonempty": bool(row.get("stored_content_nonempty")),
+        } for row in rows]
+        total = int((count or {}).get("total") or 0)
+        return self._result(
+            scope,
+            _page_result(items, total, normalized_offset, normalized_limit),
+        )
+
+    async def writing_outline_contents(
+        self,
+        scope: WritingReadScope,
+        *,
+        outline_ids: Iterable[str],
+        max_text_length: int = 64_000,
+    ) -> dict[str, Any]:
+        scope = await self.validate_scope(scope)
+        ids = _text_ids(outline_ids, "outlineIds")
+        if not ids:
+            raise ValueError("outlineIds must contain at least one identifier")
+        maximum = _positive_int(
+            max_text_length,
+            "maxTextLength",
+            maximum=64_000,
+        )
+        placeholders = ",".join("?" for _ in ids)
+        rows = await self._db.fetch_all(
+            "SELECT id, title, type, COALESCE(markdown_content, '') AS content "
+            "FROM outlines WHERE book_id = ? "
+            f"AND type IN ('global', 'volume', 'chapter', 'writing') "
+            f"AND id IN ({placeholders})",
+            [scope.book_id, *ids],
+        )
+        by_id = {str(row["id"]): row for row in rows}
+        remaining = maximum
+        items = []
+        for outline_id in ids:
+            row = by_id.get(outline_id)
+            if row is None:
+                continue
+            content = str(row.get("content") or "")
+            returned = content[:remaining]
+            items.append({
+                "id": outline_id,
+                "title": _one_line(row.get("title")) or "未命名大纲",
+                "outlineType": str(row.get("type") or ""),
+                "markdown": returned,
+                "hasContent": bool(content.strip()),
+                "truncated": len(returned) < len(content),
+                "returnedCharacters": len(returned),
+                "totalCharacters": len(content),
+                "baseRevision": text_revision(content),
+            })
+            remaining -= len(returned)
+        return self._result(scope, {
+            "items": items,
+            "missingOutlineIds": [
+                outline_id for outline_id in ids if outline_id not in by_id
+            ],
+            "maxTextLength": maximum,
+            "returnedCharacters": sum(
+                int(item["returnedCharacters"]) for item in items
+            ),
+        })
+
     async def global_outline(
         self,
         scope: WritingReadScope,
@@ -370,6 +535,18 @@ def _positive_ids(values: Iterable[int], name: str) -> tuple[int, ...]:
     return tuple(dict.fromkeys(result))
 
 
+def _text_ids(values: Iterable[str], name: str) -> tuple[str, ...]:
+    result = tuple(str(value or "").strip() for value in (values or ()))
+    if (
+        len(result) > MAX_BATCH_READ_ITEMS
+        or any(not value or len(value) > 512 for value in result)
+    ):
+        raise ValueError(
+            f"{name} must contain at most {MAX_BATCH_READ_ITEMS} identifiers"
+        )
+    return tuple(dict.fromkeys(result))
+
+
 def _names(values: Iterable[str]) -> tuple[str, ...]:
     result = tuple(
         str(value or "").strip()
@@ -403,6 +580,7 @@ def _one_line(value: object) -> str:
 
 __all__ = [
     "DEFAULT_PAGE_LIMIT",
+    "MAX_BATCH_READ_ITEMS",
     "MAX_PAGE_LIMIT",
     "SqliteWritingReadRepository",
     "WRITING_READ_SCHEMA_VERSION",

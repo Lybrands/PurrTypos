@@ -110,7 +110,7 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
         _text_registration(
             "editGlobalOutline", "编辑总纲", "markdownContent",
             "全文替换当前书唯一总纲；必须先读取并携带 baseRevision，清空需明确声明。",
-            "getGlobalOutline", "globalOutline.updated", validate_outline,
+            "readWritingOutlines", "globalOutline.updated", validate_outline,
             edit_outline,
         ),
     )

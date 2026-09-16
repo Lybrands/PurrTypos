@@ -82,7 +82,6 @@ export function createScreenplayConversationController(
     capabilities: getAgentConversationCapabilities({
       running: bindings.running,
       readOnly: bindings.project.status === 'archived',
-      sessionLoading: bindings.initializing,
     }),
     conversation: {
       identity: bindings.conversationIdentity

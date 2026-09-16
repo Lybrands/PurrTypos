@@ -50,6 +50,7 @@ export const KNOWN_TOOL_CALL_LABELS = {
   listOutlines: "查看大纲列表",
   listSettingEntities: "查看世界设定列表",
   listWritingChapters: "查看章节目录",
+  listWritingOutlines: "查看大纲目录",
   proposeBeatSheet: "形成故事节拍",
   proposeCreativeBrief: "形成创作简报",
   proposeEpisodeOutline: "形成分集结构",
@@ -83,6 +84,11 @@ export const KNOWN_TOOL_CALL_LABELS = {
   readSourceBackground: "读取故事背景",
   querySourceStoryFacts: "检索故事事实",
   readSourceOutline: "读取原作大纲",
+  readWritingChapters: "读取章节正文",
+  readWritingOutlines: "读取大纲正文",
+  readWritingTechniqueFile: "读取写作技法文件",
+  searchWritingMemories: "检索写作记忆",
+  readWritingMemories: "读取写作记忆",
   readNovelSourceSlice: "读取小说分片",
   readNovelAnalysisReduceInputs: "读取待归并分析",
   readNovelAnalysisSynthesisInputs: "读取整书分析结果",
@@ -177,7 +183,8 @@ export function toolCallDisplayRow(
 ): { label: string; outcome: ToolCallLabelOutcome } {
   try {
     switch (name) {
-      case "getChapterContent": {
+      case "getChapterContent":
+      case "readWritingChapters": {
         const chapterTitleArg =
           args.chapterTitle != null && String(args.chapterTitle).trim() !== ""
             ? String(args.chapterTitle).trim()
@@ -192,10 +199,17 @@ export function toolCallDisplayRow(
         if (titleByIndex) {
           return { label: `查看《${titleByIndex}》章节内容`, outcome: "ok" };
         }
-        const cid =
+        const ids = Array.isArray(args.chapterIds)
+          ? args.chapterIds.map((value) => String(value).trim()).filter(Boolean)
+          : [];
+        if (ids.length > 1) {
+          return { label: `读取 ${ids.length} 章正文`, outcome: "ok" };
+        }
+        const cid = ids[0] || (
           args.chapterId != null && args.chapterId !== ""
             ? String(args.chapterId).trim()
-            : "";
+            : ""
+        );
         if (!cid) {
           return { label: "查看章节内容", outcome: "ok" };
         }
@@ -297,7 +311,8 @@ export function toolCallDisplayRow(
         return { label: "查看总纲", outcome: "ok" };
       case "editGlobalOutline":
         return { label: "编辑总纲", outcome: "ok" };
-      case "queryOutline": {
+      case "queryOutline":
+      case "readWritingOutlines": {
         const outlineIdArg =
           args.outlineId != null && String(args.outlineId).trim() !== ""
             ? String(args.outlineId).trim()
@@ -334,6 +349,7 @@ export function toolCallDisplayRow(
         return { label: "查看大纲详情", outcome: "context_error" };
       }
       case "listOutlines":
+      case "listWritingOutlines":
         return { label: "查看大纲列表", outcome: "ok" };
       case "updateOutline":
         return { label: "更新大纲", outcome: "ok" };

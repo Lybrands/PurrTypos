@@ -14,7 +14,7 @@ import ConversationIndex from './ConversationIndex'
 import SessionHistory from './ConversationIndex/SessionHistory'
 import ConversationViewport from './ConversationViewport'
 import TaskProgress from './TaskProgress'
-import { SubAgentOverview } from './DelegationStatus'
+import { SubAgentOverview, type SubAgentReader } from './DelegationStatus'
 import { collapseSubAgentDelegations } from './DelegationStatus/presentation'
 import type { AgentSessionId } from '../../agent-runtime'
 import type { AgentConversationController } from './controller'
@@ -33,6 +33,7 @@ export interface AgentConversationPanelProps {
   indexOpen?: boolean
   onIndexOpenChange?(open: boolean): void
   className?: string
+  subAgentReader?: SubAgentReader
 }
 
 function ComposerFooter({
@@ -139,6 +140,7 @@ export default function AgentConversationPanel({
   indexOpen,
   onIndexOpenChange,
   className,
+  subAgentReader,
 }: AgentConversationPanelProps) {
   useAgentCompletionNotification(controller)
   const [uncontrolledIndexOpen, setUncontrolledIndexOpen] = React.useState(true)
@@ -186,7 +188,6 @@ export default function AgentConversationPanel({
     ? (
       <SessionHistory
         controller={controller}
-        disabled={controller.capabilities.sessionNavigationDisabled}
       />
     )
     : null
@@ -204,8 +205,7 @@ export default function AgentConversationPanel({
           sessionActivities={controller.conversation.activities}
           editingSessionId={editingSessionId}
           editingTitle={editingSessionTitle}
-          isCurrentSessionEmpty={controller.conversation.messages.length === 0}
-          disabled={controller.capabilities.sessionNavigationDisabled}
+          isCurrentSessionEmpty={!controller.conversation.initializing && controller.conversation.messages.length === 0}
           context={extensions?.renderSessionContext?.()}
           extraActions={history}
           onActiveSessionChange={(id) => void controller.actions.selectSession(id)}
@@ -240,6 +240,7 @@ export default function AgentConversationPanel({
           }}
           onResolveToolApproval={controller.actions.resolveToolApproval}
           onSubmitErrorReport={controller.actions.onSubmitErrorReport}
+          subAgentReader={subAgentReader}
           afterAssistantMessage={extensions?.renderAssistantAttachment}
           afterAssistantMessageActions={extensions?.renderAssistantActions}
           modelLabels={modelLabels}
@@ -269,6 +270,7 @@ export default function AgentConversationPanel({
                   items={currentSubAgents}
                   activities={currentAgentMessage?.subAgentActivities}
                   placement="topLeft"
+                  reader={subAgentReader}
                 />
               ) : null}
             </div>

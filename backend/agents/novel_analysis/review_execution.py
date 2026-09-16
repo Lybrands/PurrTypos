@@ -20,6 +20,10 @@ from agents.novel_analysis.map_execution import (
     inherited_agent_input_payload,
     raise_child_run_failure,
 )
+from agents.novel_analysis.root_model_execution import (
+    is_root_model_producer,
+    uses_root_model,
+)
 from agents.novel_analysis.reduce_execution import _artifact_id
 from infrastructure.persistence.sqlite_run_tree_repository import SqliteRunTreeRepository
 from purra.agent_tree import AgentCapabilityGrant, ChildAgentSpec
@@ -189,11 +193,13 @@ def build_review_input_tool_catalog(db, *, run_tree_repository=None):
 
 
 class PurrAScalableReviewChildRunner:
-    def __init__(self, db=None, *, model_name, submissions=None):
+    def __init__(self, db=None, *, model_name, submissions=None, root_runner=None):
         self._model_name = str(model_name or "").strip()
         if not self._model_name:
             raise ValueError("Review Child runner requires a model name")
         self._core = None
+        self._root_runner = root_runner
+        self._artifacts = NovelAnalysisAttemptArtifactStore(db) if db is not None else None
         self._children = PurrAReusableChildCoordinator()
         if submissions is None and db is None:
             raise ValueError("Review Child runner requires a submission store")
@@ -204,6 +210,28 @@ class PurrAScalableReviewChildRunner:
         self._children.bind_agent_core(core)
 
     async def run(self, *, scope, context, signal=None):
+        if uses_root_model(context):
+            if self._root_runner is None or self._artifacts is None:
+                raise RuntimeError("Review Root runner is unavailable")
+            synthesis = await self._artifacts.load_payload(scope.synthesis_artifact_id)
+            payload = await self._root_runner.complete(
+                context=context,
+                instruction=(
+                    "审核并修正整书资料。不得新增或改变资料 id；可修正文案、类型或删除"
+                    "不可靠对象。每条 character_summary 只记录一个具体角色，保留一条"
+                    "background，人物、背景和世界设定保持创作表单字段结构。"
+                    "返回 {summaryMarkdown,facts,craftCards}。"
+                ),
+                inputs={
+                    "allowedFactIds": list(scope.fact_ids),
+                    "allowedCardIds": list(scope.card_ids),
+                    "summaryMarkdown": synthesis["summaryMarkdown"],
+                    "facts": synthesis["facts"],
+                    "craftCards": synthesis["craftCards"],
+                },
+                signal=signal,
+            )
+            return context.run_id, payload
         if self._core is None:
             raise RuntimeError("Review Child runner has no active Agent Core")
         operation_id = f"{context.task.id}:{context.unit.id}:{context.unit.attempt}"
@@ -259,12 +287,12 @@ class ScalableReviewUnitExecutor:
         recovered_operation_id = None
         if recovery is None:
             child_id, raw = await self._runner.run(scope=scope, context=context, signal=signal)
-            await _require_child(self._db, context.run_id, child_id)
+            await _require_model_run(self._db, context, child_id)
             payload = _validate_output(raw, scope, child_id)
         else:
             recovered, recovered_operation_id = recovery
             child_id = str(recovered.get("childRunId") or "")
-            await _require_child(self._db, context.run_id, child_id, allow_previous_root=recovered_operation_id != operation_id)
+            await _require_model_run(self._db, context, child_id, allow_previous_root=recovered_operation_id != operation_id)
             payload = _validate_committed(recovered, scope)
         receipt = await self._store.commit(task_id=context.task.id, unit_id=context.unit.id, attempt=context.unit.attempt, operation_id=operation_id, run_id=child_id, payload=payload)
         return LongTaskUnitResult(output_ref=receipt.resource_ref, artifact_digest=canonical_json_digest(payload), validation_receipt={"schemaVersion": 1, "unitKind": "review", "childRunId": child_id, "artifactReplayed": receipt.replayed, **({"recoveredOperationId": recovered_operation_id} if recovered_operation_id is not None and recovered_operation_id != operation_id else {})}, metadata={"artifactId": receipt.artifact_id, "finalResponse": payload["summaryMarkdown"]})
@@ -316,6 +344,19 @@ async def _require_child(db, root_id, child_id, *, allow_previous_root=False):
     row = await db.fetch_one("SELECT root_run_id, parent_run_id FROM ai_agent_runs WHERE id = ?", [child_id])
     if not child_id or child_id == root_id or row is None or not ((row["root_run_id"] == root_id and row["parent_run_id"] == root_id) or (allow_previous_root and row["root_run_id"] and row["parent_run_id"] == row["root_run_id"])):
         raise ScalableReviewExecutionError("Review requires a Child owned by this Root")
+
+
+async def _require_model_run(db, context, run_id, *, allow_previous_root=False):
+    if await is_root_model_producer(
+        db, context, run_id, allow_previous_root=allow_previous_root
+    ):
+        return
+    await _require_child(
+        db,
+        context.run_id,
+        run_id,
+        allow_previous_root=allow_previous_root,
+    )
 
 
 __all__ = ["PurrAScalableReviewChildRunner", "READ_NOVEL_ANALYSIS_REVIEW_INPUT", "ReviewInputScopeCompiler", "ScalableReviewExecutionError", "ScalableReviewOutputError", "ScalableReviewUnitExecutor", "build_review_input_tool_catalog"]

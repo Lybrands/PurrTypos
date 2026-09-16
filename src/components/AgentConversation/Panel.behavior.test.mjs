@@ -46,7 +46,6 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   const controller = {
     capabilities: {
       inputDisabled: false,
-      sessionNavigationDisabled: false,
       submitMode: 'send',
     },
     conversation: {
@@ -110,7 +109,6 @@ test('paused work exposes resume but not the live-generation stop action', () =>
   const controller = {
     capabilities: {
       inputDisabled: false,
-      sessionNavigationDisabled: false,
       submitMode: 'send',
     },
     conversation: {
@@ -163,13 +161,13 @@ test('paused work exposes resume but not the live-generation stop action', () =>
 })
 
 test('message time uses local calendar-day labels before falling back to a date', () => {
-  const now = new Date('2026-08-27T00:30:00')
+  const now = new Date('2026-08-27T00:30:00+08:00')
 
-  assert.equal(formatAgentMessageTime('2026-08-27T23:43:00', now), '23:43')
-  assert.equal(formatAgentMessageTime('2026-08-26T23:43:00', now), '昨天 23:43')
-  assert.equal(formatAgentMessageTime('2026-08-25T08:43:00', now), '前天 08:43')
-  assert.equal(formatAgentMessageTime('2026-08-23T08:43:00', now), '8月23日 08:43')
-  assert.equal(formatAgentMessageTime('2025-12-30T08:43:00', now), '2025年12月30日 08:43')
+  assert.equal(formatAgentMessageTime('2026-08-27T15:43:00Z', now), '23:43')
+  assert.equal(formatAgentMessageTime('2026-08-26T15:43:00Z', now), '昨天 23:43')
+  assert.equal(formatAgentMessageTime('2026-08-25T00:43:00Z', now), '前天 08:43')
+  assert.equal(formatAgentMessageTime('2026-08-23T00:43:00Z', now), '8月23日 08:43')
+  assert.equal(formatAgentMessageTime('2025-12-30T00:43:00Z', now), '2025年12月30日 08:43')
 })
 
 test('active execution log title does not append animated ellipsis', () => {
@@ -233,11 +231,13 @@ test('task progress can be toggled closed while nonterminal', () => {
 
 test('assistant footer places actions before hover-only time', () => {
   const today = new Date()
-  const todayAt0843 = [
+  const todayAt0843 = new Date(
     today.getFullYear(),
-    String(today.getMonth() + 1).padStart(2, '0'),
-    String(today.getDate()).padStart(2, '0'),
-  ].join('-') + 'T08:43:00'
+    today.getMonth(),
+    today.getDate(),
+    8,
+    43,
+  ).toISOString()
   const model = {
     id: 'model-1',
     name: 'deepseek-v4-flash',
@@ -374,7 +374,6 @@ test('mounted initializing panel rejects real Enter and click until current sess
   const controller = {
     capabilities: {
       inputDisabled: false,
-      sessionNavigationDisabled: false,
       submitMode: 'send',
     },
     conversation: {
@@ -384,6 +383,7 @@ test('mounted initializing panel rejects real Enter and click until current sess
       messages: [],
       activities: {},
       queuedSubmissions: [],
+      history: { sessions: [], loading: false },
       initializing: true,
       running: false,
       stopping: false,
@@ -413,6 +413,8 @@ test('mounted initializing panel rejects real Enter and click until current sess
       createSession: () => undefined,
       closeSession: () => undefined,
       renameSession: () => undefined,
+      loadSessionHistory: () => undefined,
+      openHistorySession: () => undefined,
       send: () => { sends += 1 },
       abort: () => undefined,
       editMessage: () => undefined,
@@ -424,13 +426,17 @@ test('mounted initializing panel rejects real Enter and click until current sess
     await act(async () => {
       root.render(React.createElement(AgentConversationPanel, {
         controller,
-        indexOpen: false,
+        indexOpen: true,
       }))
     })
     const textarea = window.document.querySelector('textarea[aria-label="输入任务"]')
     const send = window.document.querySelector('button[aria-label="发送"]')
+    const newSession = window.document.querySelector('button[aria-label="新建对话"]')
+    const history = window.document.querySelector('button[aria-label="打开历史对话"]')
     assert.equal(textarea.disabled, false)
     assert.equal(send.disabled, true)
+    assert.equal(newSession.disabled, false)
+    assert.equal(history.disabled, false)
     send.dispatchEvent(new window.Event('click', { bubbles: true }))
     assert.equal(sends, 0)
 
@@ -446,7 +452,7 @@ test('mounted initializing panel rejects real Enter and click until current sess
     await act(async () => {
       root.render(React.createElement(AgentConversationPanel, {
         controller: ready,
-        indexOpen: false,
+        indexOpen: true,
       }))
     })
     window.document.querySelector('button[aria-label="发送"]')

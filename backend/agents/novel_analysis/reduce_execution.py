@@ -17,6 +17,10 @@ from agents.novel_analysis.map_execution import (
     inherited_agent_input_payload,
     raise_child_run_failure,
 )
+from agents.novel_analysis.root_model_execution import (
+    is_root_model_producer,
+    uses_root_model,
+)
 from infrastructure.persistence.sqlite_run_tree_repository import SqliteRunTreeRepository
 from purra.agent_tree import AgentCapabilityGrant, ChildAgentSpec
 from purra.cancellation import raise_if_stopped
@@ -269,11 +273,13 @@ class ScalableReduceChildRunner(Protocol):
 
 
 class PurrAScalableReduceChildRunner:
-    def __init__(self, db=None, *, model_name: str, submissions=None) -> None:
+    def __init__(self, db=None, *, model_name: str, submissions=None, root_runner=None) -> None:
         self._model_name = str(model_name or "").strip()
         if not self._model_name:
             raise ValueError("Reduce Child runner requires a model name")
         self._core = None
+        self._root_runner = root_runner
+        self._artifacts = NovelAnalysisAttemptArtifactStore(db) if db is not None else None
         self._children = PurrAReusableChildCoordinator()
         if submissions is None and db is None:
             raise ValueError("Reduce Child runner requires a submission store")
@@ -286,6 +292,31 @@ class PurrAScalableReduceChildRunner:
         self._children.bind_agent_core(core)
 
     async def run(self, *, scope, dimensions, context, signal=None):
+        if uses_root_model(context):
+            if self._root_runner is None or self._artifacts is None:
+                raise RuntimeError("Reduce Root runner is unavailable")
+            inputs = [
+                {
+                    "unitId": locator.unit_id,
+                    "payload": await self._artifacts.load_payload(locator.artifact_id),
+                }
+                for locator in scope.artifacts
+            ]
+            payload = await self._root_runner.complete(
+                context=context,
+                instruction=(
+                    "归并同一分析 pass 的上游结果。合并同一对象，保留无法消解的冲突。"
+                    "返回 {findings:[{dimension,subject,analysis}],"
+                    "conflicts:[{dimension,subject,description}]}。"
+                ),
+                inputs={
+                    "passId": scope.pass_id,
+                    "allowedDimensions": list(dimensions),
+                    "inputs": inputs,
+                },
+                signal=signal,
+            )
+            return ReduceChildRunResult(context.run_id, payload)
         if self._core is None:
             raise RuntimeError("Reduce Child runner has no active Agent Core")
         operation_id = f"{context.task.id}:{context.unit.id}:{context.unit.attempt}"
@@ -368,16 +399,16 @@ class ScalableReduceUnitExecutor:
                 scope=scope, dimensions=dimensions, context=context, signal=signal
             )
             child_run_id = result.child_run_id
-            await _require_child(self._db, context.run_id, child_run_id)
+            await _require_model_run(self._db, context, child_run_id)
             payload = _validate_reduce_output(
                 result.payload, scope=scope, dimensions=dimensions, child_run_id=child_run_id
             )
         else:
             recovered, recovered_operation_id = recovery
             child_run_id = str(recovered.get("childRunId") or "")
-            await _require_child(
+            await _require_model_run(
                 self._db,
-                context.run_id,
+                context,
                 child_run_id,
                 allow_previous_root=recovered_operation_id != operation_id,
             )
@@ -434,6 +465,20 @@ def _artifact_id(resource_ref: str) -> str:
     if not artifact_id:
         raise ScalableReduceExecutionError("Reduce dependency Artifact id is empty")
     return artifact_id
+
+
+async def _require_model_run(db, context, run_id, *, allow_previous_root=False):
+    if await is_root_model_producer(
+        db, context, run_id, allow_previous_root=allow_previous_root
+    ):
+        return
+    from agents.novel_analysis.review_execution import _require_child
+    await _require_child(
+        db,
+        context.run_id,
+        run_id,
+        allow_previous_root=allow_previous_root,
+    )
 
 
 def _validate_dependency_payload(

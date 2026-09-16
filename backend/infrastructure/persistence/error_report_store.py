@@ -271,6 +271,7 @@ async def _agent_run_failure_diagnostics(
     )
     diagnosis: dict[str, Any] = {}
     trace_diagnosis: dict[str, Any] = {}
+    terminal_error_code = ""
     for row in rows:
         payload = _event_payload(row.get("payload_json"))
         event_type = str(row.get("event_type") or "")
@@ -331,7 +332,7 @@ async def _agent_run_failure_diagnostics(
         elif event_type == "run.failed":
             error_code = str(payload.get("error") or "").strip()
             if error_code:
-                diagnosis.setdefault("failureErrorCode", error_code)
+                terminal_error_code = error_code
 
     if not diagnosis:
         diagnosis.update(trace_diagnosis)
@@ -344,6 +345,25 @@ async def _agent_run_failure_diagnostics(
         ):
             if trace_diagnosis.get(key):
                 diagnosis[key] = trace_diagnosis[key]
+    prior_error_code = str(diagnosis.get("failureErrorCode") or "").strip()
+    if terminal_error_code and terminal_error_code != prior_error_code:
+        if prior_error_code:
+            for source, target in (
+                ("failureStage", "lastToolFailureStage"),
+                ("failureOutcome", "lastToolFailureOutcome"),
+                ("failureTool", "lastToolFailureTool"),
+                ("failureToolCallId", "lastToolFailureToolCallId"),
+                ("failureErrorCode", "lastToolFailureErrorCode"),
+            ):
+                if source in diagnosis:
+                    diagnosis[target] = diagnosis.pop(source)
+        diagnosis.update({
+            "failureStage": "agent_runtime",
+            "failureOutcome": "failed",
+            "failureErrorCode": terminal_error_code,
+        })
+    elif terminal_error_code:
+        diagnosis["failureErrorCode"] = terminal_error_code
     error_code = str(diagnosis.get("failureErrorCode") or "").strip()
     if error_code:
         diagnosis["failureReason"] = _failure_reason(
