@@ -3,6 +3,7 @@ import {
   ArrowUpIcon,
   PanelToggleIcon,
   PurrButton,
+  PurrSelect,
   PurrTooltip,
   RefreshIcon,
   StopCircleIcon,
@@ -13,6 +14,7 @@ import ModelPicker from './Composer/ModelPicker'
 import ConversationIndex from './ConversationIndex'
 import SessionHistory from './ConversationIndex/SessionHistory'
 import ConversationViewport from './ConversationViewport'
+import type { ToolLabelContext } from './AssistantOutput/timeline'
 import TaskProgress from './TaskProgress'
 import { SubAgentOverview, type SubAgentReader } from './DelegationStatus'
 import { collapseSubAgentDelegations } from './DelegationStatus/presentation'
@@ -21,11 +23,18 @@ import type { AgentConversationController } from './controller'
 import type { AgentConversationExtensions } from './extensions'
 import { buildAgentModelLabels } from './messageMetadata'
 import { buildAgentConversationPanelView } from './panelView'
-import { isComposerSubmitDisabled } from './composerPolicy'
+import { isComposerSubmitDisabled, isEmptyConversationPresentation } from './composerPolicy'
 import QueuedSubmissions from './QueuedSubmissions'
 import { prepareAgentCompletionNotifications } from '../../platform/agentNotifications'
 import { useAgentCompletionNotification } from './useAgentCompletionNotification'
 import './Panel.scss'
+import {
+  AGENT_OPERATION_MODE_OPTIONS,
+  getAgentOperationMode,
+  setAgentOperationMode,
+  subscribeAgentOperationMode,
+  type AgentOperationMode,
+} from '../../agentOperationMode'
 
 export interface AgentConversationPanelProps {
   controller: AgentConversationController
@@ -34,6 +43,11 @@ export interface AgentConversationPanelProps {
   onIndexOpenChange?(open: boolean): void
   className?: string
   subAgentReader?: SubAgentReader
+  /** 解析工具行文案所需的页面内目录（章节/大纲标题等） */
+  toolLabelContext?: ToolLabelContext
+  /** 零会话空态文案覆盖（例如写作范围未选章节时改为引导选章节） */
+  emptyStateTitle?: string
+  emptyStateDescription?: string
 }
 
 function ComposerFooter({
@@ -55,6 +69,8 @@ function ComposerFooter({
   // Provider call is still in flight when no call can be stopped.
   const showStop = conversation.running || conversation.stopping
   const submitDisabled = isComposerSubmitDisabled(controller)
+  const [operationMode, setOperationModeState] = React.useState(getAgentOperationMode)
+  React.useEffect(() => subscribeAgentOperationMode(setOperationModeState), [])
 
   return (
     <div className="agent-conversation-panel__footer">
@@ -78,6 +94,19 @@ function ComposerFooter({
             配置模型
           </PurrButton>
         )}
+        <PurrSelect<AgentOperationMode>
+          className="agent-conversation-panel__operation-mode"
+          size="small"
+          aria-label="操作类型"
+          value={operationMode}
+          options={AGENT_OPERATION_MODE_OPTIONS}
+          disabled={capabilities.inputDisabled}
+          onChange={(value) => {
+            const next = value as AgentOperationMode
+            setOperationModeState(next)
+            setAgentOperationMode(next)
+          }}
+        />
       </div>
       <div className="agent-conversation-panel__footer-actions">
         {queueLabel ? <span role="status">{queueLabel}</span> : null}
@@ -114,7 +143,11 @@ function ComposerFooter({
             />
           </PurrTooltip>
         ) : null}
-        <PurrTooltip title={`${submitLabel} (Enter)`}>
+        <PurrTooltip title={
+          submitDisabled && composer.value.trim() && composer.disabledHint
+            ? `${composer.disabledHint}后即可发送`
+            : `${submitLabel} (Enter)`
+        }>
           <PurrButton
             type="primary"
             shape="circle"
@@ -141,6 +174,9 @@ export default function AgentConversationPanel({
   onIndexOpenChange,
   className,
   subAgentReader,
+  toolLabelContext,
+  emptyStateTitle,
+  emptyStateDescription,
 }: AgentConversationPanelProps) {
   useAgentCompletionNotification(controller)
   const [uncontrolledIndexOpen, setUncontrolledIndexOpen] = React.useState(true)
@@ -192,13 +228,18 @@ export default function AgentConversationPanel({
     )
     : null
 
+  // 空态呈现：仅当本范围没有任何会话时隐藏列表展示引导；只要存在会话
+  // （哪怕是一个尚无消息的空会话）都正常呈现对话列表。
+  const emptyPresentation = isEmptyConversationPresentation(controller.conversation)
+  const sessionsEmpty = emptyPresentation
+
   return (
     <div className={[
       'agent-conversation-panel',
-      resolvedIndexOpen ? 'is-index-open' : 'is-index-closed',
+      resolvedIndexOpen && !sessionsEmpty ? 'is-index-open' : 'is-index-closed',
       className,
     ].filter(Boolean).join(' ')}>
-      {resolvedIndexOpen ? (
+      {resolvedIndexOpen && !sessionsEmpty ? (
         <ConversationIndex
           sessions={controller.conversation.sessions}
           activeSessionId={controller.conversation.activeSessionId}
@@ -216,7 +257,7 @@ export default function AgentConversationPanel({
           onCloseSession={(session) => void controller.actions.closeSession(session.id)}
           onCollapse={() => setIndexOpen(false)}
         />
-      ) : (
+      ) : sessionsEmpty ? null : (
         <PurrTooltip title="展开对话列表" placement="right">
           <PurrButton
             type="text"
@@ -229,6 +270,10 @@ export default function AgentConversationPanel({
       )}
       <main className="agent-conversation-panel__main">
         <ConversationViewport
+          emptyTitle={sessionsEmpty ? (emptyStateTitle ?? '开启你的第一段对话') : undefined}
+          emptyDescription={sessionsEmpty
+            ? (emptyStateDescription ?? '在下方输入并发送，发送后展开对话列表开始对话')
+            : undefined}
           sessionIdentity={controller.conversation.identity}
           messages={controller.conversation.messages}
           loading={controller.conversation.running}
@@ -241,6 +286,7 @@ export default function AgentConversationPanel({
           onResolveToolApproval={controller.actions.resolveToolApproval}
           onSubmitErrorReport={controller.actions.onSubmitErrorReport}
           subAgentReader={subAgentReader}
+          toolLabelContext={toolLabelContext}
           afterAssistantMessage={extensions?.renderAssistantAttachment}
           afterAssistantMessageActions={extensions?.renderAssistantActions}
           modelLabels={modelLabels}

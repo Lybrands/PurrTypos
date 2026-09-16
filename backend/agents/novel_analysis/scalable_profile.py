@@ -335,7 +335,7 @@ class ScalableAnalysisAdapter:
     context_provider: object = ScalableAnalysisContextProvider()
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_run_generation_tokens=None,
-        max_model_rounds=3,
+        max_model_rounds=None,
         max_progress_rounds=0,
     )
     recovery_policy: RecoveryPolicy = RecoveryPolicy()

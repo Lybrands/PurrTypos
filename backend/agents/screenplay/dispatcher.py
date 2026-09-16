@@ -22,12 +22,12 @@ class ScreenplayReplacementDescriptorResolver:
             owner_id=str(metadata["projectId"]),
             idempotency_key=str(metadata["commandId"]),
             failed_resume_attempts=int(metadata.get("failedResumeAttempts") or 0),
-            message="剧本任务已进入 replacement 可恢复执行。",
+            message="剧本任务已进入 replacement 执行。",
             budget_limits=LongTaskBudgetLimits(
                 max_invocation_attempts=int(metadata["modelAttemptBudget"]),
             ),
             budget_exhaustion_disposition=(
-                BudgetExhaustionDisposition.PAUSE_RECOVERABLE
+                BudgetExhaustionDisposition.FAIL_PERMANENT
             ),
             metadata=metadata,
         )

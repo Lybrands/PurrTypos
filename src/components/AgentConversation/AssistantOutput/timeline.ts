@@ -3,6 +3,7 @@ import type {
   ToolCallSegment,
 } from "../../../agent-runtime/contracts";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
+import type { Outline, EntityId } from "../../../types";
 import { publicAgentProgressNarration } from "../../../agent-runtime/outputPresentation.ts";
 import { markdownToPlainText } from "../../../utils/markdown.ts";
 import { parseAgentMessageTime } from "../messageMetadata.ts";
@@ -103,6 +104,15 @@ export interface OperationGroupProgress {
   parallel: boolean;
 }
 
+export interface ToolLabelContext {
+  /** 本地章节目录：把工具参数中的章节 ID 解析成《标题》 */
+  writingChapters?: { id: EntityId; title: string }[];
+  /** 本地大纲目录：把工具参数中的大纲 ID 解析成《标题》 */
+  availableOutlines?: Outline[];
+  /** 本地人物目录：把工具参数中的 characterIds 解析成人物名 */
+  characters?: { id: number; name: string }[];
+}
+
 export interface BuildAssistantTimelineOptions {
   messageIndex: number;
   isStreaming?: boolean;
@@ -110,6 +120,8 @@ export interface BuildAssistantTimelineOptions {
   loading?: boolean;
   /** 子 Run 可显示已收到的普通文本；根回答始终保持终态原子提交。 */
   allowStreamingText?: boolean;
+  /** 解析工具参数（章节/大纲标题等）所需的页面内目录数据 */
+  toolLabelContext?: ToolLabelContext;
 }
 
 function timelineTimestamp(value: string | null | undefined): number {
@@ -520,7 +532,7 @@ export function buildAssistantTimeline(
         part: {
           type: "operation",
           operation,
-          label: canonicalOperationLabel(operation),
+          label: canonicalOperationLabel(operation, opts.toolLabelContext),
           isRetry: typeof operation.display.labelParams.retryOfToolCallId === "string",
         },
       });
@@ -661,7 +673,14 @@ function operationPresentationGroup(
   return key && label ? { key, label } : undefined;
 }
 
-function canonicalOperationLabel(operation: CanonicalOperation): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function canonicalOperationLabel(
+  operation: CanonicalOperation,
+  context?: ToolLabelContext,
+): string {
   const params = operation.display.labelParams;
   const toolName = typeof params.toolName === "string"
     ? params.toolName
@@ -671,13 +690,28 @@ function canonicalOperationLabel(operation: CanonicalOperation): string {
   if (isToolOperation) {
     const displayNames = localizedDisplayNames(params.displayNames);
     const displayName = resolveLocalizedToolDisplayName(displayNames);
+    const args = isRecord(params.toolArguments) ? params.toolArguments : {};
+    if (toolName && Object.keys(args).length > 0) {
+      // 参数化文案优先：只有后端投影了模型参数时才可能出现
+      // 「检索写作记忆“xxx”」这类带具体信息的行。
+      return toolCallDisplayRow(
+        toolName,
+        args,
+        context?.writingChapters ?? [],
+        context?.availableOutlines ?? [],
+        displayName,
+        context?.characters,
+      ).label;
+    }
     if (displayName) return displayName;
     if (toolName) {
       return toolCallDisplayRow(
         toolName,
         {},
-        [],
-        [],
+        context?.writingChapters ?? [],
+        context?.availableOutlines ?? [],
+        undefined,
+        context?.characters,
       ).label;
     }
   }

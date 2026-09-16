@@ -355,17 +355,6 @@ test('failure is kept as an error notice rather than an assistant answer', () =>
   assert.match(assistant.error, /超过当前时限/)
 })
 
-test('child failure is a terminal Root error without a resume instruction', () => {
-  const assistant = buildNovelAnalysisMessages(run({
-    runStatus: 'failed', taskStatus: 'failed', workflowStatus: 'failed',
-    error: 'max_model_rounds', workflowResumable: false,
-  }), 'model').at(-1)
-  assert.equal(assistant.content, '')
-  assert.equal(assistant.isError, true)
-  assert.match(assistant.error, /子 Agent 达到模型轮次上限/)
-  assert.doesNotMatch(assistant.error, /继续|恢复|重试/)
-})
-
 test('publishes each chunk while more analysis pages are still pending', () => {
   const stream = new NovelAnalysisConversationStream()
   const seen = []

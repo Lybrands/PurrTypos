@@ -110,24 +110,13 @@
 
 .agent-conversation-index__subline { min-width: 0; gap: 6px; }
 .agent-conversation-index__status {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
   gap: 3px;
-  color: var(--text-muted);
+  color: var(--accent);
   font-size: 10px;
   white-space: nowrap;
 
-  > span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .purr-icon { flex: 0 0 auto; font-size: 10px; }
-}
-
-.agent-conversation-index__status--running { color: var(--accent); }
-.agent-conversation-index__status--queued { color: var(--warning); }
-.agent-conversation-index__status--paused { color: var(--warning); }
-.agent-conversation-index__status--completed { color: var(--success); }
-.agent-conversation-index__status--failed,
-.agent-conversation-index__status--canceled {
-  color: color-mix(in srgb, var(--warning) 78%, var(--text-secondary));
 }
 
 .agent-conversation-index__close {

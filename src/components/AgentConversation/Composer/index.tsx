@@ -236,7 +236,15 @@ export default function AgentComposer({
       </div>}
       <div className="agent-composer__footer">
         {actionMenu && <PurrTooltip title={`${actionMenu.buttonLabel || '对话操作'}（输入 ${actionMenu.triggers.join(' 或 ')}）`}>
-          <PurrButton type="text" size="small" aria-label={actionMenu.buttonLabel || '对话操作'} icon={<PlusIcon />} disabled={disabled} onClick={() => setMenuOpen(true)} />
+          <PurrButton
+            type="text"
+            size="small"
+            aria-label={actionMenu.buttonLabel || '对话操作'}
+            aria-expanded={menuOpen}
+            icon={<PlusIcon />}
+            disabled={disabled}
+            onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
+          />
         </PurrTooltip>}
         {footer}
       </div>

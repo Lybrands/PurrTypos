@@ -10,14 +10,14 @@ is already installed in the PurrTypos virtual environment:
 
 | Distribution | Version | Archived wheel SHA-256 |
 | --- | --- | --- |
-| `purra` | `1.0.0` | `9a3695b9fa2f37bc11b140c0077c5c1273c5b352fc2e13579af99ff859a03c2c` |
-| `purra_openai` | `1.0.0` | `4abed23852834e63f9d49d86f9134a2d78abe91a04fa5228582fe9471dd43188` |
-| `purra_anthropic` | `1.0.0` | `3049d50e15370219df01e29f41e73a5b3fcd9086b11c691fabe860dcd03e4019` |
-| `purra_mem0` | `1.0.0` | `c2621689e3f71490de1da1d9c7e729dfdcb0b254a40a24e36595de315cea4a0d` |
+| `purra` | `1.0.1` | `4894f211cbc72430a5f83e3e6846e974d2751d33f0861c5d02bdb03ca890261e` |
+| `purra_openai` | `1.0.1` | `3089978779f47a11c89ef8497232c07fb49c99e16125ab80f230ca3b9973c13c` |
+| `purra_anthropic` | `1.0.1` | `d0cfd69b4de5a942b843c316d750418b77fd867357fb45b65aed72a9a441b235` |
+| `purra_mem0` | `1.0.1` | `ad21ed6a06b4214e8f066916109cfa36c927e6c963dc564411e5451b1d1e8529` |
 
 The authoritative machine-readable evidence remains
 `backend/purra-candidate.json`, `backend/requirements-purra.txt`, and the wheels
-under `backend/vendor/purra-1.0.0/`. A version string alone is not an artifact
+under `backend/vendor/purra-1.0.1/`. A version string alone is not an artifact
 identity. The manifest's historical `base_commit` is provenance metadata; the
 complete `core_source_sha256` file map and wheel hash are the source/content
 identity used by the host verification.

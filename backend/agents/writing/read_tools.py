@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 
+from agents.writing.display_params import display_arguments
 from agents.writing.read_model import (
     SqliteWritingReadRepository,
     WritingReadScope,
@@ -320,8 +321,9 @@ def _registration(
             host_bound_paths=("bookId", "sessionId", "chapterId"),
         ),
         operation_display_params=(
-            lambda state, arguments, call, label=display_name: {
+            lambda state, arguments, call, label=display_name, keys=tuple(properties): {
                 "displayNames": {"zh-CN": label, "en": name},
+                "toolArguments": display_arguments(arguments, keys),
             }
         ),
     )

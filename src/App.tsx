@@ -21,6 +21,12 @@ import {
 import { applyModelRuntimeConfigPatch } from './modelCatalog'
 import { installModelDescriptors } from './models/registry'
 import './App.scss'
+import {
+  DEFAULT_AGENT_OPERATION_MODE,
+  normalizeAgentOperationMode,
+  setAgentOperationMode,
+  type AgentOperationMode,
+} from './agentOperationMode'
 
 const HomePage = lazy(() => import('./HomePage'))
 const BookshelfPage = lazy(() => import('./BookshelfPage'))
@@ -99,6 +105,7 @@ export default function App() {
   )
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
   const [agentPreventSystemSleep, setAgentPreventSystemSleep] = React.useState(false)
+  const [agentOperationMode, setAgentOperationModeState] = React.useState<AgentOperationMode>(DEFAULT_AGENT_OPERATION_MODE)
 
   React.useEffect(() => {
     services.settings.getSettings().then((res) => {
@@ -106,6 +113,9 @@ export default function App() {
       if (res.data.model_descriptors) installModelDescriptors(res.data.model_descriptors)
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       setAgentPreventSystemSleep(res.data.agent_prevent_system_sleep === true)
+      const operationMode = normalizeAgentOperationMode(res.data.agent_operation_mode)
+      setAgentOperationModeState(operationMode)
+      setAgentOperationMode(operationMode)
       if (Array.isArray(res.data.ai_model_configs)) {
         setModelConfigs(res.data.ai_model_configs)
       }
@@ -185,6 +195,18 @@ export default function App() {
     }
     await window.purrDesktop?.refreshAgentPowerSaveState?.().catch(() => undefined)
   }, [appMessage])
+
+  const handleAgentOperationModeChange = React.useCallback(async (value: AgentOperationMode) => {
+    const previous = agentOperationMode
+    setAgentOperationModeState(value)
+    setAgentOperationMode(value)
+    const result = await services.settings.setSettings({ agent_operation_mode: value })
+    if (!result.success) {
+      setAgentOperationModeState(previous)
+      setAgentOperationMode(previous)
+      appMessage.error('保存默认操作类型失败')
+    }
+  }, [agentOperationMode, appMessage])
 
   const loadBooks = React.useCallback(async () => {
     setBooksStatus('loading')
@@ -396,6 +418,8 @@ export default function App() {
               onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
               agentPreventSystemSleep={agentPreventSystemSleep}
               onAgentPreventSystemSleepChange={handleAgentPreventSystemSleepChange}
+              agentOperationMode={agentOperationMode}
+              onAgentOperationModeChange={handleAgentOperationModeChange}
             />
           </Suspense>
         </div>

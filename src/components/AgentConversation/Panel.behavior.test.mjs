@@ -11,7 +11,6 @@ let AgentMessageFooter
 let ExecutionLog
 let ExecutionLogStepGroup
 let AgentTaskProgress
-let resolveTaskProgressOpenChange
 let buildAgentModelLabels
 let formatAgentMessageTime
 
@@ -30,7 +29,7 @@ before(async () => {
   ;({ default: ExecutionLog, ExecutionLogStepGroup } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/ExecutionLog/index.tsx',
   ))
-  ;({ default: AgentTaskProgress, resolveTaskProgressOpenChange } = await vite.ssrLoadModule(
+  ;({ default: AgentTaskProgress } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/TaskProgress/index.tsx',
   ))
   ;({ buildAgentModelLabels, formatAgentMessageTime } = await vite.ssrLoadModule(
@@ -170,7 +169,7 @@ test('message time uses local calendar-day labels before falling back to a date'
   assert.equal(formatAgentMessageTime('2025-12-30T00:43:00Z', now), '2025年12月30日 08:43')
 })
 
-test('active execution log title does not append animated ellipsis', () => {
+test('active execution log remains expanded and does not append animated ellipsis', () => {
   const markup = renderToStaticMarkup(React.createElement(ExecutionLog, {
     logKey: 'active-without-dots',
     title: '正在进行',
@@ -185,7 +184,12 @@ test('active execution log title does not append animated ellipsis', () => {
     parseHTML(`<html><body>${markup}</body></html>`)
       .document.querySelector('.work-log__collapsible')
       ?.hasAttribute('hidden'),
-    true,
+    false,
+  )
+  assert.equal(
+    parseHTML(`<html><body>${markup}</body></html>`)
+      .document.querySelector('.work-log__toggle')?.tagName,
+    'DIV',
   )
 })
 
@@ -214,19 +218,13 @@ test('execution panel shows status while nested groups retain their execution he
     assert.doesNotMatch(innerTitle, /正在进行|已完成/)
     if (active) {
       assert.match(markup, /读取剧本交付物/)
-      assert.equal(document.querySelector('.work-log__toggle').disabled, false)
+      assert.equal(document.querySelector('.work-log__toggle').tagName, 'DIV')
       assert.equal(document.querySelector('.work-log-step-group__toggle').disabled, true)
       assert.equal(document.querySelector('.work-log__collapsible').hasAttribute('hidden'), false)
       assert.equal(document.querySelector('.work-log-step-group__collapsible').hasAttribute('hidden'), false)
     }
     else assert.doesNotMatch(markup, /读取剧本交付物/)
   }
-})
-
-test('task progress can be toggled closed while nonterminal', () => {
-  assert.equal(resolveTaskProgressOpenChange(false, false), false)
-  assert.equal(resolveTaskProgressOpenChange(false, true), true)
-  assert.equal(resolveTaskProgressOpenChange(true, false), false)
 })
 
 test('assistant footer places actions before hover-only time', () => {

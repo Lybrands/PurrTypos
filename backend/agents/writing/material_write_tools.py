@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from agents.writing.display_params import display_arguments
 from agents.writing.material_write_model import (
     SqliteWritingMaterialRepository,
     WritingMaterialMutationError,
@@ -213,7 +214,8 @@ def _registration(
         ),
         max_argument_chars=300_000,
         operation_display_params=lambda state, arguments, call: {
-            "displayNames": {"zh-CN": display_name, "en": name}
+            "displayNames": {"zh-CN": display_name, "en": name},
+            "toolArguments": display_arguments(arguments, tuple(properties)),
         },
     )
 

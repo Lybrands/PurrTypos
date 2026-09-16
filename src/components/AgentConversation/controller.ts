@@ -50,6 +50,8 @@ export interface AgentConversationController {
     ariaLabel: string
     submitDisabled: boolean
     ready?: boolean
+    /** 有输入但被禁发时向用户说明原因（例如「请先选择一个章节」） */
+    disabledHint?: string
     selectedModel: AiModelConfig | null
     modelConfigs: AiModelConfig[]
     selectModel(id: string): void

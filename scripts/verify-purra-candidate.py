@@ -18,7 +18,7 @@ parser.add_argument('--install', action='store_true')
 args = parser.parse_args()
 requirements = []
 for item in manifest['artifacts']:
-    wheel = root / 'backend/vendor/purra-1.0.0' / item['file']
+    wheel = root / 'backend/vendor/purra-1.0.1' / item['file']
     actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
     if actual != item['sha256']:
         raise SystemExit(f'Candidate hash mismatch: {wheel.name}')

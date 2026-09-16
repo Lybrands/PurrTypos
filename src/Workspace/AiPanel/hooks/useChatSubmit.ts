@@ -18,6 +18,7 @@ import {
   resolveTerminalRootOwnership,
 } from '../../../agent-runtime/rootOwnership'
 import { normalizeApiProvider } from "../../../modelCatalog";
+import { isUntitledSessionTitle } from "../../../components/AgentConversation/sessionTitle";
 import {
   countQueuedForSession,
   getSettledSessionActivity,
@@ -68,6 +69,8 @@ export interface UseChatSubmitParams {
   bookId: EntityId | null | undefined
   chapterId: EntityId | null | undefined
   activeSessionId: number | null
+  /** 零会话发送时自动创建会话；返回新会话 id（失败返回 null） */
+  ensureSession: () => Promise<number | null>
   sessions: AiSession[]
   setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>
   associatedChapterIds: EntityId[]
@@ -132,6 +135,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     bookId,
     chapterId,
     activeSessionId,
+    ensureSession,
     sessions,
     setSessions,
     associatedChapterIds,
@@ -282,7 +286,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       const isResend = typeof submitOverride?.editIndex === "number";
       const rawUserText = (submitOverride?.content ?? prompt).trim();
       const queuedContext = submitOverride?.queuedContext;
-      const targetSessionId = queuedContext?.sessionId ?? activeSessionId;
+      let targetSessionId = queuedContext?.sessionId ?? activeSessionId;
       const targetRuntime = getChatSessionRuntime(targetSessionId);
       if (
         targetSessionId != null
@@ -373,8 +377,15 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       if (targetSessionId == null) {
-        appMessage.warning("请先点击上方「+」新建对话，或从历史记录打开会话");
-        return "rejected";
+        // 零会话时发送：自动创建会话后继续本轮提交（见 AiPanel 的 ensureSession）。
+        const createdSessionId = bookId != null
+          ? await ensureSession()
+          : null;
+        if (createdSessionId == null) {
+          appMessage.warning("自动创建对话失败，请确认已选择章节后重试");
+          return "rejected";
+        }
+        targetSessionId = createdSessionId;
       }
       const sessionId = targetSessionId;
       if (!queuedContext && writingTechniqueReady === false) {
@@ -669,10 +680,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const currentSessionTitle =
       sessions.find((s) => s.id === sessionId)?.title ?? "";
     const hasHistoryBeforeThisQuestion = historyMessages.length > 0;
-    const isUntitledSession =
-      currentSessionTitle.trim() === "" || currentSessionTitle === "新对话";
     const needsTitle = queuedContext?.needsTitle
-      ?? (!hasHistoryBeforeThisQuestion && isUntitledSession);
+      ?? (!hasHistoryBeforeThisQuestion && isUntitledSessionTitle(currentSessionTitle));
     const acc = initialAgentAccumulator({
       sessionId,
       userText,
@@ -911,6 +920,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedModelConfig,
     conversations,
     bookId,
+    ensureSession,
     chapterId,
     currentChapterTitle,
     activeSessionId,

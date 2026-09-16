@@ -436,6 +436,8 @@ async def test_native_project_list_and_sessions_use_only_v2_routes(
     current = await ensure_current_screenplay_v2_session(project_id)
     replayed_current = await ensure_current_screenplay_v2_session(project_id)
     assert replayed_current["data"]["id"] == current["data"]["id"]
+    # 新会话标题走 ai_sessions.title 列默认值，与写作会话命名约定一致。
+    assert current["data"]["title"] == "新对话"
 
     created_session = await create_screenplay_v2_session(
         project_id,

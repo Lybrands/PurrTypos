@@ -113,6 +113,39 @@ def test_edit_schema_requires_content_and_revision(chapter_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_folds_blank_lines_into_single_paragraph_breaks(chapter_db) -> None:
+    repository = SqliteWritingChapterRepository(chapter_db)
+    current = await repository.read(WritingReadScope(
+        "book-1",
+        session_id=11,
+        chapter_id="chapter-1",
+    ))
+    profile = WritingReplacementProfile(chapter_db)
+    approvals = InMemoryApprovalGateway()
+    sink = _EventSink()
+    task = asyncio.create_task(CoreToolExecutor(
+        profile.adapter.tool_catalog,
+        approval_gateway=approvals,
+    ).execute_batch(_request({
+        "content": "\n第一段\n\n第二段\n\n\n第三段\n",
+        "baseRevision": current["baseRevision"],
+    }), sink))
+
+    for _ in range(100):
+        if sink.events:
+            break
+        await asyncio.sleep(0)
+    approval_id = sink.events[0].payload["approvalId"]
+    await approvals.resolve("run-edit", approval_id, "approve")
+    await task
+    stored = await chapter_db.fetch_one(
+        "SELECT content FROM articles WHERE chapter_id = 'chapter-1'"
+    )
+
+    assert stored == {"content": "第一段\n第二段\n第三段"}
+
+
+@pytest.mark.asyncio
 async def test_edit_waits_for_approval_then_commits_once(chapter_db) -> None:
     repository = SqliteWritingChapterRepository(chapter_db)
     current = await repository.read(WritingReadScope(

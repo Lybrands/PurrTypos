@@ -693,6 +693,13 @@ async def init_schema(db: DatabaseConnection) -> None:
         db,
         "ALTER TABLE ai_sessions ADD COLUMN screenplay_project_id TEXT DEFAULT NULL",
     )
+    # 剧本会话命名与写作会话对齐：历史自动命名的「{项目} · Agent」一次性
+    # 改回默认「新对话」，首轮对话结束后再由标题生成接口自动命名。
+    await _try_exec(
+        db,
+        "UPDATE ai_sessions SET title = '新对话' "
+        "WHERE scope = 'screenplay' AND title LIKE '% · Agent'",
+    )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_sessions_screenplay_project "
         "ON ai_sessions(screenplay_project_id, id DESC)"

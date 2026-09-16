@@ -454,7 +454,7 @@ class VersionedNovelAnalysisProductService:
         }.get(task.status.value)
         reason = str((row or {}).get("state_reason_code") or "").strip() or None
         scope = str((row or {}).get("state_reason_scope") or "").strip()
-        pause_kind = scope if scope in {"system", "user", "budget"} else None
+        pause_kind = scope if scope in {"system", "user"} else None
         due = metadata.get("autoResumeNotBeforeMs")
         due = due if isinstance(due, int) and due > 0 else None
         return {

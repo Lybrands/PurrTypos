@@ -107,6 +107,28 @@ export default function AiPanel({
     writingChapters,
   } = useWorkspace()
   const [prompt, setPromptState] = React.useState('')
+  /** 人物目录：把 Agent 工具参数中的 characterIds 解析成人物名（工具行文案用） */
+  const [bookCharacters, setBookCharacters] = React.useState<Array<{ id: number; name: string }>>([])
+  const [characterCatalogRevision, bumpCharacterCatalog] = React.useReducer((value: number) => value + 1, 0)
+  React.useEffect(() => {
+    if (bookId == null) {
+      setBookCharacters([])
+      return
+    }
+    let cancelled = false
+    services.characters.getCharacters({ bookId }).then((res) => {
+      if (cancelled || !res.success || !Array.isArray(res.data)) return
+      setBookCharacters(
+        (res.data as Array<{ id: number; name: string }>).map((c) => ({ id: Number(c.id), name: String(c.name ?? '') })),
+      )
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [bookId, characterCatalogRevision])
+  React.useEffect(() => {
+    const refetch = () => bumpCharacterCatalog()
+    window.addEventListener('setting-updated', refetch)
+    return () => window.removeEventListener('setting-updated', refetch)
+  }, [])
   const [conversations, setConversations] = React.useState<AgentConversationMessage[]>([])
   const [loading, setLoading] = React.useState(false)
   const [conversationInitializing, setConversationInitializing] = React.useState(false)
@@ -115,6 +137,24 @@ export default function AiPanel({
     0,
   )
   const [chatScope, setChatScope] = React.useState<ChatSessionScope>('chapter')
+  // 全局定位是「自动」还是「用户手动」的标记：自动切到全局后，一旦章节
+  // 恢复（上次章节/回退/新建）就切回章节范围；用户手动切换则以用户为准。
+  const autoGlobalScopeRef = React.useRef(false)
+  const handleChatScopeChange = React.useCallback((scope: ChatSessionScope) => {
+    autoGlobalScopeRef.current = false
+    setChatScope(scope)
+  }, [])
+  React.useEffect(() => {
+    if (chapterId == null) {
+      if (chatScope === 'chapter') {
+        autoGlobalScopeRef.current = true
+        setChatScope('setting')
+      }
+    } else if (autoGlobalScopeRef.current && chatScope === 'setting') {
+      autoGlobalScopeRef.current = false
+      setChatScope('chapter')
+    }
+  }, [chatScope, chapterId])
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false)
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false)
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false)
@@ -268,6 +308,7 @@ export default function AiPanel({
     setAssociatedChapterIds,
     associatedOutlineIds,
     setAssociatedOutlineIds,
+    availableOutlines,
     outlineSelectOptions,
     chapterSelectOptions,
     handleQuickAssociateChapter,
@@ -337,6 +378,11 @@ export default function AiPanel({
     bookId: bookId ?? undefined,
     chapterId: effectiveChapterId,
     activeSessionId,
+    ensureSession: async () => {
+      const createdId = await handleNewSession()
+      if (createdId != null) onConversationSidebarOpenChange?.(true)
+      return createdId
+    },
     sessions,
     setSessions,
     associatedChapterIds,
@@ -819,6 +865,9 @@ export default function AiPanel({
     stopping,
     attachmentsVersion: attachmentManager.getVersion(),
     scopeAvailable,
+    composerDisabledHint: chatScope !== 'setting' && effectiveChapterId == null
+      ? '请先选择一个章节'
+      : undefined,
     modelConfigs,
     selectedModelId: selectedModel,
     setSelectedModelId: setSelectedModel,
@@ -827,7 +876,9 @@ export default function AiPanel({
     taskPlan: activeTaskPlan,
     actions: {
       selectSession: (id) => setActiveSessionId(Number(id)),
-      createSession: handleNewSession,
+      createSession: async () => {
+        await handleNewSession()
+      },
       closeSession,
       renameSession: (id, title) => handleRenameSession(Number(id), title),
       send: handleSubmit,
@@ -850,7 +901,7 @@ export default function AiPanel({
       ? activeChapterTitle || undefined
       : undefined,
     scope: chatScope,
-    setScope: setChatScope,
+    setScope: handleChatScopeChange,
     contextBar,
     prompt: activePrompt,
     onInsertPrompt: setPrompt,
@@ -879,9 +930,20 @@ export default function AiPanel({
           controller={bookConversationController}
           extensions={bookConversationExtensions}
           subAgentReader={services.ai}
+          emptyStateTitle={chatScope !== 'setting' && effectiveChapterId == null
+            ? '选择章节后开始对话'
+            : undefined}
+          emptyStateDescription={chatScope !== 'setting' && effectiveChapterId == null
+            ? '写作 Agent 依附章节工作：在左侧章节列表选择或新建一个章节后，即可直接输入发送'
+            : undefined}
           indexOpen={conversationSidebarOpen}
           onIndexOpenChange={onConversationSidebarOpenChange}
           className="book-agent-conversation-panel"
+          toolLabelContext={{
+            writingChapters,
+            availableOutlines,
+            characters: bookCharacters,
+          }}
         />
       </div>
       <FavoritesModal

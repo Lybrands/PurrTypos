@@ -242,6 +242,56 @@ class SqliteWritingReadRepository:
             _page_result(items, total, normalized_offset, normalized_limit),
         )
 
+    async def writing_chapter_window(
+        self,
+        scope: WritingReadScope,
+        *,
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        scope = await self.validate_scope(scope)
+        normalized_limit = _positive_int(limit, "limit", maximum=MAX_PAGE_LIMIT)
+        count = await self._db.fetch_one(
+            "SELECT COUNT(*) AS total FROM outline_chapters AS c "
+            "JOIN outlines AS o ON o.id = c.outline_id "
+            "WHERE o.book_id = ? AND o.type = 'writing'",
+            [scope.book_id],
+        )
+        total = int((count or {}).get("total") or 0)
+        offset = 0
+        if scope.chapter_id:
+            anchor = await self._db.fetch_one(
+                "SELECT c.sort, c.id FROM outline_chapters AS c "
+                "JOIN outlines AS o ON o.id = c.outline_id "
+                "WHERE o.book_id = ? AND o.type = 'writing' AND c.id = ?",
+                [scope.book_id, scope.chapter_id],
+            )
+            if anchor is not None:
+                before = await self._db.fetch_one(
+                    "SELECT COUNT(*) AS total FROM outline_chapters AS c "
+                    "JOIN outlines AS o ON o.id = c.outline_id "
+                    "WHERE o.book_id = ? AND o.type = 'writing' AND "
+                    "(c.sort < ? OR (c.sort = ? AND c.id < ?))",
+                    [
+                        scope.book_id,
+                        int(anchor.get("sort") or 0),
+                        int(anchor.get("sort") or 0),
+                        str(anchor["id"]),
+                    ],
+                )
+                anchor_index = int((before or {}).get("total") or 0)
+                offset = max(
+                    0,
+                    min(
+                        anchor_index - normalized_limit // 2,
+                        max(0, total - normalized_limit),
+                    ),
+                )
+        return await self.writing_chapters(
+            scope,
+            offset=offset,
+            limit=normalized_limit,
+        )
+
     async def writing_chapter_contents(
         self,
         scope: WritingReadScope,

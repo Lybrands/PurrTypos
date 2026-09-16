@@ -35,6 +35,7 @@ import {
   replayWritingChatPostUntilObserved,
   type WritingChatRequestReservation,
 } from './writingChatRequestReceipt'
+import { getAgentOperationMode } from '../agentOperationMode'
 
 export type PlatformApiKey =
   | 'openFilePath'
@@ -469,6 +470,7 @@ export const backendApi: BackendApi = {
   previewContinuationCanon: (data) => apiPost('/continuations/canon-preview', data),
   createContinuation: (data) => apiPost('/continuations', data),
   getContinuation: (data) => apiGet(`/continuations/${data.bookId}`),
+  getContinuationPlotMaterials: (data) => apiGet<Array<{ sourceKey: string; body: string }>>(`/continuations/${data.bookId}/plot-materials`),
 
   commitChapterDiff: (data) => apiPost(`/chapter-diff/${data.chapterId}/commit`, {
     content: data.content,
@@ -710,7 +712,10 @@ export const backendApi: BackendApi = {
 
   aiChatStream: (data) => {
     const streamId = data.streamId || `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const requestData = { ...data }
+    const requestData = {
+      ...data,
+      ...(data.chatAgentMode === 'agent' ? { operationMode: data.operationMode ?? getAgentOperationMode() } : {}),
+    }
     delete requestData.streamId
     if (data.chatAgentMode === 'agent') {
       requestData.streamId = streamId

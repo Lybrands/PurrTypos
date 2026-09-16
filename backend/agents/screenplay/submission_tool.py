@@ -126,6 +126,7 @@ def build_screenplay_replacement_submission_registration(db) -> ToolRegistration
                 "zh-CN": "提交剧本候选部件",
                 "en": "Submit screenplay candidate part",
             },
+            **_candidate_title_arguments(arguments),
         },
     )
 

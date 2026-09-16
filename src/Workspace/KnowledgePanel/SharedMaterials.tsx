@@ -1,24 +1,23 @@
 import React from 'react'
 import { PurrButton, PurrCollapse } from '@/purr-components'
-import { apiGet, apiPost } from '../../services/httpClient'
+import { novelKnowledge, type KnowledgeMaterialsStatus } from '../../services/novelKnowledge'
 
-type Status = { mode: 'database' | 'markdown'; directory?: string; deleted?: { id: string; name: string }[] }
+type Status = KnowledgeMaterialsStatus
 
 export default function SharedMaterials({ book, onChanged }: { book: string; onChanged: () => Promise<void> }) {
   const [status, setStatus] = React.useState<Status>()
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
-  const endpoint = `/books/${encodeURIComponent(book)}/knowledge/materials`
   React.useEffect(() => {
     let alive = true
     setStatus(undefined); setError('')
-    void apiGet<Status>(endpoint).then(r => { if (alive) { if (r.success) setStatus(r.data); else setError(r.error || '无法读取资料存储状态') } })
+    void novelKnowledge.materialsStatus(book).then(r => { if (alive) { if (r.success) setStatus(r.data); else setError(r.error || '无法读取资料存储状态') } })
     return () => { alive = false }
-  }, [endpoint])
+  }, [book])
   const restore = async (id: string) => {
     setBusy(true); setError('')
     try {
-      const r = await apiPost<Status>(`${endpoint}/trash/${encodeURIComponent(id)}/restore`, {})
+      const r = await novelKnowledge.restoreMaterial(book, id)
       if (!r.success) throw new Error(r.error || '恢复失败')
       setStatus(r.data)
       await onChanged()

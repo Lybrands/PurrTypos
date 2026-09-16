@@ -559,6 +559,38 @@ test('stop before the first Run id still request-cancels exactly once', async ()
   }
 })
 
+test('zero-session submission auto-creates the session and streams to it', async () => {
+  globalThis.document = { documentElement: { lang: 'zh-CN' } }
+  runtime.replaceChatRuntimeMessages(7, [])
+  runtime.setChatRuntimeLoading(7, false)
+  let streamRequest
+  let ensureCalls = 0
+  const originalStream = services.ai.aiChatStream
+  const originalSubscribe = services.ai.onAiChunk
+  services.ai.onAiChunk = () => () => undefined
+  services.ai.aiChatStream = (request) => { streamRequest = request }
+  const { result } = renderHook({
+    activeSessionId: null,
+    sessions: [],
+    prompt: '开始新对话',
+    ensureSession: async () => {
+      ensureCalls += 1
+      return 7
+    },
+  })
+  try {
+    assert.equal(await result.handleSubmit(), 'started')
+    assert.equal(ensureCalls, 1)
+    assert.ok(streamRequest, 'chat stream must be requested for the created session')
+    assert.equal(streamRequest.sessionId, 7)
+    assert.equal(streamRequest.messages.at(-1).content, '开始新对话')
+    assert.equal(runtime.getChatSessionRuntime(7)?.loading, true)
+  } finally {
+    services.ai.aiChatStream = originalStream
+    services.ai.onAiChunk = originalSubscribe
+  }
+})
+
 test('the actual missing-key submission keeps Assistant content empty', async () => {
   const { result, readMessages } = renderHook({
     selectedModelConfig: model('model-a', ''),

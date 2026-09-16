@@ -345,7 +345,7 @@ def _workflow(row, units, metadata: Mapping[str, object]) -> dict:
         None,
     )
     raw_scope = str(row.get("state_reason_scope") or "").strip()
-    pause_kind = raw_scope if raw_scope in {"system", "user", "budget"} else None
+    pause_kind = raw_scope if raw_scope in {"system", "user"} else None
     if status == "paused" and pause_kind is None:
         pause_kind = "user" if reason and reason.startswith("user_") else "unknown"
     raw_due = metadata.get("autoResumeNotBeforeMs")

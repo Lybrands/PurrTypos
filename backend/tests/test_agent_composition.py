@@ -25,7 +25,12 @@ from purra.contracts import (
     RuntimeLimits,
     RunStatus,
     ToolCall,
+    ToolExecutionMode,
+    ToolPolicy,
+    ToolRiskLevel,
+    ToolSchema,
 )
+from purra.ports import ToolRegistration
 from purra.events import AgentEvent, CoreEventType
 from purra.api import (
     AgentCoreRunOptions,
@@ -42,6 +47,8 @@ from purra.tools import InMemoryToolCatalog
 from purra.recovery import RecoveryPolicy
 from application.agent_composition import (
     AgentComposition,
+    _OperationModeToolCatalog,
+    _auto_approves_policy,
     set_agent_composition,
 )
 from application.composition_factory import create_agent_composition
@@ -69,6 +76,7 @@ from routers.ai import (
     resolve_pending_tool_approval,
 )
 from schemas.ai import ChatStreamRequest, ResolveToolApprovalRequest
+from application.sse_mapping import bridge_chunk_for_effect
 from tests.support.canonical_wire import (
     assert_raw_canonical_wire,
     provider_text,
@@ -78,6 +86,97 @@ from tests.support.planning_stream import route_planning_stream
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+@pytest.mark.parametrize(("mode", "risk", "expected"), (
+    ("request_approval", ToolRiskLevel.WRITE, False),
+    ("request_approval", ToolRiskLevel.DESTRUCTIVE, False),
+    ("auto_approve", ToolRiskLevel.WRITE, True),
+    ("auto_approve", ToolRiskLevel.DESTRUCTIVE, False),
+    ("full_access", ToolRiskLevel.WRITE, True),
+    ("full_access", ToolRiskLevel.DESTRUCTIVE, True),
+))
+def test_agent_operation_mode_controls_confirmation_policy(mode, risk, expected):
+    policy = ToolPolicy(ToolExecutionMode.CONFIRM, "修改内容", risk)
+    assert _auto_approves_policy(mode, policy) is expected
+
+
+def _catalog_registration(name: str, mode: ToolExecutionMode, risk: ToolRiskLevel):
+    async def handler(_state, _arguments, _signal):
+        return None
+
+    return ToolRegistration(
+        schema=ToolSchema(
+            name=name,
+            description=name,
+            parameters={"type": "object", "properties": {}},
+        ),
+        handler=handler,
+        policy=ToolPolicy(mode, name, risk),
+    )
+
+
+@pytest.mark.parametrize(("mode", "name", "expected_mode", "expected_approval"), (
+    # request_approval keeps every declared policy untouched.
+    ("request_approval", "read_tool", ToolExecutionMode.READ, False),
+    ("request_approval", "write_tool", ToolExecutionMode.CONFIRM, True),
+    ("request_approval", "destructive_tool", ToolExecutionMode.CONFIRM, True),
+    # auto_approve downgrades ordinary writes; destructive tools still confirm.
+    ("auto_approve", "read_tool", ToolExecutionMode.READ, False),
+    ("auto_approve", "write_tool", ToolExecutionMode.PROPOSE, False),
+    ("auto_approve", "destructive_tool", ToolExecutionMode.CONFIRM, True),
+    # full_access downgrades every confirm tool, destructive included.
+    ("full_access", "read_tool", ToolExecutionMode.READ, False),
+    ("full_access", "write_tool", ToolExecutionMode.PROPOSE, False),
+    ("full_access", "destructive_tool", ToolExecutionMode.PROPOSE, False),
+))
+def test_operation_mode_catalog_rewrites_confirm_policies(
+    mode, name, expected_mode, expected_approval,
+):
+    registrations = (
+        _catalog_registration("read_tool", ToolExecutionMode.READ, ToolRiskLevel.READ),
+        _catalog_registration("write_tool", ToolExecutionMode.CONFIRM, ToolRiskLevel.WRITE),
+        _catalog_registration(
+            "destructive_tool", ToolExecutionMode.CONFIRM, ToolRiskLevel.DESTRUCTIVE,
+        ),
+    )
+    catalog = _OperationModeToolCatalog(
+        InMemoryToolCatalog(registrations), mode,
+    )
+
+    rewritten = catalog.get(name)
+    original = next(item for item in registrations if item.schema.name == name)
+
+    assert rewritten.policy.mode is expected_mode
+    assert rewritten.policy.requires_user_approval is expected_approval
+    # Auto approval must not be modeled as READ: purra 1.0.1 reserves READ for
+    # side-effect-free tools (parallel batching, no idempotency gating).
+    if original.policy.mode is ToolExecutionMode.CONFIRM and not expected_approval:
+        assert rewritten.policy.mode is ToolExecutionMode.PROPOSE
+
+
+@pytest.mark.parametrize("mode", ("request_approval", "auto_approve", "full_access"))
+def test_writing_core_accepts_each_operation_mode(
+    temp_db: DatabaseConnection,
+    mode: str,
+):
+    composition = _writing_composition(temp_db)
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "续写本章"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-1",
+        chapterId="chapter-1",
+        chatAgentMode="agent",
+        operationMode=mode,
+    )
+    request = to_writing_agent_request(body, {"model": "model"})
+
+    core = composition.create_core_for_request(request, "key")
+
+    assert core is not None
 
 
 class _FakeAgentProfile:
@@ -2018,3 +2117,87 @@ async def test_composition_shutdown_cancels_owned_root_execution_tasks(
 
     assert canceled.is_set()
     assert worker.done()
+
+
+@pytest.mark.asyncio
+async def test_composed_stream_delivers_tool_published_effect(monkeypatch):
+    """工具在自己的代码里提交落库的瞬间直接发布通知（不走框架管道）；
+    SSE 生成器注册广播队列后，桥接块必须出现在传输流里。"""
+    from application.domain_effect_bridge import init_broadcaster
+    import application.agent_composition as composition_module
+    import application.writing_agent_service as writing_service
+
+    broadcaster = init_broadcaster(bridge_chunk_for_effect)
+
+    class _BridgeComposition:
+        database = None
+        domain_effect_broadcaster = broadcaster
+
+    monkeypatch.setattr(
+        composition_module, "get_agent_composition", lambda: _BridgeComposition(),
+    )
+
+    hold_run_open = asyncio.Event()
+
+    def fake_start_writing_agent_run(**_kwargs):
+        async def _stream():
+            await hold_run_open.wait()
+            yield AgentRunResult(
+                run_id="run-bridge", status=RunStatus.DONE, model="m",
+            )
+
+        return _stream()
+
+    monkeypatch.setattr(
+        writing_service, "start_writing_agent_run", fake_start_writing_agent_run,
+    )
+
+    body = ChatStreamRequest(
+        messages=[{"role": "user", "content": "改写本章"}],
+        apiKey="key",
+        apiProvider="openai",
+        options=_fixture_model_options(),
+        enableAgentTools=True,
+        bookId="book-1",
+        chapterId="chapter-1",
+        chatAgentMode="agent",
+    )
+
+    chunks: list = []
+
+    async def collect():
+        async for chunk in _stream_composed_agent(
+            body=body,
+            api_key="key",
+            provider_options={"model": "model"},
+            signal=asyncio.Event(),
+        ):
+            chunks.append(chunk)
+
+    consumer = asyncio.create_task(collect())
+    # 等待 SSE 生成器启动并注册广播队列
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if broadcaster._queues:
+            break
+    assert broadcaster._queues, "SSE generator must register with the broadcaster"
+
+    # 工具处理函数提交成功后，在自己的代码里直接发布（不经过框架）
+    broadcaster.publish(
+        "run-bridge",
+        "writing.chapter_content_updated",
+        {"bookId": 1, "chapterId": 7, "committedRevision": "r2", "noop": False},
+    )
+
+    hold_run_open.set()
+    await asyncio.wait_for(consumer, timeout=5)
+
+    assert {
+        "chapterContentUpdated": {
+            "bookId": 1,
+            "chapterId": 7,
+            "committedRevision": "r2",
+            "firstContent": False,
+        },
+    } in chunks
+    assert chunks[-1]["done"] is True

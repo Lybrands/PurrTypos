@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict'
+import { after, before, test } from 'node:test'
+import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { createServer } from 'vite'
+
+let vite
+let useAiSessions
+
+before(async () => {
+  vite = await createServer({
+    appType: 'custom',
+    logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  ;({ useAiSessions } = await vite.ssrLoadModule(
+    '/src/Workspace/AiPanel/hooks/useAiSessions.ts',
+  ))
+})
+
+after(async () => {
+  delete globalThis.document
+  await vite?.close()
+})
+
+const jsonResponse = (payload) => new Response(JSON.stringify(payload), {
+  status: 200,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+function renderSessionsHook(overrides = {}) {
+  let result
+  let conversations = overrides.conversations ?? []
+  const params = {
+    bookId: 'book-a',
+    chapterId: 'chapter-a',
+    scope: 'chapter',
+    conversations,
+    setConversations: (next) => {
+      conversations = typeof next === 'function' ? next(conversations) : next
+    },
+    setLoading: () => undefined,
+    ...overrides,
+  }
+  function Harness() {
+    result = useAiSessions(params)
+    return React.createElement('div')
+  }
+  renderToStaticMarkup(React.createElement(Harness))
+  return { result, readConversations: () => conversations }
+}
+
+test('handleNewSession performs the real createSession step and returns the id', async () => {
+  globalThis.document = { documentElement: { lang: 'zh-CN' } }
+  const created = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input)
+    if (url.endsWith('/api/sessions') && init?.method === 'POST') {
+      created.push(JSON.parse(init.body))
+      return jsonResponse({
+        success: true,
+        data: { id: 9, book_id: 'book-a', chapter_id: 'chapter-a', scope: 'chapter' },
+      })
+    }
+    throw new Error(`unexpected URL ${url}`)
+  }
+  try {
+    const { result } = renderSessionsHook()
+    const id = await result.handleNewSession()
+    assert.equal(id, 9, 'create step must resolve with the new session id')
+    assert.deepEqual(created, [{
+      bookId: 'book-a',
+      chapterId: 'chapter-a',
+    }])
+    // activeSessionId 的更新发生在 setState 之后，静态渲染不重绘；
+    // 发送链路使用返回值 id，不依赖该状态同步可见（见 useChatSubmit 测试）。
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('create step fails loudly upstream when the API rejects', async () => {
+  globalThis.document = { documentElement: { lang: 'zh-CN' } }
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async () => jsonResponse({ success: false, error: 'boom' })
+  try {
+    const { result } = renderSessionsHook()
+    const id = await result.handleNewSession()
+    assert.equal(id, null, 'failed create resolves null so the caller can warn')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

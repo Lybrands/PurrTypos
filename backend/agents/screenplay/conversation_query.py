@@ -86,6 +86,15 @@ class ScreenplayReplacementConversationQuery:
             event.turn_id for _cursor, event in page if event.turn_id
         ))
         turns = await self._turns(turn_ids)
+        # run -> 所属 turn 的归属映射：一个 run 只归属其 planner turn。
+        # 事件已经按 canonical turn_id 分组，runRole 只需要排除「明确属于
+        # 其他 turn 的 run」；归属未知（规划 run/执行 run 未登记）一律
+        # root，否则历史回放会把整轮过程事件误判为 related 而丢弃。
+        run_owner_turn = {
+            str(row.get("root_run_id")): str(row.get("id"))
+            for row in turns.values()
+            if row.get("root_run_id")
+        }
         chunks = []
         for cursor, event in page:
             if event.turn_id is None:
@@ -94,17 +103,18 @@ class ScreenplayReplacementConversationQuery:
             if chunk is None:
                 continue
             turn = turns.get(str(event.turn_id), {})
+            owner_turn = run_owner_turn.get(str(event.run_id))
+            related = (
+                owner_turn is not None
+                and owner_turn != str(event.turn_id)
+            )
             runtime = _object(turn.get("runtime_profile_json"))
             chunks.append({
                 "cursor": int(cursor),
                 "turnId": event.turn_id,
                 "taskId": str(turn.get("task_id") or "") or None,
                 "runId": event.run_id,
-                "runRole": (
-                    "root"
-                    if turn.get("root_run_id") == event.run_id
-                    else "related"
-                ),
+                "runRole": "related" if related else "root",
                 "userContent": str(turn.get("user_content") or ""),
                 "model": str(runtime.get("model") or "") or None,
                 "turnCreatedAt": turn.get("create_time"),

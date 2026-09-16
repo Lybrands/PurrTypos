@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from uuid import uuid4
 
 from agents.screenplay.contracts import (
-    SCREENPLAY_OPERATION_MAX_MODEL_ROUNDS,
+    SCREENPLAY_OPERATION_MAX_MODEL_ATTEMPTS,
     SCREENPLAY_REPLACEMENT_DOMAIN_NAMESPACE,
     SCREENPLAY_REPLACEMENT_RECIPE_VERSION,
     SCREENPLAY_REPLACEMENT_SCHEMA_VERSION,
@@ -305,7 +305,7 @@ class _Adapter:
     context_provider: object = _ContextProvider()
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_run_generation_tokens=None,
-        max_model_rounds=SCREENPLAY_OPERATION_MAX_MODEL_ROUNDS,
+        max_model_rounds=None,
     )
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
@@ -449,7 +449,7 @@ class ScreenplayReplacementProfile:
                 "recipeDigest": recipe.metadata["recipeDigest"],
                 "plannerAuthority": "presentation_mapping_only",
                 "modelAttemptBudget": sum(
-                    step.max_attempts * SCREENPLAY_OPERATION_MAX_MODEL_ROUNDS
+                    step.max_attempts * SCREENPLAY_OPERATION_MAX_MODEL_ATTEMPTS
                     for step in model_steps
                 ),
                 "failedResumeAttempts": int(

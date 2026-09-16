@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -16,6 +16,7 @@ from purra.contracts import (
     ModelRequest,
     RunProvenance,
 )
+from purra.output import AgentOutputEvent
 from application.request_mapping import (
     UnsupportedCallerToolContractError,
     build_chat_provider_options,
@@ -1006,6 +1007,17 @@ async def _stream_composed_agent(
     stream_end = object()
     subscriber_attached = True
 
+    # 领域效果是 PRIVATE 事件，handle.subscribe 只流 PUBLIC，因此 effect
+    # 永远不会出现在 service_stream 里。输出仓库持久化领域效果时会同步
+    # 回调 domain_projector（composition 装配的广播器），这里注册本条
+    # SSE 的队列直接接收桥接块。
+    broadcaster = getattr(composition, "domain_effect_broadcaster", None)
+    unregister_effects: Callable[[], None] | None = (
+        broadcaster.register(queue)
+        if callable(getattr(broadcaster, "register", None))
+        else None
+    )
+
     async def _execute_run() -> None:
         nonlocal subscriber_attached
         try:
@@ -1056,6 +1068,8 @@ async def _stream_composed_agent(
         # Closing the response only detaches this subscriber. The composition
         # owns execution_task until the durable Run reaches a terminal state.
         subscriber_attached = False
+        if unregister_effects:
+            unregister_effects()
 
 
 @router.post("/ai/chat/stream")
@@ -1195,6 +1209,9 @@ async def chat_stream(
                 ),
             })
         except Exception:
+            logger.exception(
+                "[ai/chat/stream] failed before Writing Agent Run binding"
+            )
             if run_binding_lifecycle is not None:
                 receipt = await run_binding_lifecycle.on_start_failed(
                     "request_start_failed",

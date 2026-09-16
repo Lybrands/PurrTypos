@@ -55,3 +55,47 @@ export function handleChapterCreated(
     }),
   );
 }
+
+/**
+ * 写作 Agent 的 editChapterContent 已获批准并落库（仅通知、不含正文）：
+ * EditorPanel 监听该事件后重新拉取当前章节正文。
+ */
+export function handleChapterContentUpdated(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+): void {
+  if (!chunk.chapterContentUpdated || !host.isVisible()) return;
+  window.dispatchEvent(
+    new CustomEvent("chapter-content-updated", {
+      detail: {
+        chapterId: chunk.chapterContentUpdated.chapterId,
+        firstContent: chunk.chapterContentUpdated.firstContent === true,
+      },
+    }),
+  );
+}
+
+/**
+ * 写作 Agent 批量创建了章节/卷。Workspace 监听单个 chapter-created
+ * 事件完成目录刷新与选章；逆序派发使最终选中本批第一章。
+ */
+export function handleChaptersCreated(
+  chunk: AiStreamChunk,
+  host: AgentChunkHost,
+): void {
+  if (!chunk.chaptersCreated || !host.isVisible()) return;
+  const chapters = Array.isArray(chunk.chaptersCreated.chapters)
+    ? chunk.chaptersCreated.chapters
+    : [];
+  [...chapters].reverse().forEach((chapter) => {
+    if (chapter?.chapterId == null || !chapter.title) return;
+    window.dispatchEvent(
+      new CustomEvent("chapter-created", {
+        detail: {
+          chapterId: chapter.chapterId,
+          title: chapter.title,
+        },
+      }),
+    );
+  });
+}

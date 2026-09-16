@@ -6,10 +6,9 @@ import type {
   AgentTerminalSnapshot,
   AiStreamChunk,
 } from '../../../agent-runtime/chunkHandlers/types'
-import { normalizeApiProvider } from '../../../modelCatalog'
-import { buildStreamOptions } from '../../../agent-runtime/streamOptions'
 import type { AiModelConfig, AiSession, EntityId } from '../../../types'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
+import { generateSessionTitleFromText } from '../../../components/AgentConversation/sessionTitle'
 import {
   countQueuedForSession,
   getSettledSessionActivity,
@@ -17,7 +16,9 @@ import {
   type QueuedChatSubmission,
 } from './chatQueue'
 import {
+  handleChapterContentUpdated,
   handleChapterCreated,
+  handleChaptersCreated,
   handleProposedChapterDiff,
   handleSettingUpdated,
 } from './bookChunkSideEffects'
@@ -169,6 +170,8 @@ function dispatchBookChunk(
   )
   handleChapterCreated(chunk, host)
   handleSettingUpdated(chunk, host)
+  handleChapterContentUpdated(chunk, host)
+  handleChaptersCreated(chunk, host)
 }
 
 function settleQueue(
@@ -363,34 +366,18 @@ function maybeGenerateSessionTitle(
   snapshot: AgentTerminalSnapshot,
   dependencies: BookChunkHostDependencies,
 ): void {
-  const titleSource = snapshot.response.trim()
-  if (
-    outcome === 'failed'
-    || !dependencies.needsTitle
-    || !titleSource
-  ) return
-
-  void services.ai.generateSessionTitle({
-    apiKey: dependencies.modelConfig.apiKey,
-    baseURL: dependencies.modelConfig.baseUrl || undefined,
-    prompt: `User:\n${snapshot.userText}\n\nAssistant:\n${titleSource}`.trim(),
-    apiProvider: normalizeApiProvider(dependencies.modelConfig.apiProvider),
-    model: dependencies.apiModelName,
-    options: buildStreamOptions({
-      cfg: dependencies.modelConfig,
-      selectedModel: dependencies.apiModelName,
-    }).options,
-  }).then(async (result) => {
-    if (!result.success || !result.data?.trim()) return
-    const title = result.data.trim()
-    await services.sessions.updateSessionTitle({
+  if (outcome === 'failed' || !dependencies.needsTitle) return
+  generateSessionTitleFromText({
+    userText: snapshot.userText,
+    model: dependencies.modelConfig,
+    requestTitle: (request) => services.ai.generateSessionTitle(request),
+    logLabel: 'AI 对话',
+    persistTitle: (title) => services.sessions.updateSessionTitle({
       sessionId: dependencies.sessionId,
       title,
-    })
-    dependencies.setSessions((sessions) => sessions.map((session) => (
+    }),
+    onTitle: (title) => dependencies.setSessions((sessions) => sessions.map((session) => (
       session.id === dependencies.sessionId ? { ...session, title } : session
-    )))
-  }).catch((error: unknown) => {
-    console.warn('[AI 对话] 标题生成请求异常：', error)
+    ))),
   })
 }

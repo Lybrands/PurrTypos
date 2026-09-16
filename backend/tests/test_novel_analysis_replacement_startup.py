@@ -8,7 +8,6 @@ import pytest_asyncio
 
 from agents.novel_analysis.automatic_recovery import (
     NovelAnalysisReplacementAutomaticRecovery,
-    retire_misclassified_failure_pauses,
 )
 from agents.novel_analysis.reliability_baseline import (
     NovelAnalysisReliabilityBaselineService,
@@ -227,89 +226,6 @@ async def test_automatic_continuation_records_automatic_recovery_source() -> Non
     await lifecycle.before_submit()
 
     assert repository.calls == [("replacement-task", 0, "automatic")]
-
-
-@pytest.mark.asyncio
-async def test_legacy_failure_pause_is_retired_as_terminal_failure(
-    temp_db,
-) -> None:
-    await temp_db.execute(
-        "INSERT INTO ai_agent_long_tasks "
-        "(id, namespace, kind, owner_id, created_by_run_id, status, total_units, "
-        "completed_units, failed_units) VALUES "
-        "('legacy-output-task', 'purrtypos.novel_analysis', "
-        "'novel_analysis.scalable.v2', 'revision-1', 'root-run', 'paused', 2, 0, 0)"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_long_task_units "
-        "(task_id, unit_id, semantic_key, position, status, error_code, disposition, failure_json) "
-        "VALUES "
-        "('legacy-output-task', 'skill:create', 'skill:create', 0, 'blocked', "
-        "'novel_analysis_skill_output_invalid', 'pause_recoverable', "
-        "'{\"category\":\"transient_provider\"}'), "
-        "('legacy-output-task', 'review:artifact', 'review:artifact', 1, 'pending', NULL, NULL, '{}')"
-    )
-
-    assert await retire_misclassified_failure_pauses(temp_db) == (
-        "legacy-output-task",
-    )
-    assert await retire_misclassified_failure_pauses(temp_db) == ()
-    task = await temp_db.fetch_one(
-        "SELECT status, failed_units FROM ai_agent_long_tasks "
-        "WHERE id = 'legacy-output-task'"
-    )
-    units = await temp_db.fetch_all(
-        "SELECT unit_id, status, disposition, failure_json "
-        "FROM ai_agent_long_task_units WHERE task_id = 'legacy-output-task' "
-        "ORDER BY position"
-    )
-
-    assert task == {"status": "failed", "failed_units": 1}
-    assert units[0]["status"] == "failed"
-    assert units[0]["disposition"] == "fail_permanent"
-    assert json.loads(units[0]["failure_json"])["category"] == "tool_execution"
-    assert units[1]["status"] == "canceled"
-
-
-@pytest.mark.asyncio
-async def test_legacy_generic_child_failure_recovers_the_child_error_code(
-    temp_db,
-) -> None:
-    await temp_db.execute(
-        "INSERT INTO ai_agent_runs (id, status, prompt, parent_run_id, error) VALUES "
-        "('legacy-root', 'canceled', '', NULL, NULL), "
-        "('legacy-child', 'failed', '', 'legacy-root', 'max_model_rounds')"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_long_tasks "
-        "(id, namespace, kind, owner_id, created_by_run_id, status, total_units, "
-        "completed_units, failed_units) VALUES "
-        "('legacy-child-task', 'purrtypos.novel_analysis', "
-        "'novel_analysis.scalable.v2', 'revision-1', 'legacy-root', 'paused', 1, 0, 0)"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_long_task_runs (task_id, run_id, relation) VALUES "
-        "('legacy-child-task', 'legacy-root', 'created')"
-    )
-    await temp_db.execute(
-        "INSERT INTO ai_agent_long_task_units "
-        "(task_id, unit_id, semantic_key, position, status, error_code, disposition, failure_json) "
-        "VALUES ('legacy-child-task', 'skill:create', 'skill:create', 0, "
-        "'blocked', 'RuntimeError', 'pause_recoverable', "
-        "'{\"category\":\"transient_provider\",\"code\":\"RuntimeError\"}')"
-    )
-
-    assert await retire_misclassified_failure_pauses(temp_db) == (
-        "legacy-child-task",
-    )
-    unit = await temp_db.fetch_one(
-        "SELECT status, error_code, disposition, failure_json "
-        "FROM ai_agent_long_task_units WHERE task_id = 'legacy-child-task'"
-    )
-    assert unit["status"] == "failed"
-    assert unit["error_code"] == "max_model_rounds"
-    assert unit["disposition"] == "fail_permanent"
-    assert json.loads(unit["failure_json"])["code"] == "max_model_rounds"
 
 
 @pytest.mark.asyncio

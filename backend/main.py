@@ -219,7 +219,6 @@ async def lifespan(application: FastAPI):
         from agents.novel_analysis.automatic_recovery import (
             NovelAnalysisReplacementAutomaticRecovery,
             monitor_novel_analysis_replacement_recovery,
-            retire_misclassified_failure_pauses,
         )
         from agents.novel_analysis.reliability_baseline import (
             NovelAnalysisReliabilityBaselineService,
@@ -229,13 +228,6 @@ async def lifespan(application: FastAPI):
             db,
             composition,
         )
-        retired_failure_pauses = await retire_misclassified_failure_pauses(db)
-        if retired_failure_pauses:
-            logging.getLogger(__name__).warning(
-                "Retired %s misclassified novel-analysis failure pause(s): %s",
-                len(retired_failure_pauses),
-                ", ".join(retired_failure_pauses),
-            )
         novel_analysis_baseline = NovelAnalysisReliabilityBaselineService(db)
         recovered_novel_analyses = await novel_analysis_recovery.recover_due()
         if recovered_novel_analyses:

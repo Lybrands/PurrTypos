@@ -30,6 +30,9 @@ from agents.writing.read_tools import (
 from agents.writing.response_contract import (
     writing_atomic_continuity_judge_policy,
 )
+from agents.writing.chapter_create_tools import (
+    build_writing_chapter_create_registrations,
+)
 from agents.writing.chapter_write_tools import (
     build_writing_chapter_tool_registrations,
 )
@@ -69,8 +72,6 @@ class WritingReplacementExecutionStateFactory:
 
 
 class WritingReplacementContextProvider:
-    """Expose policy and scope, while book facts stay behind read tools."""
-
     async def build_context(self, request, budget, signal=None) -> ContextBundle:
         raise_if_stopped(signal)
         allocation = budget.allocation_for("writing_replacement_read_policy")
@@ -78,6 +79,8 @@ class WritingReplacementContextProvider:
             return ContextBundle()
         scope = _scope_from_request(request)
         selection = _selection_from_request(request)
+        payload = thaw_json_mapping(request.domain_context.payload)
+        snapshot = payload.get("replacement_context_snapshot") or {}
         content = json.dumps({
             "schemaVersion": 1,
             "scope": scope.to_mapping(),
@@ -87,8 +90,10 @@ class WritingReplacementContextProvider:
                 "characterCountField": "total",
                 "characterCountScope": "current_book_owned_characters",
                 "doNotInferMissingFacts": True,
+                "batchIndependentReads": True,
             },
             "contextSelection": selection.public_manifest(),
+            "workspaceManifest": snapshot.get("workspaceManifest"),
         }, ensure_ascii=False)
         return ContextBundle(blocks=(ContextBlock(
             name="writing_replacement_read_policy",
@@ -107,9 +112,9 @@ class WritingReplacementContextProvider:
         raise_if_stopped(signal)
         return (ContextBudgetClaim(
             name="writing_replacement_read_policy",
-            desired_tokens=512,
-            minimum_tokens=256,
-            maximum_tokens=512,
+            desired_tokens=2_048,
+            minimum_tokens=512,
+            maximum_tokens=4_096,
             priority=100,
         ),)
 
@@ -123,7 +128,7 @@ class WritingReplacementAdapter:
     context_provider: object = WritingReplacementContextProvider()
     runtime_limits: RuntimeLimits = RuntimeLimits(
         max_run_generation_tokens=None,
-        max_model_rounds=6,
+        max_model_rounds=None,
     )
     recovery_policy: RecoveryPolicy = RecoveryPolicy()
 
@@ -149,6 +154,7 @@ class WritingReplacementProfile:
                     technique_access=WritingTechniqueAccess(db),
                 ),
                 *build_writing_chapter_tool_registrations(db),
+                *build_writing_chapter_create_registrations(db),
                 *build_writing_material_tool_registrations(db),
             )),
         )

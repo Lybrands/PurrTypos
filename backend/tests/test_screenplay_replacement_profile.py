@@ -300,14 +300,14 @@ async def test_profile_exposes_dispatcher_only_when_executor_is_supplied(temp_db
 
 
 @pytest.mark.asyncio
-async def test_descriptor_uses_project_command_and_recoverable_budget() -> None:
+async def test_descriptor_uses_project_command_and_terminal_budget() -> None:
     descriptor = await ScreenplayReplacementDescriptorResolver().resolve(
         None,
         None,
         SimpleNamespace(metadata={
             "projectId": "project-1",
             "commandId": "command-1",
-            "modelAttemptBudget": 54,
+            "modelAttemptBudget": 576,
             "failedResumeAttempts": 2,
         }),
     )
@@ -315,8 +315,8 @@ async def test_descriptor_uses_project_command_and_recoverable_budget() -> None:
     assert descriptor.owner_id == "project-1"
     assert descriptor.idempotency_key == "command-1"
     assert descriptor.failed_resume_attempts == 2
-    assert descriptor.budget_limits.max_invocation_attempts == 54
-    assert descriptor.budget_exhaustion_disposition.value == "pause_recoverable"
+    assert descriptor.budget_limits.max_invocation_attempts == 576
+    assert descriptor.budget_exhaustion_disposition.value == "fail_permanent"
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 
+from agents.writing.display_params import display_arguments
 from agents.writing.context_contract import (
     WRITING_CONTEXT_SELECTION_STATE_KEY,
     WritingContextSelection,
@@ -758,6 +759,7 @@ def _registration(
         ),
         operation_display_params=lambda state, arguments, call: {
             "displayNames": {"zh-CN": display_name, "en": name},
+            "toolArguments": display_arguments(arguments, tuple(properties)),
         },
     )
 
