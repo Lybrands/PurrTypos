@@ -542,6 +542,15 @@ function AssistantOutputInner({
           startedAt={message.turnStartedAt}
           durationMs={message.durationMs}
           hasError={executionPanelHasTerminalError(message)}
+          headerExtra={!executionPanel.active && message.delegations?.length ? (
+            <DelegationStatus
+              items={message.delegations}
+              activities={message.subAgentActivities}
+              variant="overview"
+              placement="topRight"
+              reader={subAgentReader}
+            />
+          ) : undefined}
         >
           {executionLogItems.map(renderExecutionLogItem)}
           {showProcessingStandby ? (
