@@ -4,9 +4,9 @@ import {
   LoadingIcon,
   MessageIcon,
   PanelToggleIcon,
-  PinFilledIcon,
-  PinIcon,
+  PinnedIcon,
   PlusIcon,
+  PushpinIcon,
   PurrButton,
   PurrEmpty,
   PurrInput,
@@ -226,7 +226,7 @@ export default function AgentConversationIndex<
                 )}
                 <div className="agent-conversation-index__subline">
                   {session.pinned ? (
-                    <PinFilledIcon
+                    <PinnedIcon
                       className="agent-conversation-index__pinned-mark"
                       aria-label="已置顶"
                     />
@@ -250,7 +250,7 @@ export default function AgentConversationIndex<
                   <PurrButton
                     type="text"
                     size="small"
-                    icon={session.pinned ? <PinFilledIcon /> : <PinIcon />}
+                    icon={session.pinned ? <PinnedIcon /> : <PushpinIcon />}
                     className="agent-conversation-index__pin"
                     onClick={(event) => {
                       event.stopPropagation()
