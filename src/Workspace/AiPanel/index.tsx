@@ -20,10 +20,10 @@ import {
   useAssociatedContext,
   useAiModelPrefs,
   useAiSessions,
+  useChatScopeMemory,
   useMemorySelection,
   usePromptTemplateContext,
   useChatSubmit,
-  type ChatSessionScope,
 } from './hooks'
 import {
   getChatSessionRuntime,
@@ -136,25 +136,13 @@ export default function AiPanel({
     (value: number) => value + 1,
     0,
   )
-  const [chatScope, setChatScope] = React.useState<ChatSessionScope>('chapter')
-  // 全局定位是「自动」还是「用户手动」的标记：自动切到全局后，一旦章节
-  // 恢复（上次章节/回退/新建）就切回章节范围；用户手动切换则以用户为准。
-  const autoGlobalScopeRef = React.useRef(false)
-  const handleChatScopeChange = React.useCallback((scope: ChatSessionScope) => {
-    autoGlobalScopeRef.current = false
-    setChatScope(scope)
-  }, [])
-  React.useEffect(() => {
-    if (chapterId == null) {
-      if (chatScope === 'chapter') {
-        autoGlobalScopeRef.current = true
-        setChatScope('setting')
-      }
-    } else if (autoGlobalScopeRef.current && chatScope === 'setting') {
-      autoGlobalScopeRef.current = false
-      setChatScope('chapter')
-    }
-  }, [chatScope, chapterId])
+  // 对话作用域（章节/全局）：手动选择按书记忆，再次进入工作台时恢复；
+  // 无章节时的自动全局不落盘，章节恢复即切回章节范围。
+  const {
+    chatScope,
+    handleChatScopeChange,
+    openGlobalChat,
+  } = useChatScopeMemory(bookId, chapterId)
   const [favoritesModalOpen, setFavoritesModalOpen] = React.useState(false)
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false)
   const [contextPopoverOpen, setContextPopoverOpen] = React.useState(false)
@@ -285,7 +273,7 @@ export default function AiPanel({
   React.useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ prefill?: string }>).detail
-      setChatScope('setting')
+      openGlobalChat()
       pendingSettingSessionRef.current = true
       if (detail?.prefill) {
         pendingSettingPromptRef.current = detail.prefill
@@ -294,7 +282,7 @@ export default function AiPanel({
     }
     window.addEventListener('open-setting-chat', handler as EventListener)
     return () => window.removeEventListener('open-setting-chat', handler as EventListener)
-  }, [])
+  }, [openGlobalChat])
 
   React.useEffect(() => {
     if (!pendingSettingSessionRef.current) return
