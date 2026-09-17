@@ -1,12 +1,34 @@
 {
-  "base_commit": "377f5e81e923fa63ed0df7a895ef5ae8e382d670",
+  "artifacts": [
+    {
+      "file": "purra-1.0.1-py3-none-any.whl",
+      "sha256": "65d48191dec2eaeb67feb5936cb425b9203f04a4dfe4b3f9046c6c88615952fe",
+      "source": "/Users/liuyubin/Lybrand_project/purra"
+    },
+    {
+      "file": "purra_anthropic-1.0.1-py3-none-any.whl",
+      "sha256": "d0cfd69b4de5a942b843c316d750418b77fd867357fb45b65aed72a9a441b235",
+      "source": "/Users/liuyubin/Lybrand_project/purra"
+    },
+    {
+      "file": "purra_mem0-1.0.1-py3-none-any.whl",
+      "sha256": "ad21ed6a06b4214e8f066916109cfa36c927e6c963dc564411e5451b1d1e8529",
+      "source": "/Users/liuyubin/Lybrand_project/purra"
+    },
+    {
+      "file": "purra_openai-1.0.1-py3-none-any.whl",
+      "sha256": "3089978779f47a11c89ef8497232c07fb49c99e16125ab80f230ca3b9973c13c",
+      "source": "/Users/liuyubin/Lybrand_project/purra"
+    }
+  ],
+  "base_commit": "d9f9380cc66d7c7319f7c4bafc0eba90403e36a4",
   "core_source_sha256": {
     ".github/workflows/ci.yml": "b15b403ac83386fa51eb7fab1d25fea3d9679f98c5bc2f718f2fbc4abcd6fca0",
     ".github/workflows/release.yml": "49bb3f4c87d9e924f4f01ce9f22fb4044e3ac3c59cde43b29466039e77478917",
     ".gitignore": "dc8bb91f28a9632d73b13391f1e506a29c12bf1a7ea4c39fab22ea53da22dfcd",
     ".zcode/plans/plan-sess_fdee7ab3-d69b-4aa3-abb1-64941516d8c9.md": "6bd5a47278560e2a3c2be6347361e2577e8ee5a3b21ec264c32a004a105fb7e2",
     "ARCHITECTURE.md": "3c474e08390ff296c82b72887375447de001271ae6b9529d7fbadec1233e13ad",
-    "CHANGELOG.md": "bb61e45743d563c89e3e70b9da226c00c51525c1ffdd7b90efb21ba9bb2a70ad",
+    "CHANGELOG.md": "ab41f65c52c280614802cc657e807ec64d0d3577ee07151d106d23f7898b4a59",
     "LICENSE": "583c52a9709000ef6d5091146f3e8a2c0394a8f836f0d8c888b3b1467f57c922",
     "MANIFEST.in": "097444555f148f6eb9aba150cd1d18db6510d473e646f02ac171b44b0c90ef4e",
     "README.md": "97f97b5039278161922f29307041a9b136d53f169c08ca40e054941b63afb726",
@@ -132,7 +154,7 @@
     "integrations/mcp/python/tests/test_protocol.py": "58ebda57bfeb5c0c23858ce579e1b23575e75284c82c0ea979ff8ace2c20e612",
     "integrations/mcp/typescript/LICENSE": "583c52a9709000ef6d5091146f3e8a2c0394a8f836f0d8c888b3b1467f57c922",
     "integrations/mcp/typescript/README.md": "fd25e2873bc35280b597e37a547254587308800767f19d9e01f7a0aee982948f",
-    "integrations/mcp/typescript/package-lock.json": "fdfc546e164564108d0d88fce904769c5a02c0419370aa22b6d9cb66b868ecb4",
+    "integrations/mcp/typescript/package-lock.json": "9b95e061c5d27099bc4bfbe46beb4932de9071e44143e1d7d5ca80817431ee53",
     "integrations/mcp/typescript/package.json": "f5f88597238d012f4683e946aa3ec3109b19f86776b1578fea26d54e364f4a22",
     "integrations/mcp/typescript/scripts/check-installed-write.mjs": "5be2a8da67e8e04cd06cdea8e7d7c918690c49677fe553168b7b15bda7921ca6",
     "integrations/mcp/typescript/scripts/check-installed.mjs": "68c238e2811c3914ea870d064877c13ce93ed9bda5e71544b40e3a4439845dce",
@@ -188,7 +210,7 @@
     "integrations/mem0/typescript/README.md": "11258a3e51710bb82f08a304d7d74a5497757562bbff34f17a80319a43588173",
     "integrations/mem0/typescript/README.zh-CN.md": "ccb39126a9518d63a52626b76e34e315ebb2d0297061ba076a795ca90f39f35a",
     "integrations/mem0/typescript/THIRD_PARTY_NOTICES.md": "5db4ac25b17979f18d2828b8d42b6e7126c28fe4f625468d08cef33d6590dba7",
-    "integrations/mem0/typescript/package-lock.json": "3b6ff0fe984638dcf144dc98987480cb4e1fe641364cd6270953e47fb4e7234c",
+    "integrations/mem0/typescript/package-lock.json": "fbb9d4dd35b47cc5441aadc7b83cb3932fb36581f6789007dfc337cb347e8b92",
     "integrations/mem0/typescript/package.json": "e76ae8412e47622a2051010749112a8d7dac3a23c69c1c23bb01e4e0b31262f5",
     "integrations/mem0/typescript/scripts/build-sdk.mjs": "5f6828a9cdbe502d0aea98211c1191f0b9099dab9104ce046cd0e90269377ed1",
     "integrations/mem0/typescript/scripts/check-native-sdk.mjs": "64489c1066885a7aadf0050bf940157fe4cabf676a8ac7b9f1f2fc46c7d031ab",
@@ -497,7 +519,7 @@
     "src/purra/runtime/orchestrator.py": "f7f9c9267094b186bf1ed339a5bf1b56b79ad949a9e2c7502afd10107a4acd34",
     "src/purra/runtime/response_finalization.py": "a7c543a54259d203f0e788945e0bc3d5e1b23ecb3d7395899d04adb56b052c9c",
     "src/purra/runtime/tool_authorization.py": "eb3c124c268048271c6b5c3faa7fb25c2e78601968fac31f3c215331c6e0afbc",
-    "src/purra/runtime/tool_recovery.py": "c487513ab7d7e3b89676de992f4433087b559bc1e0516d009dc469b920bc19ef",
+    "src/purra/runtime/tool_recovery.py": "66d17a494d72a0c877b3fbaa0a2784109fe2e3dd94ee325ae4800683e1d934e4",
     "src/purra/runtime/tool_round.py": "3923b3044aec21758f166810e8693c56c23d9bb8c2a3b996e91db7186e565b4c",
     "src/purra/runtime_context.py": "db5fde120bf7fd47a38efe189eef803646c6cce03294926b5255cff553a329b3",
     "src/purra/schema.py": "5d7772178dbe253df07ca9130673b5b72224b739d85a504e5c797dab4d5d0c04",
@@ -520,7 +542,7 @@
     "src/purra/tools/approval.py": "364e2e1b7b5fa570acd76fcffb092be09d4865bc884e7ba1fa1f01bc9b313553",
     "src/purra/tools/contracts.py": "126c49208ce7e9ca7101d39129c3d73fed67cb48f31cd589e7026f439d50f86b",
     "src/purra/tools/display_names.py": "a78ea8d039dbbf681339839a8bba6e5a10c4fc8a027a06c4ed786bcdca88bdc0",
-    "src/purra/tools/executor.py": "da046e5c79e4445b49d38abfba7a79d30cffffc8fe41d998396061af5b8f554f",
+    "src/purra/tools/executor.py": "de1799e59cc8f91d5200ab846c41979f66815ee918f3212787406fafc52ea70a",
     "src/purra/tools/policy.py": "75fb7ec2644c63a633418f7ad415a10280ac08cf8fa8441d2e147f0ff6819096",
     "src/purra/tools/registry.py": "b3c9e647e286f39c4ddea637de90e09daf4450ef224b5615b24ef4d95f2496f9",
     "src/purra/tools/scoping.py": "ab085aeb3b9cbd38cf928e97365fe31bf8185294878e23a6806651bfb10dee63",
@@ -555,6 +577,7 @@
     "tests/test_model_protocol_fixture.py": "0443765c526b89f9cab84ad3aee66eb021a6fe310aaff9f11560ca251b3c5fd7",
     "tests/test_model_routing.py": "578c11f924cb3b610decfb05818ba0aac4e1eaf8afd0dcff0d9dace4395c306b",
     "tests/test_model_tool_gateway_conformance.py": "b7903cf064b477a542500ab87a07ac5f75f39eb889e36851008c598f28cf07d8",
+    "tests/test_multi_call_recovery.py": "5ee37976f982a04fab075a8a649a40c8f926201a9d78c059f22037ec790c3477",
     "tests/test_observability_protocol_fixture.py": "b158235bcf06d89b82b27d1fd725cf7ff020d000744acf8538c0e3f8a12f84b6",
     "tests/test_operation_contracts.py": "dc1e99d9ce56723b482df7d6916a7b4ea7f5f41fce225355986d31f338099f10",
     "tests/test_operation_controller.py": "9713d23cc5401313c366b89c73c5631d85adfa0bddc9b3db70ec5ea3cc822152",
@@ -724,27 +747,5 @@
     "typescript/test/unit-run-binding.test.mjs": "519f789214f58a66d58bbaa93b8c75a22fd8c835da61d5e6c68fc5015f4f614e",
     "typescript/tsconfig.example.json": "7a4f05e2c5905f85044c34e009e3701eab781367f91e524e8ac430045e7cfaaa",
     "typescript/tsconfig.json": "c67db69061df747269694a3dcc0e1a74ab6f5f44b3e1954124ded28f3e394e91"
-  },
-  "artifacts": [
-    {
-      "file": "purra-1.0.1-py3-none-any.whl",
-      "sha256": "8fe48a48f8a687f28f248d304670271cc08000b7347e963386ca3f382b8fe9c0",
-      "source": "/Users/liuyubin/Lybrand_project/purra"
-    },
-    {
-      "file": "purra_openai-1.0.1-py3-none-any.whl",
-      "sha256": "3089978779f47a11c89ef8497232c07fb49c99e16125ab80f230ca3b9973c13c",
-      "source": "/Users/liuyubin/Lybrand_project/purra/integrations/openai/python"
-    },
-    {
-      "file": "purra_anthropic-1.0.1-py3-none-any.whl",
-      "sha256": "d0cfd69b4de5a942b843c316d750418b77fd867357fb45b65aed72a9a441b235",
-      "source": "/Users/liuyubin/Lybrand_project/purra/integrations/anthropic/python"
-    },
-    {
-      "file": "purra_mem0-1.0.1-py3-none-any.whl",
-      "sha256": "ad21ed6a06b4214e8f066916109cfa36c927e6c963dc564411e5451b1d1e8529",
-      "source": "/Users/liuyubin/Lybrand_project/purra/integrations/mem0/python"
-    }
-  ]
+  }
 }
