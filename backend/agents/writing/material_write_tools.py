@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 
 from agents.writing.display_params import display_arguments
 from agents.writing.material_write_model import (
@@ -92,6 +93,52 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
             base_revision=arguments.get("baseRevision"), patch=_patch(arguments),
         )
 
+    async def validate_create_entities(state, arguments, signal=None):
+        del signal
+        return await _validate(
+            repository.validate_create_setting_entities, state, arguments,
+            entities=_entity_entries(arguments),
+        )
+
+    async def create_entities(state, arguments, signal=None):
+        try:
+            payload = await repository.commit_create_setting_entities(
+                _scope(state), signal=signal, entities=_entity_entries(arguments),
+            )
+            if not payload["noop"]:
+                # 提交成功的瞬间通知已连接的 SSE 流：世界设定面板据此刷新列表。
+                get_broadcaster().publish(
+                    getattr(state, "run_id", None),
+                    "writing.setting_entities_changed",
+                    {
+                        "bookId": payload["bookId"],
+                        "action": "created",
+                        "id": payload["entities"][0]["targetId"] if payload["entities"] else None,
+                        "name": f"新增 {payload['count']} 条设定",
+                    },
+                )
+            return ToolHandlerResult(
+                json.dumps(payload, ensure_ascii=False),
+                effects=(DomainEffect(
+                    type="writing.setting_entities_created",
+                    payload={
+                        "bookId": payload["bookId"],
+                        "count": payload["count"],
+                        "targetIds": [item["targetId"] for item in payload["entities"]],
+                        "intentDigest": payload["intentDigest"],
+                        "noop": payload["noop"],
+                    },
+                ),),
+                effect_state=ToolEffectState.COMMITTED,
+            )
+        except (WritingMaterialMutationError, WritingReadScopeError) as error:
+            return ToolHandlerResult(
+                json.dumps({"success": False, "code": error.code, "error": str(error)},
+                           ensure_ascii=False),
+                error_code=error.code,
+                effect_state=ToolEffectState.NOT_STARTED,
+            )
+
     async def validate_create_entity(state, arguments, signal=None):
         del signal
         return await _validate(
@@ -153,9 +200,17 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
             "createSettingEntity", "新增世界设定",
             "在当前书新增一条世界设定实体（地点/势力/物品/其他）；"
             "名称不得与已有设定重复，创建前应先查看设定目录确认。"
-            "需要创建多条时必须逐轮逐条调用：并行多调用批次仅支持只读工具。",
+            "需要一次创建多条时改用 createSettingEntities。",
             "listSettingEntities", "settingEntity.created",
             validate_create_entity, create_entity,
+        ),
+        _create_entities_registration(
+            "createSettingEntities", "批量新增世界设定",
+            "一次调用批量新增多条世界设定（1-20 条，内部逐条串行落库，"
+            "任一条校验失败整批不写入）；批内名称不得重复，也不得与已有设定重复，"
+            "创建前应先查看设定目录确认。只创建一条时改用 createSettingEntity。",
+            "listSettingEntities", "settingEntities.created",
+            validate_create_entities, create_entities,
         ),
         _delete_entity_registration(
             "deleteSettingEntity", "删除世界设定",
@@ -274,6 +329,39 @@ def _create_entity_registration(
     )
 
 
+def _create_entities_registration(
+    name, display_name, description, prerequisite, produces,
+    validator, handler,
+) -> ToolRegistration:
+    from agents.writing.material_write_model import SETTING_ENTITY_BATCH_LIMIT
+    properties = {
+        "entities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": SETTING_ENTITY_BATCH_LIMIT,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "entityType": {
+                        "type": "string",
+                        "enum": ["location", "faction", "item", "other"],
+                    },
+                    "tags": {"type": "string", "maxLength": 10_000},
+                    "profileMd": {"type": "string", "maxLength": 250_000},
+                },
+                "required": ["name", "entityType"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    return _registration(
+        name, display_name, description, properties,
+        required=("entities",), prerequisite=prerequisite,
+        produces=produces, validator=validator, handler=handler,
+    )
+
+
 def _delete_entity_registration(
     name, display_name, description, prerequisite, produces,
     validator, handler,
@@ -338,6 +426,14 @@ def _patch(arguments) -> dict[str, str]:
         for key in ("name", "tags", "profileMd")
         if key in arguments
     }
+
+
+def _entity_entries(arguments) -> tuple[Mapping, ...]:
+    """批量创建参数归一：purra 冻结容器按 Mapping 协议读取。"""
+    raw = arguments.get("entities")
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        return tuple(item for item in raw if isinstance(item, Mapping))
+    return ()
 
 
 __all__ = ["build_writing_material_tool_registrations"]
