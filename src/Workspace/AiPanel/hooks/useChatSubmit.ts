@@ -363,8 +363,29 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       const requestBookId = queuedContext?.bookId ?? bookId
-      const requestChapterId = queuedContext?.chapterId ?? chapterId ?? null
-      const requestSessionScope = queuedContext?.sessionScope ?? sessionScope
+      const queuedChapterId = queuedContext?.chapterId ?? chapterId ?? null
+      // 会话自身绑定是请求章节/scope 的权威来源：作用域切换竞态或队列
+      // 补发时，UI/排队上下文携带的章节可能属于另一作用域（例如章节
+      // 上下文配到全局会话），后端会按 scope 不一致拒绝预订与保存，
+      // 整轮失败。绑定明确时按会话收敛；未知（遗留行/夹具）保持原值。
+      const boundSession = sessions.find(
+        (session) => session.id === (queuedContext?.sessionId ?? activeSessionId),
+      );
+      const sessionChapterBinding = boundSession
+        ? (boundSession.scope === "setting" || boundSession.scope === "screenplay"
+            ? null
+            : boundSession.chapter_id
+          ? String(boundSession.chapter_id)
+          : undefined)
+        : undefined;
+      const requestChapterId = sessionChapterBinding !== undefined
+        ? sessionChapterBinding
+        : queuedChapterId;
+      const requestSessionScope = boundSession?.scope === "setting"
+        ? "setting" as const
+        : boundSession?.scope === "chapter"
+          ? "chapter" as const
+          : (queuedContext?.sessionScope ?? sessionScope)
       const requestCurrentChapterTitle = queuedContext?.currentChapterTitle
         ?? currentChapterTitle
       const requestLocale = queuedContext?.locale
