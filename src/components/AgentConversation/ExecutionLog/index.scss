@@ -436,3 +436,8 @@
 .subagent-overview__trigger .subagent-overview__trigger-count {
   margin-left: 3px;
 }
+
+/* 压过组件库 text 型按钮的 hover 底色（--bg-hover-zone），保持纯内联观感 */
+.subagent-overview__trigger.purr-button:is(:hover, :focus-visible):not(:disabled) {
+  background: none;
+}
