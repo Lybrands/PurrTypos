@@ -426,3 +426,10 @@
   padding-left: 0;
   border-left: 0;
 }
+
+/* 标题行右侧的附加入口（子 Agent 概览等）推到行尾、位于收起箭头左侧 */
+.work-log__toggle-extra {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}

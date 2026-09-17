@@ -18,6 +18,8 @@ export interface ExecutionLogProps {
   startedAt?: number;
   durationMs?: number;
   hasError?: boolean;
+  /** 收起态标题行右侧的附加入口（如已结束后收起的子 Agent 概览） */
+  headerExtra?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -62,6 +64,7 @@ export default function ExecutionLog({
   startedAt,
   durationMs,
   hasError = false,
+  headerExtra,
   children,
 }: ExecutionLogProps) {
   const [openState, setOpenState] = React.useState(() =>
@@ -125,18 +128,24 @@ export default function ExecutionLog({
           aria-expanded={openState.open}
           aria-controls={contentId}
         >
-          <ChevronRightIcon className="work-log__chevron" />
           {hasError ? <AlertCircleIcon className="work-log__error-icon" /> : null}
           <span>{title}</span>
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
           ) : null}
+          {headerExtra ? (
+            <span className="work-log__toggle-extra">{headerExtra}</span>
+          ) : null}
+          <ChevronRightIcon className="work-log__chevron" />
         </button>
       ) : (
         <div className="work-log__toggle work-log__toggle--static">
           <span>{title}</span>
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
+          ) : null}
+          {headerExtra ? (
+            <span className="work-log__toggle-extra">{headerExtra}</span>
           ) : null}
         </div>
       )}

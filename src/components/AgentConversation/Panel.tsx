@@ -207,6 +207,9 @@ export default function AgentConversationPanel({
     () => collapseSubAgentDelegations(currentAgentMessage?.delegations ?? []),
     [currentAgentMessage?.delegations],
   )
+  // 子 Agent 胶囊只在运行中出现在输入框上方；对话结束后收进「已完成」
+  // 标题行右侧的入口（见 AssistantOutput 的 ExecutionLog headerExtra）。
+  const showSubAgentOverview = controller.conversation.running && currentSubAgents.length > 0
 
   const setIndexOpen = React.useCallback((open: boolean) => {
     if (indexOpen == null) setUncontrolledIndexOpen(open)
@@ -312,13 +315,13 @@ export default function AgentConversationPanel({
           submitDisabled={isComposerSubmitDisabled(controller)}
           floatingContent={(
             (view.showTaskProgress && controller.composer.taskPlan)
-            || currentSubAgents.length > 0
+            || showSubAgentOverview
           ) ? (
             <div className="agent-composer__floating-content">
               {view.showTaskProgress && controller.composer.taskPlan ? (
                 <TaskProgress plan={controller.composer.taskPlan} placement="topLeft" />
               ) : null}
-              {currentSubAgents.length > 0 ? (
+              {showSubAgentOverview ? (
                 <SubAgentOverview
                   items={currentSubAgents}
                   activities={currentAgentMessage?.subAgentActivities}
