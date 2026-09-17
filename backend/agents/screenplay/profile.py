@@ -13,6 +13,7 @@ from agents.screenplay.contracts import (
     SCREENPLAY_REPLACEMENT_RECIPE_VERSION,
     SCREENPLAY_REPLACEMENT_SCHEMA_VERSION,
     ScreenplayPartCompletion,
+    ScreenplayPartKind,
     screenplay_part_definition,
 )
 from agents.shared.implementation import AgentKind, replacement_implementation
@@ -134,9 +135,113 @@ _ROLE_LABELS = {
     "review": "审阅修订",
 }
 
+_PART_STEP_TYPES = {
+    ScreenplayPartKind.EVIDENCE: StepType.ANALYZE,
+    ScreenplayPartKind.EXPANSION: StepType.ANALYZE,
+    ScreenplayPartKind.DRAFT_SCENE: StepType.WRITE,
+    ScreenplayPartKind.EPISODE_METADATA: StepType.WRITE,
+    ScreenplayPartKind.DOCUMENT_SECTION: StepType.WRITE,
+    ScreenplayPartKind.REVIEW_DIMENSION: StepType.REVIEW,
+}
+
+
+def _template_plan_steps(scope_id: str, label: str) -> tuple[WorkStep, ...]:
+    return (
+        WorkStep(
+            id=f"prepare-{scope_id}",
+            title=f"梳理{label}目标",
+            type=StepType.ANALYZE,
+            executor=StepExecutor.MODEL,
+        ),
+        WorkStep(
+            id=f"produce-{scope_id}",
+            title=f"生成{label}候选",
+            type=StepType.WRITE,
+            executor=StepExecutor.MODEL,
+            depends_on=(f"prepare-{scope_id}",),
+        ),
+        WorkStep(
+            id=f"verify-{scope_id}",
+            title="校验并形成候选版本",
+            type=StepType.REVIEW,
+            executor=StepExecutor.MODEL,
+            depends_on=(f"produce-{scope_id}",),
+        ),
+    )
+
+
+def _expanded_plan_step_title(step, episode_scenes: dict[int, int]) -> str:
+    kind = ScreenplayPartKind(step.kind)
+    episode = step.metadata.get("episodeNumber")
+    if kind is ScreenplayPartKind.DRAFT_SCENE:
+        episode_scenes[episode] = episode_scenes.get(episode, 0) + 1
+        return f"编写第{episode}集剧本场景{episode_scenes[episode]}"
+    if kind is ScreenplayPartKind.EPISODE_METADATA:
+        return f"汇总第{episode}集剧本信息"
+    if (
+        kind is ScreenplayPartKind.DOCUMENT_SECTION
+        and str(step.id).startswith("scene-list:")
+    ):
+        return f"拆解第{episode}集场景"
+    if kind is ScreenplayPartKind.REVIEW_DIMENSION:
+        return "审阅并形成修订候选"
+    return None
+
+
+def _expanded_plan_steps(
+    spec: ScreenplayHostRecipeSpec,
+    project_id: str,
+    label: str,
+) -> tuple[WorkStep, ...] | None:
+    """Expand visible plan steps from the compiled recipe so the plan reflects
+    real execution granularity (per scene / per episode). Returns None — the
+    static three-step template — when the recipe carries fewer than three
+    model Parts, where per-Part steps would be less readable."""
+    recipe = spec.compile(project_id=project_id)
+    model_steps = tuple(
+        step for step in recipe.steps
+        if screenplay_part_definition(step.kind).completion
+        is not ScreenplayPartCompletion.HOST_ONLY
+    )
+    if len(model_steps) < 3:
+        return None
+    episode_scenes: dict[int, int] = {}
+    step_ids_by_part_key: dict[str, str] = {}
+    drafts: list[tuple[str, str, StepType, tuple[str, ...]]] = []
+    for step in model_steps:
+        title = _expanded_plan_step_title(step, episode_scenes)
+        if title is None:
+            title = f"生成{label}候选"
+        step_id = f"work:{step.id}"
+        step_ids_by_part_key[step.id] = step_id
+        drafts.append((
+            step_id,
+            title,
+            _PART_STEP_TYPES.get(ScreenplayPartKind(step.kind), StepType.WRITE),
+            step.depends_on,
+        ))
+    return tuple(
+        WorkStep(
+            id=step_id,
+            title=title,
+            type=step_type,
+            executor=StepExecutor.MODEL,
+            depends_on=tuple(
+                step_ids_by_part_key[dependency]
+                for dependency in dependencies
+                if dependency in step_ids_by_part_key
+            ),
+        )
+        for step_id, title, step_type, dependencies in drafts
+    )
+
 
 class ScreenplayHostPlanner:
-    """Project host-owned intent into stable, presentation-only WorkSteps."""
+    """Project host-owned intent into stable, presentation-only WorkSteps.
+
+    Single-deliverable stages keep the static three-step template; episode /
+    scene pipelines expand from the compiled recipe so the plan mirrors the
+    durable execution units."""
 
     async def create_plan(
         self,
@@ -150,9 +255,12 @@ class ScreenplayHostPlanner:
     ):
         del capabilities, run_id, turn_id, reasoning_mode
         raise_if_stopped(signal)
+        scope = ScreenplayRootScope.from_request(request)
         spec = _host_recipe_spec(request)
         label = _ROLE_LABELS.get(spec.target_role, spec.target_role)
         scope_id = spec.target_role
+        steps = _expanded_plan_steps(spec, scope.project_id, label) \
+            or _template_plan_steps(scope_id, label)
         return PlanningResult(
             kind=PlanningKind.PLANNED,
             work_plan=WorkPlan(
@@ -165,28 +273,7 @@ class ScreenplayHostPlanner:
                     instruction=str(request.messages[-1].content or "").strip(),
                     deliverable=spec.target_role,
                 ),
-                steps=(
-                    WorkStep(
-                        id=f"prepare-{scope_id}",
-                        title=f"梳理{label}目标",
-                        type=StepType.ANALYZE,
-                        executor=StepExecutor.MODEL,
-                    ),
-                    WorkStep(
-                        id=f"produce-{scope_id}",
-                        title=f"生成{label}候选",
-                        type=StepType.WRITE,
-                        executor=StepExecutor.MODEL,
-                        depends_on=(f"prepare-{scope_id}",),
-                    ),
-                    WorkStep(
-                        id=f"verify-{scope_id}",
-                        title="校验并形成候选版本",
-                        type=StepType.REVIEW,
-                        executor=StepExecutor.MODEL,
-                        depends_on=(f"produce-{scope_id}",),
-                    ),
-                ),
+                steps=steps,
             ),
         )
 
