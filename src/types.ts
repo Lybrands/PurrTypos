@@ -1233,6 +1233,10 @@ export interface AiSession {
   title: string;
   create_time?: string;
   closed?: number | boolean;
+  /** 置顶：1 = 在会话列表置顶分组展示 */
+  pinned?: number | boolean;
+  /** 手动排序值（拖拽后整列表重排写入 0..N-1）；null/缺省 = 未参与手动排序 */
+  sort_order?: number | null;
 }
 
 export interface AiFavorite {
@@ -2243,6 +2247,8 @@ export interface ElectronAPI {
   setSessionClosed: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   setSessionReopened: (data: { sessionId: number }) => Promise<ApiResult<void>>;
   deleteSession: (data: { sessionId: number }) => Promise<ApiResult<void>>;
+  updateSessionPinned: (data: { sessionId: number; pinned: boolean }) => Promise<ApiResult<void>>;
+  reorderSessions: (data: { orderedIds: number[] }) => Promise<ApiResult<void>>;
   saveConversation: (data: {
     sessionId: number;
     bookId?: EntityId | null;

@@ -256,6 +256,12 @@ export default function AgentConversationPanel({
           onSaveTitle={saveSessionTitle}
           onNewSession={() => void controller.actions.createSession()}
           onCloseSession={(session) => void controller.actions.closeSession(session.id)}
+          onReorderSessions={controller.actions.reorderSessions
+            ? (orderedIds) => void controller.actions.reorderSessions?.(orderedIds)
+            : undefined}
+          onToggleSessionPinned={controller.actions.toggleSessionPinned
+            ? (id, pinned) => void controller.actions.toggleSessionPinned?.(id, pinned)
+            : undefined}
           onCollapse={() => setIndexOpen(false)}
         />
       ) : sessionsEmpty ? null : (

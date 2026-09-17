@@ -14,3 +14,12 @@ class CreateSessionRequest(BaseModel):
 
 class UpdateSessionTitleRequest(BaseModel):
     title: str
+
+
+class UpdateSessionPinnedRequest(BaseModel):
+    pinned: bool
+
+
+class ReorderSessionsRequest(BaseModel):
+    """按展示顺序传入会话 ID 列表，服务端按序写入 sort_order（0..N-1）。"""
+    orderedIds: list[int]

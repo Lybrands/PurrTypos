@@ -12,7 +12,12 @@ from application.product_owner_deletion import (
 from database.crud.screenplay_session_deletion import (
     delete_screenplay_session_rows,
 )
-from schemas.sessions import CreateSessionRequest, UpdateSessionTitleRequest
+from schemas.sessions import (
+    CreateSessionRequest,
+    ReorderSessionsRequest,
+    UpdateSessionPinnedRequest,
+    UpdateSessionTitleRequest,
+)
 
 router = APIRouter(tags=["sessions"])
 
@@ -112,4 +117,26 @@ async def update_session_title(sessionId: int, body: UpdateSessionTitleRequest):
         "UPDATE ai_sessions SET title = ? WHERE id = ?",
         [body.title, sessionId],
     )
+    return {"success": True}
+
+
+@router.put("/sessions/{sessionId}/pinned")
+async def update_session_pinned(sessionId: int, body: UpdateSessionPinnedRequest):
+    db = get_db()
+    await db.execute(
+        "UPDATE ai_sessions SET pinned = ? WHERE id = ?",
+        [1 if body.pinned else 0, sessionId],
+    )
+    return {"success": True}
+
+
+@router.put("/sessions/reorder")
+async def reorder_sessions(body: ReorderSessionsRequest):
+    db = get_db()
+    async with db.transaction():
+        for index, session_id in enumerate(body.orderedIds):
+            await db.execute(
+                "UPDATE ai_sessions SET sort_order = ? WHERE id = ?",
+                [index, session_id],
+            )
     return {"success": True}

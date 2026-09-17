@@ -170,6 +170,8 @@ export const services = {
     setSessionReopened: backendApi.setSessionReopened,
     deleteSession: backendApi.deleteSession,
     updateSessionTitle: backendApi.updateSessionTitle,
+    updateSessionPinned: backendApi.updateSessionPinned,
+    reorderSessions: backendApi.reorderSessions,
   },
   conversations: {
     saveConversation: backendApi.saveConversation,

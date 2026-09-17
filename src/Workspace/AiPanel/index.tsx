@@ -181,6 +181,8 @@ export default function AiPanel({
     handleDeleteFromHistory,
     currentSessionTitle,
     handleRenameSession,
+    handleReorderSessions,
+    handleToggleSessionPinned,
   } = useAiSessions({
     bookId,
     chapterId: effectiveChapterId,
@@ -875,6 +877,8 @@ export default function AiPanel({
       },
       closeSession,
       renameSession: (id, title) => handleRenameSession(Number(id), title),
+      reorderSessions: (orderedIds) => handleReorderSessions(orderedIds.map(Number)),
+      toggleSessionPinned: (id, pinned) => handleToggleSessionPinned(Number(id), pinned),
       send: handleSubmit,
       updateQueuedSubmission,
       abort: handleAbort,

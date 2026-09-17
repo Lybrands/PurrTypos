@@ -553,6 +553,9 @@ export const backendApi: BackendApi = {
   setSessionClosed: (data) => apiPut(`/sessions/${data.sessionId}/close`, {}),
   setSessionReopened: (data) => apiPut(`/sessions/${data.sessionId}/reopen`, {}),
   deleteSession: (data) => apiDelete(`/sessions/${data.sessionId}`),
+  updateSessionPinned: (data) =>
+    apiPut(`/sessions/${data.sessionId}/pinned`, { pinned: data.pinned }),
+  reorderSessions: (data) => apiPut('/sessions/reorder', { orderedIds: data.orderedIds }),
   updateSessionTitle: (data) =>
     apiPut(`/sessions/${data.sessionId}/title`, { title: data.title }),
 

@@ -247,6 +247,32 @@ export function useAiSessions({
     }
   }, [appMessage]);
 
+  /** 拖拽排序：先按目标顺序乐观更新本地 sort_order，再整列表落库 */
+  const handleReorderSessions = React.useCallback((
+    orderedIds: number[],
+  ) => {
+    if (orderedIds.length === 0) return;
+    const rankById = new Map(orderedIds.map((id, index) => [id, index]));
+    setSessions((prev) => prev.map((session) => (
+      rankById.has(session.id)
+        ? { ...session, sort_order: rankById.get(session.id) ?? null }
+        : session
+    )));
+    services.sessions.reorderSessions({ orderedIds }).catch(() => undefined);
+  }, []);
+
+  /** 置顶/取消置顶：乐观更新本地标记并落库 */
+  const handleToggleSessionPinned = React.useCallback((
+    sessionId: number,
+    pinned: boolean,
+  ) => {
+    setSessions((prev) => prev.map((session) => (
+      session.id === sessionId ? { ...session, pinned: pinned ? 1 : 0 } : session
+    )));
+    services.sessions.updateSessionPinned({ sessionId, pinned })
+      .catch(() => undefined);
+  }, []);
+
   return {
     sessions,
     setSessions,
@@ -261,5 +287,7 @@ export function useAiSessions({
     handleDeleteFromHistory,
     currentSessionTitle,
     handleRenameSession,
+    handleReorderSessions,
+    handleToggleSessionPinned,
   };
 }

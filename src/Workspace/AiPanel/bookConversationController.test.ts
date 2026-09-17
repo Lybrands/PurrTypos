@@ -427,11 +427,15 @@ test('book adapter maps history, current messages, queue, model and actions', ()
     id: 7,
     title: '第一轮',
     createdAt: '2026-08-12 09:30:00',
+    pinned: false,
+    sortOrder: null,
   }])
   assert.deepEqual(controller.conversation.history?.sessions, [{
     id: 8,
     title: '已关闭对话',
     createdAt: '2026-08-11 08:00:00',
+    pinned: false,
+    sortOrder: null,
   }])
   assert.deepEqual(controller.conversation.messages, [...historyMessages, ...messages])
   assert.deepEqual(controller.conversation.queuedSubmissions, [{
