@@ -232,12 +232,12 @@
 
 .subagent-overview__trigger.purr-button {
   height: 28px;
-  padding: 0 8px;
+  padding: 0 4px;
   color: var(--text-secondary);
-  border: 1px solid var(--border-light);
+  border: none;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--bg-panel) 88%, transparent);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
+  background: none;
+  box-shadow: none;
   font-size: var(--font-size-sm);
   opacity: 1 !important;
 
@@ -432,4 +432,9 @@
   display: inline-flex;
   align-items: center;
   margin-left: 8px;
+}
+
+/* icon 与「· 数量」之间的间距 */
+.subagent-overview__trigger .subagent-overview__trigger-count {
+  margin-left: 3px;
 }
