@@ -217,6 +217,75 @@ async def test_formal_planner_projects_host_recipe_without_model_call(temp_db) -
     ]
 
 
+def _multi_part_request() -> AgentRunRequest:
+    def _part(**overrides):
+        part = {
+            "id": "", "kind": "", "semanticKey": "", "dependsOn": [],
+            "sourceRevisionRefs": [], "deliverableRevisionScope": {},
+            "sourceBookId": None, "sourceItems": [],
+            "episodeNumber": None, "sceneId": None,
+        }
+        part.update(overrides)
+        return part
+
+    model_parts = [
+        _part(id="draft-scene:s1", kind="draft_scene", semanticKey="s1",
+              episodeNumber=1, sceneId="s1"),
+        _part(id="draft-scene:s2", kind="draft_scene", semanticKey="s2",
+              episodeNumber=1, sceneId="s2"),
+        _part(id="draft-scene:s3", kind="draft_scene", semanticKey="s3",
+              episodeNumber=2, sceneId="s3"),
+        _part(id="episode-metadata:2", kind="episode_metadata",
+              semanticKey="episode-metadata:2", dependsOn=["draft-scene:s3"],
+              episodeNumber=2),
+    ]
+    model_keys = [part["id"] for part in model_parts]
+    settlement = [
+        _part(id="projection:screenplayDraft", kind="host_projection",
+              semanticKey="projection:screenplayDraft", dependsOn=model_keys),
+        _part(id="validation:screenplayDraft", kind="validation",
+              semanticKey="validation:screenplayDraft",
+              dependsOn=["projection:screenplayDraft"]),
+        _part(id="final:screenplayDraft", kind="final_response",
+              semanticKey="final:screenplayDraft",
+              dependsOn=["validation:screenplayDraft"]),
+    ]
+    return replace(_request(), metadata={"screenplayRecipe": {
+        "recipeVersion": 1,
+        "operation": "create",
+        "targetRole": "screenplayDraft",
+        "maxParallelism": 2,
+        "parts": [*model_parts, *settlement],
+    }})
+
+
+@pytest.mark.asyncio
+async def test_formal_planner_expands_multi_part_recipe_into_visible_steps(
+    temp_db,
+) -> None:
+    profile = ScreenplayReplacementProfile(temp_db)
+
+    result = await profile.adapter.planner.create_plan(
+        _multi_part_request(),
+        SimpleNamespace(),
+    )
+
+    assert result.model_call_count == 0
+    assert result.work_plan.title == "剧本正文"
+    steps = result.work_plan.steps
+    assert [(step.id, step.title) for step in steps] == [
+        ("work:s1", "编写第1集剧本场景1"),
+        ("work:s2", "编写第1集剧本场景2"),
+        ("work:s3", "编写第2集剧本场景1"),
+        ("work:episode-metadata:2", "汇总第2集剧本信息"),
+    ]
+    by_id = {step.id: step for step in steps}
+    assert by_id["work:episode-metadata:2"].depends_on == ("work:s3",)
+    assert all(step.executor.name == "MODEL" for step in steps)
+    assert all(step.type.name in {"ANALYZE", "WRITE", "REVIEW"} for step in steps)
+    assert all(not step.capability_names for step in steps)
+
+
 @pytest.mark.asyncio
 async def test_profile_keeps_ordinary_conversation_reactive_and_non_recipe(
     temp_db,
