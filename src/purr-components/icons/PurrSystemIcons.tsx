@@ -238,15 +238,7 @@ export const PlusIcon = createPurrIcon('PlusIcon', <>
   <path d="M12 4v16M4 12h16" />
 </>)
 
-const pushpinGlyph = <>
-  <path d="M9 3h6l-.75 5 3 3v2H13v7l-1 1-1-1v-7H6.75v-2l3-3Z" />
-</>
-
-export const PinIcon = createPurrIcon('PinIcon', pushpinGlyph)
-
-export const PinFilledIcon = createPurrIcon('PinFilledIcon', <>
-  <path d="M9 3h6l-.75 5 3 3v2H13v7l-1 1-1-1v-8H6.75v-2l3-3Z" fill="currentColor" stroke="none" />
-</>)
+// 图钉（置顶/固定）移至 icons/PushpinIcon.tsx（PushpinIcon / PinnedIcon）
 
 export const ReadIcon = createPurrIcon('ReadIcon', <>
   <path d="M6 3.5h12v17H6A2.5 2.5 0 0 1 3.5 18V6A2.5 2.5 0 0 1 6 3.5Z" />

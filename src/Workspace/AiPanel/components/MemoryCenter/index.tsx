@@ -10,7 +10,7 @@ import {
   InboxIcon,
   LibraryIcon,
   PlusIcon,
-  PinIcon,
+  PushpinIcon,
 } from '@/purr-components'
 import type {
   ComponentMemoryLinkPage,
@@ -627,7 +627,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             <PurrButton
               size="small"
               type={item.pinned ? 'primary' : 'default'}
-              icon={<PinIcon />}
+              icon={<PushpinIcon />}
               onClick={() => void updateSemantic(item, { pinned: item.pinned ? 0 : 1 })}
             />
           </PurrTooltip>
