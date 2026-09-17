@@ -18,7 +18,11 @@ parser.add_argument('--install', action='store_true')
 args = parser.parse_args()
 requirements = []
 for item in manifest['artifacts']:
-    wheel = root / 'backend/vendor/purra-1.0.1' / item['file']
+    # wheel 按文件名在 vendor 子目录中定位，避免清单更新时遗留硬编码版本路径。
+    matches = sorted((root / 'backend/vendor').glob(f'*/{item["file"]}'))
+    if len(matches) != 1:
+        raise SystemExit(f'Expected exactly one vendored copy of {item["file"]}, found {len(matches)}')
+    wheel = matches[0]
     actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
     if actual != item['sha256']:
         raise SystemExit(f'Candidate hash mismatch: {wheel.name}')
