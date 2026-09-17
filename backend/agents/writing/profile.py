@@ -133,9 +133,9 @@ class WritingReplacementAdapter:
     )
     # 混合批次（如并行多个 createSettingEntity）按 FAILED 回传后，需要给模型
     # 拆批重发的余量：标准策略对 tool_input_invalid 只给 1 次（即无重试），
-    # 首次违规即终态失败。放宽到 3 次，授权类拒绝仍不受影响。
+    # 首次违规即终态失败。放宽到 12 次，授权类拒绝仍不受影响。
     recovery_policy: RecoveryPolicy = RecoveryPolicy().with_overrides({
-        RecoveryCause.TOOL_INPUT_INVALID: 3,
+        RecoveryCause.TOOL_INPUT_INVALID: 12,
     })
 
 

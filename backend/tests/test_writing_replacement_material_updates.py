@@ -459,4 +459,4 @@ def test_writing_profile_gives_the_model_batch_split_headroom(material_db) -> No
 
     policy = WritingReplacementProfile(material_db).adapter.recovery_policy
 
-    assert policy.max_attempts(RecoveryCause.TOOL_INPUT_INVALID) >= 2
+    assert policy.max_attempts(RecoveryCause.TOOL_INPUT_INVALID) >= 12
