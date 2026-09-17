@@ -12,6 +12,38 @@ export type ChatSessionScope = "chapter" | "setting";
 // 返回工作台时优先恢复原会话，而不是总是跳到列表最后一项。
 const activeSessionByLoadKey = new Map<string, number>();
 
+// 模块级记忆随应用重启丢失；按作用域（book-chapter / book-__setting__）再落
+// 一份 localStorage，重启后仍能定位到上次访问的那个对话。
+const ACTIVE_SESSION_STORAGE_KEY = "purrtypos_active_session_by_scope";
+
+export function loadRememberedSessionMap(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+    const obj = raw ? JSON.parse(raw) : null;
+    if (!obj || typeof obj !== "object") return {};
+    const entries = Object.entries(obj).filter(
+      (entry): entry is [string, number] =>
+        typeof entry[1] === "number" && Number.isFinite(entry[1]),
+    );
+    return Object.fromEntries(entries);
+  } catch {
+    return {};
+  }
+}
+
+export function rememberActiveSession(loadKey: string, sessionId: number) {
+  try {
+    const map = loadRememberedSessionMap();
+    map[loadKey] = sessionId;
+    localStorage.setItem(
+      ACTIVE_SESSION_STORAGE_KEY,
+      JSON.stringify(map),
+    );
+  } catch {
+    // ignore
+  }
+}
+
 interface UseAiSessionsParams {
   bookId: EntityId | null | undefined;
   chapterId: EntityId | null | undefined;
@@ -55,6 +87,7 @@ export function useAiSessions({
       activeSessionIdRef.current = resolved
       if (resolved != null && loadKeyRef.current) {
         activeSessionByLoadKey.set(loadKeyRef.current, resolved);
+        rememberActiveSession(loadKeyRef.current, resolved);
       }
       return resolved;
     });
@@ -130,13 +163,17 @@ export function useAiSessions({
         if (loadKeyRef.current !== key) return;
         if (res.success && res.data.length > 0) {
           setSessions(res.data);
-          const rememberedSessionId = activeSessionByLoadKey.get(key);
+          // 内存记忆优先（本次运行内最新），重启后回退 localStorage 记忆；
+          // 都没有时落到列表最新一项，并同步写回两份记忆。
+          const rememberedSessionId = activeSessionByLoadKey.get(key)
+            ?? loadRememberedSessionMap()[key];
           const restoredSession = res.data.find(
             (session) => session.id === rememberedSessionId,
           );
           const nextSessionId =
             restoredSession?.id ?? res.data[res.data.length - 1].id;
           activeSessionByLoadKey.set(key, nextSessionId);
+          rememberActiveSession(key, nextSessionId);
           setActiveSessionIdState(nextSessionId);
         } else if (res.success) {
           activeSessionByLoadKey.delete(key);
@@ -247,21 +284,29 @@ export function useAiSessions({
     }
   }, [appMessage]);
 
-  /** 拖拽排序：先按目标顺序乐观更新本地 sort_order，再整列表落库 */
+  /** 拖拽排序：先按目标顺序乐观更新本地 sort_order，再整列表落库；失败回滚 */
   const handleReorderSessions = React.useCallback((
     orderedIds: number[],
   ) => {
     if (orderedIds.length === 0) return;
+    const previous = sessionsRef.current;
     const rankById = new Map(orderedIds.map((id, index) => [id, index]));
     setSessions((prev) => prev.map((session) => (
       rankById.has(session.id)
         ? { ...session, sort_order: rankById.get(session.id) ?? null }
         : session
     )));
-    services.sessions.reorderSessions({ orderedIds }).catch(() => undefined);
-  }, []);
+    services.sessions.reorderSessions({ orderedIds })
+      .then((res) => {
+        if (!res.success) throw new Error(res.error || "reorderSessions failed");
+      })
+      .catch(() => {
+        setSessions(previous);
+        appMessage.warning("对话排序保存失败，已还原，请重试");
+      });
+  }, [appMessage]);
 
-  /** 置顶/取消置顶：乐观更新本地标记并落库 */
+  /** 置顶/取消置顶：乐观更新本地标记并落库；失败回滚 */
   const handleToggleSessionPinned = React.useCallback((
     sessionId: number,
     pinned: boolean,
@@ -270,8 +315,19 @@ export function useAiSessions({
       session.id === sessionId ? { ...session, pinned: pinned ? 1 : 0 } : session
     )));
     services.sessions.updateSessionPinned({ sessionId, pinned })
-      .catch(() => undefined);
-  }, []);
+      .then((res) => {
+        if (!res.success) throw new Error(res.error || "updateSessionPinned failed");
+      })
+      .catch(() => {
+        // 仅在本地仍处于乐观值时回滚，避免吞掉紧随其后的再次切换
+        setSessions((prev) => prev.map((session) => (
+          session.id === sessionId && session.pinned === (pinned ? 1 : 0)
+            ? { ...session, pinned: pinned ? 0 : 1 }
+            : session
+        )));
+        appMessage.warning("置顶状态保存失败，已还原，请重试");
+      });
+  }, [appMessage]);
 
   return {
     sessions,
