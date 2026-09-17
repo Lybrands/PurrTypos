@@ -1317,3 +1317,38 @@ test('Stop plus failed truncation restores a settled retryable session', async (
     services.ai.aiChatStream = originalStream
   }
 })
+
+test('request scope converges to the bound session, not stale UI chapter state', async () => {
+  globalThis.document = { documentElement: { lang: 'zh-CN' } }
+  const originalStream = services.ai.aiChatStream
+  const originalSubscribe = services.ai.onAiChunk
+  const bodies = []
+  services.ai.onAiChunk = () => () => undefined
+  services.ai.aiChatStream = (data) => {
+    bodies.push(data)
+    return undefined
+  }
+  try {
+    // 全局会话(scope=setting)处于章节上下文的竞态态：请求必须收敛为无章节
+    const globalScope = renderHook({
+      chapterId: 'chapter-a',
+      sessions: [{ id: 7, title: '全局会话', scope: 'setting' }],
+    })
+    assert.equal(await globalScope.result.handleSubmit({ content: '全局问题' }), 'started')
+
+    // 章节会话绑定别的章节：以会话绑定为准
+    const chapterScope = renderHook({
+      chapterId: 'chapter-a',
+      activeSessionId: 9,
+      sessions: [{ id: 9, title: '章节会话', scope: 'chapter', chapter_id: 'chapter-b' }],
+    })
+    assert.equal(await chapterScope.result.handleSubmit({ content: '章节问题' }), 'started')
+
+    assert.deepEqual(bodies.map((body) => body.chapterId ?? null), [null, 'chapter-b'])
+  } finally {
+    runtime.clearChatRuntime(7)
+    runtime.clearChatRuntime(9)
+    services.ai.aiChatStream = originalStream
+    services.ai.onAiChunk = originalSubscribe
+  }
+})
