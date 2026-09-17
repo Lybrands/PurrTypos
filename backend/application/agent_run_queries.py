@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from purra.json_values import thaw_json_mapping
 from purra.output import AgentOutputRepository, OutputVisibility
 from application.sse_mapping import canonical_output_to_sse_chunk
+from application.sub_agent_runs import delegation_projection
 
 
 RUN_SNAPSHOT_VERSION = 2
@@ -32,10 +33,12 @@ class AgentRunQueryService:
         output_repository: AgentOutputRepository,
         *,
         product_event_query=None,
+        related_runs_provider=None,
     ) -> None:
         self._store = store
         self._output = output_repository
         self._product_events = product_event_query
+        self._related_runs = related_runs_provider
 
     async def get_snapshot(
         self,
@@ -92,31 +95,25 @@ class AgentRunQueryService:
             if self._product_events is not None
             else []
         )
+        # 根 Run 附带子 Agent（子 Run）投影：快照消费方据此还原委派视图。
+        # 提供方负责按 agent kind 决定数据来源；子 Run 快照保持轻量。
+        related_runs: list[dict[str, Any]] = []
+        if self._related_runs is not None and not persisted.run.get("parent_run_id"):
+            related_runs = await self._related_runs(normalized_run_id)
+        run_view = _run_view(thaw_json_mapping(persisted.run))
+        if related_runs:
+            run_view["relatedRuns"] = related_runs
         return {
             "version": RUN_SNAPSHOT_VERSION,
-            "run": _run_view(thaw_json_mapping(persisted.run)),
+            "run": run_view,
             "todos": [thaw_json_mapping(step) for step in persisted.steps],
             "events": envelopes,
             "productEvents": product_events,
-            "delegations": {
-                "items": [],
-                "aggregate": {
-                    "state": "ready",
-                    "counts": {
-                        status: 0
-                        for status in (
-                            "queued",
-                            "claimed",
-                            "running",
-                            "done",
-                            "failed",
-                            "canceled",
-                        )
-                    },
-                    "requiredFailures": [],
-                    "results": [],
-                },
-            },
+            "delegations": (
+                delegation_projection(related_runs)
+                if self._related_runs is not None
+                else _empty_delegation_projection()
+            ),
             "nextCursor": (
                 output_events[-1].sequence
                 if output_events
@@ -124,6 +121,28 @@ class AgentRunQueryService:
             ),
             "hasMore": has_more,
         }
+
+
+def _empty_delegation_projection() -> dict[str, Any]:
+    return {
+        "items": [],
+        "aggregate": {
+            "state": "ready",
+            "counts": {
+                status: 0
+                for status in (
+                    "queued",
+                    "claimed",
+                    "running",
+                    "done",
+                    "failed",
+                    "canceled",
+                )
+            },
+            "requiredFailures": [],
+            "results": [],
+        },
+    }
 
 
 def _run_view(

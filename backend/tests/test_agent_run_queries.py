@@ -9,6 +9,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 
 from application.agent_run_queries import AgentRunQueryService
+from application.sub_agent_runs import related_runs_for_root
 from application.writing_proposal_read_model import (
     SqliteWritingProposalReadModel,
 )
@@ -686,6 +687,106 @@ async def test_sub_agent_conversation_returns_continued_agent_history(temp_db):
     assert [turn["finalResponse"] for turn in data["turns"]] == [
         "人物结果", "设定结果",
     ]
+
+
+async def test_root_snapshot_projects_child_delegations(temp_db):
+    root_run_id = await _seed_run(temp_db)
+    composition = get_agent_composition()
+    tree = composition.run_tree_repository
+    await tree.begin_root(BeginRootAgentCommand(
+        run_id=root_run_id,
+        agent_id="root-agent-delegations",
+        name="root",
+        title="Root",
+        instruction="test",
+        objective="test",
+        capability_grant=AgentCapabilityGrant(can_spawn_agents=True),
+        idempotency_key="begin-delegation-root",
+    ))
+    spawned = await tree.spawn_agents(SpawnAgentsCommand(
+        parent_run_id=root_run_id,
+        idempotency_key="spawn-delegation-children",
+        children=(
+            ChildAgentSpec(
+                name="draft-agent",
+                title="草稿",
+                instruction="test",
+                objective="写出草稿。",
+            ),
+            ChildAgentSpec(
+                name="review-agent",
+                title="审校",
+                instruction="test",
+                objective="审校草稿。",
+            ),
+        ),
+    ))
+    for item, status in zip(spawned.items, ("done", "failed")):
+        await create_run(
+            temp_db,
+            run_id=item.run.run_id,
+            session_id=7,
+            prompt=item.run.objective,
+            mode="agent",
+            root_run_id=root_run_id,
+            parent_run_id=root_run_id,
+            agent_id=item.agent.agent_id,
+        )
+        await temp_db.execute(
+            "UPDATE ai_agent_runs SET status = ? WHERE id = ?",
+            [status, item.run.run_id],
+        )
+
+    def queries() -> AgentRunQueryService:
+        return AgentRunQueryService(
+            SqliteRunSnapshotReader(temp_db),
+            SqliteAgentOutputRepository(temp_db),
+            related_runs_provider=lambda run_id_value: related_runs_for_root(
+                temp_db,
+                tree,
+                run_id_value,
+            ),
+        )
+
+    snapshot = await queries().get_snapshot(root_run_id, limit=10)
+
+    assert [item["role"] for item in snapshot["run"]["relatedRuns"]] == [
+        "child",
+        "child",
+    ]
+    items = snapshot["delegations"]["items"]
+    assert [item["status"] for item in items] == ["done", "failed"]
+    assert items[0]["delegationId"] == f"run:{spawned.items[0].run.run_id}"
+    assert items[0]["agentName"] == "draft-agent"
+    assert items[0]["agentTitle"] == "草稿"
+    assert items[0]["objective"] == "写出草稿。"
+    assert snapshot["delegations"]["aggregate"]["counts"] == {
+        "queued": 0,
+        "claimed": 0,
+        "running": 0,
+        "done": 1,
+        "failed": 1,
+        "canceled": 0,
+    }
+
+    # 子 Run 自身的快照不附带委派投影（它没有子 Run）。
+    child_snapshot = await queries().get_snapshot(
+        spawned.items[0].run.run_id,
+        limit=10,
+    )
+    assert "relatedRuns" not in child_snapshot["run"]
+    assert child_snapshot["delegations"]["items"] == []
+
+
+async def test_snapshot_without_related_runs_provider_keeps_empty_delegations(
+    temp_db,
+):
+    root_run_id = await _seed_run(temp_db)
+
+    snapshot = await _queries(temp_db).get_snapshot(root_run_id, limit=10)
+
+    assert "relatedRuns" not in snapshot["run"]
+    assert snapshot["delegations"]["items"] == []
 
 
 async def test_latest_session_run_breaks_same_timestamp_ties_by_insertion(temp_db):

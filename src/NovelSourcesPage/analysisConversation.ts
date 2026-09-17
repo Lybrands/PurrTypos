@@ -1,11 +1,15 @@
 import type { AgentConversationMessage } from '../agent-runtime/contracts.ts'
-import type { AiAgentDelegation, AiAgentRunSnapshot, AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
+import type { AiAgentRunSnapshot, AiModelConfig, NovelAnalysisRun, NovelAnalysisStreamPage } from '../types.ts'
 import { AgentChunkReplay } from '../agent-runtime/chunkReplay.ts'
 import type { AiStreamChunk } from '../agent-runtime/chunkHandlers/types.ts'
 import {
   loadCompleteAgentRunSnapshot,
   replayAgentRunSnapshotAsync,
 } from '../agent-runtime/runSnapshotHydration.ts'
+import {
+  mergeDelegations,
+  relatedRunsToDelegations,
+} from '../agent-runtime/delegationProjection.ts'
 import {
   backendTimestampMs,
   buildNovelAnalysisTaskPlan,
@@ -252,7 +256,7 @@ export function buildNovelAnalysisMessages(
   const followUp = run.interactionKind === 'follow_up'
   const mayHaveError = analysisMayHaveError(run)
   const error = analysisErrorMessage(run) || (mayHaveError ? runtimeMessage?.error : undefined)
-  const projectedDelegations = novelAnalysisDelegations(run)
+  const projectedDelegations = relatedRunsToDelegations(run.relatedRuns)
   const messages: AgentConversationMessage[] = []
   if (run.prompt && !run.automaticRecovery) {
     messages.push({
@@ -279,46 +283,4 @@ export function buildNovelAnalysisMessages(
     ...buildNovelAnalysisTiming(run),
   })
   return messages
-}
-
-function novelAnalysisDelegations(run: NovelAnalysisRun): AiAgentDelegation[] {
-  return (run.relatedRuns ?? [])
-    .filter((item) => item.role === 'child')
-    .map((item) => ({
-      delegationId: `run:${item.runId}`,
-      runId: item.runId,
-      ...(item.agentId ? { agentId: item.agentId } : {}),
-      ...(item.previousRunId ? { previousRunId: item.previousRunId } : {}),
-      agentName: item.agentName || item.agentTitle || '子 Agent',
-      agentTitle: item.agentTitle || null,
-      objective: item.objective || '',
-      ...(item.createTime ? { startedAt: item.createTime } : {}),
-      ...(item.unitId ? { unitId: item.unitId } : {}),
-      ...(item.attempt != null ? { attempt: item.attempt } : {}),
-      status: delegationStatus(item.status),
-      required: true,
-      priority: 0,
-    }))
-}
-
-function mergeDelegations(
-  runtime: AiAgentDelegation[] | undefined,
-  projected: AiAgentDelegation[],
-): AiAgentDelegation[] | undefined {
-  if (!runtime?.length) return projected.length ? projected : undefined
-  const byRunId = new Map(runtime.map((item) => [item.runId, item]))
-  for (const item of projected) {
-    const current = byRunId.get(item.runId)
-    byRunId.set(item.runId, current ? { ...item, ...current, status: item.status } : item)
-  }
-  return [...byRunId.values()]
-}
-
-function delegationStatus(status: string): AiAgentDelegation['status'] {
-  if (status === 'pending' || status === 'queued') return 'queued'
-  if (status === 'claimed') return 'claimed'
-  if (status === 'running' || status === 'waiting') return 'running'
-  if (status === 'done' || status === 'completed') return 'done'
-  if (status === 'canceled') return 'canceled'
-  return 'failed'
 }

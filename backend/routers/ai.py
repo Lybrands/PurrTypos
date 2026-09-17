@@ -708,6 +708,7 @@ async def get_agent_run_snapshot(
     from agents.shared.run_query import VersionedAgentRunQueryService
     from application.agent_run_queries import AgentRunQueryService
     from application.agent_composition import get_agent_composition
+    from application.sub_agent_runs import related_runs_for_root
     from application.writing_proposal_read_model import (
         SqliteWritingProposalReadModel,
     )
@@ -721,6 +722,11 @@ async def get_agent_run_snapshot(
         return {"success": False, "error": "Agent Run 不存在"}
     query_options = {
         "product_event_query": SqliteWritingProposalReadModel(db),
+        # 通用子 Run 投影：根 Run 快照附带 relatedRuns 与 delegations，
+        # 前端据此还原子 Agent 委派视图（写作/分析共用）。
+        "related_runs_provider": lambda run_id_value: related_runs_for_root(
+            db, composition.run_tree_repository, run_id_value
+        ),
     }
     if run.get("parent_run_id"):
         query = AgentRunQueryService(
