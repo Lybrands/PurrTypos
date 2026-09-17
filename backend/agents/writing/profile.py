@@ -50,7 +50,7 @@ from purra.contracts import (
     RuntimeLimits,
 )
 from purra.json_values import thaw_json_mapping
-from purra.recovery import RecoveryPolicy
+from purra.recovery import RecoveryCause, RecoveryPolicy
 from purra.tools import InMemoryToolCatalog
 
 
@@ -91,6 +91,7 @@ class WritingReplacementContextProvider:
                 "characterCountScope": "current_book_owned_characters",
                 "doNotInferMissingFacts": True,
                 "batchIndependentReads": True,
+                "nonReadToolCallsOnePerRound": True,
             },
             "contextSelection": selection.public_manifest(),
             "workspaceManifest": snapshot.get("workspaceManifest"),
@@ -130,7 +131,12 @@ class WritingReplacementAdapter:
         max_run_generation_tokens=None,
         max_model_rounds=None,
     )
-    recovery_policy: RecoveryPolicy = RecoveryPolicy()
+    # 混合批次（如并行多个 createSettingEntity）按 FAILED 回传后，需要给模型
+    # 拆批重发的余量：标准策略对 tool_input_invalid 只给 1 次（即无重试），
+    # 首次违规即终态失败。放宽到 3 次，授权类拒绝仍不受影响。
+    recovery_policy: RecoveryPolicy = RecoveryPolicy().with_overrides({
+        RecoveryCause.TOOL_INPUT_INVALID: 3,
+    })
 
 
 class WritingReplacementProfile:

@@ -152,7 +152,8 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
         _create_entity_registration(
             "createSettingEntity", "新增世界设定",
             "在当前书新增一条世界设定实体（地点/势力/物品/其他）；"
-            "名称不得与已有设定重复，创建前应先查看设定目录确认。",
+            "名称不得与已有设定重复，创建前应先查看设定目录确认。"
+            "需要创建多条时必须逐轮逐条调用：并行多调用批次仅支持只读工具。",
             "listSettingEntities", "settingEntity.created",
             validate_create_entity, create_entity,
         ),
