@@ -1173,11 +1173,20 @@ export interface ForeshadowHealthItem {
   createTime?: string;
 }
 
+export interface CharacterChapterRef {
+  chapterId: string;
+  index: number;
+  title: string;
+  mentions: number;
+}
+
 export interface CharacterAppearanceItem {
   id: number;
   name: string;
   tags: string;
   appearChapters: number;
+  /** 出场章明细（按章序升序）；mentions 为该章中姓名出现次数。 */
+  chapterRefs?: CharacterChapterRef[];
   lastChapterIndex: number | null;
   lastChapterTitle: string | null;
   gapChapters: number | null;

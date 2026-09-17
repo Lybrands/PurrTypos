@@ -137,6 +137,14 @@ class SqliteWritingReadRepository:
             },
         })
 
+    async def story_dashboard(self, scope: WritingReadScope) -> dict[str, Any]:
+        """写作仪表盘摘要：与 /dashboard/health 同一份聚合（含人物出场章明细）。"""
+        from application.story_health import build_story_health
+
+        scope = await self.validate_scope(scope)
+        payload = await build_story_health(self._db, scope.book_id)
+        return self._result(scope, {"dashboard": payload})
+
     async def characters(
         self,
         scope: WritingReadScope,
