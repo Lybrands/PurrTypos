@@ -297,6 +297,14 @@ async def get_run(
     )
 
 
+# 会话归属的 Run 集合必须只含根 Run：子 Run（子 Agent）会继承 session_id
+# 用于归属，但永远不会物化成对话行；按 session 计数/比对的读路径若把
+# 子 Run 算进去，会话一旦用过委派就永远校验不过（发送 409 等）。
+ROOT_RUN_SESSION_FILTER = (
+    "parent_run_id IS NULL AND (root_run_id IS NULL OR root_run_id = id)"
+)
+
+
 async def get_latest_run_for_session(
     db: "DatabaseConnection",
     session_id: int,
@@ -313,8 +321,8 @@ async def get_latest_run_for_session(
         "execution_owner_id, lease_expires_at_ms, "
         "heartbeat_at_ms, execution_attempt, cancel_requested_at_ms, "
         "final_response, create_time, update_time "
-        "FROM ai_agent_runs WHERE session_id = ? "
-        "AND parent_run_id IS NULL AND (root_run_id IS NULL OR root_run_id = id) "
+        f"FROM ai_agent_runs WHERE session_id = ? "
+        f"AND {ROOT_RUN_SESSION_FILTER} "
         "ORDER BY create_time DESC, rowid DESC LIMIT 1",
         [int(session_id)],
     )

@@ -12,6 +12,7 @@ from application.book_conversation_product_projection import (
     persist_setting_diff_resolution,
 )
 from dependencies import get_db
+from infrastructure.persistence.run_store import ROOT_RUN_SESSION_FILTER
 from schemas.conversations import SaveConversationRequest
 
 router = APIRouter(tags=["conversations"])
@@ -225,6 +226,7 @@ async def save_conversation(body: SaveConversationRequest):
                         )
                 pending_agent_projection = await db.fetch_one(
                     "SELECT id FROM ai_agent_runs WHERE session_id = ? "
+                    f"AND {ROOT_RUN_SESSION_FILTER} "
                     "AND ("
                     "conversation_id IS NULL OR "
                     "status IN ('pending', 'queued', 'running', 'paused')"
@@ -525,7 +527,8 @@ async def delete_after_turn(
             current_run_ids = {
                 str(row["id"])
                 for row in await db.fetch_all(
-                    "SELECT id FROM ai_agent_runs WHERE session_id = ?",
+                    "SELECT id FROM ai_agent_runs WHERE session_id = ? "
+                    f"AND {ROOT_RUN_SESSION_FILTER}",
                     [sessionId],
                 )
             }
