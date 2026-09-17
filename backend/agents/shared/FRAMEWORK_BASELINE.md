@@ -10,14 +10,18 @@ is already installed in the PurrTypos virtual environment:
 
 | Distribution | Version | Archived wheel SHA-256 |
 | --- | --- | --- |
-| `purra` | `1.0.1` | `4894f211cbc72430a5f83e3e6846e974d2751d33f0861c5d02bdb03ca890261e` |
-| `purra_openai` | `1.0.1` | `3089978779f47a11c89ef8497232c07fb49c99e16125ab80f230ca3b9973c13c` |
-| `purra_anthropic` | `1.0.1` | `d0cfd69b4de5a942b843c316d750418b77fd867357fb45b65aed72a9a441b235` |
-| `purra_mem0` | `1.0.1` | `ad21ed6a06b4214e8f066916109cfa36c927e6c963dc564411e5451b1d1e8529` |
+| `purra` | `1.1.1` | `cdde4afe3db550c4e4d69c26fab6fd8e6089921691245d96cde4a01ddefc319d` |
+| `purra_openai` | `1.1.1` | `088e6a0a6a982f573da0901352a6cd2e54fbe7f70f7d2de5142df89adec9f0a1` |
+| `purra_anthropic` | `1.1.1` | `dda93df534661df5677558a7a3dfbd9a26efe9f5230d73f4f4eb88190f4e49ad` |
+| `purra_mem0` | `1.1.1` | `f2c5987328e023b9a956a35456f77b54159a4959119e7e40dd0e2ce436297855` |
+
+2026-09-18 更正：PurrA 1.0.x 版本线实际包含 1.1 范围特性，整线改号为
+1.1.1（候选 wheel 位于 `backend/vendor/purra-1.1.1/`，基线 commit
+`a2e69c6`）；上表随之更新。
 
 The authoritative machine-readable evidence remains
 `backend/purra-candidate.json`, `backend/requirements-purra.txt`, and the wheels
-under `backend/vendor/purra-1.0.1/`. A version string alone is not an artifact
+under `backend/vendor/purra-1.1.1/`. A version string alone is not an artifact
 identity. The manifest's historical `base_commit` is provenance metadata; the
 complete `core_source_sha256` file map and wheel hash are the source/content
 identity used by the host verification.
