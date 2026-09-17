@@ -194,8 +194,11 @@ class SqliteWritingChatRequestStore:
             if current != expected:
                 return False
         if expected_run_ids is not None:
+            from infrastructure.persistence.run_store import ROOT_RUN_SESSION_FILTER
+
             rows = await self._db.fetch_all(
                 "SELECT id FROM ai_agent_runs WHERE session_id = ? "
+                f"AND {ROOT_RUN_SESSION_FILTER} "
                 "ORDER BY rowid ASC",
                 [int(session_id)],
             )
