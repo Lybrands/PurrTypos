@@ -9,15 +9,15 @@ const provider = {
 } as const
 
 const preset = {
-  id: 'minimax:MiniMax-M3',
+  id: 'minimax',
   providerId: 'minimax',
-  name: 'MiniMax-M3',
-  label: 'MiniMax M3',
-  summary: '1M 上下文，512K 最大输出，支持自适应思考',
+  namePlaceholder: '如 MiniMax-M3',
+  label: 'MiniMax',
+  summary: '接入固定，模型名按 MiniMax 文档填写',
   recommended: true,
 } as const
 
-export const minimaxM3Profile: BuiltinModelPresentation = {
+export const minimaxVendorProfile: BuiltinModelPresentation = {
   provider,
   preset,
 }

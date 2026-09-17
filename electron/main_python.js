@@ -139,6 +139,9 @@ ipcMain.handle('show-agent-notification', (_, data) => {
   const body = String(data?.body || '').slice(0, 500)
   const notification = new Notification({
     title,
+    // macOS 横幅图标固定取应用 bundle 图标（icon 选项仅 Windows/Linux 生效），
+    // 副标题用于在不支持正文的场景保留完成语义。
+    ...(process.platform === 'darwin' ? { subtitle: 'Agent 任务已完成' } : {}),
     body,
     icon: appIcon || undefined,
   })

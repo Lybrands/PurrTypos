@@ -28,13 +28,13 @@ test('every built-in provider has presets', () => {
   }
 })
 
-test('Z.ai GLM-5.3-Flash is the first catalog entry', () => {
+test('Z.ai vendor entry is the first catalog entry and carries no fixed model name', () => {
   const provider = getBuiltinProvider('zai')
-  const preset = getModelPreset('zai:glm-5.3-flash')
+  const preset = getModelPreset('zai')
 
   assert.deepEqual(provider, {
     id: 'zai',
-    name: '智谱 AI',
+    name: '智谱 GLM',
     apiProvider: 'zai',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4/',
     keyPlaceholder: '请输入智谱 API Key',
@@ -42,7 +42,7 @@ test('Z.ai GLM-5.3-Flash is the first catalog entry', () => {
   assert.deepEqual(
     {
       id: preset.id,
-      name: preset.name,
+      namePlaceholder: preset.namePlaceholder,
       contextWindow: preset.contextWindow,
       supportsThinking: preset.supportsThinking,
       thinkingOnly: preset.thinkingOnly,
@@ -51,20 +51,20 @@ test('Z.ai GLM-5.3-Flash is the first catalog entry', () => {
       temperatureNonThinking: preset.temperatureNonThinking,
     },
     {
-      id: 'zai:glm-5.3-flash',
-      name: 'glm-5.3-flash',
+      id: 'zai',
+      namePlaceholder: '如 glm-5.3-flash',
       contextWindow: '1m',
       supportsThinking: true,
-      thinkingOnly: true,
+      thinkingOnly: false,
       thinkingEnabled: true,
       temperatureThinking: 1,
       temperatureNonThinking: 1,
     },
   )
-  assert.equal(AI_MODEL_PRESETS[0].id, 'zai:glm-5.3-flash')
+  assert.equal(AI_MODEL_PRESETS[0].id, 'zai')
 })
 
-test('DeepSeek exposes only V4 Flash as its built-in default', () => {
+test('each vendor exposes exactly one provider-level preset', () => {
   const provider = getBuiltinProvider('deepseek')
   const presets = AI_MODEL_PRESETS.filter(preset => preset.providerId === 'deepseek')
 
@@ -78,7 +78,7 @@ test('DeepSeek exposes only V4 Flash as its built-in default', () => {
   assert.deepEqual(
     presets.map((preset) => ({
       id: preset.id,
-      name: preset.name,
+      namePlaceholder: preset.namePlaceholder,
       contextWindow: preset.contextWindow,
       maxGenerationTokens: preset.maxGenerationTokens,
       supportsThinking: preset.supportsThinking,
@@ -87,8 +87,8 @@ test('DeepSeek exposes only V4 Flash as its built-in default', () => {
     })),
     [
       {
-        id: 'deepseek:deepseek-v4-flash',
-        name: 'deepseek-v4-flash',
+        id: 'deepseek',
+        namePlaceholder: '如 deepseek-v4-flash',
         contextWindow: '1m',
         maxGenerationTokens: 393_216,
         supportsThinking: true,
@@ -107,105 +107,86 @@ test('API provider normalization preserves Z.ai and rejects unknown legacy value
   assert.equal(normalizeApiProvider(undefined), 'openai')
 })
 
-test('preset ids and provider/model pairs are unique', () => {
+test('vendor preset ids are unique and defaults stay inside their options', () => {
   const presetIds = AI_MODEL_PRESETS.map((preset) => preset.id)
-  const pairs = AI_MODEL_PRESETS.map((preset) => `${preset.providerId}:${preset.name}`)
   assert.equal(new Set(presetIds).size, presetIds.length)
-  assert.equal(new Set(pairs).size, pairs.length)
+  assert.deepEqual(presetIds, ['zai', 'deepseek', 'moonshot', 'minimax', 'mimo'])
   for (const preset of AI_MODEL_PRESETS) {
-    assert.ok(preset.contextWindowOptions.length <= 3)
-    assert.equal(preset.contextWindowOptions.at(-1), preset.contextWindow)
+    assert.ok(preset.contextWindowOptions.includes(preset.contextWindow))
   }
 })
 
 test('model catalog exposes capability ceilings instead of task budgets', () => {
   assert.equal(
     getModelProfileMaxGenerationTokens({
-      presetId: 'mimo:mimo-v2.5-pro',
+      presetId: 'mimo',
       contextWindow: '32k',
     }),
     131_072,
   )
   assert.equal(
-    getModelProfileMaxGenerationTokens({ presetId: 'deepseek:deepseek-v4-flash' }),
+    getModelProfileMaxGenerationTokens({ presetId: 'deepseek' }),
     393_216,
   )
   assert.equal(
-    getModelProfileMaxGenerationTokens({ presetId: 'minimax:MiniMax-M3' }),
+    getModelProfileMaxGenerationTokens({ presetId: 'minimax' }),
     524_288,
   )
-  assert.equal(getModelProfileMaxGenerationTokens({ presetId: 'moonshot:kimi-k3' }), 1_048_576)
-  assert.equal(getModelProfileMaxGenerationTokens({ presetId: 'moonshot:kimi-k2.6' }), 262_144)
+  assert.equal(getModelProfileMaxGenerationTokens({ presetId: 'moonshot' }), 1_048_576)
+  // 用户显式覆盖优先于服务商登记默认。
+  assert.equal(
+    getModelProfileMaxGenerationTokens({ presetId: 'moonshot', profileMaxGenerationTokens: 262_144 }),
+    262_144,
+  )
   assert.equal(getModelProfileMaxGenerationTokens({ profileMaxGenerationTokens: 65_536 }), 65_536)
 })
 
-test('the catalog contains GLM-5.3-Flash and the existing models', () => {
+test('the catalog contains the five vendor presets with per-vendor defaults', () => {
   assert.deepEqual(
-    AI_MODEL_PRESETS.map((preset) => preset.name),
-    [
-      'glm-5.3-flash',
-      'deepseek-v4-flash',
-      'kimi-k3',
-      'kimi-k2.6',
-      'MiniMax-M3',
-      'mimo-v2.5-pro',
-    ],
-  )
-  assert.deepEqual(
-    Object.fromEntries(AI_MODEL_PRESETS.map((preset) => [preset.name, preset.contextWindow])),
+    Object.fromEntries(AI_MODEL_PRESETS.map((preset) => [preset.id, preset.contextWindow])),
     {
-      'glm-5.3-flash': '1m',
-      'deepseek-v4-flash': '1m',
-      'kimi-k3': '1m',
-      'kimi-k2.6': '256k',
-      'MiniMax-M3': '1m',
-      'mimo-v2.5-pro': '1m',
+      zai: '1m',
+      deepseek: '1m',
+      moonshot: '256k',
+      minimax: '1m',
+      mimo: '1m',
+    },
+  )
+  // 模型名由用户填写，思考不再被任何服务商强制锁定。
+  assert.deepEqual(
+    Object.fromEntries(
+      AI_MODEL_PRESETS.map((preset) => [preset.id, preset.thinkingOnly]),
+    ),
+    {
+      zai: false,
+      deepseek: false,
+      moonshot: false,
+      minimax: false,
+      mimo: false,
     },
   )
   assert.deepEqual(
     Object.fromEntries(
-      AI_MODEL_PRESETS.map((preset) => [preset.name, preset.thinkingOnly]),
+      AI_MODEL_PRESETS.map((preset) => [preset.id, [...preset.contextWindowOptions]]),
     ),
     {
-      'glm-5.3-flash': true,
-      'deepseek-v4-flash': false,
-      'kimi-k3': true,
-      'kimi-k2.6': false,
-      'MiniMax-M3': false,
-      'mimo-v2.5-pro': false,
-    },
-  )
-  assert.deepEqual(
-    Object.fromEntries(
-      AI_MODEL_PRESETS.map((preset) => [preset.name, [...preset.contextWindowOptions]]),
-    ),
-    {
-      'glm-5.3-flash': ['32k', '256k', '1m'],
-      'deepseek-v4-flash': ['32k', '256k', '1m'],
-      'kimi-k3': ['32k', '256k', '1m'],
-      'kimi-k2.6': ['32k', '128k', '256k'],
-      'MiniMax-M3': ['32k', '256k', '1m'],
-      'mimo-v2.5-pro': ['32k', '256k', '1m'],
+      zai: ['32k', '256k', '1m'],
+      deepseek: ['32k', '256k', '1m'],
+      moonshot: ['32k', '128k', '256k', '1m'],
+      minimax: ['32k', '256k', '1m'],
+      mimo: ['32k', '256k', '1m'],
     },
   )
 })
 
-test('context choices follow each built-in model maximum without dense legacy tiers', () => {
+test('context choices follow each vendor default without dense legacy tiers', () => {
   assert.deepEqual(
-    [...getModelContextWindowOptions({ presetId: 'zai:glm-5.3-flash' })],
+    [...getModelContextWindowOptions({ presetId: 'zai' })],
     ['32k', '256k', '1m'],
   )
   assert.deepEqual(
-    [...getModelContextWindowOptions({ presetId: 'moonshot:kimi-k3' })],
-    ['32k', '256k', '1m'],
-  )
-  assert.deepEqual(
-    [...getModelContextWindowOptions({ presetId: 'moonshot:kimi-k2.6' })],
-    ['32k', '128k', '256k'],
-  )
-  assert.deepEqual(
-    [...getModelContextWindowOptions({ presetId: 'minimax:MiniMax-M3' })],
-    ['32k', '256k', '1m'],
+    [...getModelContextWindowOptions({ presetId: 'moonshot' })],
+    ['32k', '128k', '256k', '1m'],
   )
   assert.deepEqual(
     [...getModelContextWindowOptions({ contextWindow: '200k' })],
@@ -213,7 +194,7 @@ test('context choices follow each built-in model maximum without dense legacy ti
   )
   assert.equal(
     getDefaultModelContextWindow({
-      presetId: 'moonshot:kimi-k2.6',
+      presetId: 'moonshot',
       contextWindow: '32k',
     }),
     '32k',
@@ -256,7 +237,7 @@ test('runtime thinking selection changes only the user-owned mode', () => {
   const lowEffort = applyModelRuntimeConfigPatch(
     {
       ...config,
-      presetId: 'deepseek:deepseek-v4-flash',
+      presetId: 'deepseek',
     },
     { reasoningEffort: 'low' },
   )
@@ -266,4 +247,32 @@ test('runtime thinking selection changes only the user-owned mode', () => {
     ['low', 'high', 'max'],
   )
   assert.equal(getModelReasoningEffort(config), undefined)
+})
+
+test('legacy model-level presets migrate to vendor presets', () => {
+  const { migrateLegacyModelConfigs } = loadTypeScriptModule(
+    path.join(__dirname, 'models', 'migration.ts'),
+  )
+  const { configs, changed } = migrateLegacyModelConfigs([
+    { id: 'a', name: '', presetId: 'zai:glm-5.3-flash' },
+    { id: 'b', name: 'my-k2', presetId: 'moonshot:kimi-k2.6' },
+    { id: 'c', name: 'custom' },
+  ])
+  assert.equal(changed, true)
+  assert.deepEqual(configs[0], {
+    id: 'a',
+    name: 'glm-5.3-flash',
+    presetId: 'zai',
+    providerId: 'zai',
+    profileMaxGenerationTokens: 131_072,
+  })
+  assert.deepEqual(configs[1], {
+    id: 'b',
+    name: 'my-k2',
+    presetId: 'moonshot',
+    providerId: 'moonshot',
+    profileMaxGenerationTokens: 262_144,
+  })
+  assert.deepEqual(configs[2], { id: 'c', name: 'custom' })
+  assert.equal(migrateLegacyModelConfigs(configs).changed, false)
 })

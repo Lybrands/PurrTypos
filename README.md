@@ -140,19 +140,9 @@ Agent 分为三个产品形态：小说写作（工作台 AI 面板）、小说�
 剧本（剧本工作台），分别由 `backend/agents/writing`、`backend/agents/novel_analysis`
 和 `backend/agents/screenplay` 承载。
 
-模型接入提供两条路径：系统固定提供内置模型，设置页只允许配置其服务商凭据与运行参数，
-不能新增、复制或删除；代理、自建服务或目录外模型继续使用"高级自定义"。两种路径最终
-生成相同的 `AiModelConfig`，沿用同一套后端调用链。缺少 API Key 的内置模型仍显示在
-设置页，但不会进入对话模型列表。
+模型接入提供两条路径：系统固定提供五家内置服务商（智谱 GLM、DeepSeek、Kimi/Moonshot、MiniMax、小米 MiMo），接入端点与协议由系统维护，**模型名称由用户在设置页填写**，思考/非思考全部放开、由用户按所填模型声明；代理、自建服务或目录外服务商继续使用"高级自定义"。两种路径最终生成相同的 `AiModelConfig`，沿用同一套后端调用链。缺少 API Key 或模型名的内置条目仍显示在设置页，但不会进入对话模型列表。
 
-内置模型共六个，覆盖五家服务商：智谱 GLM-5.3-Flash、DeepSeek V4 Flash、
-Moonshot Kimi K3 与 Kimi K2.6、MiniMax M3、小米 MiMo V2.5 Pro。内置模型采用
-profile 分层适配：`src/models/profiles/` 保存前端目录能力与配置迁移，
-`backend/infrastructure/models/profiles/` 保存请求参数和响应规范化差异；OpenAI /
-Anthropic SDK、流式生命周期、工具调用和错误处理由公共协议适配器负责。模型能力
-描述符由 `scripts/generate-model-descriptors.py` 生成到
-`src/models/descriptors.generated.ts`，不要手工编辑。内置配置通过 `model_profile`
-命中对应 profile，高级自定义不携带该字段并回退到 generic profile。
+内置服务商采用 profile 分层适配：`src/models/profiles/` 保存前端目录与服务商接入信息，`backend/infrastructure/models/profiles/` 保存请求参数和响应规范化差异（服务商级 profile 只按接入端点匹配，不校验模型名）；OpenAI / Anthropic SDK、流式生命周期、工具调用和错误处理由公共协议适配器负责。每家登记主推模型的能力上限作为默认值，用户可在配置中按实际模型覆盖。模型能力描述符由 `scripts/generate-model-descriptors.py` 生成到 `src/models/descriptors.generated.ts`，不要手工编辑。内置配置通过 `model_profile` 命中对应服务商 profile，高级自定义不携带该字段并回退到 generic profile；旧模型级 profile id（如 `zai:glm-5.3-flash`）已冻结，仅用于解析存量配置与历史请求。
 
 ### Agent 工具系统
 

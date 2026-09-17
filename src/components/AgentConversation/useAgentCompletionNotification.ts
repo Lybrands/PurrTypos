@@ -1,5 +1,6 @@
 import React from 'react'
 import type { AgentConversationController } from './controller'
+import { isUntitledSessionTitle } from './sessionTitle'
 import { notifyAgentCompletion } from '../../platform/agentNotifications'
 
 interface CompletionWatchState {
@@ -22,6 +23,21 @@ function assistantKey(message: ReturnType<typeof latestAssistant>): string {
     || message.clientTurnId
     || message.sentAt
     || ''
+}
+
+/** 会话已命名则用其标题；未命名（「新对话」）时回退到触发本轮任务的用户消息。 */
+function resolveCompletionTitle(controller: AgentConversationController): string | undefined {
+  const conversation = controller.conversation
+  const sessionTitle = conversation.sessions.find(
+    (session) => session.id === conversation.activeSessionId,
+  )?.title
+  if (sessionTitle && !isUntitledSessionTitle(sessionTitle)) return sessionTitle
+
+  const latestUserText = [...conversation.messages]
+    .reverse()
+    .find((message) => message.role === 'user')?.content
+    .trim()
+  return latestUserText || undefined
 }
 
 export function useAgentCompletionNotification(
@@ -89,12 +105,9 @@ export function useAgentCompletionNotification(
     if (!completed) return
 
     watch.current.awaitingTerminal = false
-    const sessionTitle = conversation.sessions.find(
-      (session) => session.id === conversation.activeSessionId,
-    )?.title
     void notifyAgentCompletion({
       runId: assistant?.agentRunId,
-      conversationTitle: sessionTitle,
+      conversationTitle: resolveCompletionTitle(controller),
     })
   }, [
     controller,

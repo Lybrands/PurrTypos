@@ -83,7 +83,7 @@ def model_request_from_runtime(
             raise ValueError("model profile does not match model/endpoint; declare compatible binding explicitly")
     if profile_id and provider == "anthropic" and not profile.native_anthropic_thinking:
         raise ValueError("model profile does not support Anthropic protocol")
-    if profile_id and provider == "zai" and not profile_id.startswith("zai:"):
+    if profile_id and provider == "zai" and profile_id != "zai" and not profile_id.startswith("zai:"):
         raise ValueError("model profile does not support Zai protocol")
     descriptor = describe_profile(profile)
     expected_digest = options.pop("model_descriptor_digest", None)
@@ -233,13 +233,23 @@ def apply_user_declared_generic_capabilities(
     supports_thinking = options.pop("supports_thinking", None)
     thinking_only = options.pop("thinking_only", None)
     if snapshot.profile_id != "generic":
-        if (
-            profile_max_generation_tokens is not None
-            or supports_thinking is not None
-            or thinking_only is not None
-        ):
+        if supports_thinking is not None or thinking_only is not None:
             raise ValueError(
-                "built-in model capabilities cannot be overridden"
+                "built-in model thinking capability cannot be overridden"
+            )
+        if profile_max_generation_tokens is not None:
+            # 服务商级预设的登记上限是默认值，允许用户按实际模型覆盖。
+            if (
+                requested_user_max_generation_tokens is not None
+                and requested_user_max_generation_tokens > profile_max_generation_tokens
+            ):
+                raise ValueError(
+                    "max_generation_tokens exceeds profile_max_generation_tokens"
+                )
+            snapshot = replace(
+                snapshot,
+                max_generation_tokens=profile_max_generation_tokens,
+                source="user_declared",
             )
         return snapshot
     if profile_max_generation_tokens is None:

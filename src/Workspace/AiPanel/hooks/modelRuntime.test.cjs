@@ -106,19 +106,19 @@ test('built-in selection sends its model profile while custom models stay generi
   const builtIn = buildStreamOptions({
     cfg: {
       id: 'minimax',
-      presetId: 'minimax:MiniMax-M3',
+      presetId: 'minimax',
       name: 'MiniMax-M3',
       apiKey: 'secret',
       baseUrl: 'https://api.minimaxi.com/v1',
       supportsThinking: true,
-      thinkingOnly: true,
+      thinkingOnly: false,
       thinkingEnabled: true,
       customizeTemperature: false,
       contextWindow: '256k',
     },
     selectedModel: 'minimax',
   })
-  assert.equal(builtIn.options.model_profile, 'minimax:MiniMax-M3')
+  assert.equal(builtIn.options.model_profile, 'minimax')
   assert.deepEqual(builtIn.options.thinking, { type: 'enabled' })
   assert.equal(builtIn.options.context_window, '256k')
   assert.equal(Object.hasOwn(builtIn.options, 'max_tokens'), false)
@@ -149,7 +149,7 @@ test('renderer sends only the explicit user generation ceiling', () => {
   const configured = buildStreamOptions({
     cfg: {
       id: 'mimo',
-      presetId: 'mimo:mimo-v2.5-pro',
+      presetId: 'mimo',
       name: 'mimo-v2.5-pro',
       apiKey: 'secret',
       baseUrl: 'https://api.xiaomimimo.com/v1',
@@ -188,7 +188,7 @@ test('renderer sends reasoning effort only after an explicit supported choice', 
   const explicit = buildStreamOptions({
     cfg: {
       id: 'deepseek',
-      presetId: 'deepseek:deepseek-v4-flash',
+      presetId: 'deepseek',
       name: 'deepseek-v4-flash',
       apiKey: 'secret',
       baseUrl: 'https://api.deepseek.com',
@@ -203,7 +203,7 @@ test('renderer sends reasoning effort only after an explicit supported choice', 
   const providerDefault = buildStreamOptions({
     cfg: {
       id: 'deepseek-default',
-      presetId: 'deepseek:deepseek-v4-flash',
+      presetId: 'deepseek',
       name: 'deepseek-v4-flash',
       apiKey: 'secret',
       baseUrl: 'https://api.deepseek.com',
@@ -605,7 +605,7 @@ test('session runtime revision advances even when wall clock does not', () => {
 
 test('GLM preset forwards an explicit reasoning effort while keeping thinking enabled', () => {
   const result = buildStreamOptions({
-    cfg: { id: 'glm', presetId: 'zai:glm-5.3-flash', name: 'glm-5.3-flash',
+    cfg: { id: 'glm', presetId: 'zai', name: 'glm-5.3-flash',
       apiKey: 'test', baseUrl: 'https://open.bigmodel.cn/api/paas/v4/',
       supportsThinking: true, thinkingOnly: true, thinkingEnabled: true,
       reasoningEffort: 'low', customizeTemperature: false },
@@ -618,7 +618,7 @@ test('GLM preset forwards an explicit reasoning effort while keeping thinking en
 test('model request preserves preference states and sends the generated descriptor digest', () => {
   for (const choice of [{ state: 'inherit' }, { state: 'provider_default' }, { state: 'explicit', value: 'high' }]) {
     const { options } = buildStreamOptions({ cfg: {
-      id: 'glm', name: 'glm-5.3-flash', presetId: 'zai:glm-5.3-flash', apiKey: 'key',
+      id: 'glm', name: 'glm-5.3-flash', presetId: 'zai', apiKey: 'key',
       thinkingEnabled: true, reasoningEffort: 'low',
       modelPreferences: { reasoning_effort: choice, reasoning_mode: { state: 'provider_default' } },
     }, selectedModel: 'glm' })

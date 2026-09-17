@@ -2,10 +2,8 @@
 export const MODEL_DESCRIPTORS = [
   {
     "schemaVersion": 1,
-    "profileId": "zai:glm-5.3-flash",
-    "modelNames": [
-      "glm-5.3-flash"
-    ],
+    "profileId": "zai",
+    "modelNames": [],
     "baseUrls": [
       "https://open.bigmodel.cn/api/paas/v4"
     ],
@@ -20,7 +18,7 @@ export const MODEL_DESCRIPTORS = [
     "defaultTemperatureThinking": 1,
     "defaultTemperatureNonThinking": 1,
     "maxGenerationTokens": 131072,
-    "reasoningControl": "always_enabled",
+    "reasoningControl": "selectable",
     "reasoningEffortOptions": [
       "low",
       "high",
@@ -32,28 +30,26 @@ export const MODEL_DESCRIPTORS = [
     "outputTokenParameter": "max_tokens",
     "nativeAnthropicThinking": false,
     "openaiExtraBodies": {
-      "default": {
-        "thinking": {
-          "type": "enabled"
-        }
-      },
+      "default": {},
       "enabled": {
         "thinking": {
           "type": "enabled"
         }
       },
-      "disabled": null
+      "disabled": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
     },
     "streamUsage": true,
     "source": "https://docs.z.ai/guides/vlm/glm-5.3-flash",
-    "digest": "6c7ebd90b0f04a3b4f34a3baf1dbf662f47c3e8fffe2c4bfb703db0f78bf8dc6"
+    "digest": "a51b8cb83de645bdb098e58921617841d31ecc94f0ba40b17c7e728236320271"
   },
   {
     "schemaVersion": 1,
-    "profileId": "deepseek:deepseek-v4-flash",
-    "modelNames": [
-      "deepseek-v4-flash"
-    ],
+    "profileId": "deepseek",
+    "modelNames": [],
     "baseUrls": [
       "https://api.deepseek.com",
       "https://api.deepseek.com/v1"
@@ -93,53 +89,12 @@ export const MODEL_DESCRIPTORS = [
     },
     "streamUsage": true,
     "source": "https://api-docs.deepseek.com/quick_start/pricing",
-    "digest": "49dfe3130288b41159029da62b53399ff8e77bcdc0694d38ea3b5dae3d615b63"
+    "digest": "4055c315161f14d1ff33ef0d292bab005e54df3d865bb15e70ddf20e3f6a36b0"
   },
   {
     "schemaVersion": 1,
-    "profileId": "moonshot:kimi-k3",
-    "modelNames": [
-      "kimi-k3"
-    ],
-    "baseUrls": [
-      "https://api.moonshot.ai/v1",
-      "https://api.moonshot.cn/v1"
-    ],
-    "contextWindowOptions": [
-      "32k",
-      "256k",
-      "1m"
-    ],
-    "defaultContextWindow": "1m",
-    "defaultThinkingEnabled": true,
-    "customizeTemperature": false,
-    "defaultTemperatureThinking": 1,
-    "defaultTemperatureNonThinking": 1,
-    "maxGenerationTokens": 1048576,
-    "reasoningControl": "always_enabled",
-    "reasoningEffortOptions": [],
-    "taskReasoningPreferences": {},
-    "outputTokenParameter": "max_completion_tokens",
-    "nativeAnthropicThinking": false,
-    "openaiExtraBodies": {
-      "default": {
-        "reasoning_effort": "max"
-      },
-      "enabled": {
-        "reasoning_effort": "max"
-      },
-      "disabled": null
-    },
-    "streamUsage": true,
-    "source": "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart",
-    "digest": "272992c156ad44ae3ff6e7cd413ae34a70d840480425dd9618544b9f5e5d36b5"
-  },
-  {
-    "schemaVersion": 1,
-    "profileId": "moonshot:kimi-k2.6",
-    "modelNames": [
-      "kimi-k2.6"
-    ],
+    "profileId": "moonshot",
+    "modelNames": [],
     "baseUrls": [
       "https://api.moonshot.ai/v1",
       "https://api.moonshot.cn/v1"
@@ -147,14 +102,15 @@ export const MODEL_DESCRIPTORS = [
     "contextWindowOptions": [
       "32k",
       "128k",
-      "256k"
+      "256k",
+      "1m"
     ],
     "defaultContextWindow": "256k",
     "defaultThinkingEnabled": true,
     "customizeTemperature": false,
     "defaultTemperatureThinking": 1,
     "defaultTemperatureNonThinking": 0.6,
-    "maxGenerationTokens": 262144,
+    "maxGenerationTokens": 1048576,
     "reasoningControl": "selectable",
     "reasoningEffortOptions": [],
     "taskReasoningPreferences": {},
@@ -174,16 +130,13 @@ export const MODEL_DESCRIPTORS = [
       }
     },
     "streamUsage": true,
-    "source": "https://platform.kimi.ai/docs/guide/kimi-k2-6-quickstart",
-    "digest": "930fbfbef2d093d3ec2dff87d906fb3d69d23b0a564ca1597f322980e9806040"
+    "source": "https://platform.kimi.ai/docs/guide/kimi-k3-quickstart",
+    "digest": "9ae76d5a010651259a0b9b747f263767ec38eb32b162be83b82845b9ce16bb01"
   },
   {
     "schemaVersion": 1,
-    "profileId": "minimax:MiniMax-M3",
-    "modelNames": [
-      "minimax-m3",
-      "minimax-m3.0"
-    ],
+    "profileId": "minimax",
+    "modelNames": [],
     "baseUrls": [
       "https://api.minimax.io/anthropic",
       "https://api.minimax.io/v1",
@@ -225,14 +178,12 @@ export const MODEL_DESCRIPTORS = [
     },
     "streamUsage": true,
     "source": "https://platform.minimaxi.com/docs/api-reference/text-chat-openai",
-    "digest": "1444b611b4776236b5db8dcf9c0c43d0622b599efdb86f566e7f4e7777ae0fdf"
+    "digest": "51e6ef82913ba90ce66b8c5d754cbf7bef9e9400710fddd7da14067d6a20388f"
   },
   {
     "schemaVersion": 1,
-    "profileId": "mimo:mimo-v2.5-pro",
-    "modelNames": [
-      "mimo-v2.5-pro"
-    ],
+    "profileId": "mimo",
+    "modelNames": [],
     "baseUrls": [
       "https://api.xiaomimimo.com/v1"
     ],
@@ -267,6 +218,6 @@ export const MODEL_DESCRIPTORS = [
     },
     "streamUsage": true,
     "source": "https://mimo.mi.com/docs/en-US/api/chat/responses",
-    "digest": "c43310c80bed7c5607c651583397a05aa5de6697b1954212886a02298ed1dbae"
+    "digest": "07eb86cc775479893d7d6327070ac4cef58c41f363e307033e5a99318531de3b"
   }
 ] as const

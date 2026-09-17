@@ -145,6 +145,15 @@ class GenericModelProfile(ModelProfile):
     parallel_tool_calls = FeatureSupport.SUPPORTED
 
 
+class VendorModelProfile(ModelProfile):
+    """服务商级 profile：模型名由用户填写，匹配只看接入端点。"""
+
+    model_names = frozenset()
+
+    def matches(self, model: str, base_url: str | None) -> bool:
+        return _normalize_base_url(base_url) in self.base_urls
+
+
 def _normalize_base_url(value: str | None) -> str:
     return str(value or "").strip().lower().rstrip("/")
 
@@ -180,4 +189,4 @@ def _reasoning_details_text(value: Any) -> str:
     return "".join(parts)
 
 
-__all__ = ["GenericModelProfile", "ModelProfile"]
+__all__ = ["GenericModelProfile", "ModelProfile", "VendorModelProfile"]

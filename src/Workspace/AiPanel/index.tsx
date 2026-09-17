@@ -423,10 +423,16 @@ export default function AiPanel({
 
   const handleSubmit = React.useCallback((content?: string) => {
     const token = conversationLifecycleRef.current.currentToken()
+    // 零会话时放行：useChatSubmit 的 ensureSession 会先建会话再提交本轮
+    // （composerPolicy 的 sessionlessSend 契约）；此时 lifecycle token 尚不存在，
+    // 不能用它拦截，否则零会话发送会静默失效。
     if (
-      !token
-      || token.sessionId !== activeSessionRef.current
-      || !conversationLifecycleRef.current.canAct(token)
+      activeSessionRef.current != null
+      && (
+        !token
+        || token.sessionId !== activeSessionRef.current
+        || !conversationLifecycleRef.current.canAct(token)
+      )
     ) return
     if (content !== undefined) {
       const trimmed = content.trim()

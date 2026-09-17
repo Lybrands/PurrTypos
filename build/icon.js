@@ -62,10 +62,14 @@ function fitIconToCanvas(source, {
   return output
 }
 
-async function generateIcons() {
+async function generateIcons({ ifMissing = false } = {}) {
   const sourcePath = path.join(__dirname, '..', 'public', 'PurrTypos.png')
   const pngPath = path.join(__dirname, 'icon.png')
   const icoPath = path.join(__dirname, 'icon.ico')
+
+  if (ifMissing && fs.existsSync(pngPath) && fs.existsSync(icoPath)) {
+    return
+  }
 
   if (!fs.existsSync(sourcePath)) {
     throw new Error(`PNG not found: ${sourcePath}`)
@@ -79,7 +83,7 @@ async function generateIcons() {
 }
 
 if (require.main === module) {
-  generateIcons().catch((error) => {
+  generateIcons({ ifMissing: process.argv.includes('--if-missing') }).catch((error) => {
     console.error('Icon generation failed:', error)
     process.exitCode = 1
   })
