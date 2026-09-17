@@ -133,10 +133,10 @@ export default function ExecutionLog({
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
           ) : null}
+          <ChevronRightIcon className="work-log__chevron" />
           {headerExtra ? (
             <span className="work-log__toggle-extra">{headerExtra}</span>
           ) : null}
-          <ChevronRightIcon className="work-log__chevron" />
         </button>
       ) : (
         <div className="work-log__toggle work-log__toggle--static">
