@@ -184,7 +184,9 @@ export default function DelegationStatus({
             aria-label={`查看 ${collapsedItems.length} 个子 Agent`}
           >
             <RobotIcon size={14} />
-            <span>{collapsedItems.length}</span>
+            <span className="subagent-overview__trigger-count">
+              · {collapsedItems.length}
+            </span>
           </PurrButton>
         </PurrPopover>
       ) : rows}
