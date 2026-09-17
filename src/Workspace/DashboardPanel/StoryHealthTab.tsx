@@ -1,13 +1,84 @@
 import { services } from '@/services'
 import React from 'react'
 import { RefreshIcon } from '@/purr-components'
-import { PurrButton, PurrEmpty, PurrSpin, PurrTag, PurrTooltip } from '@/purr-components'
-import type { EntityId, StoryHealthData } from '../../types'
+import { PurrButton, PurrEmpty, PurrModal, PurrSpin, PurrTag, PurrTooltip } from '@/purr-components'
+import type { CharacterAppearanceItem, EntityId, StoryHealthData } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import { formatWords } from './dashboardFormatters'
 
 interface StoryHealthTabProps {
   bookId: EntityId
+}
+
+function CharacterAppearanceRow({
+  character,
+  gapWarnThreshold,
+}: {
+  character: CharacterAppearanceItem
+  gapWarnThreshold: number
+}) {
+  const [detailOpen, setDetailOpen] = React.useState(false)
+  const gapWarn = character.gapChapters != null && character.gapChapters >= gapWarnThreshold
+  const refs = character.chapterRefs ?? []
+  const topRefs = [...refs].sort((a, b) => b.mentions - a.mentions).slice(0, 3)
+  return (
+    <div className="dashboard-character-item">
+      <div className="dashboard-character-main">
+        <span className="dashboard-character-name">{character.name}</span>
+        <span className="dashboard-character-meta">
+          {character.appearChapters > 0 ? (
+            <>
+              出场 {character.appearChapters} 章 · 最近在第 {character.lastChapterIndex} 章
+              {character.gapChapters != null && character.gapChapters > 0 ? `（已隔 ${character.gapChapters} 章）` : '（最新章在场）'}
+            </>
+          ) : '尚未出场'}
+        </span>
+        {gapWarn ? <PurrTag color="warning">久未出场</PurrTag> : null}
+        {character.appearChapters === 0 ? <PurrTag>未出场</PurrTag> : null}
+        {refs.length > 0 ? (
+          <PurrButton
+            type="text"
+            size="small"
+            onClick={() => setDetailOpen(true)}
+          >
+            出场章 {refs.length}
+          </PurrButton>
+        ) : null}
+      </div>
+      <PurrModal
+        title={`${character.name} · 出场章节`}
+        open={detailOpen}
+        onCancel={() => setDetailOpen(false)}
+        footer={null}
+        destroyOnHidden
+        width={560}
+      >
+        <div className="dashboard-chapter-modal">
+          {topRefs.length > 0 ? (
+            <div className="dashboard-chapter-modal-top">
+              <span className="dashboard-chapter-modal-label">戏份最多</span>
+              <div className="dashboard-chapter-modal-top-tags">
+                {topRefs.map((r) => (
+                  <PurrTooltip key={r.chapterId} title={`第 ${r.index} 章「${r.title}」 · 提及 ${r.mentions} 次`}>
+                    <PurrTag color="blue">第 {r.index} 章 · {r.mentions} 次</PurrTag>
+                  </PurrTooltip>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="dashboard-chapter-modal-list">
+            {refs.map((r) => (
+              <div key={r.chapterId} className="dashboard-chapter-modal-item">
+                <span className="dashboard-chapter-modal-index">第 {r.index} 章</span>
+                <span className="dashboard-chapter-modal-title">{r.title || '未命名章节'}</span>
+                <span className="dashboard-chapter-modal-mentions">提及 {r.mentions} 次</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </PurrModal>
+    </div>
+  )
 }
 
 export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
@@ -128,24 +199,13 @@ export default function StoryHealthTab({ bookId }: StoryHealthTabProps) {
           <div className="dashboard-empty-line">还没有录入人物。</div>
         ) : (
           <div className="dashboard-list">
-            {data.characters.map((c) => {
-              const gapWarn = c.gapChapters != null && c.gapChapters >= data.gapWarnThreshold
-              return (
-                <div key={c.id} className="dashboard-character-item">
-                  <span className="dashboard-character-name">{c.name}</span>
-                  <span className="dashboard-character-meta">
-                    {c.appearChapters > 0 ? (
-                      <>
-                        出场 {c.appearChapters} 章 · 最近在第 {c.lastChapterIndex} 章
-                        {c.gapChapters != null && c.gapChapters > 0 ? `（已隔 ${c.gapChapters} 章）` : '（最新章在场）'}
-                      </>
-                    ) : '尚未出场'}
-                  </span>
-                  {gapWarn ? <PurrTag color="warning">久未出场</PurrTag> : null}
-                  {c.appearChapters === 0 ? <PurrTag>未出场</PurrTag> : null}
-                </div>
-              )
-            })}
+            {data.characters.map((c) => (
+              <CharacterAppearanceRow
+                key={c.id}
+                character={c}
+                gapWarnThreshold={data.gapWarnThreshold}
+              />
+            ))}
           </div>
         )}
       </div>

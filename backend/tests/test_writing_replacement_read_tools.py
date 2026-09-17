@@ -261,6 +261,7 @@ def test_read_catalog_is_static_and_not_removed_by_knowledge_purpose(temp_db) ->
     assert catalog.enabled_names(request) == catalog.names
     assert catalog.names == {
         "getStoryBackground",
+        "readWritingDashboard",
         "listBookCharacters",
         "getBookCharacters",
         "listWritingChapters",

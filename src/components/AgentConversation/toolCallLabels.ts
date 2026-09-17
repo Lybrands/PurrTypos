@@ -87,6 +87,7 @@ export const KNOWN_TOOL_CALL_LABELS = {
   readScreenplayTaskDependencies: "读取剧本任务依赖",
   readScreenplayPartDependenciesV1: "读取剧本任务依赖",
   readWritingChapters: "读取章节正文",
+  readWritingDashboard: "读取写作仪表盘",
   readWritingOutlines: "读取大纲正文",
   readWritingTechniqueFile: "读取写作技法文件",
   searchWritingMemories: "检索写作记忆",

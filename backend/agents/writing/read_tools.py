@@ -44,6 +44,14 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
             signal=signal,
         )
 
+    async def story_dashboard(state, arguments, signal=None):
+        del arguments
+        return await _read(
+            repository.story_dashboard,
+            state,
+            signal=signal,
+        )
+
     async def list_characters(state, arguments, signal=None):
         return await _read(
             repository.characters,
@@ -131,6 +139,15 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
             "查看故事背景",
             {},
             story_background,
+        ),
+        _registration(
+            "readWritingDashboard",
+            "读取当前书的写作仪表盘摘要：人物出场章明细（chapterId、章号、标题、提及次数）、"
+            "伏笔逾期/临期清单、章节与字数总览。先用它定位角色出现的章节或伏笔埋设章节，"
+            "再用 readWritingChapters 按 chapterId 精读正文，避免整本扫描。",
+            "读取写作仪表盘",
+            {},
+            story_dashboard,
         ),
         _registration(
             "listBookCharacters",
