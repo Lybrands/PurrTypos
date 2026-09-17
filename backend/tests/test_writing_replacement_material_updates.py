@@ -451,3 +451,12 @@ async def test_material_commit_joins_host_idempotency_transaction(material_db) -
     assert await material_db.fetch_one(
         "SELECT content FROM story_background WHERE book_id = 'book-1'"
     ) == {"content": "宿主事务内背景"}
+
+
+def test_writing_profile_gives_the_model_batch_split_headroom(material_db) -> None:
+    """混合批次按 FAILED 回传后，恢复预算必须容许模型拆批重发。"""
+    from purra.recovery import RecoveryCause
+
+    policy = WritingReplacementProfile(material_db).adapter.recovery_policy
+
+    assert policy.max_attempts(RecoveryCause.TOOL_INPUT_INVALID) >= 2
