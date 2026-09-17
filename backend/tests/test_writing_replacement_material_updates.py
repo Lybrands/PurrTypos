@@ -460,3 +460,73 @@ def test_writing_profile_gives_the_model_batch_split_headroom(material_db) -> No
     policy = WritingReplacementProfile(material_db).adapter.recovery_policy
 
     assert policy.max_attempts(RecoveryCause.TOOL_INPUT_INVALID) >= 12
+
+
+@pytest.mark.asyncio
+async def test_setting_entity_batch_create_inserts_serially_with_all_or_nothing(material_db) -> None:
+    reads = SqliteWritingReadRepository(material_db)
+    writes = SqliteWritingMaterialRepository(material_db)
+    scope = WritingReadScope("book-1")
+
+    receipt = await writes.commit_create_setting_entities(scope, entities=[
+        {"name": "涟漪局", "entityType": "faction", "tags": "官方",
+         "profileMd": "# 涟漪局\n官方组织。"},
+        {"name": "雾港区", "entityType": "location"},
+    ])
+
+    assert receipt["success"] is True
+    assert receipt["count"] == 2
+    assert [item["name"] for item in receipt["entities"]] == ["涟漪局", "雾港区"]
+    rows = await material_db.fetch_all(
+        "SELECT id, entity_type, name, tags FROM setting_entities "
+        "WHERE book_id = 'book-1' ORDER BY id"
+    )
+    assert [row["name"] for row in rows] == ["灯塔", "涟漪局", "雾港区"]
+    # 回执 revision 与读取侧同组成，可直接作为后续更新的 baseRevision
+    entities = await reads.setting_entities(scope, include_profile=True)
+    by_name = {item["name"]: item for item in entities["items"]}
+    assert (by_name["涟漪局"]["baseRevision"]
+            == receipt["entities"][0]["committedRevision"])
+
+    # 批内同名 → 整批拒绝，且不落库
+    before = await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entities"
+    )
+    with pytest.raises(WritingMaterialMutationError) as dup:
+        await writes.validate_create_setting_entities(scope, entities=[
+            {"name": "新区", "entityType": "location"},
+            {"name": "新区", "entityType": "faction"},
+        ])
+    with pytest.raises(WritingMaterialMutationError) as existing:
+        await writes.validate_create_setting_entities(scope, entities=[
+            {"name": "全新区", "entityType": "location"},
+            {"name": "灯塔", "entityType": "location"},  # 已存在
+        ])
+    assert await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entities"
+    ) == before
+
+    assert dup.value.code == "writing_setting_entity_duplicate_name"
+    assert existing.value.code == "writing_setting_entity_duplicate_name"
+
+    # 超上限 → 输入无效
+    with pytest.raises(WritingMaterialMutationError) as over:
+        await writes.validate_create_setting_entities(
+            scope, entities=[
+                {"name": f"条目{index}", "entityType": "other"}
+                for index in range(21)
+            ],
+        )
+    assert over.value.code == "tool_input_invalid"
+
+
+def test_setting_entity_batch_tool_contract(material_db) -> None:
+    catalog = WritingReplacementProfile(material_db).adapter.tool_catalog
+    registration = catalog.get("createSettingEntities")
+
+    assert registration.policy.mode.value == "confirm"
+    assert registration.policy.risk_level.value == "write"
+    assert registration.cancellation_linearizable is True
+    assert registration.context_contract.prerequisite_tools == ("listSettingEntities",)
+    assert registration.schema.parameters["required"] == ["entities"]
+    assert registration.schema.parameters["properties"]["entities"]["maxItems"] == 20

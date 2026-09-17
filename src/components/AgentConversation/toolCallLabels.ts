@@ -15,6 +15,7 @@ export const KNOWN_TOOL_CALL_LABELS = {
   createCharacter: "创建人物",
   createMemory: "创建长期记忆",
   createSettingEntity: "创建世界设定",
+  createSettingEntities: "批量创建世界设定",
   createWritingChapter: "创建章节",
   createWritingChapters: "创建章节/卷",
   delegateToAgents: "委派子 Agent 协作",
@@ -467,6 +468,25 @@ export function toolCallDisplayRow(
       case "createSettingEntity": {
         const n = args.name != null ? String(args.name).trim() : "";
         return { label: n ? `创建设定「${n}」` : "创建世界设定", outcome: "ok" };
+      }
+      case "createSettingEntities": {
+        const entries = Array.isArray(args.entities)
+          ? args.entities.filter(
+              (item): item is Record<string, unknown> =>
+                Boolean(item) && typeof item === "object" && !Array.isArray(item),
+            )
+          : [];
+        const names = entries
+          .map((item) => displayQuery(item.name, 24))
+          .filter(Boolean);
+        if (names.length === 0) return { label: "批量创建世界设定", outcome: "ok" };
+        const head = names.slice(0, 3).map((n) => `「${n}」`).join("");
+        return {
+          label: names.length <= 3
+            ? `批量创建设定${head}`
+            : `批量创建设定${head}等 ${names.length} 条`,
+          outcome: "ok",
+        };
       }
       case "updateSettingEntity": {
         const n = args.name != null ? String(args.name).trim() : "";

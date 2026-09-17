@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from agents.writing.read_model import (
@@ -252,6 +253,54 @@ class SqliteWritingMaterialRepository:
                 "noop": False,
             }
 
+    async def validate_create_setting_entities(
+        self, scope: WritingReadScope, *, entities,
+    ) -> None:
+        planned = _validate_entity_batch(entities)
+        await self._validate_scope(scope)
+        for values in planned:
+            await self._require_entity_name_available(scope, values["name"])
+
+    async def commit_create_setting_entities(
+        self, scope: WritingReadScope, *, entities, signal=None,
+    ) -> dict[str, Any]:
+        planned = _validate_entity_batch(entities)
+        raise_if_stopped(signal)
+        async with self._write_transaction():
+            await self._validate_scope(scope)
+            # 全量预校验后串行落库：任一条失败整批不写入（对齐 createWritingChapters）。
+            for values in planned:
+                await self._require_entity_name_available(scope, values["name"])
+            raise_if_stopped(signal)
+            items: list[dict[str, Any]] = []
+            for values in planned:
+                entity_id = int(await self._db.execute_and_get_id(
+                    "INSERT INTO setting_entities "
+                    "(book_id, entity_type, name, tags, profile_md) VALUES (?, ?, ?, ?, ?)",
+                    [scope.book_id, values["entityType"], values["name"],
+                     values["tags"], values["profileMd"]],
+                ))
+                items.append({
+                    "targetId": entity_id, "name": values["name"],
+                    "entityType": values["entityType"],
+                    "committedRevision": record_revision("setting_entity", {
+                        "name": values["name"], "tags": values["tags"],
+                        "profileMd": values["profileMd"],
+                    }),
+                })
+            return {
+                "schemaVersion": 1, "success": True, "bookId": scope.book_id,
+                "entities": items,
+                "intentDigest": intent_digest("setting_entities_create", {
+                    "bookId": scope.book_id,
+                    "items": [
+                        {"name": values["name"], "entityType": values["entityType"]}
+                        for values in planned
+                    ],
+                }),
+                "count": len(items), "noop": False,
+            }
+
     async def validate_delete_setting_entity(
         self, scope: WritingReadScope, *, entity_id: int, base_revision: str,
     ) -> None:
@@ -416,6 +465,39 @@ def _validate_record_patch(
 
 
 SETTING_ENTITY_TYPES = ("location", "faction", "item", "other")
+SETTING_ENTITY_BATCH_LIMIT = 20
+
+
+def _validate_entity_batch(entities) -> list[dict[str, str]]:
+    # purra 会把参数冻结为 FrozenList/FrozenDict（Sequence/Mapping 子类，
+    # 不是原生 list/dict），按结构化协议判断而不是具体容器类型。
+    if (
+        not isinstance(entities, Sequence)
+        or isinstance(entities, (str, bytes))
+        or not (1 <= len(entities) <= SETTING_ENTITY_BATCH_LIMIT)
+    ):
+        raise WritingMaterialMutationError(
+            "tool_input_invalid",
+            f"entities must contain 1 to {SETTING_ENTITY_BATCH_LIMIT} entries",
+        )
+    planned = [
+        _validate_entity_create(
+            item.get("name") if isinstance(item, Mapping) else None,
+            item.get("entityType") if isinstance(item, Mapping) else None,
+            item.get("tags", "") if isinstance(item, Mapping) else "",
+            item.get("profileMd", "") if isinstance(item, Mapping) else "",
+        )
+        for item in entities
+    ]
+    seen: set[str] = set()
+    for values in planned:
+        if values["name"] in seen:
+            raise WritingMaterialMutationError(
+                "writing_setting_entity_duplicate_name",
+                f"Batch contains duplicate name: {values['name']}",
+            )
+        seen.add(values["name"])
+    return planned
 
 
 def _validate_entity_create(
