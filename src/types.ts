@@ -2561,9 +2561,9 @@ export interface ElectronAPI {
         title: string;
         parentId?: EntityId | null;
       };
-      /** AI 写工具改动了设定类数据（人物/背景/大纲），前端面板据此刷新 */
+      /** AI 写工具改动了设定类数据（人物/背景/大纲/世界设定），前端面板据此刷新 */
       settingUpdated?: {
-        kind: "character" | "background" | "outline";
+        kind: "character" | "background" | "outline" | "entity";
         action?: string;
         id?: EntityId;
         name?: string;

@@ -1,4 +1,4 @@
-"""Approved material update tools for the replacement Writing Agent."""
+"""Approved material write tools (update / create / delete) for the Writing Agent."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from agents.writing.material_write_model import (
 )
 from agents.writing.read_model import WritingReadScope, WritingReadScopeError
 from agents.writing.read_tools import WRITING_READ_SCOPE_STATE_KEY
+from application.domain_effect_bridge import get_broadcaster
 from purra.contracts import (
     DomainEffect,
     ToolContextContract,
@@ -85,8 +86,48 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
     async def update_entity(state, arguments, signal=None):
         return await _commit(
             repository.commit_setting_entity, "writing.setting_entity_updated",
-            state, arguments, signal=signal, entity_id=arguments.get("entityId"),
+            state, arguments, signal=signal,
+            broadcast_action="updated",
+            entity_id=arguments.get("entityId"),
             base_revision=arguments.get("baseRevision"), patch=_patch(arguments),
+        )
+
+    async def validate_create_entity(state, arguments, signal=None):
+        del signal
+        return await _validate(
+            repository.validate_create_setting_entity, state, arguments,
+            name=arguments.get("name"),
+            entity_type=arguments.get("entityType"),
+            tags=arguments.get("tags", ""),
+            profile_md=arguments.get("profileMd", ""),
+        )
+
+    async def create_entity(state, arguments, signal=None):
+        return await _commit(
+            repository.commit_create_setting_entity, "writing.setting_entity_created",
+            state, arguments, signal=signal,
+            broadcast_action="created",
+            name=arguments.get("name"),
+            entity_type=arguments.get("entityType"),
+            tags=arguments.get("tags", ""),
+            profile_md=arguments.get("profileMd", ""),
+        )
+
+    async def validate_delete_entity(state, arguments, signal=None):
+        del signal
+        return await _validate(
+            repository.validate_delete_setting_entity, state, arguments,
+            entity_id=arguments.get("entityId"),
+            base_revision=arguments.get("baseRevision"),
+        )
+
+    async def delete_entity(state, arguments, signal=None):
+        return await _commit(
+            repository.commit_delete_setting_entity, "writing.setting_entity_deleted",
+            state, arguments, signal=signal,
+            broadcast_action="deleted",
+            entity_id=arguments.get("entityId"),
+            base_revision=arguments.get("baseRevision"),
         )
 
     return (
@@ -108,6 +149,20 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
             "getSettingEntities", "settingEntity.updated", validate_entity,
             update_entity,
         ),
+        _create_entity_registration(
+            "createSettingEntity", "新增世界设定",
+            "在当前书新增一条世界设定实体（地点/势力/物品/其他）；"
+            "名称不得与已有设定重复，创建前应先查看设定目录确认。",
+            "listSettingEntities", "settingEntity.created",
+            validate_create_entity, create_entity,
+        ),
+        _delete_entity_registration(
+            "deleteSettingEntity", "删除世界设定",
+            "删除当前书已有的一条设定实体；必须先读取详情并携带 baseRevision，"
+            "删除会连同其修订历史一起清除。",
+            "getSettingEntities", "settingEntity.deleted",
+            validate_delete_entity, delete_entity,
+        ),
         _text_registration(
             "editGlobalOutline", "编辑总纲", "markdownContent",
             "全文替换当前书唯一总纲；必须先读取并携带 baseRevision，清空需明确声明。",
@@ -126,10 +181,25 @@ async def _validate(operation, state, arguments, **kwargs):
     return None
 
 
-async def _commit(operation, effect_type, state, arguments, *, signal=None, **kwargs):
+async def _commit(
+    operation, effect_type, state, arguments, *, signal=None,
+    broadcast_action: str | None = None, **kwargs,
+):
     del arguments
     try:
         payload = await operation(_scope(state), signal=signal, **kwargs)
+        if broadcast_action and not payload["noop"]:
+            # 提交成功的瞬间通知已连接的 SSE 流：世界设定面板据此刷新列表。
+            get_broadcaster().publish(
+                getattr(state, "run_id", None),
+                "writing.setting_entities_changed",
+                {
+                    "bookId": payload["bookId"],
+                    "action": broadcast_action,
+                    "id": payload["targetId"],
+                    "name": payload.get("name"),
+                },
+            )
         return ToolHandlerResult(
             json.dumps(payload, ensure_ascii=False),
             effects=(DomainEffect(type=effect_type, payload={
@@ -184,9 +254,44 @@ def _record_registration(
     )
 
 
+def _create_entity_registration(
+    name, display_name, description, prerequisite, produces,
+    validator, handler,
+) -> ToolRegistration:
+    properties = {
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "entityType": {
+            "type": "string", "enum": ["location", "faction", "item", "other"],
+        },
+        "tags": {"type": "string", "maxLength": 10_000},
+        "profileMd": {"type": "string", "maxLength": 250_000},
+    }
+    return _registration(
+        name, display_name, description, properties,
+        required=("name", "entityType"), prerequisite=prerequisite,
+        produces=produces, validator=validator, handler=handler,
+    )
+
+
+def _delete_entity_registration(
+    name, display_name, description, prerequisite, produces,
+    validator, handler,
+) -> ToolRegistration:
+    properties = {
+        "entityId": {"type": "integer", "minimum": 1},
+        "baseRevision": {"type": "string", "minLength": 8, "maxLength": 80},
+    }
+    return _registration(
+        name, display_name, description, properties,
+        required=("entityId", "baseRevision"), prerequisite=prerequisite,
+        produces=produces, validator=validator, handler=handler,
+        risk_level=ToolRiskLevel.DESTRUCTIVE,
+    )
+
+
 def _registration(
     name, display_name, description, properties, *, required, prerequisite,
-    produces, validator, handler,
+    produces, validator, handler, risk_level=ToolRiskLevel.WRITE,
 ) -> ToolRegistration:
     return ToolRegistration(
         schema=ToolSchema(
@@ -199,7 +304,7 @@ def _registration(
             display_names={"zh-CN": display_name, "en": name},
         ),
         handler=handler,
-        policy=ToolPolicy(ToolExecutionMode.CONFIRM, display_name, ToolRiskLevel.WRITE),
+        policy=ToolPolicy(ToolExecutionMode.CONFIRM, display_name, risk_level),
         scope_validator=validator,
         cancellation_linearizable=True,
         context_contract=ToolContextContract(

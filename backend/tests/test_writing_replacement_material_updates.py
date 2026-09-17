@@ -253,6 +253,186 @@ async def test_exact_material_replay_is_noop_with_same_intent(material_db) -> No
 
 
 @pytest.mark.asyncio
+async def test_setting_entity_create_persists_and_guards_duplicates(material_db) -> None:
+    reads = SqliteWritingReadRepository(material_db)
+    writes = SqliteWritingMaterialRepository(material_db)
+    scope = WritingReadScope("book-1")
+
+    receipt = await writes.commit_create_setting_entity(
+        scope, name="雾港区", entity_type="location",
+        tags="港口,雾", profile_md="终年锁在雾里的旧港区。",
+    )
+
+    assert receipt["success"] is True
+    assert receipt["noop"] is False
+    assert receipt["targetId"] == 2
+    assert receipt["name"] == "雾港区"
+    assert receipt["entityType"] == "location"
+    assert await material_db.fetch_one(
+        "SELECT entity_type, name, tags, profile_md FROM setting_entities WHERE id = 2"
+    ) == {
+        "entity_type": "location", "name": "雾港区",
+        "tags": "港口,雾", "profile_md": "终年锁在雾里的旧港区。",
+    }
+    # 回执的 committedRevision 与读取侧 baseRevision 同组成，可直接用于后续更新。
+    entities = await reads.setting_entities(scope, include_profile=True)
+    created = next(item for item in entities["items"] if item["id"] == 2)
+    assert created["baseRevision"] == receipt["committedRevision"]
+
+    with pytest.raises(WritingMaterialMutationError) as duplicate:
+        await writes.validate_create_setting_entity(
+            scope, name="雾港区", entity_type="location"
+        )
+    with pytest.raises(WritingMaterialMutationError) as blank:
+        await writes.validate_create_setting_entity(
+            scope, name="   ", entity_type="location"
+        )
+    with pytest.raises(WritingMaterialMutationError) as bad_type:
+        await writes.validate_create_setting_entity(
+            scope, name="新区", entity_type="city"
+        )
+    # 跨书查重互不影响：book-2 建同名设定不应被 book-1 的存量拦截。
+    book2 = WritingReadScope("book-2")
+    await writes.commit_create_setting_entity(
+        book2, name="灯塔", entity_type="location"
+    )
+
+    assert duplicate.value.code == "writing_setting_entity_duplicate_name"
+    assert blank.value.code == "tool_input_invalid"
+    assert bad_type.value.code == "tool_input_invalid"
+
+
+@pytest.mark.asyncio
+async def test_setting_entity_delete_requires_fresh_read_and_removes_history(material_db) -> None:
+    reads = SqliteWritingReadRepository(material_db)
+    writes = SqliteWritingMaterialRepository(material_db)
+    scope = WritingReadScope("book-1")
+    await material_db.execute(
+        "INSERT INTO setting_entity_history (entity_id, before_name, after_name, "
+        "source) VALUES (1, '旧名', '灯塔', 'user')"
+    )
+    await material_db.execute(
+        "INSERT INTO setting_entities (book_id, entity_type, name) "
+        "VALUES ('book-2', 'item', '他书之物')"
+    )
+    entity = (await reads.setting_entities(scope, include_profile=True))["items"][0]
+
+    with pytest.raises(WritingMaterialMutationError) as stale:
+        await writes.validate_delete_setting_entity(
+            scope, entity_id=entity["id"], base_revision="sha256:stale"
+        )
+    with pytest.raises(WritingMaterialMutationError) as missing:
+        await writes.validate_delete_setting_entity(
+            scope, entity_id=999, base_revision="sha256:any"
+        )
+    with pytest.raises(WritingMaterialMutationError) as cross_book:
+        await writes.validate_delete_setting_entity(
+            scope, entity_id=2, base_revision="sha256:any"
+        )
+    assert await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entities WHERE id = 1"
+    ) == {"count": 1}
+
+    receipt = await writes.commit_delete_setting_entity(
+        scope, entity_id=entity["id"], base_revision=entity["baseRevision"]
+    )
+
+    assert receipt["success"] is True
+    assert receipt["noop"] is False
+    assert receipt["name"] == "灯塔"
+    assert receipt["committedRevision"] is None
+    assert await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entities WHERE id = 1"
+    ) == {"count": 0}
+    assert await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entity_history"
+    ) == {"count": 0}
+
+    assert stale.value.code == "writing_setting_entity_revision_conflict"
+    assert missing.value.code == "writing_setting_entity_not_found"
+    assert cross_book.value.code == "writing_setting_entity_not_found"
+
+
+def test_setting_entity_create_delete_tool_contracts(material_db) -> None:
+    catalog = WritingReplacementProfile(material_db).adapter.tool_catalog
+    create = catalog.get("createSettingEntity")
+    delete = catalog.get("deleteSettingEntity")
+
+    assert create.policy.mode.value == "confirm"
+    assert create.policy.risk_level.value == "write"
+    assert create.cancellation_linearizable is True
+    assert create.context_contract.prerequisite_tools == ("listSettingEntities",)
+    assert set(create.schema.parameters["required"]) == {"name", "entityType"}
+    assert "baseRevision" not in create.schema.parameters["properties"]
+
+    assert delete.policy.mode.value == "confirm"
+    # DESTRUCTIVE：auto_approve 模式也不会自动放行，必须用户确认。
+    assert delete.policy.risk_level.value == "destructive"
+    assert delete.cancellation_linearizable is True
+    assert delete.context_contract.prerequisite_tools == ("getSettingEntities",)
+    assert set(delete.schema.parameters["required"]) == {"entityId", "baseRevision"}
+
+
+@pytest.mark.asyncio
+async def test_setting_entity_delete_waits_for_approval_and_rejection_keeps_database(
+    material_db,
+) -> None:
+    reads = SqliteWritingReadRepository(material_db)
+    entity = (
+        await reads.setting_entities(WritingReadScope("book-1"), include_profile=True)
+    )["items"][0]
+    approvals = InMemoryApprovalGateway()
+    sink = _EventSink()
+    request = ToolBatchRequest(
+        run_id="run-delete-entity",
+        allowed_tool_names=frozenset({"deleteSettingEntity"}),
+        state=_state(), calls=(ToolCall(
+            id="call-delete-entity", name="deleteSettingEntity",
+            arguments_json=json.dumps({
+                "entityId": entity["id"],
+                "baseRevision": entity["baseRevision"],
+            }),
+        ),),
+    )
+    task = asyncio.create_task(CoreToolExecutor(
+        WritingReplacementProfile(material_db).adapter.tool_catalog,
+        approval_gateway=approvals,
+    ).execute_batch(request, sink))
+
+    for _ in range(100):
+        if sink.events:
+            break
+        await asyncio.sleep(0)
+    assert await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entities WHERE id = 1"
+    ) == {"count": 1}
+    assert await approvals.resolve(
+        "run-delete-entity", sink.events[0].payload["approvalId"], "reject"
+    ) is ApprovalStatus.REJECTED
+    result = await task
+
+    assert result.outcome is ToolBatchOutcome.DECLINED
+    assert await material_db.fetch_one(
+        "SELECT COUNT(*) AS count FROM setting_entities WHERE id = 1"
+    ) == {"count": 1}
+
+
+def test_bridge_chunk_maps_setting_entity_changes_for_ui_refresh() -> None:
+    from application.sse_mapping import bridge_chunk_for_effect
+
+    chunk = bridge_chunk_for_effect("writing.setting_entities_changed", {
+        "bookId": "book-1", "action": "deleted", "id": 3, "name": "灯塔",
+    })
+    assert chunk == {
+        "settingUpdated": {
+            "kind": "entity", "action": "deleted", "id": 3, "name": "灯塔",
+        }
+    }
+    assert bridge_chunk_for_effect("writing.setting_entities_changed", "junk") is None
+    assert bridge_chunk_for_effect("writing.unknown_effect", {}) is None
+
+
+@pytest.mark.asyncio
 async def test_material_commit_joins_host_idempotency_transaction(material_db) -> None:
     reads = SqliteWritingReadRepository(material_db)
     writes = SqliteWritingMaterialRepository(material_db)
