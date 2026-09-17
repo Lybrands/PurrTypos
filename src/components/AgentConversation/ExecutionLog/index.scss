@@ -47,7 +47,7 @@
 
 .work-log__chevron {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 12px;
   transition: transform 0.2s ease;
 }
 
@@ -427,9 +427,9 @@
   border-left: 0;
 }
 
-/* 标题行右侧的附加入口（子 Agent 概览等）推到行尾、位于收起箭头左侧 */
+/* 标题行右侧的附加入口（子 Agent 概览等）：紧跟时间与收起箭头，整体左对齐 */
 .work-log__toggle-extra {
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
+  margin-left: 8px;
 }

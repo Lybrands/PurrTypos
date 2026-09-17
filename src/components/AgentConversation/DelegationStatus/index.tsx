@@ -181,9 +181,10 @@ export default function DelegationStatus({
             type="text"
             size="small"
             className="subagent-overview__trigger"
-            icon={<RobotIcon size={14} />}
+            aria-label={`查看 ${collapsedItems.length} 个子 Agent`}
           >
-            子 Agent {collapsedItems.length}
+            <RobotIcon size={14} />
+            <span>{collapsedItems.length}</span>
           </PurrButton>
         </PurrPopover>
       ) : rows}
