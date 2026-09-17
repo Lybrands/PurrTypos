@@ -486,9 +486,19 @@ export default function AiPanel({
       currentRuntime
       && (currentRuntime.loading || currentRuntime.stopping || currentRuntime.streamId),
     )
-    setConversations(currentRuntimeAttached ? currentRuntime!.messages : [])
+    const cachedMessages = currentRuntime?.messages ?? []
+    // 切回已看过的会话：runtime store 留有上次渲染的完整消息，直接展示缓存
+    // 并结束初始化等待，不再整段重放「恢复对话」；下方复核循环仍在后台重读
+    // 服务端投影，如有差异由 commitSettled 刷新为权威内容。
+    const restoreFromCache = !currentRuntimeAttached && cachedMessages.length > 0
+    setConversations(
+      currentRuntimeAttached || restoreFromCache ? cachedMessages : [],
+    )
     setLoading(currentRuntimeAttached ? currentRuntime!.loading : false)
     setConversationInitializing(true)
+    // 缓存快速路径的基线版本：复核期间用户若有新动作（发送/编辑），
+    // commitSettled 放弃用旧快照覆盖 runtime。
+    const cacheBaseRevision = restoreFromCache ? currentRuntime!.revision : null
     let initialLoadFinished = false
 
     const finishInitialLoad = () => {
@@ -496,6 +506,7 @@ export default function AiPanel({
       initialLoadFinished = true
       if (lifecycle.finishLoad(token)) setConversationInitializing(false)
     }
+    if (restoreFromCache) finishInitialLoad()
     const projectOccurrences = (loaded: HydratedBookConversationReadModel) => {
       for (const occurrence of loaded.settingDiffOccurrences) {
         attachmentManager.add(occurrence.message, occurrence.card, {
@@ -546,6 +557,10 @@ export default function AiPanel({
       recoveredOwner?: RecoveredRunProjectionOwner<number>,
     ) => {
       if (!lifecycle.isCurrent(token)) return
+      if (
+        cacheBaseRevision != null
+        && getChatSessionRuntime(sessionId)?.revision !== cacheBaseRevision
+      ) return
       if (
         recoveredOwner
         && !canCommitRecoveredRunProjection(
