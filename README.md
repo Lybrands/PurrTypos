@@ -33,8 +33,8 @@ pip install -r backend/requirements.txt
 
 `backend/requirements.txt` 由三部分组成：
 
-- `requirements-purra.txt` — 按相对路径引用 `backend/vendor/purra-1.1.1/` 内的四个
-  PurrA 1.1.1 候选 wheel（`purra`、`purra_openai`、`purra_anthropic`、`purra_mem0`），
+- `requirements-purra.txt` — 按相对路径引用 `backend/vendor/purra-1.0.1/` 内的四个
+  PurrA 1.0.1 候选 wheel（`purra`、`purra_openai`、`purra_anthropic`、`purra_mem0`），
   行内注释记录 SHA-256；**必须在仓库根目录执行 pip**。
 - `requirements-runtime.txt` — FastAPI、uvicorn、aiosqlite 等运行时依赖。
 - 其余为开发 / 测试依赖（setuptools、pytest），PyInstaller 打包不会带入运行时。
@@ -182,9 +182,9 @@ PurrTypos/
 ├── backend/                     # Python 后端（FastAPI + aiosqlite）
 │   ├── main.py                  # FastAPI 入口，CORS、路由装载、生命周期
 │   ├── requirements.txt         # = purra + runtime + 开发/测试依赖
-│   ├── requirements-purra.txt   # vendor 内 PurrA 1.1.1 本地 wheel（根目录执行 pip）
+│   ├── requirements-purra.txt   # vendor 内 PurrA 1.0.1 本地 wheel（根目录执行 pip）
 │   ├── requirements-runtime.txt # FastAPI / uvicorn / aiosqlite 等运行时依赖
-│   ├── vendor/purra-1.1.1/      # PurrA 1.1.1 候选 wheel（core/openai/anthropic/mem0）
+│   ├── vendor/purra-1.0.1/      # PurrA 1.0.1 候选 wheel（core/openai/anthropic/mem0）
 │   ├── purra-candidate.json     # PurrA 源码基线与 wheel SHA-256 记录
 │   ├── purrtypos-backend.spec   # PyInstaller 打包配置
 │   ├── routers/                 # HTTP/SSE 路由层
@@ -223,7 +223,7 @@ PurrTypos/
 
 ## 长期记忆
 
-- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由当前锁定的 PurrA 1.1.1 候选包 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不维护平行的长期记忆表或召回实现。
+- 通用长期记忆、版本、关系、评审、Embedding 和向量检索由当前锁定的 PurrA 1.0.1 候选包 `purra-mem0` 组件持有，数据位于用户数据目录的 `memory-component-v1/`；PurrTypos 不维护平行的长期记忆表或召回实现。
 - PurrTypos 只保留业务源到组件的投递策略与持久化 outbox（`memory_source_heads` / `memory_source_deliveries`）。用户保存与业务提交先在 SQLite 中完成，组件投递失败会如实返回并由恢复流程重试。
 - Story Memory 仍是独立的章节证据状态账本，用于版本、来源失效和审阅；它与可编辑的通用长期记忆具有不同生命周期。模型输入由两者共同组装，并在调用 Provider 前校验版本化 evidence receipt。
 

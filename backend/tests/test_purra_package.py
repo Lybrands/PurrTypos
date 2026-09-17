@@ -18,7 +18,7 @@ import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "1.1.1"
+PURRA_VERSION = "1.0.1"
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
     "httpx2>=2.7.0,<3",
