@@ -182,6 +182,8 @@ export default function DelegationStatus({
             size="small"
             className="subagent-overview__trigger"
             aria-label={`查看 ${collapsedItems.length} 个子 Agent`}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
           >
             <RobotIcon size={14} />
             <span className="subagent-overview__trigger-count">
