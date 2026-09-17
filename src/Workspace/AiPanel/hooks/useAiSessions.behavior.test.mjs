@@ -92,3 +92,52 @@ test('create step fails loudly upstream when the API rejects', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('toggleSessionPinned persists the optimistic flag through the sessions API', async () => {
+  globalThis.document = { documentElement: { lang: 'zh-CN' } }
+  const puts = []
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    const url = String(input instanceof Request ? input.url : input)
+    if (url.endsWith('/api/sessions/5/pinned') && init?.method === 'PUT') {
+      puts.push(JSON.parse(init.body))
+      return jsonResponse({ success: true })
+    }
+    throw new Error(`unexpected URL ${url}`)
+  }
+  try {
+    const { result } = renderSessionsHook()
+    await Promise.resolve(result.handleToggleSessionPinned(5, true))
+    assert.deepEqual(puts, [{ pinned: true }])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('last visited session memory survives reload via localStorage', async () => {
+  const store = new Map()
+  const originalStorage = globalThis.localStorage
+  globalThis.localStorage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => { store.set(key, String(value)) },
+    removeItem: (key) => { store.delete(key) },
+  }
+  try {
+    const module = await vite.ssrLoadModule(
+      '/src/Workspace/AiPanel/hooks/useAiSessions.ts',
+    )
+    const { rememberActiveSession, loadRememberedSessionMap } = module
+    rememberActiveSession('book-a-chapter-a', 7)
+    rememberActiveSession('book-a-__setting__', 12)
+    assert.deepEqual(loadRememberedSessionMap(), {
+      'book-a-chapter-a': 7,
+      'book-a-__setting__': 12,
+    })
+    // 损坏内容回退为空映射
+    store.set('purrtypos_active_session_by_scope', '{bad-json')
+    assert.deepEqual(loadRememberedSessionMap(), {})
+  } finally {
+    delete globalThis.localStorage
+    if (originalStorage) globalThis.localStorage = originalStorage
+  }
+})

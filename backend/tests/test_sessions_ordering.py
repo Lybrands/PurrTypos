@@ -6,11 +6,18 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 
 from database.connection import DatabaseConnection
 from dependencies import set_db
-from routers.sessions import reorder_sessions, update_session_pinned
+from routers.ai import router as ai_router  # noqa: F401 -- 依赖链初始化
+from routers.sessions import router as sessions_router
+from routers.sessions import (
+    reorder_sessions,
+    update_session_pinned,
+)
 from schemas.sessions import ReorderSessionsRequest, UpdateSessionPinnedRequest
+from tests.support.asgi_sse import request_json
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,3 +87,45 @@ async def test_reorder_ignores_unknown_ids_and_keeps_single_transaction(
     assert await temp_db.fetch_one(
         "SELECT sort_order FROM ai_sessions WHERE id = 1"
     ) == {"sort_order": None}
+
+
+async def test_pin_and_reorder_persist_through_http_round_trip(
+    temp_db: DatabaseConnection,
+):
+    """置顶与排序经真实路由写入后，会话查询按原值返回（持久化闭环）。"""
+
+    await _seed_sessions(temp_db)
+    app = FastAPI()
+    app.include_router(sessions_router, prefix="/api")
+
+    pinned = await request_json(
+        app,
+        method="PUT",
+        path="/api/sessions/2/pinned",
+        json_body={"pinned": True},
+    )
+    assert pinned.status_code == 200
+    assert pinned.json() == {"success": True}
+
+    reordered = await request_json(
+        app,
+        method="PUT",
+        path="/api/sessions/reorder",
+        json_body={"orderedIds": [3, 1, 2]},
+    )
+    assert reordered.status_code == 200
+
+    listed = await request_json(
+        app,
+        method="GET",
+        path="/api/sessions?bookId=book-1&chapterId=chapter-1",
+        json_body=None,
+    )
+    assert listed.status_code == 200
+    rows = listed.json()["data"]
+    by_id = {row["id"]: row for row in rows}
+    assert by_id[2]["pinned"] == 1
+    assert by_id[1]["pinned"] == 0
+    assert by_id[3]["sort_order"] == 0
+    assert by_id[1]["sort_order"] == 1
+    assert by_id[2]["sort_order"] == 2
