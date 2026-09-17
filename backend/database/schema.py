@@ -693,6 +693,10 @@ async def init_schema(db: DatabaseConnection) -> None:
         db,
         "ALTER TABLE ai_sessions ADD COLUMN screenplay_project_id TEXT DEFAULT NULL",
     )
+    # 会话列表手动排序/置顶：pinned=1 的会话分组置顶展示；
+    # sort_order 由前端拖拽后整列表重排写入（0..N-1），NULL = 未参与手动排序。
+    await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN pinned INTEGER DEFAULT 0")
+    await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN sort_order INTEGER")
     # 剧本会话命名与写作会话对齐：历史自动命名的「{项目} · Agent」一次性
     # 改回默认「新对话」，首轮对话结束后再由标题生成接口自动命名。
     await _try_exec(

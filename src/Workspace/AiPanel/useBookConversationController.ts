@@ -165,6 +165,8 @@ export interface BookConversationBindings {
     | 'createSession'
     | 'closeSession'
     | 'renameSession'
+    | 'reorderSessions'
+    | 'toggleSessionPinned'
     | 'loadSessionHistory'
     | 'openHistorySession'
     | 'deleteSession'
