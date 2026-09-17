@@ -96,6 +96,7 @@ function ComposerFooter({
         )}
         <PurrSelect<AgentOperationMode>
           className="agent-conversation-panel__operation-mode"
+          variant="borderless"
           size="small"
           aria-label="操作类型"
           value={operationMode}

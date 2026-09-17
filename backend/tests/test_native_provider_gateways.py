@@ -386,10 +386,12 @@ async def test_registered_vendors_keep_business_routing(monkeypatch, profile):
         }
 
     monkeypatch.setattr(gateways.provider_router, "create_chat_no_stream", complete)
-    provider = "zai" if profile.profile_id.startswith("zai:") else "openai"
+    provider = "zai" if profile.profile_id.startswith("zai") else "openai"
     snapshot = profile.capability_snapshot(context_window_tokens=1_000_000)
+    # 服务商级 profile 不登记具体模型名，用占位名验证业务路由。
+    model = next(iter(profile.model_names)) if profile.model_names else f"{profile.profile_id}-model"
     invocation = ModelInvocation(
-        request=ModelRequest(provider=provider, model=next(iter(profile.model_names)), capability_snapshot=snapshot, options={"baseURL": next(iter(profile.base_urls))}),
+        request=ModelRequest(provider=provider, model=model, capability_snapshot=snapshot, options={"baseURL": next(iter(profile.base_urls))}),
         output_budget=resolve_invocation_output_budget(
             snapshot,
             max_generation_tokens=None,

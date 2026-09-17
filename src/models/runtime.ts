@@ -46,10 +46,10 @@ export function getDefaultModelContextWindow(config?: AiModelConfig | null): AiC
   return config?.contextWindow ?? getModelPreset(config?.presetId)?.contextWindow ?? '128k'
 }
 
-/** 返回版本化 profile 或自定义配置声明的模型能力上限。 */
+/** 返回版本化 profile 或自定义配置声明的模型能力上限；用户显式覆盖优先。 */
 export function getModelProfileMaxGenerationTokens(config?: AiModelConfig | null): number | undefined {
-  return getModelPreset(config?.presetId)?.maxGenerationTokens
-    ?? config?.profileMaxGenerationTokens
+  return config?.profileMaxGenerationTokens
+    ?? getModelPreset(config?.presetId)?.maxGenerationTokens
 }
 
 export function isModelThinkingEnabled(config?: AiModelConfig | null) {

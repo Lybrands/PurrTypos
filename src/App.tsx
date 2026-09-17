@@ -19,6 +19,7 @@ import {
   type MemoryEmbeddingConfig,
 } from './types'
 import { applyModelRuntimeConfigPatch } from './modelCatalog'
+import { migrateLegacyModelConfigs } from './models/migration'
 import { installModelDescriptors } from './models/registry'
 import './App.scss'
 import {
@@ -117,7 +118,9 @@ export default function App() {
       setAgentOperationModeState(operationMode)
       setAgentOperationMode(operationMode)
       if (Array.isArray(res.data.ai_model_configs)) {
-        setModelConfigs(res.data.ai_model_configs)
+        const { configs, changed } = migrateLegacyModelConfigs(res.data.ai_model_configs)
+        setModelConfigs(configs)
+        if (changed) void services.settings.setSettings({ ai_model_configs: configs })
       }
       if (Array.isArray(res.data.ai_provider_capacity_policies)) {
         setProviderCapacityPolicies(res.data.ai_provider_capacity_policies)

@@ -4,6 +4,7 @@ import { CheckIcon, CopyIcon, DeleteIcon, EditIcon, ExportIcon, ImportIcon, Plus
 import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrInputNumber, PurrModal, PurrRadio, PurrSelect, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
 import type { AiModelConfig, AiProviderCapacityPolicy, MemoryEmbeddingConfig } from '../types'
 import {
+  AI_BUILTIN_MODEL_PROFILES,
   AI_CONTEXT_WINDOW_LABELS,
   AI_REASONING_EFFORT_LABELS,
   getBuiltinProvider,
@@ -82,6 +83,8 @@ export default function SettingsPage({
   const [modelConfigList, setModelConfigList] = React.useState<AiModelConfig[]>(modelConfigs)
   const [modelModalOpen, setModelModalOpen] = React.useState(false)
   const [editingConfig, setEditingConfig] = React.useState<AiModelConfig | null>(null)
+  /** 新建内置服务商条目时选中的服务商级 preset id。 */
+  const [creatingPresetId, setCreatingPresetId] = React.useState<string | null>(null)
   const memory = useMemoryAutosave(memoryModelId, memoryEmbeddingConfig, onSaveMemoryConfiguration)
   const { model: memoryModelDraft, enabled: configureEmbedding, draft: memoryEmbeddingDraft } = memory
   const [form] = PurrForm.useForm<Omit<AiModelConfig, 'id' | 'reasoningEffort'> & { reasoningEffort?: AiModelConfig['reasoningEffort'] | 'inherit' }>()
@@ -92,6 +95,8 @@ export default function SettingsPage({
 
   /** 列表/弹窗中展示用：昵称优先，否则模型名称 */
   const displayName = (c: AiModelConfig) => (c.nickname?.trim() || c.name) || '未命名'
+  /** 弹窗当前命中的内置服务商 preset（编辑存量条目或新建内置条目时） */
+  const modalPreset = getModelPreset(editingConfig?.presetId ?? creatingPresetId ?? undefined)
   const displayModelOutputCapability = (c: AiModelConfig) => {
     const maximum = getModelProfileMaxGenerationTokens(c)
     return maximum ? `${Math.round(maximum / 1024)}K` : '未登记'
@@ -196,13 +201,38 @@ export default function SettingsPage({
 
   const openAddModel = () => {
     setEditingConfig(null)
+    setCreatingPresetId(null)
     form.resetFields()
     form.setFieldsValue(customModelDefaults())
     setModelModalOpen(true)
   }
 
+  const openAddBuiltinModel = (presetId: string) => {
+    const profile = AI_BUILTIN_MODEL_PROFILES.find((entry) => entry.preset.id === presetId)
+    if (!profile) return
+    setEditingConfig(null)
+    setCreatingPresetId(presetId)
+    form.resetFields()
+    form.setFieldsValue({
+      apiProvider: profile.provider.apiProvider,
+      name: '',
+      nickname: '',
+      thinkingEnabled: profile.preset.thinkingEnabled,
+      contextWindow: profile.preset.contextWindow,
+      profileMaxGenerationTokens: undefined,
+      maxGenerationTokens: undefined,
+      customizeTemperature: profile.preset.customizeTemperature,
+      temperatureThinking: profile.preset.temperatureThinking,
+      temperatureNonThinking: profile.preset.temperatureNonThinking,
+      apiKey: '',
+      baseUrl: profile.provider.baseUrl,
+    })
+    setModelModalOpen(true)
+  }
+
   const openEditModel = (config: AiModelConfig) => {
     setEditingConfig(config)
+    setCreatingPresetId(null)
     form.resetFields()
     form.setFieldsValue({
       apiProvider: config.apiProvider ?? 'openai',
@@ -227,9 +257,9 @@ export default function SettingsPage({
 
   const handleModelModalOk = () => {
     form.validateFields().then((values) => {
-      const editingPreset = getModelPreset(editingConfig?.presetId)
+      const editingPreset = getModelPreset(editingConfig?.presetId ?? creatingPresetId ?? undefined)
       const editingPresetProvider = getBuiltinProvider(editingPreset?.providerId)
-      const name = (editingPreset?.name ?? values.name ?? '').trim()
+      const name = (values.name ?? '').trim()
       const nickname = (values.nickname ?? '').trim()
       const apiKey = (values.apiKey ?? '').trim()
       const baseUrl = (editingPresetProvider?.baseUrl ?? values.baseUrl ?? '').trim()
@@ -295,14 +325,23 @@ export default function SettingsPage({
         return
       }
       if (
+        profileMaxGenerationTokens != null
+        && (!Number.isInteger(profileMaxGenerationTokens) || profileMaxGenerationTokens <= 0)
+      ) {
+        message.warning('模型能力上限必须是正整数')
+        return
+      }
+      if (
         maxGenerationTokens != null
         && (!Number.isInteger(maxGenerationTokens) || maxGenerationTokens <= 0)
       ) {
         message.warning('用户单次生成上限必须是正整数')
         return
       }
-      const registeredProfileLimit = editingPreset?.maxGenerationTokens
-        ?? profileMaxGenerationTokens
+      // 内置条目的能力上限默认取服务商登记值，用户显式覆盖时以覆盖值为准。
+      const registeredProfileLimit = editingPreset
+        ? (profileMaxGenerationTokens ?? editingPreset.maxGenerationTokens)
+        : profileMaxGenerationTokens
       if (
         registeredProfileLimit
         && maxGenerationTokens
@@ -355,9 +394,7 @@ export default function SettingsPage({
                 },
                 thinkingBudgetTokens,
                 contextWindow,
-                profileMaxGenerationTokens: editingPreset
-                  ? undefined
-                  : profileMaxGenerationTokens,
+                profileMaxGenerationTokens,
                 maxGenerationTokens,
                 customizeTemperature,
                 temperatureThinking,
@@ -375,11 +412,13 @@ export default function SettingsPage({
           modelSettingsVersion: 1,
           modelPreferences: { reasoning_effort: { state: 'inherit' } },
           id: `model_${shortUuid()}`,
+          presetId: editingPreset?.id,
+          providerId: editingPreset?.providerId,
           apiProvider: prov,
           name,
           nickname: nickname || undefined,
-          supportsThinking: thinkingEnabled === true,
-          thinkingOnly: false,
+          supportsThinking: editingPreset?.supportsThinking ?? thinkingEnabled === true,
+          thinkingOnly: editingPreset?.thinkingOnly ?? false,
           thinkingEnabled,
           thinkingBudgetTokens,
           contextWindow,
@@ -396,6 +435,7 @@ export default function SettingsPage({
         onSaveModelConfigs(next)
         message.success('已添加')
       }
+      setCreatingPresetId(null)
       setModelModalOpen(false)
     }).catch(() => {})
   }
@@ -502,12 +542,27 @@ export default function SettingsPage({
             <div className="settings-section">
               <h2 className="settings-section-title">模型配置</h2>
               <p className="settings-section-desc settings-model-section-desc">
-                内置模型由系统统一提供，只需配置凭据和运行参数；代理、自建服务和目录外模型可继续使用高级自定义接入。
+                内置服务商由系统统一提供接入，只需填写模型名、凭据和运行参数；代理、自建服务和目录外模型可继续使用高级自定义接入。
               </p>
               <div className="settings-models-actions" style={{ marginBottom: 12 }}>
                 <PurrButton type="primary" icon={<PlusIcon />} onClick={openAddModel}>
                   新增自定义模型
                 </PurrButton>
+              </div>
+              <div className="settings-model-vendors" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+                {AI_BUILTIN_MODEL_PROFILES.map(({ provider, preset }) => {
+                  const configured = modelConfigList.some((c) => c.presetId === preset.id)
+                  return (
+                    <PurrButton
+                      key={preset.id}
+                      size="small"
+                      disabled={configured}
+                      onClick={() => openAddBuiltinModel(preset.id)}
+                    >
+                      {provider.name}{configured ? ' · 已配置' : ' · 添加'}
+                    </PurrButton>
+                  )
+                })}
               </div>
               {modelConfigList.length === 0 ? (
                 <p className="settings-field-desc">暂无模型，请点击「新增模型」添加后，在 AI 对话中选择使用。</p>
@@ -628,12 +683,15 @@ export default function SettingsPage({
                 </section>
               ) : null}
               <PurrModal
-                title={getModelPreset(editingConfig?.presetId)
-                  ? '配置内置模型'
+                title={modalPreset
+                  ? (editingConfig ? '配置内置服务商' : '添加内置服务商')
                   : (editingConfig ? '编辑自定义模型' : '新增自定义模型')}
                 open={modelModalOpen}
                 onOk={handleModelModalOk}
-                onCancel={() => setModelModalOpen(false)}
+                onCancel={() => {
+                  setCreatingPresetId(null)
+                  setModelModalOpen(false)
+                }}
                 okText="保存"
                 cancelText="取消"
                 destroyOnHidden
@@ -651,19 +709,25 @@ export default function SettingsPage({
                 }}
               >
                 <PurrForm form={form} layout="vertical" style={{ marginTop: 16 }}>
-                  {getModelPreset(editingConfig?.presetId) ? (
+                  {modalPreset ? (
                     <>
                       <div className="settings-model-preset-summary">
                         <div>
-                          <strong>{getModelPreset(editingConfig?.presetId)?.label}</strong>
-                          <span>{getModelPreset(editingConfig?.presetId)?.summary}</span>
+                          <strong>{modalPreset.label}</strong>
+                          <span>{modalPreset.summary}</span>
                         </div>
                         <div className="settings-model-preset-meta">
                           <PurrTag>系统内置</PurrTag>
-                          <PurrTag>Context {getModelPreset(editingConfig?.presetId)?.contextWindow.toUpperCase()}</PurrTag>
-                          <PurrTag>模型输出上限 {displayModelOutputCapability(editingConfig!)}</PurrTag>
+                          <PurrTag>默认能力上限 {Math.round((modalPreset.maxGenerationTokens ?? 0) / 1024)}K</PurrTag>
                         </div>
                       </div>
+                      <PurrForm.Item
+                        name="name"
+                        label="模型名称"
+                        rules={[{ required: true, message: '请填写模型名称' }]}
+                      >
+                        <PurrInput placeholder={modalPreset.namePlaceholder} />
+                      </PurrForm.Item>
                       <PurrForm.Item name="nickname" label="昵称">
                         <PurrInput placeholder="选填，AI 对话中优先显示昵称" />
                       </PurrForm.Item>
@@ -673,7 +737,7 @@ export default function SettingsPage({
                         rules={[{ required: true, message: '请选择 Context' }]}
                       >
                         <PurrRadio.Group optionType="button" buttonStyle="solid">
-                          {getModelContextWindowOptions(editingConfig).map((value) => (
+                          {modalPreset.contextWindowOptions.map((value) => (
                             <PurrRadio.Button key={value} value={value}>
                               {AI_CONTEXT_WINDOW_LABELS[value]}
                             </PurrRadio.Button>
@@ -681,25 +745,97 @@ export default function SettingsPage({
                         </PurrRadio.Group>
                       </PurrForm.Item>
                       <PurrForm.Item
-                        name="maxGenerationTokens"
-                        label="单次总生成上限（含思考）"
-                        extra="选填；未设置时使用系统登记的模型能力上限。它不是正文长度目标。"
-                        rules={[{
-                          type: 'number', min: 1,
-                          max: getModelPreset(editingConfig?.presetId)?.maxGenerationTokens,
-                          message: '必须是模型能力范围内的正整数',
-                        }]}
+                        name="profileMaxGenerationTokens"
+                        label="模型能力上限（含思考）"
+                        extra={`选填；未设置时使用服务商默认 ${Math.round((modalPreset.maxGenerationTokens ?? 0) / 1024)}K。填写服务商确认的真实上限。`}
+                        rules={[{ type: 'number', min: 1, message: '必须是正整数' }]}
                       >
                         <PurrInputNumber min={1} className="settings-input-full" />
                       </PurrForm.Item>
+                      <PurrForm.Item
+                        name="maxGenerationTokens"
+                        label="单次总生成上限（含思考）"
+                        extra="选填；未设置时使用上方模型能力上限。它不是正文长度目标。"
+                        rules={[{ type: 'number', min: 1, message: '必须是正整数' }]}
+                      >
+                        <PurrInputNumber min={1} className="settings-input-full" />
+                      </PurrForm.Item>
+                      <PurrForm.Item
+                        name="thinkingEnabled"
+                        valuePropName="checked"
+                        label="模型支持思考"
+                        extra="按所填模型的实际能力声明：开启后以思考模式请求，关闭后按普通模式请求。对话报思考配置错误时回到这里调整。"
+                      >
+                        <PurrSwitch size="small" />
+                      </PurrForm.Item>
+                      {(modalPreset.reasoningEffortOptions ?? []).length > 0 ? (
+                        <PurrForm.Item
+                          name="reasoningEffort"
+                          label="思考强度"
+                          extra="选择本模型支持的思考强度；未选择时使用服务商默认值。"
+                        >
+                          <PurrSelect
+                            allowClear
+                            placeholder="服务商默认"
+                            options={[{ value: 'inherit', label: '继承任务默认' }, ...(modalPreset.reasoningEffortOptions ?? []).map((value) => ({
+                              value,
+                              label: AI_REASONING_EFFORT_LABELS[value],
+                            }))]}
+                          />
+                        </PurrForm.Item>
+                      ) : null}
+                      <PurrForm.Item name="customizeTemperature" valuePropName="checked" label="自定义 Temperature">
+                        <PurrSwitch size="small" />
+                      </PurrForm.Item>
+                      {customizeTemperatureWatch === true ? (
+                        <div className="settings-model-temperature-panel">
+                          <div className="settings-model-temperature-panel-title">Temperature</div>
+                          {thinkingEnabledWatch === true ? (
+                            <PurrForm.Item
+                              name="temperatureThinking"
+                              label="Thinking 请求"
+                              rules={[
+                                { required: true, message: '请设置 temperature' },
+                                { type: 'number', min: 0, max: 1, message: '范围为 0～1' },
+                              ]}
+                            >
+                              <PurrSlider
+                                min={0}
+                                max={1}
+                                step={0.1}
+                                showValue
+                                valueLabel="Thinking 请求 Temperature"
+                                tooltip={{ formatter: (v) => (v != null ? v.toFixed(1) : '') }}
+                              />
+                            </PurrForm.Item>
+                          ) : null}
+                          <PurrForm.Item
+                            name="temperatureNonThinking"
+                            label={thinkingEnabledWatch === true ? '普通请求（备用）' : '普通请求'}
+                            rules={[
+                              { required: true, message: '请设置 temperature' },
+                              { type: 'number', min: 0, max: 1, message: '范围为 0～1' },
+                            ]}
+                          >
+                            <PurrSlider
+                              min={0}
+                              max={1}
+                              step={0.1}
+                              showValue
+                              valueLabel="普通请求 Temperature"
+                              tooltip={{ formatter: (v) => (v != null ? v.toFixed(1) : '') }}
+                            />
+                          </PurrForm.Item>
+                        </div>
+                      ) : null}
                       <PurrForm.Item name="apiKey" label="API Key" rules={[{ required: true, message: '请填写 API Key' }]}>
                         <PurrInput.Password
-                          placeholder={getBuiltinProvider(editingConfig?.providerId)?.keyPlaceholder ?? 'sk-xxxxxxxxxxxxxxxx'}
+                          placeholder={getBuiltinProvider(modalPreset.providerId)?.keyPlaceholder ?? 'sk-xxxxxxxxxxxxxxxx'}
                         />
                       </PurrForm.Item>
                       <div className="settings-model-preset-endpoint">
                         <span>接口地址</span>
-                        <code>{getBuiltinProvider(editingConfig?.providerId)?.baseUrl}</code>
+                        <code>{getBuiltinProvider(modalPreset.providerId)?.baseUrl}</code>
                       </div>
                     </>
                   ) : (

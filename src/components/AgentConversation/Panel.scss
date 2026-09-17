@@ -50,9 +50,10 @@
   overflow: hidden;
 }
 
-.agent-conversation-panel__operation-mode {
-  width: 112px;
-  flex: 0 0 112px;
+.agent-conversation-panel__operation-mode.purr-select {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
 }
 
 .agent-conversation-panel__footer-actions {

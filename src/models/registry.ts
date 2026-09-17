@@ -1,21 +1,19 @@
 import type { AiBuiltinProviderId } from '../types'
-import { deepseekV4FlashProfile } from './profiles/deepseekV4'
-import { glm5_3FlashProfile } from './profiles/glm5_3Flash'
-import { kimiK3Profile } from './profiles/kimiK3'
-import { kimiK2_6Profile } from './profiles/kimiK2_6'
-import { minimaxM3Profile } from './profiles/minimaxM3'
-import { mimoV2_5ProProfile } from './profiles/mimoV2_5Pro'
+import { deepseekVendorProfile } from './profiles/deepseek'
+import { zaiVendorProfile } from './profiles/zai'
+import { moonshotVendorProfile } from './profiles/moonshot'
+import { minimaxVendorProfile } from './profiles/minimax'
+import { mimoVendorProfile } from './profiles/mimo'
 import type { BuiltinModelProfile } from './types'
 import type { AiContextWindow, AiReasoningEffort } from '../types'
 import { MODEL_DESCRIPTORS } from './descriptors.generated'
 
 const presentations = [
-  glm5_3FlashProfile,
-  deepseekV4FlashProfile,
-  kimiK3Profile,
-  kimiK2_6Profile,
-  minimaxM3Profile,
-  mimoV2_5ProProfile,
+  zaiVendorProfile,
+  deepseekVendorProfile,
+  moonshotVendorProfile,
+  minimaxVendorProfile,
+  mimoVendorProfile,
 ]
 
 type Descriptor = (typeof MODEL_DESCRIPTORS)[number]
@@ -31,7 +29,7 @@ function buildProfiles(): BuiltinModelProfile[] {
     contextWindow: descriptor.defaultContextWindow as AiContextWindow,
     maxGenerationTokens: descriptor.maxGenerationTokens,
     supportsThinking: descriptor.reasoningControl !== ('unavailable' as string),
-    thinkingOnly: descriptor.reasoningControl === 'always_enabled',
+    thinkingOnly: descriptor.reasoningControl === ('always_enabled' as string),
     thinkingEnabled: descriptor.defaultThinkingEnabled,
     reasoningEffortOptions: descriptor.reasoningEffortOptions as readonly AiReasoningEffort[],
     customizeTemperature: descriptor.customizeTemperature,
@@ -62,8 +60,14 @@ export function installModelDescriptors(rows: Array<Record<string, unknown>>) {
       throw new Error('模型能力描述无效，请更新应用')
     }
   }
-  if (presentations.some(p => !rows.some(d => d.profileId === p.preset.id))) throw new Error('模型能力目录不完整')
-  descriptors = rows as unknown as readonly Descriptor[]
+  // 后端版本可能落后于前端（如开发中未重启）：下发行按 id 覆盖内置快照，
+  // 缺失的条目保留内置版本，避免目录不完整导致设置加载中断。
+  const served = new Map(rows.map((row) => [row.profileId as string, row]))
+  descriptors = presentations.map((presentation) => {
+    const bundled = MODEL_DESCRIPTORS.find(d => d.profileId === presentation.preset.id)
+    if (!bundled) throw new Error(`Missing model descriptor: ${presentation.preset.id}`)
+    return served.get(presentation.preset.id) as unknown as Descriptor ?? bundled
+  })
   AI_BUILTIN_MODEL_PROFILES.splice(0, AI_BUILTIN_MODEL_PROFILES.length, ...buildProfiles())
   AI_MODEL_PRESETS.splice(0, AI_MODEL_PRESETS.length, ...AI_BUILTIN_MODEL_PROFILES.map(p => p.preset))
 }
