@@ -853,19 +853,7 @@ export interface NovelAnalysisRun {
   completedUnits: number;
   failedUnits: number;
   providerOutputEvents?: number;
-  relatedRuns?: Array<{
-    runId: string;
-    status: string;
-    role?: 'child' | 'previous_root';
-    agentId?: string;
-    agentName?: string;
-    agentTitle?: string;
-    objective?: string;
-    previousRunId?: string | null;
-    createTime?: string;
-    unitId?: string | null;
-    attempt?: number | null;
-  }>;
+  relatedRuns?: AiAgentRelatedRun[];
   analysisPlan?: {
     title: string;
     goal?: string;
@@ -1374,6 +1362,21 @@ export interface AiAgentRunProductEvent {
   createdAt?: string | null;
 }
 
+/** 根 Run 快照/页面投影携带的子 Agent（子 Run）条目 */
+export interface AiAgentRelatedRun {
+  runId: string;
+  status: string;
+  role?: 'child' | 'previous_root';
+  agentId?: string;
+  agentName?: string;
+  agentTitle?: string;
+  objective?: string;
+  previousRunId?: string | null;
+  createTime?: string;
+  unitId?: string | null;
+  attempt?: number | null;
+}
+
 export interface AiAgentRunSnapshot {
   version: 2;
   run: {
@@ -1388,6 +1391,8 @@ export interface AiAgentRunSnapshot {
     finalResponse: string;
     createdAt?: string | null;
     updatedAt?: string | null;
+    /** 根 Run 直接派生的子 Agent 列表（通用子 Run 投影下发） */
+    relatedRuns?: AiAgentRelatedRun[];
     execution: {
       attempt: number;
       leaseExpiresAtMs?: number | null;

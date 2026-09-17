@@ -1,5 +1,9 @@
 import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
 import {
+  mergeDelegations,
+  relatedRunsToDelegations,
+} from '../../agent-runtime/delegationProjection.ts'
+import {
   loadCompleteAgentRunSnapshot,
   replayAgentRunSnapshotAsync,
 } from '../../agent-runtime/runSnapshotHydration.ts'
@@ -207,9 +211,22 @@ async function hydrateTurn(
     model,
   }, isCurrent)
   const content = replayed.content || ''
+  // 子 Agent 委派：根 Run 快照携带 relatedRuns 时投影成 delegations。
+  // 重放 reducer 对任何 canonical 事件都会写 delegations=[]，直接展开会
+  // 覆盖持久化（agent_process）或投影的委派，这里以合并结果为准。
+  const mergedDelegations = mergeDelegations(
+    replayed.delegations?.length
+      ? replayed.delegations
+      : storedAssistant.delegations,
+    relatedRunsToDelegations(loaded.run.relatedRuns),
+  )
   const assistant: AgentConversationMessage = {
     ...storedAssistant,
     ...replayed,
+    ...(mergedDelegations ? { delegations: mergedDelegations } : {}),
+    subAgentActivities: replayed.subAgentActivities?.length
+      ? replayed.subAgentActivities
+      : storedAssistant.subAgentActivities,
     content,
     conversationId: row.id,
     agentRunId: runId,

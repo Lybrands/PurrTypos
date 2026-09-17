@@ -18,11 +18,13 @@ class VersionedAgentRunQueryService:
         implementation_router,
         *,
         product_event_query=None,
+        related_runs_provider=None,
     ) -> None:
         self._legacy_query = AgentRunQueryService(
             store,
             output_repository,
             product_event_query=product_event_query,
+            related_runs_provider=related_runs_provider,
         )
         self._implementation_router = implementation_router
 

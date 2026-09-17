@@ -632,3 +632,80 @@ test('latest terminal fallback exhausts journal pages before committing read mod
     'running',
   )
 })
+
+test('snapshot relatedRuns project onto the assistant message as delegations', async () => {
+  const runId = 'run-300'
+  const withChildren = {
+    ...snapshot(runId, 'done', [], '委派后终稿'),
+    run: {
+      ...snapshot(runId, 'done', [], '委派后终稿').run,
+      relatedRuns: [
+        {
+          runId: 'child-1',
+          status: 'done',
+          role: 'child' as const,
+          agentId: 'agent-draft',
+          agentName: 'draft-agent',
+          agentTitle: '草稿',
+          objective: '写出草稿。',
+          createTime: '2026-08-12 08:00:02',
+        },
+        {
+          runId: 'child-2',
+          status: 'failed',
+          role: 'child' as const,
+          agentName: 'review-agent',
+          objective: '审校草稿。',
+        },
+        {
+          runId: 'previous-root',
+          status: 'done',
+          role: 'previous_root' as const,
+        },
+      ],
+    },
+  }
+
+  const messages = await hydrateBookConversations([row(300, runId)], {
+    getRunSnapshot: async () => ({ success: true, data: withChildren }),
+  })
+
+  const assistant = messages?.[1]
+  assert.equal(assistant?.role, 'assistant')
+  const delegations = assistant?.delegations ?? []
+  assert.deepEqual(delegations.map((item) => [item.runId, item.status]), [
+    ['child-1', 'done'],
+    ['child-2', 'failed'],
+  ])
+  assert.equal(delegations[0].delegationId, 'run:child-1')
+  assert.equal(delegations[0].agentTitle, '草稿')
+})
+
+test('replayed empty delegations do not clobber persisted agent_process delegations', async () => {
+  const runId = 'run-301'
+  const stored = row(301, runId)
+  stored.agent_process = JSON.stringify({
+    delegations: [{
+      delegationId: 'run:child-9',
+      runId: 'child-9',
+      agentName: 'persisted-agent',
+      agentTitle: null,
+      objective: '持久化的委派',
+      status: 'running',
+      required: true,
+      priority: 0,
+    }],
+  })
+  const withoutChildren = snapshot(runId, 'running', [
+    canonical(runId, 1, { payload: { eventType: 'fixture.event' } }),
+  ])
+
+  const messages = await hydrateBookConversations([stored], {
+    getRunSnapshot: async () => ({ success: true, data: withoutChildren }),
+  })
+
+  const delegations = messages?.[1]?.delegations ?? []
+  assert.equal(delegations.length, 1)
+  assert.equal(delegations[0].runId, 'child-9')
+  assert.equal(delegations[0].objective, '持久化的委派')
+})

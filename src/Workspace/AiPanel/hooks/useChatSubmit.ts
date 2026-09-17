@@ -41,6 +41,7 @@ import {
 } from "./chatRuntimeStore";
 import { createAiStreamId } from "../../../utils/aiStream";
 import { createBookChunkHost } from './bookChunkHost'
+import { enrichSettledSubAgents } from './subAgentEnrichment'
 import type {
   AiModelConfig,
   AiSession,
@@ -749,12 +750,21 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       },
       associateAssistantIdentities,
       productAgentProcess,
-      afterSettled: () => {
+      afterSettled: (_outcome, settled) => {
         if (pendingTerminalPersistence.get(sessionId) === persistenceAttempt) {
           pendingTerminalPersistence.delete(sessionId)
         }
         const entry = durableControls.get(sessionId)
         if (entry?.streamId === streamId) durableControls.delete(sessionId)
+        // 根 Run 结算后补齐子 Agent 委派视图（仅在调用过 delegateToAgents
+        // 时发起一次快照读取；直播流本身不转发子 Run 事件）。
+        void enrichSettledSubAgents(
+          settled,
+          getChatSessionRuntime(sessionId)?.messages,
+          { getRunSnapshot: services.ai.getAgentRunSnapshot },
+        ).then((next) => {
+          if (next) replaceChatRuntimeMessages(sessionId, next)
+        }).catch(() => undefined)
       },
       onPersistenceBlocked: () => {
         setChatRuntimeActivity(sessionId, {
