@@ -1,4 +1,4 @@
-"""CAS-protected material updates for the replacement Writing Agent."""
+"""CAS-protected material writes for the replacement Writing Agent."""
 
 from __future__ import annotations
 
@@ -212,6 +212,86 @@ class SqliteWritingMaterialRepository:
             )
             return receipt
 
+    async def validate_create_setting_entity(
+        self, scope: WritingReadScope, *, name: str, entity_type: str,
+        tags: str = "", profile_md: str = "",
+    ) -> None:
+        values = _validate_entity_create(name, entity_type, tags, profile_md)
+        await self._validate_scope(scope)
+        await self._require_entity_name_available(scope, values["name"])
+
+    async def commit_create_setting_entity(
+        self, scope: WritingReadScope, *, name: str, entity_type: str,
+        tags: str = "", profile_md: str = "", signal=None,
+    ) -> dict[str, Any]:
+        values = _validate_entity_create(name, entity_type, tags, profile_md)
+        raise_if_stopped(signal)
+        async with self._write_transaction():
+            await self._validate_scope(scope)
+            await self._require_entity_name_available(scope, values["name"])
+            raise_if_stopped(signal)
+            entity_id = int(await self._db.execute_and_get_id(
+                "INSERT INTO setting_entities "
+                "(book_id, entity_type, name, tags, profile_md) VALUES (?, ?, ?, ?, ?)",
+                [scope.book_id, values["entityType"], values["name"],
+                 values["tags"], values["profileMd"]],
+            ))
+            return {
+                "schemaVersion": 1, "success": True, "bookId": scope.book_id,
+                "targetId": entity_id, "name": values["name"],
+                "entityType": values["entityType"],
+                # 与读取侧 record_revision 同组成（不含 entityType），
+                # 模型可直接把该回执当作后续 updateSettingEntity 的 baseRevision。
+                "committedRevision": record_revision("setting_entity", {
+                    "name": values["name"], "tags": values["tags"],
+                    "profileMd": values["profileMd"],
+                }),
+                "intentDigest": intent_digest("setting_entity_create", {
+                    "bookId": scope.book_id, **values,
+                }),
+                "noop": False,
+            }
+
+    async def validate_delete_setting_entity(
+        self, scope: WritingReadScope, *, entity_id: int, base_revision: str,
+    ) -> None:
+        _validate_entity_id("setting entity", entity_id)
+        _require_base_revision(base_revision)
+        row = await self._require_deletable_entity(scope, entity_id)
+        _require_current_revision(row, base_revision)
+
+    async def commit_delete_setting_entity(
+        self, scope: WritingReadScope, *, entity_id: int,
+        base_revision: str, signal=None,
+    ) -> dict[str, Any]:
+        _validate_entity_id("setting entity", entity_id)
+        _require_base_revision(base_revision)
+        raise_if_stopped(signal)
+        async with self._write_transaction():
+            row = await self._require_deletable_entity(scope, entity_id)
+            previous = _entity_values(row)
+            _require_current_revision(row, base_revision)
+            raise_if_stopped(signal)
+            # 与宿主删除语义一致：连同修订历史一起清理，不留孤儿历史行。
+            await self._db.execute(
+                "DELETE FROM setting_entity_history WHERE entity_id = ?",
+                [entity_id],
+            )
+            await self._db.execute(
+                "DELETE FROM setting_entities WHERE id = ?", [entity_id],
+            )
+            return {
+                "schemaVersion": 1, "success": True, "bookId": scope.book_id,
+                "targetId": entity_id, "name": previous["name"],
+                "previousRevision": record_revision("setting_entity", previous),
+                "committedRevision": None,
+                "intentDigest": intent_digest("setting_entity_delete", {
+                    "bookId": scope.book_id, "targetId": entity_id,
+                    "baseRevision": base_revision,
+                }),
+                "noop": False,
+            }
+
     async def _validate_scope(self, scope: WritingReadScope) -> None:
         try:
             await self._reads.validate_scope(scope)
@@ -270,6 +350,35 @@ class SqliteWritingMaterialRepository:
             )
         return row
 
+    async def _require_entity_name_available(
+        self, scope: WritingReadScope, name: str,
+    ) -> None:
+        row = await self._db.fetch_one(
+            "SELECT id FROM setting_entities WHERE book_id = ? AND name = ?",
+            [scope.book_id, name],
+        )
+        if row is not None:
+            raise WritingMaterialMutationError(
+                "writing_setting_entity_duplicate_name",
+                "A setting entity with the same name already exists in the bound book",
+            )
+
+    async def _require_deletable_entity(
+        self, scope: WritingReadScope, entity_id: int,
+    ) -> dict[str, Any]:
+        await self._validate_scope(scope)
+        row = await self._db.fetch_one(
+            "SELECT id, name, tags, profile_md FROM setting_entities "
+            "WHERE id = ? AND book_id = ?",
+            [entity_id, scope.book_id],
+        )
+        if row is None:
+            raise WritingMaterialMutationError(
+                "writing_setting_entity_not_found",
+                "Setting entity does not exist in the bound book",
+            )
+        return row
+
 
 def _validate_text_update(
     kind: str, content: object, base_revision: object, clear_content: object,
@@ -294,8 +403,7 @@ def _validate_text_update(
 def _validate_record_patch(
     kind: str, record_id: object, base_revision: object, patch: dict[str, str],
 ) -> None:
-    if type(record_id) is not int or record_id < 1:
-        raise WritingMaterialMutationError("tool_input_invalid", f"{kind} id is invalid")
+    _validate_entity_id(kind, record_id)
     _require_base_revision(base_revision)
     if not patch:
         raise WritingMaterialMutationError("tool_input_invalid", "At least one field must be changed")
@@ -305,6 +413,50 @@ def _validate_record_patch(
         raise WritingMaterialMutationError("tool_input_invalid", "name cannot be empty")
     if any(len(value) > 250_000 for value in patch.values()):
         raise WritingMaterialMutationError("tool_input_invalid", "Patch field is too large")
+
+
+SETTING_ENTITY_TYPES = ("location", "faction", "item", "other")
+
+
+def _validate_entity_create(
+    name: object, entity_type: object, tags: object, profile_md: object,
+) -> dict[str, str]:
+    normalized_name = str(name or "").strip() if isinstance(name, str) else ""
+    if not normalized_name or len(normalized_name) > 200:
+        raise WritingMaterialMutationError(
+            "tool_input_invalid", "name must be 1 to 200 characters"
+        )
+    normalized_type = str(entity_type or "").strip().lower()
+    if normalized_type not in SETTING_ENTITY_TYPES:
+        raise WritingMaterialMutationError(
+            "tool_input_invalid",
+            "entityType must be one of location, faction, item, other",
+        )
+    values = {"name": normalized_name, "entityType": normalized_type}
+    for key, raw, limit in (("tags", tags, 10_000), ("profileMd", profile_md, 250_000)):
+        if not isinstance(raw, str):
+            raise WritingMaterialMutationError(
+                "tool_input_invalid", f"{key} must be a string"
+            )
+        if len(raw) > limit:
+            raise WritingMaterialMutationError(
+                "tool_input_invalid", f"{key} is too large"
+            )
+        values[key] = raw
+    return values
+
+
+def _validate_entity_id(kind: str, record_id: object) -> None:
+    if type(record_id) is not int or record_id < 1:
+        raise WritingMaterialMutationError("tool_input_invalid", f"{kind} id is invalid")
+
+
+def _require_current_revision(row: dict[str, Any], base_revision: str) -> None:
+    if record_revision("setting_entity", _entity_values(row)) != base_revision:
+        raise WritingMaterialMutationError(
+            "writing_setting_entity_revision_conflict",
+            "Setting entity changed after it was read",
+        )
 
 
 def _require_base_revision(value: object) -> None:
@@ -355,7 +507,8 @@ def _record_receipt(
     committed = record_revision(kind, desired)
     return {
         "schemaVersion": 1, "success": True, "bookId": book_id,
-        "targetId": target_id, "previousRevision": record_revision(kind, previous),
+        "targetId": target_id, "name": desired["name"],
+        "previousRevision": record_revision(kind, previous),
         "committedRevision": committed,
         "intentDigest": intent_digest(kind, {
             "targetId": target_id, "baseRevision": base_revision, "values": desired,

@@ -86,6 +86,16 @@ def bridge_chunk_for_effect(effect_type: str, data: Any) -> dict[str, Any] | Non
                 "chapters": list(chapters),
             }
         }
+    if effect_type == "writing.setting_entities_changed":
+        # 世界设定增/删/改的提交通知；WorldEntityTab 监听 kind=entity 刷新列表。
+        return {
+            "settingUpdated": {
+                "kind": "entity",
+                "action": data.get("action"),
+                "id": data.get("id"),
+                "name": data.get("name"),
+            }
+        }
     return None
 
 
