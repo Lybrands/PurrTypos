@@ -135,7 +135,8 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
     registrations = (
         _registration(
             "getStoryBackground",
-            "读取当前绑定书籍的故事背景；没有内容时返回 hasContent=false。",
+            "读取当前绑定书籍的故事背景；没有内容时返回 hasContent=false。"
+            "共享资料作品附带 materialLink 与只读 inheritedBaseline（原作继承基线，不可改写）。",
             "查看故事背景",
             {},
             story_background,
@@ -158,7 +159,8 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
         ),
         _registration(
             "getBookCharacters",
-            "分页读取当前书人物详情；可按人物 ID 或精确姓名筛选。",
+            "分页读取当前书人物详情；可按人物 ID 或精确姓名筛选。"
+            "共享资料作品每项附带 materialLink，正文引用该人物时原样使用。",
             "读取人物详情",
             {
                 **_PAGE_PROPERTIES,
@@ -243,7 +245,8 @@ def build_writing_read_tool_catalog(db) -> InMemoryToolCatalog:
         ),
         _registration(
             "getSettingEntities",
-            "分页读取当前书的世界设定详情；可按 ID、精确名称或类型筛选。",
+            "分页读取当前书的世界设定详情；可按 ID、精确名称或类型筛选。"
+            "共享资料作品每项附带 materialLink，正文引用该设定时原样使用。",
             "读取设定详情",
             {
                 **_PAGE_PROPERTIES,
