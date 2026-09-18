@@ -1,9 +1,11 @@
 import { backendApi } from './backendApi'
 import { platformApi } from '../platform'
 import { writingTechniques } from './writingTechniques'
+import { skills } from './skills'
 
 export const services = {
   writingTechniques,
+  skills,
   database: {
     getDatabaseInfo: backendApi.getDatabaseInfo,
     exportDatabase: platformApi.exportDatabase,

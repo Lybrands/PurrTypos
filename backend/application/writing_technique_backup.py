@@ -7,11 +7,13 @@ from pathlib import Path
 from domains.writing.techniques import canonical_bytes, digest
 from infrastructure.persistence.writing.technique_file_store import TechniqueFileStore
 from infrastructure.persistence.writing.scheme_file_store import SchemeFileStore
+from infrastructure.persistence.writing.skill_file_store import SkillFileStore
 
 
 def validate_technique_backup(database_path: Path, library_root: Path):
     techniques = TechniqueFileStore(library_root)
     schemes = SchemeFileStore(library_root)
+    skills = SkillFileStore(library_root)
     verified = set()
 
     def verify(ref):
@@ -21,13 +23,15 @@ def validate_technique_backup(database_path: Path, library_root: Path):
         verified.add(key)
         if key[0] == 'technique':
             techniques.get_version_manifest(ref, verify_files=True)
+        elif key[0] == 'skill':
+            skills.get_version_manifest(ref, verify_files=True)
         elif key[0] == 'scheme':
             for member in schemes.read_scheme(ref, verify_members=False)['members']:
                 verify(member)
         else:
             raise ValueError('invalid technique reference in backup')
 
-    for kind, store in [('technique', techniques), ('scheme', schemes)]:
+    for kind, store in [('technique', techniques), ('scheme', schemes), ('skill', skills)]:
         for record in store.list_records(include_archived=True, include_candidates=True):
             if record['draftHead'] not in record['draftIds']:
                 raise ValueError('missing current technique draft')
@@ -35,11 +39,11 @@ def validate_technique_backup(database_path: Path, library_root: Path):
                 draft = store.get_draft(record['id'], draft_id)
                 if draft.get('sealedRef'):
                     verify(draft['sealedRef'])
-                if kind == 'technique':
+                if kind in ('technique', 'skill'):
                     state_path = store._draft_path(record['id'], draft_id)
                     raw = store._json(state_path)
                     for generation in raw['history'].values():
-                        base = store._path('techniques', record['id'], 'drafts', draft_id, 'generations', generation)
+                        base = store._path(store.collection, record['id'], 'drafts', draft_id, 'generations', generation)
                         manifest = store._json(base / 'manifest.json')
                         store._read_files(base / 'files', manifest)
                     if raw['manifest']['versionId'] != draft['treeDigest']:
@@ -51,7 +55,7 @@ def validate_technique_backup(database_path: Path, library_root: Path):
 
     def walk(value):
         if isinstance(value, dict):
-            if value.get('kind') in {'technique', 'scheme'} and 'id' in value and 'versionId' in value:
+            if value.get('kind') in {'technique', 'scheme', 'skill'} and 'id' in value and 'versionId' in value:
                 verify(value)
             elif all(key in value for key in ('techniqueId', 'draftId', 'versionId')):
                 verify({'kind': 'technique', 'id': value['techniqueId'], 'versionId': value['versionId']})

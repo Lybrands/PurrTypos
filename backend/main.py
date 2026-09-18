@@ -109,6 +109,11 @@ async def lifespan(application: FastAPI):
 
         await SqliteWritingChatRequestStore(db).recover_unbound()
 
+        from application.builtin_skills import ensure_builtin_skills
+
+        for skill_id in await ensure_builtin_skills(db):
+            logging.getLogger(__name__).info("Published builtin skill %s", skill_id)
+
         from application.memory_component import (
             MemoryComponentConfigurationError,
             create_memory_component_resource,
@@ -315,6 +320,7 @@ async def lifespan(application: FastAPI):
             prompt_templates,
             screenplay_v2,
             sessions,
+            skills,
             setting_diff,
             setting_entities,
             settings,
@@ -344,6 +350,7 @@ async def lifespan(application: FastAPI):
         application.include_router(setting_entities.router, prefix="/api")
         application.include_router(story_memory.router, prefix="/api")
         application.include_router(writing_techniques.router, prefix="/api")
+        application.include_router(skills.router, prefix="/api")
         application.include_router(novel_sources.router, prefix="/api")
         application.include_router(novel_knowledge.router, prefix="/api")
         application.include_router(continuations.router, prefix="/api")

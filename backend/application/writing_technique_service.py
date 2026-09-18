@@ -9,6 +9,7 @@ from pathlib import Path
 from domains.writing.techniques import TechniqueError, canonical_bytes
 from infrastructure.persistence.writing.technique_file_store import TechniqueFileStore
 from infrastructure.persistence.writing.scheme_file_store import SchemeFileStore
+from infrastructure.persistence.writing.skill_file_store import SkillFileStore
 
 
 async def _file_commit(operation, *args, **kwargs):
@@ -27,11 +28,12 @@ class WritingTechniqueService:
         self.root = root or db.get_db_path().parent / "writing-library"
         self.techniques = TechniqueFileStore(self.root)
         self.schemes = SchemeFileStore(self.root)
+        self.skills = SkillFileStore(self.root)
 
     def store(self, kind: str):
-        if kind not in {"technique", "scheme"}:
+        if kind not in {"technique", "scheme", "skill"}:
             raise TechniqueError("invalid_reference", "无效的写作技法对象类型")
-        return self.techniques if kind == "technique" else self.schemes
+        return {"technique": self.techniques, "scheme": self.schemes, "skill": self.skills}[kind]
 
     async def rebuild_index(self):
         records = await asyncio.to_thread(self._all_records)
@@ -43,7 +45,9 @@ class WritingTechniqueService:
         return records
 
     def _all_records(self):
-        return self.techniques.list_records(include_archived=True) + self.schemes.list_records(include_archived=True)
+        return (self.techniques.list_records(include_archived=True)
+                + self.schemes.list_records(include_archived=True)
+                + self.skills.list_records(include_archived=True))
 
     async def _index(self, kind: str, object_id: str):
         record = await asyncio.to_thread(self.store(kind).get_record, object_id)
@@ -58,7 +62,7 @@ class WritingTechniqueService:
         for record in records:
             draft = await asyncio.to_thread(self.store(kind).get_draft, record["id"], record["draftHead"])
             if not record.get("metadata"):
-                record["metadata"] = draft.get("manifest", {}).get("metadata") if kind == "technique" else {
+                record["metadata"] = draft.get("manifest", {}).get("metadata") if kind in {"technique", "skill"} else {
                     key: draft["content"].get(key, "") for key in ("name", "description")}
         return records
 
@@ -70,7 +74,7 @@ class WritingTechniqueService:
 
     async def create_draft(self, *, kind="technique", **values):
         store = self.store(kind)
-        if kind == "technique" and values.get("from_version") and values.get("owner") is None:
+        if kind in {"technique", "skill"} and values.get("from_version") and values.get("owner") is None:
             ref = values["from_version"]
             record = await asyncio.to_thread(store.get_record, ref["id"])
             for draft_id in record["draftIds"]:
@@ -78,16 +82,29 @@ class WritingTechniqueService:
                 if draft.get("sealedRef") == ref:
                     values["owner"] = draft.get("owner", {})
                     break
-        result = await _file_commit(store.create_draft if kind == "technique" else store.create_scheme_draft, **values)
-        await self._index(kind, result["techniqueId" if kind == "technique" else "schemeId"])
+        # 内置技法只能由种子通道（internal=True）重新起草新版本。
+        if not values.pop("internal", False) and kind in {"technique", "skill"} and values.get("technique_id"):
+            await self._require_not_builtin(kind, values["technique_id"])
+        result = await _file_commit(store.create_draft if kind in {"technique", "skill"} else store.create_scheme_draft, **values)
+        await self._index(kind, result["techniqueId" if kind != "scheme" else "schemeId"])
         return result
+
+    async def _require_not_builtin(self, kind: str, object_id: str) -> None:
+        try:
+            record = await asyncio.to_thread(self.store(kind).get_record, object_id)
+        except TechniqueError:
+            return
+        if record.get("origin") == "builtin":
+            raise TechniqueError("invalid_reference", "内置技法由应用统一管理，不能编辑、发布或删除")
 
     async def references_sources(self, revision_ids: set[str]) -> bool:
         return await asyncio.to_thread(self.techniques.references_sources, revision_ids)
 
-    async def apply_changes(self, object_id: str, draft_id: str, **values):
-        result = await _file_commit(self.techniques.apply_changes, object_id, draft_id, **values)
-        await self._index("technique", object_id)
+    async def apply_changes(self, object_id: str, draft_id: str, *, kind="technique", **values):
+        if not values.pop("internal", False):
+            await self._require_not_builtin(kind, object_id)
+        result = await _file_commit(self.store(kind).apply_changes, object_id, draft_id, **values)
+        await self._index(kind, object_id)
         return result
 
     async def update_scheme(self, object_id: str, draft_id: str, **values):
@@ -97,12 +114,16 @@ class WritingTechniqueService:
 
     async def seal(self, kind: str, object_id: str, draft_id: str, **values):
         store = self.store(kind)
-        result = await _file_commit(store.seal_draft if kind == "technique" else store.seal_scheme_draft,
+        if not values.pop("internal", False):
+            await self._require_not_builtin(kind, object_id)
+        result = await _file_commit(store.seal_draft if kind in {"technique", "skill"} else store.seal_scheme_draft,
                                          object_id, draft_id, **values)
         await self._index(kind, object_id)
         return result
 
     async def publish(self, kind: str, object_id: str, **values):
+        if not values.pop("internal", False):
+            await self._require_not_builtin(kind, object_id)
         result = await _file_commit(self.store(kind).publish, object_id, **values)
         await self._index(kind, object_id)
         if kind == "technique":
@@ -111,6 +132,7 @@ class WritingTechniqueService:
         return result
 
     async def set_status(self, kind: str, object_id: str, status: str, *, operation_id: str):
+        await self._require_not_builtin(kind, object_id)
         if status == "archived":
             await self._require_unreferenced_continuation(kind, object_id)
         result = await _file_commit(self.store(kind).set_status, object_id, status, operation_id=operation_id)
@@ -124,6 +146,7 @@ class WritingTechniqueService:
         return await asyncio.to_thread(deletion_preview, self, kind, object_id)
 
     async def delete_object(self, kind: str, object_id: str, *, operation_id: str, revision_token: str):
+        await self._require_not_builtin(kind, object_id)
         await self._require_unreferenced_continuation(kind, object_id)
         from application.writing_technique_deletion import delete_files
         from application.writing_technique_lifecycle import cancel_invalid_technique_runs
@@ -139,7 +162,7 @@ class WritingTechniqueService:
         return await asyncio.to_thread(self.techniques.read_draft_file, object_id, draft_id, revision, path)
 
     async def read_version_file(self, ref: dict, path: str):
-        return await asyncio.to_thread(self.techniques.read_version_file, ref, path)
+        return await asyncio.to_thread(self.store(ref.get("kind", "technique")).read_version_file, ref, path)
 
     async def get_mode(self, scope_kind: str, scope_id: str) -> str:
         row = await self.db.fetch_one("SELECT mode FROM writing_technique_modes WHERE scope_kind=? AND scope_id=?", [scope_kind, scope_id])

@@ -14,6 +14,37 @@ from application.continuation_context import ContinuationContextService
 WRITING_CONTEXT_SNAPSHOT_STATE_KEY = "writingContextSnapshot"
 
 
+async def _skill_entries(db) -> list[dict[str, object]]:
+    """冻结快照中的技能：仅收录声明允许自动使用（metadata.autoUse）的活跃已发布技能。
+
+    未声明 autoUse 的技能对 Agent 不可见——它们只在技能库页面供用户查看。
+    """
+    from application.writing_technique_service import WritingTechniqueService
+
+    rows = await db.fetch_all(
+        "SELECT record_json FROM writing_technique_catalog WHERE kind='skill'")
+    service = WritingTechniqueService(db)
+    entries: list[dict[str, object]] = []
+    for row in rows:
+        record = json.loads(str(row["record_json"]))
+        metadata = record.get("metadata") or {}
+        if (record.get("status") != "active" or not record.get("publishedHead")
+                or metadata.get("autoUse") is not True):
+            continue
+        ref = {"kind": "skill", "id": record["id"], "versionId": record["publishedHead"]}
+        try:
+            manifest = await asyncio.to_thread(
+                service.store("skill").get_version_manifest, ref)
+        except Exception:
+            continue
+        entry_bytes = next(
+            (item["size"] for item in manifest["files"] if item["path"] == "SKILL.md"),
+            0,
+        )
+        entries.append({"ref": ref, "metadata": metadata, "entryBytes": entry_bytes})
+    return entries
+
+
 async def build_writing_context_snapshot(
     db,
     *,
@@ -95,6 +126,7 @@ async def build_writing_context_snapshot(
             "missingIds": missing_memory_ids,
         },
         "writingTechniqueInput": technique,
+        "skills": await _skill_entries(db),
         "novelKnowledgeScope": knowledge_scope or None,
         "continuation": {
             "creationMode": continuation["creationMode"],

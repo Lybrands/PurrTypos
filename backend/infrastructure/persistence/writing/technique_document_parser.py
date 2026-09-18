@@ -54,6 +54,11 @@ def entry_metadata(content: str) -> dict:
             raise TechniqueError("invalid_entry", "入口 metadata 必须为对象")
         if "retrieval" in metadata:
             result["retrieval"] = _retrieval_metadata(metadata["retrieval"])
+        # 技能包声明是否允许 Agent 自动使用；技法忽略该键。
+        if "autoUse" in metadata:
+            if not isinstance(metadata["autoUse"], bool):
+                raise TechniqueError("invalid_entry", "入口 metadata.autoUse 必须为布尔值")
+            result["autoUse"] = metadata["autoUse"]
     return result
 
 

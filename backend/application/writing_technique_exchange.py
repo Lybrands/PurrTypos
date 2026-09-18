@@ -63,12 +63,26 @@ def export_technique(store, ref: dict) -> bytes:
 
 
 async def import_technique(service, *, files: dict, operation_id: str,
-                           technique_id: str | None = None, storage_scope="library", owner=None):
+                           technique_id: str | None = None, storage_scope="library", owner=None,
+                           origin: str | None = None, internal: bool = False):
     file_manifest(files, validate=False, limits=service.techniques.limits)
-    draft = await service.create_draft(operation_id=operation_id, technique_id=technique_id,
-                                      storage_scope=storage_scope, owner=owner)
+    draft = await service.create_draft(kind="technique", operation_id=operation_id, technique_id=technique_id,
+                                      storage_scope=storage_scope, owner=owner,
+                                      origin=origin, internal=internal)
     return await service.apply_changes(draft["techniqueId"], draft["draftId"], expected_revision=0,
-        operation_id=operation_id + ":files", changes=[{"action": "put", "path": p, "content": t} for p, t in files.items()])
+        operation_id=operation_id + ":files", kind="technique", internal=internal,
+        changes=[{"action": "put", "path": p, "content": t} for p, t in files.items()])
+
+
+async def import_skill(service, *, files: dict, operation_id: str,
+                       skill_id: str | None = None, origin: str | None = None):
+    """安装技能：校验包结构后以草稿→封存流程落库，由调用方发布。"""
+    file_manifest(files, limits=service.store("skill").limits)
+    draft = await service.create_draft(kind="skill", operation_id=operation_id,
+                                      technique_id=skill_id, origin=origin, internal=origin == "builtin")
+    return await service.apply_changes(draft["techniqueId"], draft["draftId"], expected_revision=0,
+        operation_id=operation_id + ":files", kind="skill", internal=origin == "builtin",
+        changes=[{"action": "put", "path": p, "content": t} for p, t in files.items()])
 
 
 async def upload_technique(service, *, files: dict, operation_id: str, book_id: str, session_id: str):
