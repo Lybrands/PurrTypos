@@ -11,6 +11,7 @@ from agents.writing.read_model import (
     WritingReadScopeError,
 )
 from agents.writing.revisions import intent_digest, record_revision, text_revision
+from exceptions import AppError
 from purra.cancellation import raise_if_stopped
 
 
@@ -47,19 +48,35 @@ class SqliteWritingMaterialRepository:
         raise_if_stopped(signal)
         async with self._write_transaction():
             await self._validate_scope(scope)
+            authority = await self._authority(scope)
+            if authority is not None:
+                content = await self._normalized_body(
+                    authority, scope, "content", content
+                )
             row = await self._db.fetch_one(
                 "SELECT content FROM story_background WHERE book_id = ?", [scope.book_id]
             )
             previous = str((row or {}).get("content") or "")
+            if authority is not None:
+                committed_revision = await self._authority_update(
+                    authority, scope, "background", scope.book_id,
+                    {"content": content}, base_revision,
+                    "writing_story_background_revision_conflict",
+                )
+                noop = committed_revision == base_revision
+            else:
+                committed_revision = text_revision(content)
+                noop = text_revision(previous) == committed_revision
             receipt = _text_receipt(
                 "story_background", scope.book_id, previous, content, base_revision
             )
-            if receipt["noop"]:
+            if noop:
                 return receipt
-            _require_revision(
-                text_revision(previous), base_revision, text_revision(content),
-                "writing_story_background_revision_conflict",
-            )
+            if authority is None:
+                _require_revision(
+                    text_revision(previous), base_revision, committed_revision,
+                    "writing_story_background_revision_conflict",
+                )
             raise_if_stopped(signal)
             await self._db.execute(
                 "INSERT INTO story_background_history "
@@ -72,6 +89,8 @@ class SqliteWritingMaterialRepository:
                 "content = excluded.content, update_time = CURRENT_TIMESTAMP",
                 [scope.book_id, content],
             )
+            if authority is not None:
+                receipt["committedRevision"] = committed_revision
             return receipt
 
     async def validate_global_outline(
@@ -137,19 +156,38 @@ class SqliteWritingMaterialRepository:
         _validate_record_patch("character", character_id, base_revision, patch)
         raise_if_stopped(signal)
         async with self._write_transaction():
+            await self._validate_scope(scope)
+            authority = await self._authority(scope)
+            if authority is not None and "profileMd" in patch:
+                patch = {
+                    **patch,
+                    "profileMd": await self._normalized_body(
+                        authority, scope, "profile_md", patch["profileMd"]
+                    ),
+                }
             row = await self._require_character(scope, character_id)
             previous = _character_values(row)
             desired = _apply_patch(previous, patch)
+            if authority is not None:
+                committed_revision = await self._authority_update(
+                    authority, scope, "character", character_id,
+                    _document_fields(desired), base_revision,
+                    "writing_character_revision_conflict",
+                )
+                noop = committed_revision == base_revision
+            else:
+                committed_revision = record_revision("character", desired)
+                noop = record_revision("character", previous) == committed_revision
             receipt = _record_receipt(
                 "character", scope.book_id, character_id, previous, desired, base_revision
             )
-            if receipt["noop"]:
+            if noop:
                 return receipt
-            _require_revision(
-                record_revision("character", previous), base_revision,
-                record_revision("character", desired),
-                "writing_character_revision_conflict",
-            )
+            if authority is None:
+                _require_revision(
+                    record_revision("character", previous), base_revision,
+                    committed_revision, "writing_character_revision_conflict",
+                )
             raise_if_stopped(signal)
             await self._db.execute(
                 "INSERT INTO character_history "
@@ -163,6 +201,8 @@ class SqliteWritingMaterialRepository:
                 "UPDATE characters SET name = ?, tags = ?, profile_md = ? WHERE id = ?",
                 [desired["name"], desired["tags"], desired["profileMd"], character_id],
             )
+            if authority is not None:
+                receipt["committedRevision"] = committed_revision
             return receipt
 
     async def validate_setting_entity(
@@ -185,19 +225,42 @@ class SqliteWritingMaterialRepository:
         _validate_record_patch("setting entity", entity_id, base_revision, patch)
         raise_if_stopped(signal)
         async with self._write_transaction():
+            await self._validate_scope(scope)
+            authority = await self._authority(scope)
+            if authority is not None and "profileMd" in patch:
+                patch = {
+                    **patch,
+                    "profileMd": await self._normalized_body(
+                        authority, scope, "profile_md", patch["profileMd"]
+                    ),
+                }
             row = await self._require_setting_entity(scope, entity_id)
             previous = _entity_values(row)
             desired = _apply_patch(previous, patch)
+            document_fields = {
+                **_document_fields(desired),
+                "entity_type": str(row.get("entity_type") or "other"),
+            }
+            if authority is not None:
+                committed_revision = await self._authority_update(
+                    authority, scope, "entity", entity_id,
+                    document_fields, base_revision,
+                    "writing_setting_entity_revision_conflict",
+                )
+                noop = committed_revision == base_revision
+            else:
+                committed_revision = record_revision("setting_entity", desired)
+                noop = record_revision("setting_entity", previous) == committed_revision
             receipt = _record_receipt(
                 "setting_entity", scope.book_id, entity_id, previous, desired, base_revision
             )
-            if receipt["noop"]:
+            if noop:
                 return receipt
-            _require_revision(
-                record_revision("setting_entity", previous), base_revision,
-                record_revision("setting_entity", desired),
-                "writing_setting_entity_revision_conflict",
-            )
+            if authority is None:
+                _require_revision(
+                    record_revision("setting_entity", previous), base_revision,
+                    committed_revision, "writing_setting_entity_revision_conflict",
+                )
             raise_if_stopped(signal)
             await self._db.execute(
                 "INSERT INTO setting_entity_history "
@@ -211,6 +274,8 @@ class SqliteWritingMaterialRepository:
                 "UPDATE setting_entities SET name = ?, tags = ?, profile_md = ? WHERE id = ?",
                 [desired["name"], desired["tags"], desired["profileMd"], entity_id],
             )
+            if authority is not None:
+                receipt["committedRevision"] = committed_revision
             return receipt
 
     async def validate_create_setting_entity(
@@ -229,6 +294,11 @@ class SqliteWritingMaterialRepository:
         raise_if_stopped(signal)
         async with self._write_transaction():
             await self._validate_scope(scope)
+            authority = await self._authority(scope)
+            if authority is not None:
+                values["profileMd"] = await self._normalized_body(
+                    authority, scope, "profile_md", values["profileMd"]
+                )
             await self._require_entity_name_available(scope, values["name"])
             raise_if_stopped(signal)
             entity_id = int(await self._db.execute_and_get_id(
@@ -237,16 +307,23 @@ class SqliteWritingMaterialRepository:
                 [scope.book_id, values["entityType"], values["name"],
                  values["tags"], values["profileMd"]],
             ))
+            # 与读取侧 record_revision 同组成（不含 entityType），
+            # 模型可直接把该回执当作后续 updateSettingEntity 的 baseRevision。
+            committed_revision = record_revision("setting_entity", {
+                "name": values["name"], "tags": values["tags"],
+                "profileMd": values["profileMd"],
+            })
+            if authority is not None:
+                await self._authority_add(authority, scope, "entity", entity_id, values)
+                committed_revision = (
+                    await self._mapping_revision(scope, "entity", entity_id)
+                    or committed_revision
+                )
             return {
                 "schemaVersion": 1, "success": True, "bookId": scope.book_id,
                 "targetId": entity_id, "name": values["name"],
                 "entityType": values["entityType"],
-                # 与读取侧 record_revision 同组成（不含 entityType），
-                # 模型可直接把该回执当作后续 updateSettingEntity 的 baseRevision。
-                "committedRevision": record_revision("setting_entity", {
-                    "name": values["name"], "tags": values["tags"],
-                    "profileMd": values["profileMd"],
-                }),
+                "committedRevision": committed_revision,
                 "intentDigest": intent_digest("setting_entity_create", {
                     "bookId": scope.book_id, **values,
                 }),
@@ -268,6 +345,12 @@ class SqliteWritingMaterialRepository:
         raise_if_stopped(signal)
         async with self._write_transaction():
             await self._validate_scope(scope)
+            authority = await self._authority(scope)
+            if authority is not None:
+                for values in planned:
+                    values["profileMd"] = await self._normalized_body(
+                        authority, scope, "profile_md", values["profileMd"]
+                    )
             # 全量预校验后串行落库：任一条失败整批不写入（对齐 createWritingChapters）。
             for values in planned:
                 await self._require_entity_name_available(scope, values["name"])
@@ -280,13 +363,20 @@ class SqliteWritingMaterialRepository:
                     [scope.book_id, values["entityType"], values["name"],
                      values["tags"], values["profileMd"]],
                 ))
+                committed_revision = record_revision("setting_entity", {
+                    "name": values["name"], "tags": values["tags"],
+                    "profileMd": values["profileMd"],
+                })
+                if authority is not None:
+                    await self._authority_add(authority, scope, "entity", entity_id, values)
+                    committed_revision = (
+                        await self._mapping_revision(scope, "entity", entity_id)
+                        or committed_revision
+                    )
                 items.append({
                     "targetId": entity_id, "name": values["name"],
                     "entityType": values["entityType"],
-                    "committedRevision": record_revision("setting_entity", {
-                        "name": values["name"], "tags": values["tags"],
-                        "profileMd": values["profileMd"],
-                    }),
+                    "committedRevision": committed_revision,
                 })
             return {
                 "schemaVersion": 1, "success": True, "bookId": scope.book_id,
@@ -319,7 +409,11 @@ class SqliteWritingMaterialRepository:
         async with self._write_transaction():
             row = await self._require_deletable_entity(scope, entity_id)
             previous = _entity_values(row)
-            _require_current_revision(row, base_revision)
+            authority = await self._authority(scope)
+            if authority is not None:
+                await self._authority_delete(authority, scope, entity_id, base_revision)
+            else:
+                _require_current_revision(row, base_revision)
             raise_if_stopped(signal)
             # 与宿主删除语义一致：连同修订历史一起清理，不留孤儿历史行。
             await self._db.execute(
@@ -340,6 +434,110 @@ class SqliteWritingMaterialRepository:
                 }),
                 "noop": False,
             }
+
+    async def _authority(self, scope: WritingReadScope):
+        """Shared-file authority for bound books; syncs external edits first.
+
+        Returns the service, or None when the book still lives in SQL only.
+        """
+        from application.creation_material_service import materials
+
+        try:
+            svc = materials(self._db)
+            binding = await svc.binding(scope.book_id)
+            if not binding:
+                return None
+            await svc.synchronize(scope.book_id)
+        except AppError as error:
+            raise WritingMaterialMutationError(
+                "writing_material_unavailable", f"共享资料暂不可用：{error}"
+            ) from error
+        return svc
+
+    async def _normalized_body(
+        self, authority, scope: WritingReadScope, field: str, body: str,
+    ) -> str:
+        """Canonicalize model-written wikilinks before they reach the vault."""
+        try:
+            return (await authority.normalize_links(scope.book_id, {field: body}))[field]
+        except AppError as error:
+            raise WritingMaterialMutationError(
+                "writing_material_link_ambiguous", str(error)
+            ) from error
+
+    async def _authority_update(
+        self, authority, scope: WritingReadScope, kind: str, entity_id: object,
+        data: dict[str, str], base_revision: str, conflict_code: str,
+    ) -> str:
+        """Two-phase file commit with file-revision CAS; returns the new revision."""
+        try:
+            await authority.update(
+                scope.book_id, kind, str(entity_id), data, base_revision,
+            )
+        except AppError as error:
+            raise self._authority_error(error, conflict_code) from error
+        committed = await self._mapping_revision(scope, kind, entity_id)
+        if committed is None:
+            raise WritingMaterialMutationError(
+                "writing_material_authority_missing", "共享资料登记缺失"
+            )
+        return committed
+
+    async def _authority_add(
+        self, authority, scope: WritingReadScope, kind: str, entity_id: object,
+        values: dict[str, str],
+    ) -> None:
+        try:
+            await authority.add(scope.book_id, kind, str(entity_id), {
+                "name": values["name"],
+                "tags": values.get("tags", ""),
+                "entity_type": values.get("entityType"),
+                "profile_md": values.get("profileMd", ""),
+                "content": values.get("content", ""),
+            })
+        except (AppError, ValueError, OSError) as error:
+            raise WritingMaterialMutationError(
+                "writing_material_authority_rejected", f"共享资料写入失败：{error}"
+            ) from error
+
+    async def _authority_delete(
+        self, authority, scope: WritingReadScope, entity_id: int,
+        base_revision: str,
+    ) -> None:
+        try:
+            await authority.update(
+                scope.book_id, "entity", str(entity_id), {}, base_revision,
+                delete=True,
+            )
+        except AppError as error:
+            raise self._authority_error(
+                error, "writing_setting_entity_revision_conflict"
+            ) from error
+
+    async def _mapping_revision(
+        self, scope: WritingReadScope, kind: str, entity_id: object,
+    ) -> str | None:
+        row = await self._db.fetch_one(
+            "SELECT revision FROM creation_material_files "
+            "WHERE book_id = ? AND kind = ? AND entity_id = ?",
+            [scope.book_id, kind, str(entity_id)],
+        )
+        return str(row["revision"]) if row else None
+
+    @staticmethod
+    def _authority_error(error: AppError, conflict_code: str) -> WritingMaterialMutationError:
+        message = str(error)
+        if "版本已变化" in message or "其他编辑器" in message or "基础版本" in message:
+            return WritingMaterialMutationError(
+                conflict_code, "Material changed after it was read"
+            )
+        if "继承" in message:
+            return WritingMaterialMutationError(
+                "writing_material_baseline_protected", message
+            )
+        return WritingMaterialMutationError(
+            "writing_material_authority_rejected", message
+        )
 
     async def _validate_scope(self, scope: WritingReadScope) -> None:
         try:
@@ -556,6 +754,12 @@ def _require_revision(actual: str, base: str, desired: str, code: str) -> None:
 def _character_values(row: dict[str, Any]) -> dict[str, str]:
     return {"name": str(row.get("name") or ""), "tags": str(row.get("tags") or ""),
             "profileMd": str(row.get("profile_md") or "")}
+
+
+def _document_fields(values: dict[str, str]) -> dict[str, str]:
+    """Agent record fields → material document edit keys."""
+    return {"name": values["name"], "tags": values["tags"],
+            "profile_md": values["profileMd"]}
 
 
 def _entity_values(row: dict[str, Any]) -> dict[str, str]:

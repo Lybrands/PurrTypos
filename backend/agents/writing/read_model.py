@@ -123,19 +123,28 @@ class SqliteWritingReadRepository:
 
     async def story_background(self, scope: WritingReadScope) -> dict[str, Any]:
         scope = await self.validate_scope(scope)
+        # 外部（Obsidian）编辑先并入投影，资料读到的就是文件权威的当前值。
+        await self._sync_material_authority(scope)
         row = await self._db.fetch_one(
             "SELECT content, update_time FROM story_background WHERE book_id = ?",
             [scope.book_id],
         )
         content = str((row or {}).get("content") or "")
-        return self._result(scope, {
-            "background": {
-                "content": content,
-                "hasContent": bool(content.strip()),
-                "updatedAt": (row or {}).get("update_time"),
-                "baseRevision": text_revision(content),
-            },
-        })
+        background = {
+            "content": content,
+            "hasContent": bool(content.strip()),
+            "updatedAt": (row or {}).get("update_time"),
+            "baseRevision": text_revision(content),
+        }
+        authority_row = {"book_id": scope.book_id, "content": content}
+        await self._annotate_material_authority(scope, "background", [authority_row])
+        for key in (
+            "baseRevision", "materialId", "materialLink",
+            "inheritedBaseline", "inheritedEvidence",
+        ):
+            if key in authority_row:
+                background[key] = authority_row[key]
+        return self._result(scope, {"background": background})
 
     async def story_dashboard(self, scope: WritingReadScope) -> dict[str, Any]:
         """写作仪表盘摘要：与 /dashboard/health 同一份聚合（含人物出场章明细）。"""
@@ -170,6 +179,8 @@ class SqliteWritingReadRepository:
             )
             params.extend(normalized_names)
         predicate = " AND ".join(where)
+        if include_profile:
+            await self._sync_material_authority(scope)
         count = await self._db.fetch_one(
             f"SELECT COUNT(*) AS total FROM characters WHERE {predicate}",
             params,
@@ -201,6 +212,10 @@ class SqliteWritingReadRepository:
             }
             for row in rows
         ]
+        if include_profile:
+            await self._annotate_material_authority(scope, "character", items)
+        else:
+            await self._attach_material_links(scope, "character", items)
         total = int((count or {}).get("total") or 0)
         return self._result(scope, {
             "countScope": "current_book_owned_characters",
@@ -525,6 +540,8 @@ class SqliteWritingReadRepository:
             )
             params.extend(normalized_names)
         predicate = " AND ".join(where)
+        if include_profile:
+            await self._sync_material_authority(scope)
         count = await self._db.fetch_one(
             f"SELECT COUNT(*) AS total FROM setting_entities WHERE {predicate}",
             params,
@@ -554,11 +571,88 @@ class SqliteWritingReadRepository:
                 else {}
             ),
         } for row in rows]
+        if include_profile:
+            await self._annotate_material_authority(scope, "entity", items)
+        else:
+            await self._attach_material_links(scope, "entity", items)
         total = int((count or {}).get("total") or 0)
         return self._result(
             scope,
             _page_result(items, total, normalized_offset, normalized_limit),
         )
+
+    async def _material_binding(self, scope: WritingReadScope):
+        """Bound books answer to the shared-file authority; None means SQL-only."""
+        from application.creation_material_service import materials
+        from exceptions import AppError
+
+        try:
+            binding = await materials(self._db).binding(scope.book_id)
+        except AppError as error:
+            raise WritingReadScopeError(
+                "writing_material_unavailable", f"共享资料暂不可用：{error}"
+            ) from error
+        return binding
+
+    async def _sync_material_authority(self, scope: WritingReadScope) -> bool:
+        """Pull external vault edits into the projection; returns True when bound."""
+        from exceptions import AppError
+
+        binding = await self._material_binding(scope)
+        if binding is None:
+            return False
+        try:
+            from application.creation_material_service import materials
+
+            await materials(self._db).synchronize(scope.book_id)
+        except AppError as error:
+            raise WritingReadScopeError(
+                "writing_material_unavailable", f"共享资料暂不可用：{error}"
+            ) from error
+        return True
+
+    async def _annotate_material_authority(
+        self, scope: WritingReadScope, kind: str, rows: list[dict[str, Any]],
+    ) -> None:
+        """Re-base baseRevision on the file revision and attach materialLink."""
+        from exceptions import AppError
+
+        if await self._material_binding(scope) is None:
+            return
+        try:
+            from application.creation_material_service import materials
+
+            await materials(self._db).annotate(scope.book_id, kind, rows)
+        except AppError as error:
+            raise WritingReadScopeError(
+                "writing_material_unavailable", f"共享资料暂不可用：{error}"
+            ) from error
+
+    async def _attach_material_links(
+        self, scope: WritingReadScope, kind: str, items: list[dict[str, Any]],
+    ) -> None:
+        """Directory listings get the canonical link without a vault scan."""
+        if not items or await self._material_binding(scope) is None:
+            return
+        from infrastructure.obsidian.material_links import material_link
+
+        mappings = await self._db.fetch_all(
+            "SELECT entity_id, path, material_id FROM creation_material_files "
+            "WHERE book_id = ? AND kind = ?",
+            [scope.book_id, kind],
+        )
+        by_id = {str(m["entity_id"]): m for m in mappings}
+        for item in items:
+            mapping = by_id.get(str(item["id"]))
+            if mapping is None:
+                continue
+            try:
+                item["materialLink"] = material_link(
+                    mapping["path"], item.get("name", "故事背景")
+                )
+            except ValueError:
+                continue
+            item["materialId"] = mapping["material_id"]
 
     @staticmethod
     def _result(

@@ -180,19 +180,22 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
     return (
         _text_registration(
             "editStoryBackground", "编辑小说背景", "content",
-            "全文替换当前书故事背景；必须先读取并携带 baseRevision，清空需明确声明。",
+            "全文替换当前书故事背景；必须先读取并携带 baseRevision，清空需明确声明。"
+            "正文引用其他资料时使用读取结果返回的 materialLink，不手写 [[…]] 链接。",
             "getStoryBackground", "storyBackground.updated", validate_background,
             edit_background,
         ),
         _record_registration(
             "updateCharacter", "更新人物设定", "characterId",
-            "部分更新当前书已有的人物；必须先读取详情并携带 baseRevision。",
+            "部分更新当前书已有的人物；必须先读取详情并携带 baseRevision。"
+            "档案正文中引用其他资料时使用读取结果返回的 materialLink，不手写 [[…]] 链接。",
             "getBookCharacters", "character.updated", validate_character,
             update_character,
         ),
         _record_registration(
             "updateSettingEntity", "更新世界设定", "entityId",
-            "部分更新当前书已有的设定实体；必须先读取详情并携带 baseRevision。",
+            "部分更新当前书已有的设定实体；必须先读取详情并携带 baseRevision。"
+            "正文中引用其他资料时使用读取结果返回的 materialLink，不手写 [[…]] 链接。",
             "getSettingEntities", "settingEntity.updated", validate_entity,
             update_entity,
         ),
@@ -200,7 +203,8 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
             "createSettingEntity", "新增世界设定",
             "在当前书新增一条世界设定实体（地点/势力/物品/其他）；"
             "名称不得与已有设定重复，创建前应先查看设定目录确认。"
-            "需要一次创建多条时改用 createSettingEntities。",
+            "需要一次创建多条时改用 createSettingEntities。"
+            "正文中引用其他资料时使用读取结果返回的 materialLink。",
             "listSettingEntities", "settingEntity.created",
             validate_create_entity, create_entity,
         ),
@@ -208,7 +212,8 @@ def build_writing_material_tool_registrations(db) -> tuple[ToolRegistration, ...
             "createSettingEntities", "批量新增世界设定",
             "一次调用批量新增多条世界设定（1-20 条，内部逐条串行落库，"
             "任一条校验失败整批不写入）；批内名称不得重复，也不得与已有设定重复，"
-            "创建前应先查看设定目录确认。只创建一条时改用 createSettingEntity。",
+            "创建前应先查看设定目录确认。只创建一条时改用 createSettingEntity。"
+            "正文中引用其他资料时使用读取结果返回的 materialLink。",
             "listSettingEntities", "settingEntities.created",
             validate_create_entities, create_entities,
         ),

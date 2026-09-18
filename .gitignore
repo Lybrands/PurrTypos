@@ -83,3 +83,8 @@ local-backups/
 purrtypos.db
 purrtypos.db-wal
 purrtypos.db-shm
+
+# Shared material vaults and the seeded skills library are runtime data
+backend/creation-materials/
+backend/writing-library/
+backend/.writing-library.lock
