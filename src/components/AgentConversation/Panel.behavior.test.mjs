@@ -1,3 +1,7 @@
+// Calendar-day label expectations below only hold in one timezone; pin it so
+// the suite is hermetic on POSIX dev machines and UTC CI runners.
+process.env.TZ = 'Asia/Shanghai'
+
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import React from 'react'
