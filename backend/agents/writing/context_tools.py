@@ -333,6 +333,87 @@ async def _technique_candidates(
         return _error(error)
 
 
+async def _skills_list(db, state, arguments, signal=None) -> ToolHandlerResult:
+    del arguments
+    raise_if_stopped(signal)
+    try:
+        scope, _selection = _state_contracts(state)
+        frozen = await snapshot_from_state_or_run_attributes(db, state)
+        return _result(scope, {
+            "items": [
+                {
+                    "ref": item["ref"],
+                    "metadata": item["metadata"],
+                    "entryBytes": item["entryBytes"],
+                }
+                for item in frozen.get("skills") or []
+            ],
+        })
+    except Exception as error:
+        raise_if_stopped(signal)
+        return _error(error, fallback_code="writing_skills_unavailable")
+
+
+async def _skill_file(db, state, arguments, signal=None) -> ToolHandlerResult:
+    raise_if_stopped(signal)
+    try:
+        scope, _selection = _state_contracts(state)
+        frozen = await snapshot_from_state_or_run_attributes(db, state)
+        available = {
+            canonical_ref(item["ref"]): item
+            for item in frozen.get("skills") or []
+        }
+        ref = _skill_ref(arguments.get("ref"))
+        entry = available.get(canonical_ref(ref))
+        if entry is None:
+            raise ValueError(
+                "技能不在本轮可用范围内：未声明允许自动使用（metadata.autoUse）或版本不在冻结快照中"
+            )
+        path = str(arguments.get("path") or "").strip()
+        if not path:
+            raise ValueError("path is required")
+        entry_refs = tuple(state.domain.get("writingSkillEntryRefs") or ())
+        if path != "SKILL.md" and ref not in entry_refs:
+            raise ValueError("必须先读取同一技能的 SKILL.md，再读取其中引用的辅助文件")
+        from application.writing_technique_service import WritingTechniqueService
+
+        content = await WritingTechniqueService(db).read_version_file(ref, path)
+        maximum = _max_text_length(arguments)
+        if len(content["content"]) > maximum:
+            raise ValueError(
+                f"技能文件共 {len(content['content'])} 字符，超过 maxTextLength，请提高上限后重试"
+            )
+        if path == "SKILL.md" and ref not in entry_refs:
+            state.domain["writingSkillEntryRefs"] = [*entry_refs, ref]
+        return _result(scope, {
+            "file": {
+                "ref": ref,
+                "path": path,
+                "content": content["content"],
+                "sha256": content["sha256"],
+            },
+        })
+    except Exception as error:
+        raise_if_stopped(signal)
+        return _error(error, fallback_code="writing_skills_unavailable")
+
+
+def _skill_ref(value) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != {"kind", "id", "versionId"}:
+        raise ValueError("ref contains an invalid skill reference")
+    normalized = {
+        key: str(value[key]).strip()
+        for key in ("kind", "id", "versionId")
+    }
+    if normalized["kind"] != "skill" or not all(normalized.values()):
+        raise ValueError("ref contains an invalid skill reference")
+    return normalized
+
+
+def canonical_ref(ref: dict) -> str:
+    return json.dumps(ref, sort_keys=True, ensure_ascii=False)
+
+
 async def _continuation_sections(
     db, state, arguments, signal=None
 ) -> ToolHandlerResult:
@@ -405,6 +486,12 @@ def build_writing_context_tool_registrations(
 
     async def continuation_section(state, arguments, signal=None):
         return await _continuation_section(db, state, arguments, signal)
+
+    async def skills_list(state, arguments, signal=None):
+        return await _skills_list(db, state, arguments, signal)
+
+    async def skill_file(state, arguments, signal=None):
+        return await _skill_file(db, state, arguments, signal)
 
     async def technique_candidates(state, arguments, signal=None):
         return await _technique_candidates(
@@ -546,6 +633,39 @@ def build_writing_context_tool_registrations(
             },
             continuation_section,
             required=("sectionId",),
+        ),
+        _registration(
+            "listWritingSkills",
+            "列出本轮可自动使用的技能元数据（技能由包内 metadata.autoUse 声明允许自动使用），"
+            "不返回技能正文。根据 name、description、tags 与 retrieval 信息判断与当前任务的相关性，"
+            "需要时用 readWritingSkillFile 读取。",
+            "查看可用技能",
+            {},
+            skills_list,
+        ),
+        _registration(
+            "readWritingSkillFile",
+            "读取本轮可用技能的文件。必须先读取同一技能的 SKILL.md，"
+            "再读取其中引用的辅助文件。",
+            "读取技能文件",
+            {
+                "ref": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["skill"]},
+                        "id": {"type": "string", "minLength": 1},
+                        "versionId": {"type": "string", "minLength": 1},
+                    },
+                    "required": ["kind", "id", "versionId"],
+                    "additionalProperties": False,
+                },
+                "path": {"type": "string", "minLength": 1, "maxLength": 512},
+                "maxTextLength": {
+                    "type": "integer", "minimum": 1, "maximum": 64_000
+                },
+            },
+            skill_file,
+            required=("ref", "path"),
         ),
     )
 

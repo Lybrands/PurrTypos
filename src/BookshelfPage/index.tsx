@@ -39,6 +39,7 @@ interface BookshelfPageProps {
   onContinuationCreated: () => void
   onOpenNovelSources: () => void
   onOpenWritingMethods: () => void
+  onOpenSkills: () => void
   onOpenSettings: () => void
   onBack: () => void
 }
@@ -64,6 +65,7 @@ export default function BookshelfPage({
   onContinuationCreated,
   onOpenNovelSources,
   onOpenWritingMethods,
+  onOpenSkills,
   onOpenSettings,
   onBack,
 }: BookshelfPageProps) {
@@ -464,6 +466,7 @@ export default function BookshelfPage({
           <div className="bookshelf-toolbar-actions">
             <PurrButton onClick={onOpenNovelSources}>小说来源库</PurrButton>
             <PurrButton onClick={onOpenWritingMethods}>写作技法库</PurrButton>
+            <PurrButton onClick={onOpenSkills}>技能库</PurrButton>
           </div>
         </div>
 

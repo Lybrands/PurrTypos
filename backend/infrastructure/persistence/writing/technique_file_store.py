@@ -38,6 +38,11 @@ def _sync_dir(path: Path) -> None:
 
 
 class TechniqueFileStore:
+    # 集合目录与记录类型：子类（如 SkillFileStore）覆写这两个属性即可获得
+    # 独立的存储命名空间、版本目录与 kind 校验，无需复制任何逻辑。
+    collection = "techniques"
+    record_kind = "technique"
+
     def __init__(self, root: Path, *, limits: TechniqueLimits = TechniqueLimits()):
         self.root = Path(root).absolute()
         self.limits = limits
@@ -125,10 +130,10 @@ class TechniqueFileStore:
         return value
 
     def _record_path(self, technique_id: str) -> Path:
-        return self._path("techniques", self._id(technique_id), "record.json")
+        return self._path(self.collection, self._id(technique_id), "record.json")
 
     def _draft_path(self, technique_id: str, draft_id: str) -> Path:
-        return self._path("techniques", self._id(technique_id), "drafts", self._id(draft_id), "state.json")
+        return self._path(self.collection, self._id(technique_id), "drafts", self._id(draft_id), "state.json")
 
     def _deletion_path(self, object_id: str) -> Path:
         collection = self._record_path(object_id).parent.parent.name
@@ -203,7 +208,7 @@ class TechniqueFileStore:
 
     def create_draft(self, *, operation_id: str, owner: dict | None = None,
                      technique_id: str | None = None, from_version: dict | None = None,
-                     storage_scope: str = "library") -> dict:
+                     storage_scope: str = "library", origin: str | None = None) -> dict:
         if storage_scope not in {"library", "analysis_candidate", "run_input"}:
             raise TechniqueError("invalid_reference", "无效的技法存储作用域")
         request = {"action": "create", "owner": owner, "techniqueId": technique_id,
@@ -215,10 +220,17 @@ class TechniqueFileStore:
         with self.barrier():
             self._assert_not_deleted(technique_id)
             record_path = self._record_path(technique_id)
-            record = self._json(record_path) if record_path.exists() else {
-                "id": technique_id, "kind": "technique", "storageScope": storage_scope,
-                "status": "active", "publishedHead": None, "draftIds": [], "operations": {},
-            }
+            if record_path.exists():
+                record = self._json(record_path)
+                if origin is not None and record.get("origin") != origin:
+                    raise TechniqueError("invalid_reference", "技法来源标记不可变更")
+            else:
+                record = {
+                    "id": technique_id, "kind": self.record_kind, "storageScope": storage_scope,
+                    "status": "active", "publishedHead": None, "draftIds": [], "operations": {},
+                }
+                if origin is not None:
+                    record["origin"] = origin
             replay = self._replay(record, operation_id, request)
             if replay is not None:
                 return replay
@@ -338,10 +350,10 @@ class TechniqueFileStore:
                 raise TechniqueError("draft_conflict", "草稿内容摘要已改变")
             files = self._read_files(state_path.parent / "generations" / state["generation"] / "files", state["manifest"])
             manifest = file_manifest(files, limits=self.limits)
-            manifest.update(id=technique_id, kind="technique")
-            destination = self._path("techniques", technique_id, "versions", manifest["versionId"])
+            manifest.update(id=technique_id, kind=self.record_kind)
+            destination = self._path(self.collection, technique_id, "versions", manifest["versionId"])
             self._install_files(destination, files, manifest)
-            state.update(state="sealed", sealedRef={"kind": "technique", "id": technique_id, "versionId": manifest["versionId"]})
+            state.update(state="sealed", sealedRef={"kind": self.record_kind, "id": technique_id, "versionId": manifest["versionId"]})
             return self._public(state)
 
         return self._mutate_draft(technique_id, draft_id, expected_revision, operation_id, request, seal)
@@ -357,9 +369,9 @@ class TechniqueFileStore:
 
     def _version_files(self, ref: dict) -> dict:
         self._assert_not_deleted(ref.get("id"))
-        if ref.get("kind") != "technique" or not re.fullmatch(r"[a-f0-9]{64}", str(ref.get("versionId", ""))):
+        if ref.get("kind") != self.record_kind or not re.fullmatch(r"[a-f0-9]{64}", str(ref.get("versionId", ""))):
             raise TechniqueError("invalid_reference", "需要准确的技法版本引用")
-        base = self._path("techniques", self._id(ref.get("id")), "versions", ref["versionId"])
+        base = self._path(self.collection, self._id(ref.get("id")), "versions", ref["versionId"])
         manifest = self._json(base / "manifest.json")
         if manifest.get("id") != ref["id"] or manifest.get("versionId") != ref["versionId"]:
             raise TechniqueError("version_missing", "技法版本清单身份不一致")
@@ -373,7 +385,7 @@ class TechniqueFileStore:
             entry = next((entry for entry in manifest["files"] if entry["path"] == path), None)
             if entry is None:
                 raise TechniqueError("version_missing", f"技法文件不存在：{path}")
-            target = self._path("techniques", ref["id"], "versions", ref["versionId"], "files", path)
+            target = self._path(self.collection, ref["id"], "versions", ref["versionId"], "files", path)
             try:
                 raw = target.read_bytes()
                 if len(raw) != entry["size"] or digest(raw) != entry["sha256"]:
@@ -385,9 +397,9 @@ class TechniqueFileStore:
 
     def _version_manifest(self, ref: dict) -> dict:
         self._assert_not_deleted(ref.get("id"))
-        if ref.get("kind") != "technique" or not re.fullmatch(r"[a-f0-9]{64}", str(ref.get("versionId", ""))):
+        if ref.get("kind") != self.record_kind or not re.fullmatch(r"[a-f0-9]{64}", str(ref.get("versionId", ""))):
             raise TechniqueError("invalid_reference", "需要准确的技法版本引用")
-        manifest = self._json(self._path("techniques", self._id(ref.get("id")), "versions", ref["versionId"], "manifest.json"))
+        manifest = self._json(self._path(self.collection, self._id(ref.get("id")), "versions", ref["versionId"], "manifest.json"))
         tree = {"formatVersion": 1, "files": [{"path": e["path"], "sha256": e["sha256"]} for e in manifest["files"]]}
         if manifest.get("id") != ref["id"] or manifest.get("versionId") != ref["versionId"] or digest(canonical_bytes(tree)) != ref["versionId"]:
             raise TechniqueError("version_missing", "技法版本清单身份或摘要不一致")
@@ -464,7 +476,7 @@ class TechniqueFileStore:
     def list_records(self, *, include_archived: bool = False, include_candidates: bool = False) -> list[dict]:
         with self.barrier():
             records = []
-            directory = self._path("techniques")
+            directory = self._path(self.collection)
             if not directory.exists():
                 return records
             for child in sorted(directory.iterdir()):

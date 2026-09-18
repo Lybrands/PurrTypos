@@ -35,12 +35,13 @@ const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const ScreenplayAgentPage = lazy(() => import('./ScreenplayAgentPage'))
 const WritingMethodsPage = lazy(() => import('./WritingMethodsPage'))
+const SkillsPage = lazy(() => import('./SkillsPage'))
 const NovelSourcesPage = lazy(() => import('./NovelSourcesPage'))
 const AiDevInspector = import.meta.env.DEV
   ? lazy(() => import('./components/AiDevInspector'))
   : null
 
-type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'novelSources' | 'workspace'
+type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'skills' | 'novelSources' | 'workspace'
 type BooksStatus = 'idle' | 'loading' | 'loaded'
 type SettingsLocationState = { returnTo?: string }
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
@@ -84,6 +85,8 @@ export default function App() {
         ? 'bookshelf'
         : contentPath === '/writing-methods'
           ? 'writingMethods'
+        : contentPath === '/skills'
+          ? 'skills'
         : contentPath === '/novel-sources' || contentPath.startsWith('/novel-sources/')
           ? 'novelSources'
         : 'home'
@@ -245,6 +248,10 @@ export default function App() {
     navigate('/writing-methods')
   }, [navigate])
 
+  const handleEnterSkills = React.useCallback(() => {
+    navigate('/skills')
+  }, [navigate])
+
   const handleEnterNovelSources = React.useCallback(() => {
     navigate('/novel-sources')
   }, [navigate])
@@ -367,12 +374,16 @@ export default function App() {
                 onContinuationCreated={loadBooks}
                 onOpenNovelSources={handleEnterNovelSources}
                 onOpenWritingMethods={handleEnterWritingMethods}
+                onOpenSkills={handleEnterSkills}
                 onOpenSettings={handleOpenSettings}
                 onBack={handleBackToHome}
               />
             )} />
             <Route path="/writing-methods" element={(
               <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} onOpenSettings={handleOpenSettings} />
+            )} />
+            <Route path="/skills" element={(
+              <SkillsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} onOpenSettings={handleOpenSettings} />
             )} />
             <Route path="/novel-sources/:workId?" element={(
               <NovelSourcesPage
