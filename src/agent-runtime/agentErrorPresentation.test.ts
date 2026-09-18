@@ -16,3 +16,14 @@ test('transport error codes are localized only in the product read model', () =>
     '模型单次处理超过当前时限，已安全停止。',
   )
 })
+
+test('context overflow codes present actionable guidance instead of a generic failure', () => {
+  assert.equal(
+    presentAgentRunError('failed', 'context_overflow_initial'),
+    '本轮请求的上下文超出所选模型的窗口（含必选的写作技法与受保护内容）。请减少手动选择的写作技法，或改用更大上下文窗口的模型后重试。',
+  )
+  assert.equal(
+    presentAgentRunError('failed', 'context_overflow_after_tool'),
+    '对话与工具结果累计超出模型上下文窗口，本轮已安全停止。请开启新会话继续，或改用更大上下文窗口的模型。',
+  )
+})

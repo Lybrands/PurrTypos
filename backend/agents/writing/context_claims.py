@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from purra.context_budget import estimate_json_tokens
 from purra.contracts import AgentRunRequest, ContextBudgetClaim
+from purra.json_values import thaw_json_value
 
 from agents.writing.request_contract import WritingRequestContext
 
@@ -42,7 +45,8 @@ def writing_context_claims(
         + estimate_json_tokens(candidate.get("composition", ""))
         + 1024
         for candidate in manual
-        if isinstance(candidate, dict)
+        # 领域载荷经 purra 冻结后是 Mapping 协议容器而不是原生 dict。
+        if isinstance(candidate, Mapping)
     )
     desired_techniques = required + (
         12_000 if technique_snapshot.get("candidates") else 0
@@ -60,6 +64,9 @@ def writing_context_claims(
 
     inherited = payload.get("inherited_canon_records")
     if payload.get("creation_mode") == "continuation" and inherited:
+        # 领域载荷按 purra 协议冻结为不可变容器；估算前解冻，
+        # 避免 FrozenList/FrozenDict 无法走 JSON 序列化。
+        inherited = thaw_json_value(inherited)
         desired_canon = min(
             24_000,
             max(2_000, estimate_json_tokens(inherited) + 400),

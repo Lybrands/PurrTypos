@@ -19,6 +19,8 @@ const AGENT_ERROR_MESSAGES: Record<string, string> = {
   provider_unavailable: '模型服务暂时不可用，请稍后重试。',
   upstream_stream_interrupted: '模型服务流式响应中断，请检查网络或稍后重试。',
   model_invocation_deadline_exceeded: '模型单次处理超过当前时限，已安全停止。',
+  context_overflow_initial: '本轮请求的上下文超出所选模型的窗口（含必选的写作技法与受保护内容）。请减少手动选择的写作技法，或改用更大上下文窗口的模型后重试。',
+  context_overflow_after_tool: '对话与工具结果累计超出模型上下文窗口，本轮已安全停止。请开启新会话继续，或改用更大上下文窗口的模型。',
 }
 
 export function presentAgentRunError(
