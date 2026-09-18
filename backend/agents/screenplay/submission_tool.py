@@ -26,6 +26,33 @@ from purra.contracts import (
 from purra.ports import ToolRegistration
 
 
+_CANDIDATE_TITLE_MAX_CHARS = 24
+
+
+def _candidate_title_arguments(arguments: Mapping) -> dict[str, str]:
+    candidate = arguments.get("candidate")
+    if not isinstance(candidate, Mapping):
+        return {}
+    text = ""
+    for key in ("title", "name"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            break
+    if not text:
+        content = candidate.get("content")
+        if isinstance(content, str):
+            text = next(
+                (line.strip() for line in content.splitlines() if line.strip()),
+                "",
+            )
+    if not text:
+        return {}
+    if len(text) > _CANDIDATE_TITLE_MAX_CHARS:
+        text = text[: _CANDIDATE_TITLE_MAX_CHARS - 1] + "…"
+    return {"candidateTitle": text}
+
+
 def build_screenplay_replacement_submission_registration(db) -> ToolRegistration:
     artifacts = ScreenplayCandidateArtifactStore(db)
 
