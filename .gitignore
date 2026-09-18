@@ -88,3 +88,6 @@ purrtypos.db-shm
 backend/creation-materials/
 backend/writing-library/
 backend/.writing-library.lock
+
+# ZCode session-local artifacts
+.zcode/
