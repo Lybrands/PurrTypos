@@ -131,10 +131,12 @@ async def test_edit_folds_blank_lines_into_single_paragraph_breaks(chapter_db) -
         "baseRevision": current["baseRevision"],
     }), sink))
 
-    for _ in range(100):
+    # 等审批事件到达：aiosqlite 的线程回调需要真实时间让步，
+    # CI 慢机上纯 sleep(0) 让步不足百次就会取空列表。
+    for _ in range(500):
         if sink.events:
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     approval_id = sink.events[0].payload["approvalId"]
     await approvals.resolve("run-edit", approval_id, "approve")
     await task
@@ -164,10 +166,12 @@ async def test_edit_waits_for_approval_then_commits_once(chapter_db) -> None:
         "baseRevision": current["baseRevision"],
     }), sink))
 
-    for _ in range(100):
+    # 等审批事件到达：aiosqlite 的线程回调需要真实时间让步，
+    # CI 慢机上纯 sleep(0) 让步不足百次就会取空列表。
+    for _ in range(500):
         if sink.events:
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     assert sink.events[0].type == CoreEventType.APPROVAL_REQUESTED
     before = await chapter_db.fetch_one(
         "SELECT content FROM articles WHERE chapter_id = 'chapter-1'"
@@ -211,10 +215,12 @@ async def test_rejected_edit_never_changes_article(chapter_db) -> None:
         "baseRevision": current["baseRevision"],
     }), sink))
 
-    for _ in range(100):
+    # 等审批事件到达：aiosqlite 的线程回调需要真实时间让步，
+    # CI 慢机上纯 sleep(0) 让步不足百次就会取空列表。
+    for _ in range(500):
         if sink.events:
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     await approvals.resolve(
         "run-edit",
         sink.events[0].payload["approvalId"],
