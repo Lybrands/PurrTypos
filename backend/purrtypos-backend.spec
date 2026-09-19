@@ -19,16 +19,10 @@ _datas = []
 if os.path.isdir(_skills_src):
     _datas.append((_skills_src, "skills"))
 
-_writing_builtin_skills = os.path.join("agents", "writing", "builtin_skills")
+_builtin_skills = os.path.join("agents", "builtin_skills")
 _datas.append((
-    os.path.join(_spec_dir, _writing_builtin_skills),
-    _writing_builtin_skills,
-))
-
-_novel_analysis_skills = os.path.join("agents", "novel_analysis", "skills")
-_datas.append((
-    os.path.join(_spec_dir, _novel_analysis_skills),
-    _novel_analysis_skills,
+    os.path.join(_spec_dir, _builtin_skills),
+    _builtin_skills,
 ))
 
 _hiddenimports = [
