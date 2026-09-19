@@ -16,10 +16,13 @@ from infrastructure.persistence.writing.technique_document_parser import file_ma
 
 logger = logging.getLogger(__name__)
 
-BUILTIN_PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "agents" / "writing" / "builtin_skills"
+BUILTIN_PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "agents" / "builtin_skills"
 
 BUILTIN_SKILLS = (
     {"id": "builtin-obsidian-materials", "package": "obsidian-materials"},
+    # 分析 Agent 创建写作 Skill 的子 Agent 指令包；未声明 autoUse，
+    # 仅在技能库展示，注入仍走 creator_skill_resource（仓库目录是唯一源）。
+    {"id": "builtin-writing-skill-creator", "package": "purrtypos-writing-skill-creator"},
 )
 
 
