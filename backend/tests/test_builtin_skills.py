@@ -57,13 +57,18 @@ def _payload(result) -> dict:
 @pytest.mark.asyncio
 async def test_seed_publishes_skill_and_is_idempotent(db):
     first = await ensure_builtin_skills(db)
-    assert first == ["builtin-obsidian-materials"]
+    assert first == ["builtin-obsidian-materials", "builtin-writing-skill-creator"]
 
     record = await _record(db, "builtin-obsidian-materials")
     assert record["kind"] == "skill"
     assert record["origin"] == "builtin"
     assert record["status"] == "active"
     assert record["publishedHead"]
+
+    # skill creator 同为内置技能，但未声明 autoUse —— 仅展示，不进 Agent 快照。
+    creator = await _record(db, "builtin-writing-skill-creator")
+    assert creator["origin"] == "builtin"
+    assert (creator.get("metadata") or {}).get("autoUse") is None
 
     service = WritingTechniqueService(db)
     entry = await service.read_version_file(
@@ -161,6 +166,8 @@ async def test_snapshot_skills_only_include_auto_use(db):
     ids = {entry["ref"]["id"] for entry in entries}
     assert "builtin-obsidian-materials" in ids
     assert quiet_ref["id"] not in ids
+    # 未声明 autoUse 的内置技能（skill creator）同样不进 Agent 快照。
+    assert "builtin-writing-skill-creator" not in ids
     builtin = next(e for e in entries if e["ref"]["id"] == "builtin-obsidian-materials")
     assert builtin["metadata"]["autoUse"] is True
     assert builtin["entryBytes"] > 0

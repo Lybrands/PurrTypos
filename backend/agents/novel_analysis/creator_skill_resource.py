@@ -8,7 +8,8 @@ from pathlib import Path
 
 CREATOR_SKILL_ID = "purrtypos-writing-skill-creator"
 CREATOR_SKILL_VERSION = 2
-_ROOT = Path(__file__).with_name("skills") / CREATOR_SKILL_ID
+# 与 application.builtin_skills.py 共用 agents/builtin_skills 下的同一份源文件。
+_ROOT = Path(__file__).resolve().parents[1] / "builtin_skills" / CREATOR_SKILL_ID
 
 
 def creator_skill_files() -> dict[str, str]:
