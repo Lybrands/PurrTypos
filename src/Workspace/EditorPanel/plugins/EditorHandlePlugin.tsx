@@ -12,9 +12,16 @@ import {
   $isRangeSelection,
   UNDO_COMMAND,
   REDO_COMMAND,
-  type RangeSelection,
 } from 'lexical'
 import { getEditorText, reformatArticleText } from './editorText'
+import {
+  $applyFlatSelection,
+  $getFlatSelectionRange,
+  findAnchorStart,
+} from '../selectionAnchor'
+
+/** 校验式替换/插入的结果：ok=已落盘；stale=原文已变且无法重定位 */
+export type InlineApplyResult = 'ok' | 'stale'
 
 export interface LexicalEditorHandle {
   undo: () => void
@@ -40,17 +47,26 @@ export interface LexicalEditorHandle {
   /**
    * 捕获当前选区，返回：
    * - `text`：选中文本
+   * - `flatStart` / `flatEnd`：章节纯文本扁平偏移（\n 拼接规则）
    * - `restore()`：重新把同一范围设为选区
-   * - `replace(newText)`：基于快照范围替换为新文本
+   * - `replace(newText)`：校验式替换——原位文本仍匹配则原位替换；否则按引文
+   *   在当前全文重定位（取离原位置最近的匹配）；找不到返回 'stale'
+   * - `insertAfter(newText)`：校验式插入——文本作为新段落插到选区之后，
+   *   不改动选区原文；定位规则同 replace
    * 无选区（collapsed / 空）返回 null。
    */
   captureSelection: () => {
     text: string
+    flatStart: number
+    flatEnd: number
     restore: () => void
-    replace: (newText: string) => void
+    replace: (newText: string) => InlineApplyResult
+    insertAfter: (newText: string) => InlineApplyResult
   } | null
   /** 读取当前选区纯文本；无选区返回空串。 */
   getSelectedText: () => string
+  /** 读取当前章节纯文本（与 editorStateToText 同一套 \n 段落拼接）。 */
+  getFlatText: () => string
   /** 聚焦编辑器。 */
   focus: () => void
 }
@@ -124,15 +140,20 @@ export function EditorHandlePlugin({ parentRef }: { parentRef: React.Ref<Lexical
         let result:
           | {
               text: string
+              flatStart: number
+              flatEnd: number
               restore: () => void
-              replace: (newText: string) => void
+              replace: (newText: string) => InlineApplyResult
+              insertAfter: (newText: string) => InlineApplyResult
             }
           | null = null
         editor.getEditorState().read(() => {
           const sel = $getSelection()
           if (!$isRangeSelection(sel) || sel.isCollapsed()) return
           const text = sel.getTextContent()
-          if (!text) return
+          if (!text.trim()) return
+          const flat = $getFlatSelectionRange()
+          if (!flat) return
           const anchorKey = sel.anchor.key
           const anchorOffset = sel.anchor.offset
           const anchorType = sel.anchor.type
@@ -148,16 +169,42 @@ export function EditorHandlePlugin({ parentRef }: { parentRef: React.Ref<Lexical
               $setSelection(range)
             })
           }
-          const replaceFn = (newText: string) => {
-            if (!newText) return
+
+          // 在扁平偏移 [start, end) 上写入 newText：
+          // mode='replace' 覆盖该范围；mode='insertAfter' 折叠到范围末尾另起一段插入
+          const applyAtFlat = (
+            start: number,
+            end: number,
+            newText: string,
+            mode: 'replace' | 'insertAfter',
+          ): InlineApplyResult => {
+            if (!newText) return 'stale'
+            let ok = false
             editor.focus()
             editor.update(() => {
-              const range = $createRangeSelection()
-              range.anchor.set(anchorKey, anchorOffset, anchorType)
-              range.focus.set(focusKey, focusOffset, focusType)
-              $setSelection(range)
-              const current = $getSelection() as RangeSelection | null
+              if (!$applyFlatSelection(start, end)) return
+              const current = $getSelection()
               if (!current || !$isRangeSelection(current)) return
+              if (mode === 'insertAfter') {
+                const collapsed = $createRangeSelection()
+                collapsed.anchor.set(current.focus.key, current.focus.offset, current.focus.type)
+                collapsed.focus.set(current.focus.key, current.focus.offset, current.focus.type)
+                $setSelection(collapsed)
+                const c = $getSelection()
+                if (!c || !$isRangeSelection(c)) return
+                const lines = newText.split('\n')
+                c.insertParagraph()
+                c.insertText(lines[0])
+                for (let i = 1; i < lines.length; i++) {
+                  const s = $getSelection()
+                  if ($isRangeSelection(s)) {
+                    s.insertParagraph()
+                    s.insertText(lines[i])
+                  }
+                }
+                ok = true
+                return
+              }
               const lines = newText.split('\n')
               current.insertText(lines[0])
               for (let i = 1; i < lines.length; i++) {
@@ -167,9 +214,42 @@ export function EditorHandlePlugin({ parentRef }: { parentRef: React.Ref<Lexical
                   s.insertText(lines[i])
                 }
               }
+              ok = true
             })
+            return ok ? 'ok' : 'stale'
           }
-          result = { text, restore: restoreFn, replace: replaceFn }
+
+          // 校验式定位：原位文本仍匹配则用原位；否则按引文重定位（取最近匹配）
+          const resolveAnchor = (
+            currentFlat: string,
+          ): { start: number; end: number } | null => {
+            if (currentFlat.slice(flat.start, flat.end) === text) {
+              return { start: flat.start, end: flat.end }
+            }
+            const trimmed = text.trim()
+            const relocated = findAnchorStart(currentFlat, trimmed, flat.start)
+            if (relocated == null) return null
+            return { start: relocated, end: relocated + trimmed.length }
+          }
+
+          const applyValidated = (
+            newText: string,
+            mode: 'replace' | 'insertAfter',
+          ): InlineApplyResult => {
+            if (!newText) return 'stale'
+            const anchor = resolveAnchor(getEditorText(editor))
+            if (!anchor) return 'stale'
+            return applyAtFlat(anchor.start, anchor.end, newText, mode)
+          }
+
+          result = {
+            text,
+            flatStart: flat.start,
+            flatEnd: flat.end,
+            restore: restoreFn,
+            replace: (newText) => applyValidated(newText, 'replace'),
+            insertAfter: (newText) => applyValidated(newText, 'insertAfter'),
+          }
         })
         return result
       },
@@ -183,6 +263,7 @@ export function EditorHandlePlugin({ parentRef }: { parentRef: React.Ref<Lexical
         })
         return text
       },
+      getFlatText: () => getEditorText(editor),
       focus: () => editor.focus(),
     }),
     [editor]

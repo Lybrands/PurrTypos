@@ -37,7 +37,7 @@ class SqliteToolIdempotencyGateway:
         if not normalized_run:
             raise ContractViolationError("idempotent tool execution requires a run id")
         digest = _arguments_digest(tool_call)
-        async with self._db.transaction():
+        async with self._db.transaction(cancellation_linearizable=True):
             execution = await self._db.fetch_one(
                 "SELECT status, execution_owner_id, lease_expires_at_ms, "
                 "cancel_requested_at_ms FROM ai_agent_runs WHERE id = ?",

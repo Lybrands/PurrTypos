@@ -20,6 +20,8 @@ interface UseChapterSectionActionsOptions {
   activeChapterId?: EntityId | null
   enableVolume: boolean
   chaptersById: Map<EntityId, Chapter>
+  /** 有序章节行（含卷行），用于删除当前章后回退到上一章 */
+  chapters: Chapter[]
   onChapterSelect: (chapterId: EntityId, title: string) => void
   onChaptersChange: (outlineId: EntityId, chapters: Chapter[]) => void
   onItemCreated?: (chapterId: EntityId, title: string, isVolume: boolean, parentWritingChapterId: EntityId | null) => void
@@ -43,6 +45,7 @@ export function useChapterSectionActions({
   activeChapterId,
   enableVolume,
   chaptersById,
+  chapters,
   onChapterSelect,
   onChaptersChange,
   onItemCreated,
@@ -115,11 +118,28 @@ export function useChapterSectionActions({
   ) => {
     for (const id of ids) await services.chapters.deleteChapter({ id })
     if (writingOutlineId) await reloadChapters(writingOutlineId)
-    if (activeChapterId != null && ids.includes(activeChapterId)) onChapterSelect('', '')
+    if (activeChapterId != null && ids.includes(activeChapterId)) {
+      // 删除的是当前章：回退到渲染顺序中它前面最近的存活章节
+      // （没有则取后面最近的），避免会话面板落到无章节的悬空状态。
+      const deletedIds = new Set(ids.map(String))
+      const volumeIds = new Set(
+        chapters.filter((c) => c.parent_id != null).map((c) => String(c.parent_id)),
+      )
+      const survivors = chapters.filter(
+        (c) => !deletedIds.has(String(c.id)) && !volumeIds.has(String(c.id)),
+      )
+      const firstDeletedIndex = chapters.findIndex((c) => deletedIds.has(String(c.id)))
+      const fallback =
+        survivors.filter((_c, index) => index < firstDeletedIndex).at(-1)
+        ?? survivors[0]
+        ?? null
+      if (fallback) onChapterSelect(fallback.id, fallback.title)
+      else onChapterSelect('', '')
+    }
     if (notifyOutlineDeleted) {
       for (const id of ids) onWritingChapterDeleted?.(id)
     }
-  }, [activeChapterId, onChapterSelect, onWritingChapterDeleted, reloadChapters, writingOutlineId])
+  }, [activeChapterId, chapters, onChapterSelect, onWritingChapterDeleted, reloadChapters, writingOutlineId])
 
   const exportChapters = React.useCallback(async (
     selectedIds: EntityId[],

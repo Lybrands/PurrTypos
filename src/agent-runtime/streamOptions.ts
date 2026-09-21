@@ -66,11 +66,12 @@ export function buildStreamOptions(params: {
     ...(cfg?.maxGenerationTokens
       ? { max_generation_tokens: cfg.maxGenerationTokens }
       : {}),
+    // 服务商级内置条目的登记上限是默认值，用户显式覆盖时必须透传（自定义模型必填）。
+    ...(cfg?.profileMaxGenerationTokens
+      ? { profile_max_generation_tokens: cfg.profileMaxGenerationTokens }
+      : {}),
     ...(!cfg?.presetId
       ? {
-          ...(cfg?.profileMaxGenerationTokens
-            ? { profile_max_generation_tokens: cfg.profileMaxGenerationTokens }
-            : {}),
           supports_thinking: cfg?.supportsThinking === true,
           thinking_only: cfg?.thinkingOnly === true,
         }

@@ -1,3 +1,4 @@
+import { SourceSectionReader } from './ContinuationHistory'
 import React, { Suspense, lazy } from 'react'
 import {
   DashboardIcon,
@@ -8,6 +9,7 @@ import {
   MasterOutlineIcon,
   OutlineIcon,
   PanelToggleIcon,
+  LibraryIcon,
   StoryMemoryIcon,
   StorySettingIcon,
 } from '@/purr-components'
@@ -34,7 +36,8 @@ const TAB_ICONS: Record<WorkspaceUtilityTabKind, React.ReactNode> = {
   memory: <StoryMemoryIcon />,
   writingMethods: <HighlightIcon />,
   canon: <StoryMemoryIcon />,
-  knowledge: <StoryMemoryIcon />,
+  source: <ManuscriptIcon />,
+  knowledge: <LibraryIcon />,
   setting: <StorySettingIcon />,
   dashboard: <DashboardIcon />,
 }
@@ -84,10 +87,6 @@ export default function WorkspaceUtilityPanel({
     setFullscreenTooltipOpen(false)
   }, [fullscreen])
 
-  const handleOutlineChanged = React.useCallback(() => {
-    window.dispatchEvent(new CustomEvent('chapter-outline-changed'))
-  }, [])
-
   const items = [{
     key: EDITOR_TAB_KEY,
     label: (
@@ -112,7 +111,6 @@ export default function WorkspaceUtilityPanel({
           <ChapterOutlinePanel
             target={tab.outlineTarget}
             bookId={bookId}
-            onChanged={handleOutlineChanged}
           />
         ) : null}
         {tab.kind === 'memory' ? (
@@ -125,7 +123,8 @@ export default function WorkspaceUtilityPanel({
             <WritingMethodBindingsPanel bookId={bookId} />
           </div>
         ) : null}
-        {tab.kind === 'knowledge' ? <KnowledgePanel key={String(bookId)} bookId={bookId} /> : null}
+        {tab.kind === 'knowledge' ? <div className="workspace-utility-content workspace-utility-content--knowledge"><KnowledgePanel key={String(bookId)} bookId={bookId} /></div> : null}
+        {tab.kind === 'source' && tab.sourceSectionId && bookId != null ? <SourceSectionReader bookId={String(bookId)} sectionId={tab.sourceSectionId} /> : null}
         {tab.kind === 'canon' ? (
           <div className="workspace-utility-content workspace-utility-content--canon">
             <ContinuationCanonPanel bookId={bookId} />
@@ -178,19 +177,19 @@ export default function WorkspaceUtilityPanel({
               </PurrTooltip>
             ) : null}
             {dockCollapsed && onExpandDock ? (
-              <PurrTooltip title="固定展开工作面板">
+              <PurrTooltip title="展开">
                 <PurrButton
                   type="text"
                   size="small"
                   icon={<PanelToggleIcon side="right" state="collapsed" />}
                   onClick={onExpandDock}
                   className="workspace-utility-action-btn"
-                  aria-label="固定展开工作面板"
+                  aria-label="展开工作面板"
                 />
               </PurrTooltip>
             ) : null}
             {!dockCollapsed && onCollapse ? (
-              <PurrTooltip title="收起工作面板">
+              <PurrTooltip title="收起">
                 <PurrButton
                   type="text"
                   size="small"

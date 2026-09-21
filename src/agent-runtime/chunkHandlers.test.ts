@@ -851,7 +851,7 @@ test('onSettled is delivered at most once even when the host throws', () => {
   assert.equal(harness.readMessages().at(-1)?.content, '已投影终稿')
 })
 
-test('each received chunk commits DOM text before the next chunk arrives', async () => {
+test('a chunk burst preserves order without forcing a DOM commit per chunk', async () => {
   const React = await import('react')
   const { parseHTML } = await import('linkedom')
   const { createRoot } = await import('react-dom/client')
@@ -863,17 +863,24 @@ test('each received chunk commits DOM text before the next chunk arrives', async
   const container = window.document.getElementById('stream-root')!
   const root = createRoot(container)
   let schedule: ReturnType<typeof createCommitScheduler>['scheduleCommit']
+  let flush: ReturnType<typeof createCommitScheduler>['flushCommits']
   function Stream() {
     const [messages, setMessages] = React.useState<AgentConversationMessage[]>([])
-    schedule = createCommitScheduler(setMessages).scheduleCommit
+    const scheduler = createCommitScheduler(setMessages)
+    schedule = scheduler.scheduleCommit
+    flush = scheduler.flushCommits
     return React.createElement('p', null, messages.map(message => message.content).join(''))
   }
   try {
     commitAgentChunk(() => root.render(React.createElement(Stream)))
-    for (const [piece, expected] of [['第一块', '第一块'], ['第二块', '第一块第二块']]) {
-      schedule!(previous => [...previous, { role: 'assistant', content: piece } as AgentConversationMessage])
-      assert.equal(container.textContent, expected)
-    }
+    await React.act(async () => {
+      for (const piece of ['第一块', '第二块']) {
+        schedule!(previous => [...previous, { role: 'assistant', content: piece } as AgentConversationMessage])
+        assert.equal(container.textContent, '')
+      }
+      flush!()
+    })
+    assert.equal(container.textContent, '第一块第二块')
   } finally {
     commitAgentChunk(() => root.unmount())
     Object.assign(globalThis, { window: previousWindow, document: previousDocument })

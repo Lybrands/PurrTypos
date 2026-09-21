@@ -1,3 +1,4 @@
+import ContinuationHistory from '../ContinuationHistory'
 import React from 'react'
 import {
   CheckSquareIcon,
@@ -9,7 +10,15 @@ import { PurrButton, PurrTooltip } from '@/purr-components'
 import type { Chapter, EntityId } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import ExportModal from '../../components/ExportModal'
-import { useWorkspace } from '../WorkspaceContext'
+import {
+    useActiveChapterId,
+    useBookId,
+    useEnableVolume,
+    useSearchQuery,
+    useWritingChapters,
+    useWritingOutlineId,
+    useWorkspaceStore,
+  } from '../../stores/workspaceStore'
 import { createOutlineUtilityTab } from '../utilityPanelTypes'
 import ChapterSectionNavigation from './ChapterSectionNavigation'
 import {
@@ -30,7 +39,7 @@ export interface ChapterSectionProps {
 
 type DeleteModal = {
   chapter: Chapter
-  onConfirm: (checked: boolean) => void
+  onConfirm: () => void
   checkboxLabel?: string
 }
 
@@ -44,18 +53,17 @@ export default function ChapterSection({
   onItemCreated,
   onWritingChapterDeleted,
 }: ChapterSectionProps) {
-  const {
-    writingChapters: chapters,
-    activeChapterId: chapterId,
-    writingOutlineId,
-    bookId,
-    enableVolume,
-    setActiveChapter: onChapterSelect,
-    setChaptersData: onChaptersChange,
-    openUtilityTab,
-    workspaceSearchQuery,
-  } = useWorkspace()
+  const chapters = useWritingChapters()
+  const chapterId = useActiveChapterId()
+  const writingOutlineId = useWritingOutlineId()
+  const bookId = useBookId()
+  const enableVolume = useEnableVolume()
+  const onChapterSelect = useWorkspaceStore((s) => s.setActiveChapter)
+  const onChaptersChange = useWorkspaceStore((s) => s.setChaptersData)
+  const openUtilityTab = useWorkspaceStore((s) => s.openUtilityTab)
+  const workspaceSearchQuery = useSearchQuery()
 
+  const [historyCount, setHistoryCount] = React.useState(0)
   const [editingChapterId, setEditingChapterId] = React.useState<EntityId | null>(null)
   const [editingTitle, setEditingTitle] = React.useState('')
   const [showAddInput, setShowAddInput] = React.useState(false)
@@ -96,6 +104,7 @@ export default function ChapterSection({
     activeChapterId: chapterId,
     enableVolume,
     chaptersById,
+    chapters,
     onChapterSelect,
     onChaptersChange,
     onItemCreated,
@@ -112,7 +121,7 @@ export default function ChapterSection({
   }, [openUtilityTab])
 
   const handleAddChapter = () => createItem({
-    title: numberedChapterTitle('章', writableChapters.length + 1, newTitle),
+    title: numberedChapterTitle('章', historyCount + writableChapters.length + 1, newTitle),
     resetInput: () => {
       setNewTitle('')
       setShowAddInput(false)
@@ -120,7 +129,7 @@ export default function ChapterSection({
   })
 
   const handleQuickAddChapter = () => createItem({
-    title: numberedChapterTitle('章', writableChapters.length + 1),
+    title: numberedChapterTitle('章', historyCount + writableChapters.length + 1),
   })
 
   const handleQuickAddChapterToVolume = (volumeId: EntityId) => createItem({
@@ -160,11 +169,11 @@ export default function ChapterSection({
     const ids = getItemAndDescendantIds(chapter, enableVolume, chaptersByVolumeId)
     setDeleteModal({
       chapter,
-      onConfirm: async (checked) => {
+      // 大纲与章节已不再分离：删除始终联动清理对应大纲
+      onConfirm: async () => {
         setDeleteModal(null)
-        await deleteByIds(ids, checked)
+        await deleteByIds(ids, true)
       },
-      checkboxLabel: '同时删除对应大纲',
     })
   }
 
@@ -242,11 +251,11 @@ export default function ChapterSection({
 
   return (
     <>
+      <ContinuationHistory onCount={setHistoryCount} />
       {deleteModal && (
         <ConfirmModal
           title={enableVolume && deleteModal.chapter.parent_id == null ? '删除卷' : '删除章节'}
           message={`确认删除${enableVolume && deleteModal.chapter.parent_id == null ? '卷' : '章节'}「${deleteModal.chapter.title}」？${enableVolume && deleteModal.chapter.parent_id == null ? '卷内章节将一并删除。' : ''}删除后无法恢复。`}
-          checkboxLabel={deleteModal.checkboxLabel}
           onConfirm={deleteModal.onConfirm}
           onCancel={() => setDeleteModal(null)}
         />
@@ -261,7 +270,7 @@ export default function ChapterSection({
       )}
 
       <ExportModal
-        title="导出章节"
+        title={historyCount ? "导出所选续写章节" : "导出章节"}
         open={exportModalOpen}
         onCancel={closeExportModal}
         items={exportItems}
@@ -275,9 +284,9 @@ export default function ChapterSection({
       />
 
       <div className="chapter-list-actionbar">
-        <span className="chapter-list-count">共 {writableChapters.length} 章</span>
+        <span className="chapter-list-count">{historyCount ? `历史 ${historyCount} 章 · 续写 ${writableChapters.length} 章` : `共 ${writableChapters.length} 章`}</span>
         <div className="chapter-list-actionbar-actions">
-          <PurrTooltip title="导出章节">
+          <PurrTooltip title={historyCount ? "导出所选续写章节" : "导出章节"}>
             <PurrButton
               type="text"
               size="small"
@@ -355,7 +364,7 @@ export default function ChapterSection({
           chapters={chapters}
           volumes={volumes}
           chaptersByVolumeId={chaptersByVolumeId}
-          writableChapterCount={writableChapters.length}
+          writableChapterCount={historyCount + writableChapters.length}
           activeChapterId={chapterId}
           searchQuery={workspaceSearchQuery}
           editingChapterId={editingChapterId}

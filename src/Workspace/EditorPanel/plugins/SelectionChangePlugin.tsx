@@ -45,7 +45,11 @@ export function SelectionChangePlugin({
       // 延时一帧：若焦点移到受控 UI（如工具条），保留；否则关闭。
       setTimeout(() => {
         const active = document.activeElement as HTMLElement | null
-        if (active?.closest('.inline-edit-toolbar') || active?.closest('.inline-edit-popover')) {
+        if (
+          active?.closest('.inline-edit-toolbar') ||
+          active?.closest('.inline-edit-popover') ||
+          active?.closest('.annotation-popover')
+        ) {
           return
         }
         onSelectionChange(null)

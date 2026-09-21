@@ -151,6 +151,8 @@ export interface BookConversationBindings {
   canSelectSession?(id: string | number): boolean
   attachmentsVersion?: string | number
   scopeAvailable?: boolean
+  /** 写作范围未选章节等导致禁发时给用户的提示 */
+  composerDisabledHint?: string
   modelConfigs: AiModelConfig[]
   selectedModelId: string
   setSelectedModelId(id: string): void
@@ -163,6 +165,8 @@ export interface BookConversationBindings {
     | 'createSession'
     | 'closeSession'
     | 'renameSession'
+    | 'reorderSessions'
+    | 'toggleSessionPinned'
     | 'loadSessionHistory'
     | 'openHistorySession'
     | 'deleteSession'
@@ -220,7 +224,9 @@ export function createBookConversationController(
     capabilities: getAgentConversationCapabilities({
       running: bindings.running,
       readOnly: false,
-      sessionLoading: bindings.initializing,
+      // 零会话时可直接发送：useChatSubmit 的 ensureSession 会自动创建会话
+      // （能力默认已放开，此处显式声明以表明发送路径支持该约定）。
+      sessionlessSend: true,
     }),
     conversation: {
       identity: bindings.conversationIdentity
@@ -256,11 +262,13 @@ export function createBookConversationController(
       setValue: bindings.setPrompt,
       placeholder: '想写点什么',
       ariaLabel: '输入希望写作 Agent 完成的任务',
-      ready: bindings.scopeAvailable !== false && bindings.activeSessionId != null && !bindings.initializing,
+      // 零会话不再阻断输入/发送：发送时会自动创建会话（useChatSubmit ensureSession）。
+      // 会话列表加载期间（initializing）保持禁发，避免在不知道是否已有会话时重复建会话。
+      ready: bindings.scopeAvailable !== false && !bindings.initializing,
+      disabledHint: bindings.composerDisabledHint,
       submitDisabled: Boolean(
         !bindings.prompt.trim()
         || !selectedModel
-        || bindings.activeSessionId == null
         || bindings.scopeAvailable === false
         || bindings.initializing
       ),

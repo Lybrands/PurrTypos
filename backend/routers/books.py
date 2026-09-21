@@ -77,16 +77,21 @@ async def create_book(body: CreateBookRequest):
     cnt = await db.fetch_one("SELECT COUNT(*) as c FROM books")
     color = BOOK_COLORS[int(cnt["c"] if cnt else 0) % len(BOOK_COLORS)]
     enable_volume = 1 if body.enableVolume else 0
-    await db.execute(
-        "INSERT INTO books (id, title, cover_color, enable_volume) VALUES (?, ?, ?, ?)",
-        [book_id, body.title, color, enable_volume],
-    )
-    book = await db.fetch_one("SELECT * FROM books WHERE id = ?", [book_id])
-    wid = short_id8()
-    await db.execute(
-        "INSERT INTO outlines (id, title, type, sort, book_id) VALUES (?, ?, ?, ?, ?)",
-        [wid, body.title, "writing", 0, book_id],
-    )
+    async with db.transaction():
+        await db.execute(
+            "INSERT INTO books (id, title, cover_color, enable_volume) VALUES (?, ?, ?, ?)",
+            [book_id, body.title, color, enable_volume],
+        )
+        book = await db.fetch_one("SELECT * FROM books WHERE id = ?", [book_id])
+        wid = short_id8()
+        await db.execute(
+            "INSERT INTO outlines (id, title, type, sort, book_id) VALUES (?, ?, ?, ?, ?)",
+            [wid, body.title, "writing", 0, book_id],
+        )
+        from application.creation_material_service import materials
+        material_service = materials(db)
+        initial = await material_service.preview(book_id)
+        await material_service.migrate(book_id, initial['sourceRevision'])
     return {"success": True, "data": book}
 
 
@@ -170,6 +175,8 @@ async def delete_book(bookId: str):
         )
         await _delete_where_in(db, "ai_conversations", "session_id", session_ids)
         await _delete_where_in(db, "ai_conversations", "chapter_id", chapter_ids)
+        for session_id in session_ids:
+            await db.execute("DELETE FROM writing_technique_selections WHERE scope_kind='session' AND scope_id=?", [str(session_id)])
         await _delete_where_in(db, "ai_sessions", "id", session_ids)
         await db.execute(
             "UPDATE ai_sessions SET book_id = NULL "
@@ -179,6 +186,9 @@ async def delete_book(bookId: str):
 
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
+        await db.execute(
+            "DELETE FROM chapter_annotations WHERE book_id = ?", [bookId]
+        )
         await db.execute(
             "DELETE FROM story_memory_versions WHERE book_id = ?",
             [bookId],
@@ -220,8 +230,11 @@ async def delete_book(bookId: str):
         await db.execute("DELETE FROM story_background WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM story_background_attachments WHERE book_id = ?", [bookId])
         await db.execute(
-            "DELETE FROM book_writing_method_bindings WHERE book_id = ?", [bookId]
+            "UPDATE writing_technique_grants SET active=0,generation=generation+1 WHERE book_id = ?", [bookId]
         )
+        for table in ("continuation_source_sections", "continuation_operations", "continuation_material_baselines"):
+            await db.execute(f"DELETE FROM {table} WHERE book_id=?", [bookId])
+        await db.execute("DELETE FROM writing_technique_selections WHERE scope_kind='book' AND scope_id=?", [bookId])
         if continuation is not None:
             snapshot_id = str(continuation["canon_snapshot_id"])
             await db.execute(
@@ -251,6 +264,9 @@ async def delete_book(bookId: str):
             [bookId],
         )
         await db.execute("UPDATE novel_knowledge_bindings SET state='unbound',generation=generation+1,version=version+1 WHERE book_id=?", [bookId])
+        await db.execute("DELETE FROM creation_material_trash WHERE book_id=?", [bookId])
+        await db.execute("DELETE FROM creation_material_files WHERE book_id=?", [bookId])
+        await db.execute("DELETE FROM creation_material_books WHERE book_id=?", [bookId])
         await db.execute("DELETE FROM books WHERE id = ?", [bookId])
 
     composition = get_agent_composition()

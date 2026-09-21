@@ -1,5 +1,8 @@
 import { services } from '@/services'
+import { requestGlobalChatPrefill } from '../../stores/chatPrefillStore'
+import { useSettingsRevision } from '../../stores/settingsInvalidationStore'
 import React from 'react'
+import { useMaterialRefresh } from './useMaterialRefresh'
 import {
   PlusIcon,
   DeleteIcon,
@@ -8,22 +11,17 @@ import {
   AiChatIcon,
   CompassIcon,
 } from '@/purr-components'
-import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSegmented, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
-import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
+import { PurrButton, PurrEmpty, PurrModal, PurrSegmented, PurrTag, PurrTooltip } from '@/purr-components'
 import type { EntityId, SettingEntity, SettingEntityType } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
+import MaterialProfileEditorModal, { MATERIAL_ENTITY_TYPE_OPTIONS } from './MaterialProfileEditorModal'
 import './StoryBackgroundTab.scss'
 import './CharacterTab.scss'
 
-export const ENTITY_TYPE_OPTIONS: Array<{ value: SettingEntityType; label: string }> = [
-  { value: 'location', label: '地点' },
-  { value: 'faction', label: '势力' },
-  { value: 'item', label: '物品' },
-  { value: 'other', label: '其他' },
-]
+export const ENTITY_TYPE_OPTIONS = MATERIAL_ENTITY_TYPE_OPTIONS
 
 const ENTITY_TYPE_LABEL: Record<string, string> = Object.fromEntries(
   ENTITY_TYPE_OPTIONS.map((o) => [o.value, o.label]),
@@ -66,6 +64,7 @@ export default function WorldEntityTab({
   onFocusEntityHandled,
 }: WorldEntityTabProps) {
   const { message } = useAppFeedback()
+  const [loadError, setLoadError] = React.useState('')
   const [entities, setEntities] = React.useState<SettingEntity[]>([])
   const [typeFilter, setTypeFilter] = React.useState<SettingEntityType | 'all'>('all')
   const [editModalOpen, setEditModalOpen] = React.useState(false)
@@ -87,22 +86,22 @@ export default function WorldEntityTab({
   const loadEntities = React.useCallback(async () => {
     if (bookId == null) return
     const res = await services.settingEntities.getSettingEntities({ bookId })
-    if (res.success) setEntities(res.data ?? [])
+    setLoadError(res.success ? '' : res.error || '无法读取资料')
+    setEntities(res.success ? res.data || [] : [])
   }, [bookId])
+
+  useMaterialRefresh(loadEntities)
 
   React.useEffect(() => {
     loadEntities()
   }, [loadEntities])
 
-  // AI 工具创建/修改条目后刷新列表（面板可能与 AI 对话同屏开着）
+  // AI 工具创建/修改条目后刷新列表（修订号驱动，仅 entity 变化时触发）
+  const entityRevision = useSettingsRevision('entity')
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ kind?: string }>).detail
-      if (detail?.kind === 'entity') loadEntities()
-    }
-    window.addEventListener('setting-updated', handler)
-    return () => window.removeEventListener('setting-updated', handler)
-  }, [loadEntities])
+    if (entityRevision === 0) return
+    loadEntities()
+  }, [entityRevision, loadEntities])
 
   React.useEffect(() => {
     if (focusEntityId == null) return
@@ -149,7 +148,7 @@ export default function WorldEntityTab({
       const res = editTarget
         ? await services.settingEntities.updateSettingEntity({
             id: editTarget.id,
-            data: { entityType: draftType, name, tags: draftTags.join(', '), profileMd: draftProfileMd },
+            data: { baseRevision: editTarget.baseRevision, entityType: draftType, name, tags: draftTags.join(', '), profileMd: draftProfileMd },
           })
         : await services.settingEntities.createSettingEntity({
             bookId,
@@ -172,15 +171,12 @@ export default function WorldEntityTab({
 
   /** 打开 AI 全局对话并携带条目上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((ent: SettingEntity) => {
-    window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
-    window.dispatchEvent(new CustomEvent('open-setting-chat', {
-      detail: { prefill: `关于${ENTITY_TYPE_LABEL[ent.entity_type] || '设定'}「${ent.name}」：` },
-    }))
+    requestGlobalChatPrefill(`关于${ENTITY_TYPE_LABEL[ent.entity_type] || '设定'}「${ent.name}」：`)
   }, [])
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
-    const res = await services.settingEntities.deleteSettingEntity({ id: deleteTarget.id })
+    const res = await services.settingEntities.deleteSettingEntity({ id: deleteTarget.id, baseRevision: deleteTarget.baseRevision })
     if (res.success) {
       message.success('已删除')
       setDeleteTarget(null)
@@ -202,6 +198,8 @@ export default function WorldEntityTab({
       </div>
     )
   }
+
+  if (loadError && !editModalOpen) return <p role="alert">{loadError} <PurrButton onClick={() => void loadEntities()}>重新读取</PurrButton></p>
 
   return (
     <div className="character-tab world-entity-tab">
@@ -231,7 +229,7 @@ export default function WorldEntityTab({
           </div>
         ) : (
           visibleEntities.map((ent, index) => {
-            const preview = profilePreview(ent.profile_md)
+            const preview = profilePreview([ent.inheritedBaseline, ent.profile_md].filter(Boolean).join("\n"))
             const isFocus = focusEntityId === ent.id
             const hasDiff = diff.hasSession(settingSessionKey('entity', ent.id))
             return (
@@ -264,6 +262,7 @@ export default function WorldEntityTab({
                     </div>
                   )}
                 </div>
+
                 <div className="character-card-actions">
                   <PurrButton
                     type="text"
@@ -318,52 +317,7 @@ export default function WorldEntityTab({
         onRestored={loadEntities}
       />
 
-      <PurrModal
-        title={editTarget ? '编辑设定条目' : '新建设定条目'}
-        open={editModalOpen}
-        onOk={handleSave}
-        onCancel={closeModal}
-        okText={editTarget ? '保存' : '创建'}
-        cancelText="取消"
-        okButtonProps={{ loading: saving }}
-        width={680}
-        destroyOnHidden
-        className="character-edit-modal"
-      >
-        <div className="character-edit-meta">
-          <PurrSelect
-            value={draftType}
-            onChange={(v) => setDraftType(v as SettingEntityType)}
-            options={ENTITY_TYPE_OPTIONS}
-            className="world-entity-edit-type"
-            popupMatchSelectWidth={false}
-          />
-          <PurrInput
-            placeholder="条目名称（必填）"
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            maxLength={50}
-            className="character-edit-name"
-          />
-          <PurrSelect
-            mode="tags"
-            placeholder="标签：输入后回车确认"
-            value={draftTags}
-            onChange={setDraftTags}
-            open={false}
-            suffixIcon={null}
-            maxCount={10}
-            className="character-edit-tags"
-          />
-        </div>
-        <KnowledgeMarkdownEditor
-          documentKey={`world-entity:${editTarget?.id ?? 'new'}`}
-          value={draftProfileMd}
-          onChange={setDraftProfileMd}
-          ariaLabel="设定条目档案"
-          className="character-edit-profile"
-        />
-      </PurrModal>
+      <MaterialProfileEditorModal kind="entity" open={editModalOpen} creating={!editTarget} name={draftName} tags={draftTags} profileMd={draftProfileMd} documentKey={`world-entity:${editTarget?.id ?? 'new'}`} onNameChange={setDraftName} onTagsChange={setDraftTags} onProfileChange={setDraftProfileMd} onOk={handleSave} onCancel={closeModal} entityType={draftType} onEntityTypeChange={setDraftType} inheritedBaseline={editTarget?.inheritedBaseline} saving={saving} />
 
       <PurrModal
         title="删除设定条目"

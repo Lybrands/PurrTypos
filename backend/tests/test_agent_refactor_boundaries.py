@@ -8,10 +8,7 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-SCREENPLAY_DOMAIN_DIRS = (
-    BACKEND_DIR / "domains" / "screenplay",
-    BACKEND_DIR / "domains" / "screenplay_agent",
-)
+SCREENPLAY_DOMAIN_DIRS = (BACKEND_DIR / "domains" / "screenplay",)
 GENERIC_CHUNK_HANDLER_DIR = (
     ROOT_DIR / "src" / "agent-runtime" / "chunkHandlers"
 )
@@ -48,10 +45,12 @@ SHARED_AGENT_CONVERSATION_PANEL = (
     ROOT_DIR / "src" / "components" / "AgentConversation" / "Panel.tsx"
 )
 SCREENPLAY_CONVERSATION_PRODUCTION_PATHS = (
-    BACKEND_DIR / "application" / "screenplay_agent_service.py",
-    BACKEND_DIR / "application" / "screenplay_agent_stream.py",
-    BACKEND_DIR / "application" / "screenplay_agent_task_executor.py",
-    BACKEND_DIR / "application" / "screenplay_structured_call.py",
+    BACKEND_DIR / "agents" / "screenplay" / "entry_service.py",
+    BACKEND_DIR / "agents" / "screenplay" / "ordinary_service.py",
+    BACKEND_DIR / "agents" / "screenplay" / "executor.py",
+    BACKEND_DIR / "agents" / "screenplay" / "model_runner.py",
+    BACKEND_DIR / "agents" / "screenplay" / "conversation_projection.py",
+    BACKEND_DIR / "agents" / "screenplay" / "conversation_query.py",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "conversationState.ts",
     ROOT_DIR
     / "src"
@@ -73,6 +72,13 @@ RETIRED_SCREENPLAY_PLANNER = (
     BACKEND_DIR / "application" / "screenplay_agent_planner.py"
 )
 REMOVED_COMPATIBILITY_PATHS = (
+    BACKEND_DIR / "application" / "writing_agent_profile.py",
+    BACKEND_DIR / "application" / "writing_context_source.py",
+    BACKEND_DIR / "domains" / "writing" / "adapter.py",
+    BACKEND_DIR / "domains" / "writing" / "context.py",
+    BACKEND_DIR / "domains" / "writing" / "tools" / "catalog.py",
+    BACKEND_DIR / "infrastructure" / "writing" / "skill_catalog.py",
+    BACKEND_DIR / "infrastructure" / "writing" / "tools" / "tool_catalog.py",
     BACKEND_DIR / "domains" / "agent_roles.py",
     BACKEND_DIR / "domains" / "writing" / "agent_roles.py",
     ROOT_DIR / "src" / "ScreenplayAgentPage" / "longTaskConversationAdapter.ts",
@@ -119,6 +125,15 @@ GENERIC_APPLICATION_FILES = (
     "application/request_mapping.py",
     "application/sse_mapping.py",
 )
+PRODUCTION_COMPOSITION_FACTORY = (
+    BACKEND_DIR / "application" / "composition_factory.py"
+)
+RETIRED_WRITING_SKILL_CONFIG_PATHS = (
+    BACKEND_DIR / "main.py",
+    BACKEND_DIR / "config.py",
+    ROOT_DIR / "electron" / "backend_process.js",
+    ROOT_DIR / "scripts" / "run-web-backend.cjs",
+)
 
 
 def _imports(path: Path) -> list[str]:
@@ -138,6 +153,55 @@ def _relative_backend(path: Path) -> str:
 
 def _screenplay_count(path: Path) -> int:
     return path.read_text(encoding="utf-8").casefold().count("screenplay")
+
+
+def test_product_composition_does_not_import_frozen_writing_profile():
+    assert "application.writing_agent_profile" not in _imports(
+        PRODUCTION_COMPOSITION_FACTORY
+    )
+
+
+def test_retired_writing_skills_directory_has_no_production_configuration():
+    violations = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in RETIRED_WRITING_SKILL_CONFIG_PATHS
+        if "PURRTYPOS_SKILLS_DIR" in path.read_text(encoding="utf-8")
+        or "SKILLS_DIR" in path.read_text(encoding="utf-8")
+    ]
+    assert violations == []
+
+
+def test_retired_writing_skill_sources_stay_deleted():
+    skills = BACKEND_DIR / "skills"
+    restored = [
+        path.relative_to(ROOT_DIR).as_posix()
+        for path in skills.rglob("*")
+        if path.is_file() and path.suffix in {".md", ".json", ".py"}
+    ] if skills.exists() else []
+    assert restored == []
+
+
+def test_novel_analysis_router_owns_sessions_outside_frozen_application():
+    imports = _imports(BACKEND_DIR / "routers" / "novel_sources.py")
+
+    assert "agents.novel_analysis.sessions" in imports
+    assert "application.novel_analysis_sessions" not in imports
+
+
+def test_novel_analysis_router_has_no_legacy_history_adapter():
+    imports = _imports(BACKEND_DIR / "routers" / "novel_sources.py")
+
+    assert "agents.novel_analysis.legacy_read_adapter" not in imports
+
+
+def test_novel_analysis_product_control_has_no_frozen_service_dependency():
+    product_service = (
+        BACKEND_DIR / "agents" / "novel_analysis" / "product_service.py"
+    )
+    router = BACKEND_DIR / "routers" / "novel_sources.py"
+
+    assert "application.novel_analysis_service" not in _imports(product_service)
+    assert "application.novel_analysis_service" not in _imports(router)
 
 
 def _source_between(source: str, start: str, end: str) -> str:
@@ -348,16 +412,11 @@ def test_screenplay_conversation_never_invents_assistant_copy():
         violations
     )
 
-    service = (
-        BACKEND_DIR / "application" / "screenplay_agent_service.py"
-    ).read_text(encoding="utf-8")
-    assert "assistant_content=result.final_response" not in service
-
-
 def test_screenplay_model_units_load_business_content_only_through_tools():
-    source = (
-        BACKEND_DIR / "application" / "screenplay_agent_task_executor.py"
-    ).read_text(encoding="utf-8")
+    source = "\n".join(
+        (BACKEND_DIR / "agents" / "screenplay" / name).read_text(encoding="utf-8")
+        for name in ("executor.py", "model_runner.py", "unit_context.py")
+    )
     forbidden = {
         "_hydrate_evidence(",
         ".episode_writing_context(",
@@ -370,8 +429,7 @@ def test_screenplay_model_units_load_business_content_only_through_tools():
         "Screenplay model units hydrate business content outside tools: "
         + ", ".join(violations)
     )
-    assert "ScreenplayToolCallingService" in source
-    assert '"evidenceDescriptor"' in source
+    assert "screenplay_part_tool_names" in source
 
 
 def test_screenplay_page_projects_durable_content_from_the_canonical_entry():
@@ -488,27 +546,21 @@ _LEGACY_ROOT_COLUMN = "planner_run_id"
 _BOUNDARY_TEST = Path(__file__).resolve()
 
 _PLANNER_STORAGE_ROLES: dict[str, frozenset[str]] = {
-    "backend/application/screenplay_agent_service.py": frozenset({"read"}),
+    "backend/agents/screenplay/conversation_projection.py": frozenset(
+        {"read", "write"}
+    ),
+    "backend/agents/screenplay/conversation_query.py": frozenset({"read"}),
+    "backend/agents/screenplay/recovery_service.py": frozenset(
+        {"read", "write"}
+    ),
+    "backend/agents/screenplay/truncation_service.py": frozenset({"read"}),
     "backend/database/crud/screenplay_agent_runtime_cleanup.py": frozenset(
         {"cleanup"}
     ),
     "backend/database/screenplay_agent_schema.py": frozenset({"schema"}),
-    "backend/infrastructure/persistence/sqlite_screenplay_agent_repository.py":
-        frozenset({"read", "write"}),
-    "backend/infrastructure/persistence/sqlite_screenplay_operation_finalizer.py":
-        frozenset({"read"}),
-    "backend/infrastructure/persistence/sqlite_screenplay_operation_repository.py":
-        frozenset({"read"}),
-    "backend/infrastructure/screenplay/agent_continuation_begin_projector.py":
-        frozenset({"read", "write"}),
-    "backend/infrastructure/screenplay/agent_run_cancellation_projector.py":
-        frozenset({"read"}),
-    "backend/infrastructure/screenplay/agent_root_completion_projector.py":
-        frozenset({"read"}),
     "backend/tests/test_agent_run_queries.py": frozenset({"write"}),
-    "backend/tests/test_screenplay_agent_durable_service.py": frozenset(
-        {"read", "write"}
-    ),
+    "backend/tests/test_screenplay_replacement_conversation_projection.py":
+        frozenset({"write"}),
     "backend/tests/test_screenplay_agent_runtime_cleanup.py": frozenset(
         {"write"}
     ),
@@ -700,8 +752,7 @@ def test_planner_run_alias_is_confined_to_storage_roles_and_v1_decoder():
 
 def test_storage_roles_tolerate_formatting_but_reject_rogue_reads_and_aliases():
     adapter = (
-        BACKEND_DIR / "infrastructure" / "persistence"
-        / "sqlite_screenplay_agent_repository.py"
+        BACKEND_DIR / "agents" / "screenplay" / "conversation_projection.py"
     )
     source = adapter.read_text(encoding="utf-8")
     def scan(suffix: str) -> list[str]:
@@ -853,25 +904,6 @@ def test_removed_failure_and_reasoning_fallback_paths_stay_removed():
     )
 
 
-def test_screenplay_structured_call_does_not_own_core_recovery_policy():
-    path = BACKEND_DIR / "application" / "screenplay_structured_call.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    imported_names = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.module == "purra.recovery"
-        for alias in node.names
-    }
-
-    assert not imported_names.intersection({
-        "EMPTY_RESPONSE_RETRY_GUIDANCE",
-        "RecoveryCause",
-        "RecoveryLedger",
-        "RecoveryPolicy",
-    })
-
-
 def test_legacy_task_budgets_and_truncation_replay_stay_removed():
     forbidden = {
         "OutputBudgetPolicy",
@@ -902,23 +934,6 @@ def test_legacy_task_budgets_and_truncation_replay_stay_removed():
     )
 
 
-def test_screenplay_profile_cannot_settle_business_terminal_state():
-    source = (
-        BACKEND_DIR / "application" / "screenplay_agent_profile.py"
-    ).read_text(encoding="utf-8")
-    settle_start = source.index("async def _settle_screenplay_execution(")
-    settle_end = source.index(
-        "async def _settle_screenplay_exception(",
-        settle_start,
-    )
-    settle = source[settle_start:settle_end]
-
-    assert "pause_task(" not in settle
-    assert "fail_task(" not in settle
-    assert "complete_task(" not in settle
-    assert "cancel_task(" not in settle
-
-
 def test_agent_composition_registers_profiles_without_extension_indirection():
     composition = (
         BACKEND_DIR / "application" / "agent_composition.py"
@@ -935,12 +950,146 @@ def test_agent_composition_registers_profiles_without_extension_indirection():
     assert "agent_role_registry" not in registry
 
 
+def test_production_composition_does_not_import_frozen_screenplay_runtime():
+    composition_factory = BACKEND_DIR / "application" / "composition_factory.py"
+    imported = set(_imports(composition_factory))
+    forbidden = {
+        "application.screenplay_agent_profile",
+        "application.screenplay_agent_task_executor",
+        "infrastructure.screenplay.agent_continuation_begin_projector",
+        "infrastructure.screenplay.agent_root_completion_projector",
+        "infrastructure.screenplay.agent_run_cancellation_projector",
+        "infrastructure.screenplay.candidate_completion_projector",
+        "infrastructure.screenplay.long_task_claim_guard",
+    }
+
+    assert imported.isdisjoint(forbidden)
+    assert "agents.screenplay.profile" in imported
+    assert "agents.screenplay.conversation_projection" in imported
+
+
+def test_production_composition_does_not_install_frozen_novel_analysis_profile():
+    composition_factory = BACKEND_DIR / "application" / "composition_factory.py"
+    imported = set(_imports(composition_factory))
+    source = composition_factory.read_text(encoding="utf-8")
+
+    assert "application.novel_analysis_agent_profile" not in imported
+    assert "build_novel_analysis_agent_profile" not in source
+    assert '"purrtypos.novel_analysis": (' in source
+    assert '"novel_analysis.scalable.v2"' in source
+
+
+def test_retired_novel_analysis_shared_island_is_not_reintroduced():
+    retired_modules = {
+        "application.novel_analysis_executor",
+        "application.novel_analysis_tools",
+        "application.novel_analysis_source",
+        "application.novel_analysis_artifacts",
+        "application.novel_analysis_progress",
+        "application.writing_technique_generation_tools",
+        "application.analysis_candidate_input",
+        "application.analysis_evidence_references",
+        "application.analysis_observation_references",
+        "application.analysis_provenance",
+        "application.analysis_source_spans",
+        "domains.novel_analysis",
+        "domains.novel_analysis_prompts",
+    }
+    production_roots = (
+        BACKEND_DIR / "application",
+        BACKEND_DIR / "agents",
+        BACKEND_DIR / "domains",
+        BACKEND_DIR / "infrastructure",
+        BACKEND_DIR / "routers",
+    )
+    violations = [
+        (_relative_backend(path), imported)
+        for root in production_roots
+        for path in root.rglob("*.py")
+        for imported in _imports(path)
+        if imported in retired_modules
+    ]
+
+    assert not violations
+    assert not any(
+        (BACKEND_DIR / Path(*module.split("."))).with_suffix(".py").exists()
+        for module in retired_modules
+    )
+
+
+def test_startup_does_not_recover_frozen_screenplay_turns():
+    source = (BACKEND_DIR / "main.py").read_text(encoding="utf-8")
+
+    assert "ScreenplayReplacementRecoveryService" in source
+    assert "SqliteScreenplayAgentRepository" not in source
+    assert "screenplay-startup-recovery" not in source
+
+
+def test_startup_uses_only_replacement_novel_analysis_recovery():
+    imports = set(_imports(BACKEND_DIR / "main.py"))
+    source = (BACKEND_DIR / "main.py").read_text(encoding="utf-8")
+
+    assert "agents.novel_analysis.automatic_recovery" in imports
+    assert "agents.novel_analysis.reliability_baseline" in imports
+    assert "application.novel_analysis_recovery" not in imports
+    assert "application.novel_analysis_reliability_baseline" not in imports
+    assert "NovelAnalysisReplacementAutomaticRecovery" in source
+
+
+def test_screenplay_replacement_owns_its_public_stage_command_contract():
+    paths = tuple((BACKEND_DIR / "agents" / "screenplay").glob("*.py")) + (
+        BACKEND_DIR / "schemas" / "screenplay_agent.py",
+    )
+    violations = [
+        _relative_backend(path)
+        for path in paths
+        if any(
+            imported == "domains.screenplay_agent"
+            or imported.startswith("domains.screenplay_agent.")
+            for imported in _imports(path)
+        )
+    ]
+
+    assert not violations, (
+        "Replacement screenplay still imports frozen Agent contracts:\n"
+        + "\n".join(violations)
+    )
+
+
+def test_screenplay_project_router_uses_the_current_application_boundary():
+    router = BACKEND_DIR / "routers" / "screenplay_v2.py"
+    imported = set(_imports(router))
+
+    assert "agents.screenplay.project_service" in imported
+    assert "application.screenplay_v2_service" not in imported
+
+    current = BACKEND_DIR / "agents" / "screenplay" / "project_service.py"
+    assert current.is_file()
+    assert "domains.screenplay_agent" not in set(_imports(current))
+
+
+def test_tool_diagnostics_uses_read_only_current_screenplay_history_adapter():
+    router = (BACKEND_DIR / "routers" / "ai.py").read_text(encoding="utf-8")
+    assert "agents.screenplay.historical_tool_presentation" in router
+    assert "application.screenplay_tool_presentation" not in router
+
+    paths = (
+        BACKEND_DIR / "agents" / "screenplay" / "historical_tool_presentation.py",
+        BACKEND_DIR / "agents" / "screenplay" / "legacy_tool_labels.py",
+    )
+    for path in paths:
+        imported = set(_imports(path))
+        assert not any(
+            module == "domains.screenplay_agent"
+            or module.startswith("domains.screenplay_agent.")
+            for module in imported
+        )
+
+
 def test_screenplay_manifest_never_emits_the_obsolete_coarse_units():
     source = (
-        BACKEND_DIR / "application" / "screenplay_manifest_compiler.py"
+        BACKEND_DIR / "agents" / "screenplay" / "recipe.py"
     ).read_text(encoding="utf-8")
     assert 'kind="generate_episode_draft"' not in source
     assert 'kind="generate_deliverable"' not in source
-    assert not (
-        BACKEND_DIR / "domains" / "screenplay_agent" / "recipe_compiler.py"
-    ).exists()
+    assert not (BACKEND_DIR / "domains" / "screenplay_agent").exists()

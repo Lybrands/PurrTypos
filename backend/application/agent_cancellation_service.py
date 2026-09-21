@@ -59,6 +59,7 @@ class AgentCancellationService:
         )
         if not claimed:
             return False
+        await self._cancel_agent_tree(run_id)
         todos = await self._db.fetch_all(
             "SELECT step_id, status FROM ai_agent_run_todos WHERE run_id = ? "
             "ORDER BY sort, id",
@@ -116,6 +117,13 @@ class AgentCancellationService:
             )
             raise
         return True
+
+    async def _cancel_agent_tree(self, run_id: str) -> None:
+        try:
+            await self._composition.run_tree_repository.cancel_subtree(run_id)
+        except ContractViolationError as error:
+            if str(getattr(error, "code", "")) != "child_run_not_found":
+                raise
 
 
 def _receipt_payload(

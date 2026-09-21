@@ -12,6 +12,7 @@ from application.book_conversation_product_projection import (
     persist_setting_diff_resolution,
 )
 from dependencies import get_db
+from infrastructure.persistence.run_store import ROOT_RUN_SESSION_FILTER
 from schemas.conversations import SaveConversationRequest
 
 router = APIRouter(tags=["conversations"])
@@ -41,12 +42,14 @@ async def save_conversation(body: SaveConversationRequest):
         if body.agentRunId:
             run_id = str(body.agentRunId)
             run = await db.fetch_one(
-                "SELECT conversation_id, session_id, status, prompt, model_name "
+                "SELECT conversation_id, session_id, status, prompt, model_name, parent_run_id, root_run_id "
                 "FROM ai_agent_runs WHERE id = ?",
                 [run_id],
             )
             if run is None or int(run.get("session_id") or 0) != body.sessionId:
                 raise HTTPException(status_code=409, detail="Agent Run 不属于当前会话")
+            if run.get("parent_run_id") or run.get("root_run_id") not in (None, "", run_id):
+                raise HTTPException(status_code=409, detail="Child Run 不能保存为独立对话")
             run_status = str(run.get("status") or "")
             running_resolution = (
                 run_status == "running"
@@ -223,6 +226,7 @@ async def save_conversation(body: SaveConversationRequest):
                         )
                 pending_agent_projection = await db.fetch_one(
                     "SELECT id FROM ai_agent_runs WHERE session_id = ? "
+                    f"AND {ROOT_RUN_SESSION_FILTER} "
                     "AND ("
                     "conversation_id IS NULL OR "
                     "status IN ('pending', 'queued', 'running', 'paused')"
@@ -523,7 +527,8 @@ async def delete_after_turn(
             current_run_ids = {
                 str(row["id"])
                 for row in await db.fetch_all(
-                    "SELECT id FROM ai_agent_runs WHERE session_id = ?",
+                    "SELECT id FROM ai_agent_runs WHERE session_id = ? "
+                    f"AND {ROOT_RUN_SESSION_FILTER}",
                     [sessionId],
                 )
             }

@@ -2,6 +2,5 @@
 -r requirements-runtime.txt
 
 # --- dev / test only（pyinstaller 打包不会带入运行时） ---
-setuptools>=77.0.3  # Build the local PurrA wheel without an isolated download.
 pytest>=8.3.0
 pytest-asyncio>=0.24.0

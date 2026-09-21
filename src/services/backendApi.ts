@@ -35,6 +35,7 @@ import {
   replayWritingChatPostUntilObserved,
   type WritingChatRequestReservation,
 } from './writingChatRequestReceipt'
+import { getAgentOperationMode } from '../agentOperationMode'
 
 export type PlatformApiKey =
   | 'openFilePath'
@@ -155,7 +156,6 @@ function aiErrorReportSource(streamId: string): string {
   if (streamId.startsWith('chat-')) return 'workspace_chat'
   if (streamId.startsWith('inline-edit-')) return 'inline_edit'
   if (streamId.startsWith('editor-float-')) return 'editor_rewrite'
-  if (streamId.startsWith('ghost-completion-')) return 'ghost_completion'
   return 'ai_chat_stream'
 }
 
@@ -344,7 +344,7 @@ export const backendApi: BackendApi = {
   getCharacters: (data) => apiGet(`/books/${data.bookId}/characters`),
   createCharacter: (data) => apiPost(`/books/${data.bookId}/characters`, { data: data.data }),
   updateCharacter: (data) => apiPut(`/characters/${data.id}`, { data: data.data }),
-  deleteCharacter: (data) => apiDelete(`/characters/${data.id}`),
+  deleteCharacter: (data) => apiDelete(`/characters/${data.id}?baseRevision=${encodeURIComponent(data.baseRevision || "")}`),
 
   getSettingEntities: (data) =>
     apiGet(`/books/${data.bookId}/setting-entities${data.type ? `?type=${data.type}` : ''}`),
@@ -355,7 +355,7 @@ export const backendApi: BackendApi = {
     profileMd: data.profileMd || '',
   }),
   updateSettingEntity: (data) => apiPut(`/setting-entities/${data.id}`, data.data ?? {}),
-  deleteSettingEntity: (data) => apiDelete(`/setting-entities/${data.id}`),
+  deleteSettingEntity: (data) => apiDelete(`/setting-entities/${data.id}?baseRevision=${encodeURIComponent(data.baseRevision || "")}`),
 
   getCharacterOptions: (data) => apiGet(`/character-options?category=${data.category}`),
   addCharacterOption: (data) => apiPost('/character-options', data),
@@ -393,61 +393,12 @@ export const backendApi: BackendApi = {
 
   getStoryBackground: (data) => apiGet(`/story-background/${data.bookId}`),
   saveStoryBackground: (data) =>
-    apiPut(`/story-background/${data.bookId}`, { content: data.content }),
+    apiPut(`/story-background/${data.bookId}`, { content: data.content, baseRevision: data.baseRevision }),
   getStoryBackgroundAttachments: (data) =>
     apiGet(`/story-background/${data.bookId}/attachments`),
   deleteStoryBackgroundAttachment: (data) =>
     apiDelete(`/story-background/attachments/${data.id}`),
 
-  listWritingMethods: (data = {}) => apiGet(
-    `/writing-methods${data.includeArchived ? '?includeArchived=true' : ''}`,
-  ),
-  getWritingMethod: (data) => apiGet(`/writing-methods/${data.methodId}`),
-  createWritingMethod: (data) => apiPost('/writing-methods', data),
-  updateWritingMethodDraft: (data) => apiPut(
-    `/writing-methods/${data.methodId}/draft`, data,
-  ),
-  publishWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/publish`, {}),
-  publishWritingMethodBatch: (data) => apiPost('/writing-methods/publish-batch', data),
-  copyWritingMethod: (data) => apiPost(`/writing-methods/${data.methodId}/copy`, {}),
-  deleteWritingMethod: (data) => apiDelete(`/writing-methods/${data.methodId}`),
-  createWritingMethodCandidates: (data) => apiPost(
-    `/novel-analyses/${data.analysisId}/writing-method-candidates`,
-    {},
-  ),
-  publishWritingMethodCandidateBatch: (data) => apiPost(
-    `/writing-method-candidate-batches/${data.schemeId}/publish`,
-    { methodIds: data.methodIds },
-  ),
-  listWritingSchemes: (data = {}) => apiGet(
-    `/writing-schemes${data.includeArchived ? '?includeArchived=true' : ''}`,
-  ),
-  getWritingScheme: (data) => apiGet(`/writing-schemes/${data.schemeId}`),
-  createWritingScheme: (data) => apiPost('/writing-schemes', data),
-  updateWritingSchemeDraft: (data) => apiPut(
-    `/writing-schemes/${data.schemeId}/draft`, data,
-  ),
-  publishWritingScheme: (data) => apiPost(`/writing-schemes/${data.schemeId}/publish`, {}),
-  copyWritingScheme: (data) => apiPost(`/writing-schemes/${data.schemeId}/copy`, {}),
-  deleteWritingScheme: (data) => apiDelete(`/writing-schemes/${data.schemeId}`),
-  listBookWritingMethodBindings: (data) => apiGet(
-    `/books/${data.bookId}/writing-method-bindings`,
-  ),
-  bindBookWritingMethod: (data) => apiPost(
-    `/books/${data.bookId}/writing-method-bindings`,
-    { bindingType: data.bindingType, revisionId: data.revisionId },
-  ),
-  reorderBookWritingMethodBindings: (data) => apiPut(
-    `/books/${data.bookId}/writing-method-bindings/reorder`,
-    { bindingIds: data.bindingIds },
-  ),
-  upgradeBookWritingMethodBinding: (data) => apiPut(
-    `/books/${data.bookId}/writing-method-bindings/${data.bindingId}/upgrade`,
-    { revisionId: data.revisionId },
-  ),
-  unbindBookWritingMethod: (data) => apiDelete(
-    `/books/${data.bookId}/writing-method-bindings/${data.bindingId}`,
-  ),
   previewNovelSourceImport: (data) => apiPost('/novel-sources/import/preview', data),
   confirmNovelSourceImport: (data) => apiPost('/novel-sources/import/confirm', data),
   freezeBookAsNovelSource: (data) => apiPost('/novel-sources/freeze-book', data),
@@ -473,12 +424,12 @@ export const backendApi: BackendApi = {
   ),
   startNovelAnalysis: (data) => apiPostIdempotent(
     `/novel-source-revisions/${data.revisionId}/analyses`,
-    { runtime: data.runtime, prompt: data.prompt },
+    { runtime: data.runtime, prompt: data.prompt, conversationId: data.conversationId },
     data.commandId,
   ),
   followUpNovelAnalysis: (data) => apiPostIdempotent(
     `/novel-source-revisions/${data.revisionId}/analysis-follow-ups`,
-    { runtime: data.runtime, artifactId: data.artifactId, prompt: data.prompt },
+    { runtime: data.runtime, artifactId: data.artifactId, prompt: data.prompt, conversationId: data.conversationId, replaceRunId: data.replaceRunId },
     data.commandId,
   ),
   listNovelAnalysisRuns: (data) => apiGet(
@@ -490,7 +441,7 @@ export const backendApi: BackendApi = {
   ),
   resumeNovelAnalysis: (data) => apiPostIdempotent(
     `/novel-analysis-tasks/${data.taskId}/resume`,
-    { runtime: data.runtime, retryFailed: data.retryFailed },
+    { runtime: data.runtime },
     data.commandId,
   ),
   cancelNovelAnalysis: (data) => apiPost(
@@ -502,7 +453,7 @@ export const backendApi: BackendApi = {
   ),
   reviewNovelAnalysisArtifact: (data) => apiPostIdempotent(
     `/novel-analysis-artifacts/${data.artifactId}/review`,
-    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview },
+    { facts: data.facts, craftCards: data.craftCards, storyOverview: data.storyOverview, techniqueResult: data.techniqueResult },
     data.commandId,
   ),
   publishNovelAnalysisArtifact: (data) => apiPost(
@@ -518,6 +469,7 @@ export const backendApi: BackendApi = {
   previewContinuationCanon: (data) => apiPost('/continuations/canon-preview', data),
   createContinuation: (data) => apiPost('/continuations', data),
   getContinuation: (data) => apiGet(`/continuations/${data.bookId}`),
+  getContinuationPlotMaterials: (data) => apiGet<Array<{ sourceKey: string; body: string }>>(`/continuations/${data.bookId}/plot-materials`),
 
   commitChapterDiff: (data) => apiPost(`/chapter-diff/${data.chapterId}/commit`, {
     content: data.content,
@@ -543,6 +495,7 @@ export const backendApi: BackendApi = {
       accepted_segments: data.acceptedSegments || 0,
       rejected_segments: data.rejectedSegments || 0,
       resolution: data.resolution,
+      baseRevision: data.baseRevision,
     }),
   commitBackgroundSettingDiff: (data) =>
     apiPost(`/setting-diff/background/${data.bookId}/commit`, {
@@ -553,6 +506,7 @@ export const backendApi: BackendApi = {
       accepted_segments: data.acceptedSegments || 0,
       rejected_segments: data.rejectedSegments || 0,
       resolution: data.resolution,
+      baseRevision: data.baseRevision,
     }),
   listCharacterSettingHistory: (data) =>
     apiGet(`/setting-diff/character/${data.characterId}/history?limit=${data.limit ?? 50}`),
@@ -577,6 +531,7 @@ export const backendApi: BackendApi = {
       accepted_segments: data.acceptedSegments || 0,
       rejected_segments: data.rejectedSegments || 0,
       resolution: data.resolution,
+      baseRevision: data.baseRevision,
     }),
   listEntitySettingHistory: (data) =>
     apiGet(`/setting-diff/entity/${data.entityId}/history?limit=${data.limit ?? 50}`),
@@ -597,6 +552,9 @@ export const backendApi: BackendApi = {
   setSessionClosed: (data) => apiPut(`/sessions/${data.sessionId}/close`, {}),
   setSessionReopened: (data) => apiPut(`/sessions/${data.sessionId}/reopen`, {}),
   deleteSession: (data) => apiDelete(`/sessions/${data.sessionId}`),
+  updateSessionPinned: (data) =>
+    apiPut(`/sessions/${data.sessionId}/pinned`, { pinned: data.pinned }),
+  reorderSessions: (data) => apiPut('/sessions/reorder', { orderedIds: data.orderedIds }),
   updateSessionTitle: (data) =>
     apiPut(`/sessions/${data.sessionId}/title`, { title: data.title }),
 
@@ -687,6 +645,21 @@ export const backendApi: BackendApi = {
   getForeshadowingByBook: (data) =>
     apiGet(`/foreshadowing/by-book?bookId=${data.bookId}${data.status ? `&status=${data.status}` : ''}`),
 
+  addAnnotation: (data) => apiPost('/annotations', data),
+  updateAnnotation: (data) => apiPut(
+    `/annotations/${data.id}`,
+    {
+      bookId: data.bookId,
+      ...('note' in data.data ? { note: data.data.note } : {}),
+      ...('status' in data.data ? { status: data.data.status } : {}),
+    },
+  ),
+  deleteAnnotation: (data) => apiDelete(
+    `/annotations/${data.id}?bookId=${encodeURIComponent(String(data.bookId))}`,
+  ),
+  getAnnotationsByBook: (data) =>
+    apiGet(`/annotations/by-book?bookId=${data.bookId}${data.chapterId ? `&chapterId=${data.chapterId}` : ''}`),
+
   createMemory: (data) => apiPost('/memories', data),
   updateMemory: ({ id, ...data }) => apiPut(`/memories/${id}`, data),
   setMemoryState: ({ id, ...data }) => apiPost(`/memories/${id}/state`, data),
@@ -723,6 +696,8 @@ export const backendApi: BackendApi = {
     const query = params.toString()
     return apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}${query ? `?${query}` : ''}`)
   },
+  getSubAgentConversation: (data) =>
+    apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/sub-agent-conversation`),
   getAgentRunPlannerDiagnostics: (data) =>
     apiGet(`/ai/agent-runs/${encodeURIComponent(data.runId)}/planner-diagnostics`),
   getAgentRunModelInputDiagnostics: (data) =>
@@ -754,7 +729,10 @@ export const backendApi: BackendApi = {
 
   aiChatStream: (data) => {
     const streamId = data.streamId || `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const requestData = { ...data }
+    const requestData = {
+      ...data,
+      ...(data.chatAgentMode === 'agent' ? { operationMode: data.operationMode ?? getAgentOperationMode() } : {}),
+    }
     delete requestData.streamId
     if (data.chatAgentMode === 'agent') {
       requestData.streamId = streamId

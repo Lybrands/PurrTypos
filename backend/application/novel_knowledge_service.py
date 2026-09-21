@@ -69,6 +69,13 @@ class NovelKnowledgeService:
             rows = await self.db.fetch_all("SELECT book_id FROM novel_knowledge_bindings WHERE state IN ('active','unavailable')")
             for row in rows:
                 try:
+                    from application.creation_material_service import materials
+                    from exceptions import AppError
+                    try:
+                        async with self.db.transaction():
+                            await materials(self.db).synchronize(row['book_id'])
+                    except AppError:
+                        pass
                     await self.refresh(row['book_id'])
                 except KnowledgeError:
                     pass
@@ -162,6 +169,10 @@ class NovelKnowledgeService:
         async with self.lock:
             await self.book(book_id)
             root = self.validate_root(root)
+            from application.creation_material_service import materials
+            shared = await materials(self.db).binding(book_id)
+            if shared and root != materials(self.db).directory(shared):
+                raise KnowledgeError('shared_material_directory_required', 409)
             fingerprint = digest(['bind', book_id, str(root), expected_version])
             previous = await self.command(book_id, command_id, fingerprint)
             if previous:
@@ -187,6 +198,8 @@ class NovelKnowledgeService:
 
     async def configure(self, book_id, *, expected_version, command_id, scope=None, semantic=None, unbind=False):
         async with self.lock:
+            if unbind and await self.db.fetch_one('SELECT book_id FROM creation_material_books WHERE book_id=?', [book_id]):
+                raise KnowledgeError('shared_material_binding_required', 409)
             fingerprint = digest([book_id, expected_version, scope, semantic, unbind])
             previous = await self.command(book_id, command_id, fingerprint)
             if previous:
@@ -261,7 +274,9 @@ class NovelKnowledgeService:
             scope['chapterId'] = chapter_id
         await self.validate_scope(book_id, scope)
         chapters = await self.chapters(book_id)
-        return {**scope, 'bindingId': row['id'], 'generation': row['generation'],
+        from application.creation_material_service import materials
+        material_revision = await materials(self.db).source_revision(book_id)
+        return {**({'materialRevision': material_revision} if material_revision else {}), **scope, 'bindingId': row['id'], 'generation': row['generation'],
                 'bindingVersion': row['version'], 'chapterOrder': await self.chapter_revision(book_id, chapters)}
 
     async def refresh(self, book_id):
@@ -277,12 +292,17 @@ class NovelKnowledgeService:
             old = await self.db.fetch_all('SELECT * FROM novel_knowledge_documents WHERE binding_id=? AND generation=?',
                                            [binding['id'], binding['generation']])
             by_path = {d['path']: d for d in old}
+            shared = {m['material_id']: m for m in await self.db.fetch_all('SELECT * FROM creation_material_files WHERE book_id=?', [book_id])}
             parsed, identities = {}, {}
             for path, value in files.items():
                 try:
                     if isinstance(value, str):
                         raise ValueError(value)
                     item = parse(value, path)
+                    owned = shared.get(item['metadata'].get('purr_id'))
+                    if owned:
+                        from infrastructure.obsidian.material_document import decode
+                        decode(value, path, material_id=owned['material_id'], kind=owned['kind'])
                     parsed[path] = item
                     if item['metadata'].get('purr_id'):
                         identities.setdefault(item['metadata']['purr_id'], []).append(path)
@@ -295,6 +315,13 @@ class NovelKnowledgeService:
                 if 'error' not in item:
                     for name in [item['title'], Path(path).stem, *item['metadata'].get('aliases', [])]:
                         titles.setdefault(name, set()).add(path)
+            shared = {m['material_id']: m for m in await self.db.fetch_all('SELECT * FROM creation_material_files WHERE book_id=?', [book_id])}
+            from application.creation_material_service import materials
+            shared_binding = await materials(self.db).binding(book_id)
+            shared_root = str(materials(self.db).directory(shared_binding)) if shared_binding else None
+            # Shared files are indexed under 资料; Obsidian starts at its parent.
+            if shared_root == binding['root']:
+                known_paths.update({'资料/' + key: value for key, value in list(known_paths.items())})
             host_entities = {}
             for table, kind in [('characters', 'character'), ('setting_entities', 'setting')]:
                 for entity in await self.db.fetch_all(f'SELECT id,name FROM {table} WHERE book_id=?', [book_id]):
@@ -340,7 +367,9 @@ class NovelKnowledgeService:
                                 resolved_known.append(known)
                         meta = {**meta, 'known_to': resolved_known}
                     overlap = meta.get('purr_entity')
-                    if overlap or item.get('title') in host_entities.values():
+                    owned = shared.get(source_id)
+                    same_material = bool(owned and shared_root == binding['root'] and meta.get('purr_kind') == owned['kind'])
+                    if not same_material and (overlap or item.get('title') in host_entities.values()):
                         state = 'reference'
                         diagnostics.append('host_ownership_retained' if overlap in host_entities else 'entity_overlap_requires_mapping')
                     if overlap and overlap not in host_entities:
@@ -403,6 +432,7 @@ class NovelKnowledgeService:
             return {'state': 'unbound', 'version': 0, 'semantic': {'state': 'disabled'}}
         info = {k: row[k] for k in ('id', 'generation', 'version', 'state', 'scanned_at')}
         info.update(directory=Path(row['root']).name, scope=json.loads(row['scope_json']), scan=json.loads(row['scan_json']))
+        info['sharedStorage'] = bool(await self.db.fetch_one('SELECT book_id FROM creation_material_books WHERE book_id=?', [book_id]))
         info['semantic'] = await self.vector.status(row) if self.vector else {'state': 'disabled'}
         return info
 
@@ -449,9 +479,11 @@ class NovelKnowledgeService:
             raise KnowledgeError('source_missing', 404)
         file = checked_path(Path(binding['root']), row['path'])
         data = await asyncio.to_thread(read_stable, Path(binding['root']), row['path'])
-        # Path-only navigation avoids ambiguous Vault names. Anchors are shown separately.
+        from application.creation_material_service import materials
+        shared = await materials(self.db).binding(book_id)
+        vault = materials(self.db).directory(shared).parent if shared else Path(binding['root'])
         return {'uri': 'obsidian://open?path=' + quote(str(file), safe=''), 'path': str(file),
-                'anchor': anchor, 'anchorFallback': bool(anchor), 'currentRevision': digest(data),
+                'vaultPath': str(vault), 'anchor': anchor, 'anchorFallback': bool(anchor), 'currentRevision': digest(data),
                 'usedRevision': revision, 'currentMatches': not revision or revision == digest(data)}
 
     async def check_scope(self, book_id, scope):
@@ -461,8 +493,18 @@ class NovelKnowledgeService:
         if scope.get('bindingId') != binding['id'] or scope.get('generation') != binding['generation'] or scope.get('bindingVersion') != binding['version']:
             raise KnowledgeError('knowledge_scope_changed')
         chapters = await self.chapters(book_id)
-        if scope.get('chapterOrder') != await self.chapter_revision(book_id, chapters):
+        if scope.get('purpose') != 'discussion' and scope.get('chapterOrder') != await self.chapter_revision(book_id, chapters):
             raise KnowledgeError('chapter_order_changed')
+        await self.validate_scope(book_id, scope)
+        if scope.get('materialRevision'):
+            from application.creation_material_service import materials
+            from exceptions import AppError
+            try:
+                current = await materials(self.db).source_revision(book_id)
+            except AppError as error:
+                raise KnowledgeError('material_source_unavailable') from error
+            if current != scope['materialRevision']:
+                raise KnowledgeError('material_source_changed')
         return binding, chapters
 
     async def search(self, book_id, query, *, scope=None, limit=12, token_budget=3000, mode='hybrid', document_id=None, revision=None, chunk_id=None, signal=None, context_block='writing_knowledge'):

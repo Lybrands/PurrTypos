@@ -11,6 +11,7 @@ interface ScreenplayConversationExtensionBindings {
   stageLabel: string
   messages: ScreenplayConversationState['messages'] | undefined
   artifacts: ReadonlyMap<string, ScreenplayTurnArtifact>
+  renderActions(context: { close(): void }): React.ReactNode
   renderArtifact(artifact: ScreenplayTurnArtifact): React.ReactNode
 }
 
@@ -20,8 +21,10 @@ export function useScreenplayConversationExtensions({
   messages,
   artifacts,
   renderArtifact,
+  renderActions,
 }: ScreenplayConversationExtensionBindings): AgentConversationExtensions {
   return React.useMemo(() => ({
+    composerActionMenu: { triggers: ['/'], title: '剧本对话操作', render: renderActions },
     renderSessionContext: () => (
       <div className="screenplay-conversation-context">
         <span><VideoCameraIcon /></span>
@@ -39,5 +42,5 @@ export function useScreenplayConversationExtensions({
         : undefined
       return artifact ? renderArtifact(artifact) : null
     },
-  }), [artifacts, messages, projectTitle, renderArtifact, stageLabel])
+  }), [renderActions, artifacts, messages, projectTitle, renderArtifact, stageLabel])
 }

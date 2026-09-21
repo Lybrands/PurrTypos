@@ -12,6 +12,7 @@ import {
   updateAgentConversationMessages,
 } from '../../../agent-runtime/runtimeStore'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
+import { createStore } from 'zustand/vanilla'
 import { changeQueuedSubmission, type QueuedSubmissionEdit } from '../../../agent-runtime/queuedSubmission'
 import type {
   ChatSessionActivity,
@@ -29,26 +30,31 @@ export interface ChatSessionRuntime {
   revision: number
 }
 
-let queuedSubmissions: QueuedChatSubmission[] = []
-const queueListeners = new Set<() => void>()
-let queueVersion = 0
+// 队列段（zustand vanilla）：版本号供组合订阅快照使用。
+// clearChatRuntime 需要「只通知一次」：换队列内容时静音队列订阅，
+// 由运行时清理（或队列版本号）承担唯一一次通知。
+const queueStore = createStore<{ queue: QueuedChatSubmission[]; version: number }>(
+  () => ({ queue: [], version: 0 }),
+)
+let queueNotifyMuted = false
 
-function emitQueueChange(): void {
-  queueVersion += 1
-  queueListeners.forEach((listener) => listener())
+function currentQueue(): QueuedChatSubmission[] {
+  return queueStore.getState().queue
 }
 
 export function subscribeChatRuntime(listener: () => void): () => void {
   const unsubscribeRuntime = subscribeAgentConversationRuntime(listener)
-  queueListeners.add(listener)
+  const unsubscribeQueue = queueStore.subscribe(() => {
+    if (!queueNotifyMuted) listener()
+  })
   return () => {
     unsubscribeRuntime()
-    queueListeners.delete(listener)
+    unsubscribeQueue()
   }
 }
 
 export function getChatRuntimeVersion(): number {
-  return getAgentConversationRuntimeVersion() + queueVersion
+  return getAgentConversationRuntimeVersion() + queueStore.getState().version
 }
 
 export function getChatSessionRuntime(
@@ -118,20 +124,20 @@ export function getChatSessionActivities(): Record<number, ChatSessionActivity> 
 }
 
 export function getChatRuntimeQueue(): QueuedChatSubmission[] {
-  return queuedSubmissions
+  return currentQueue()
 }
 
 export function replaceChatRuntimeQueue(queue: QueuedChatSubmission[]): void {
-  queuedSubmissions = queue
-  emitQueueChange()
+  queueStore.setState((state) => ({ queue, version: state.version + 1 }))
 }
 
 export function updateChatQueuedSubmission(
   sessionId: number, bookId: string | number, id: string, patch: QueuedSubmissionEdit | null,
 ): boolean {
-  const next = changeQueuedSubmission(queuedSubmissions, id, patch,
+  const queue = currentQueue()
+  const next = changeQueuedSubmission(queue, id, patch,
     item => item.sessionId === sessionId && item.bookId === bookId)
-  if (next === queuedSubmissions) return false
+  if (next === queue) return false
   replaceChatRuntimeQueue(next)
   const runtime = getChatSessionRuntime(sessionId)
   const queuedCount = next.filter(item => item.sessionId === sessionId).length
@@ -144,11 +150,24 @@ export function updateChatQueuedSubmission(
 
 export function clearChatRuntime(sessionId: number): void {
   const hadRuntime = getAgentConversationRuntime(sessionId) != null
-  const nextQueue = queuedSubmissions.filter(
+  const queue = currentQueue()
+  const nextQueue = queue.filter(
     (submission) => submission.sessionId !== sessionId,
   )
-  const queueChanged = nextQueue.length !== queuedSubmissions.length
-  if (queueChanged) queuedSubmissions = nextQueue
+  const queueChanged = nextQueue.length !== queue.length
+  if (queueChanged) {
+    // 先换内容再通知：清理必须只产生一次组合通知，且通知时读到一致的队列
+    if (hadRuntime) {
+      queueNotifyMuted = true
+      try {
+        queueStore.setState({ queue: nextQueue })
+        clearAgentConversationRuntime(sessionId)
+      } finally {
+        queueNotifyMuted = false
+      }
+      return
+    }
+    replaceChatRuntimeQueue(nextQueue)
+  }
   clearAgentConversationRuntime(sessionId)
-  if (!hadRuntime && queueChanged) emitQueueChange()
 }

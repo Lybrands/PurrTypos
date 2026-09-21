@@ -539,12 +539,17 @@ async def init_schema(db: DatabaseConnection) -> None:
 
     await init_continuation_schema(db)
 
-    from database.writing_method_schema import init_writing_method_schema
+    from database.writing_technique_retirement import retire_writing_method_schema
+    await retire_writing_method_schema(db)
+    from database.writing_technique_schema import init_writing_technique_schema
+    await init_writing_technique_schema(db)
 
-    await init_writing_method_schema(db)
-
+    from database.novel_analysis_sessions_schema import init_analysis_sessions
+    await init_analysis_sessions(db)
     from database.novel_knowledge_schema import init_novel_knowledge_schema
     await init_novel_knowledge_schema(db)
+    from database.creation_material_schema import init_creation_material_schema
+    await init_creation_material_schema(db)
 
     # ── screenplay projects / versioned documents ────────────────
     # 剧本项目与书架作品是“引用”关系而不是所有权关系。source_book_id
@@ -688,6 +693,17 @@ async def init_schema(db: DatabaseConnection) -> None:
         db,
         "ALTER TABLE ai_sessions ADD COLUMN screenplay_project_id TEXT DEFAULT NULL",
     )
+    # 会话列表手动排序/置顶：pinned=1 的会话分组置顶展示；
+    # sort_order 由前端拖拽后整列表重排写入（0..N-1），NULL = 未参与手动排序。
+    await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN pinned INTEGER DEFAULT 0")
+    await _try_exec(db, "ALTER TABLE ai_sessions ADD COLUMN sort_order INTEGER")
+    # 剧本会话命名与写作会话对齐：历史自动命名的「{项目} · Agent」一次性
+    # 改回默认「新对话」，首轮对话结束后再由标题生成接口自动命名。
+    await _try_exec(
+        db,
+        "UPDATE ai_sessions SET title = '新对话' "
+        "WHERE scope = 'screenplay' AND title LIKE '% · Agent'",
+    )
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_ai_sessions_screenplay_project "
         "ON ai_sessions(screenplay_project_id, id DESC)"
@@ -812,6 +828,12 @@ async def init_schema(db: DatabaseConnection) -> None:
         binding_aggregate_id TEXT DEFAULT NULL,
         binding_command_id TEXT DEFAULT NULL,
         binding_attributes_json TEXT DEFAULT NULL,
+        agent_kind TEXT DEFAULT NULL,
+        implementation_id TEXT DEFAULT NULL,
+        implementation_version INTEGER DEFAULT NULL,
+        tool_contract_version INTEGER DEFAULT NULL,
+        recipe_version INTEGER DEFAULT NULL,
+        artifact_schema_version INTEGER DEFAULT NULL,
         root_run_id TEXT DEFAULT NULL,
         agent_id TEXT DEFAULT NULL,
         parent_run_id TEXT DEFAULT NULL,
@@ -866,6 +888,12 @@ async def init_schema(db: DatabaseConnection) -> None:
         "binding_aggregate_id TEXT DEFAULT NULL",
         "binding_command_id TEXT DEFAULT NULL",
         "binding_attributes_json TEXT DEFAULT NULL",
+        "agent_kind TEXT DEFAULT NULL",
+        "implementation_id TEXT DEFAULT NULL",
+        "implementation_version INTEGER DEFAULT NULL",
+        "tool_contract_version INTEGER DEFAULT NULL",
+        "recipe_version INTEGER DEFAULT NULL",
+        "artifact_schema_version INTEGER DEFAULT NULL",
         "root_run_id TEXT DEFAULT NULL",
         "agent_id TEXT DEFAULT NULL",
         "parent_run_id TEXT DEFAULT NULL",
@@ -916,6 +944,81 @@ async def init_schema(db: DatabaseConnection) -> None:
         record_json TEXT NOT NULL,
         create_time INTEGER NOT NULL
     )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_provider_health (
+        scope_key TEXT PRIMARY KEY NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        endpoint_digest TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('closed', 'open', 'half_open')),
+        window_started_at_ms INTEGER NOT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        open_until_ms INTEGER DEFAULT NULL,
+        probe_expires_at_ms INTEGER DEFAULT NULL,
+        ramp_until_ms INTEGER DEFAULT NULL,
+        last_failure_code TEXT DEFAULT NULL,
+        revision INTEGER NOT NULL DEFAULT 1,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS idx_ai_provider_health_open
+        ON ai_provider_health(state, open_until_ms)
+    """)
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_provider_health ADD COLUMN ramp_until_ms INTEGER DEFAULT NULL",
+    )
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_provider_health_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope_key TEXT NOT NULL REFERENCES ai_provider_health(scope_key) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        reason_code TEXT DEFAULT NULL,
+        state_before TEXT DEFAULT NULL,
+        state_after TEXT DEFAULT NULL,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        open_until_ms INTEGER DEFAULT NULL,
+        ramp_until_ms INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS idx_ai_provider_health_events_scope
+        ON ai_provider_health_events(scope_key, id)
+    """)
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_provider_health_events ADD COLUMN ramp_until_ms INTEGER DEFAULT NULL",
+    )
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_provider_call_leases (
+        lease_id TEXT PRIMARY KEY NOT NULL,
+        capacity_key TEXT NOT NULL,
+        scope_key TEXT NOT NULL REFERENCES ai_provider_health(scope_key) ON DELETE CASCADE,
+        expires_at_ms INTEGER NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS idx_ai_provider_call_leases_capacity
+        ON ai_provider_call_leases(capacity_key, expires_at_ms)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_provider_capacity_policy_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        endpoint_digest TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        previous_capacity INTEGER DEFAULT NULL,
+        next_capacity INTEGER DEFAULT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_provider_capacity_policy_events_scope
+        ON ai_provider_capacity_policy_events(provider, endpoint_digest, id)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_novel_analysis_reliability_snapshots (
+        bucket_started_at_ms INTEGER NOT NULL,
+        window_limit INTEGER NOT NULL,
+        metrics_json TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (bucket_started_at_ms, window_limit)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_ai_novel_analysis_reliability_snapshots_recent
+        ON ai_novel_analysis_reliability_snapshots(bucket_started_at_ms DESC)
+    """)
     await db.execute("""CREATE TRIGGER IF NOT EXISTS ai_agent_run_sdk_diagnostics_delete
         AFTER DELETE ON ai_agent_runs BEGIN
             DELETE FROM ai_model_sdk_requests WHERE run_id = OLD.id;
@@ -1007,6 +1110,48 @@ async def init_schema(db: DatabaseConnection) -> None:
             OR OLD.binding_attributes_json IS NOT NEW.binding_attributes_json
         BEGIN
             SELECT RAISE(ABORT, 'agent run binding is immutable');
+        END
+    """)
+    await db.execute(
+        "DROP TRIGGER IF EXISTS ai_agent_runs_implementation_identity_immutable"
+    )
+    await db.execute("""CREATE TRIGGER
+        ai_agent_runs_implementation_identity_immutable
+        BEFORE UPDATE OF
+            agent_kind,
+            implementation_id,
+            implementation_version,
+            tool_contract_version,
+            recipe_version,
+            artifact_schema_version
+        ON ai_agent_runs
+        WHEN
+            OLD.agent_kind IS NOT NULL
+            OR OLD.implementation_id IS NOT NULL
+            OR OLD.implementation_version IS NOT NULL
+            OR OLD.tool_contract_version IS NOT NULL
+            OR OLD.recipe_version IS NOT NULL
+            OR OLD.artifact_schema_version IS NOT NULL
+            OR NEW.agent_kind IS NULL
+            OR NEW.agent_kind NOT IN ('writing', 'novel_analysis', 'screenplay')
+            OR NEW.implementation_id IS NULL
+            OR TRIM(NEW.implementation_id) = ''
+            OR NEW.implementation_version IS NULL
+            OR typeof(NEW.implementation_version) != 'integer'
+            OR NEW.implementation_version < 1
+            OR NEW.tool_contract_version IS NULL
+            OR typeof(NEW.tool_contract_version) != 'integer'
+            OR NEW.tool_contract_version < 1
+            OR (
+                NEW.recipe_version IS NOT NULL
+                AND typeof(NEW.recipe_version) != 'integer'
+            )
+            OR (NEW.recipe_version IS NOT NULL AND NEW.recipe_version < 1)
+            OR NEW.artifact_schema_version IS NULL
+            OR typeof(NEW.artifact_schema_version) != 'integer'
+            OR NEW.artifact_schema_version < 1
+        BEGIN
+            SELECT RAISE(ABORT, 'agent Run implementation identity is immutable');
         END
     """)
     await db.execute("DROP TRIGGER IF EXISTS ai_agent_runs_scope_immutable")
@@ -1356,6 +1501,8 @@ async def init_schema(db: DatabaseConnection) -> None:
         budget_limits_json TEXT NOT NULL DEFAULT '{}',
         cancel_requested_at_ms INTEGER DEFAULT NULL,
         usage_json TEXT NOT NULL DEFAULT '{"invocationCount":0,"unreportedUsageAttempts":0,"inputTokens":0,"generationTokens":0,"reasoningTokens":0}',
+        state_reason_code TEXT DEFAULT NULL,
+        state_reason_scope TEXT DEFAULT NULL,
         metadata_json TEXT NOT NULL DEFAULT '{}',
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -1394,6 +1541,14 @@ async def init_schema(db: DatabaseConnection) -> None:
         "ALTER TABLE ai_agent_long_tasks ADD COLUMN "
         "budget_limits_json TEXT NOT NULL DEFAULT '{}'",
     )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_tasks ADD COLUMN state_reason_code TEXT DEFAULT NULL",
+    )
+    await _try_exec(
+        db,
+        "ALTER TABLE ai_agent_long_tasks ADD COLUMN state_reason_scope TEXT DEFAULT NULL",
+    )
     await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_usage (
         task_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -1405,6 +1560,19 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (task_id, run_id)
     )""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS ai_agent_long_task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL REFERENCES ai_agent_long_tasks(id) ON DELETE CASCADE,
+        event_type TEXT NOT NULL,
+        reason_code TEXT DEFAULT NULL,
+        reason_scope TEXT DEFAULT NULL,
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        source_key TEXT NOT NULL UNIQUE,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS idx_ai_agent_long_task_events_task
+        ON ai_agent_long_task_events(task_id, id)
+    """)
     await db.execute("""CREATE INDEX IF NOT EXISTS
         idx_ai_agent_long_tasks_owner_status
         ON ai_agent_long_tasks(namespace, owner_id, kind, status, update_time DESC)
@@ -1612,6 +1780,55 @@ async def init_schema(db: DatabaseConnection) -> None:
         idx_ai_agent_artifact_projections_result
         ON ai_agent_artifact_projections(projector_namespace, result_ref)
     """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_operation_access_receipts (
+        operation_scope_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        access_kind TEXT NOT NULL,
+        resource_ref TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        observed_by_run_id TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (operation_scope_id, access_kind, resource_ref)
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_screenplay_operation_access_task
+        ON screenplay_operation_access_receipts(task_id, unit_id, attempt)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_operation_usage_receipts (
+        operation_scope_id TEXT PRIMARY KEY NOT NULL,
+        project_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        unit_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        root_run_id TEXT NOT NULL,
+        invocation_count INTEGER NOT NULL,
+        unreported_usage_attempts INTEGER NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        reasoning_tokens INTEGER DEFAULT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        usage_digest TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_screenplay_operation_usage_task_root
+        ON screenplay_operation_usage_receipts(task_id, root_run_id)
+    """)
+    await db.execute("""CREATE TABLE IF NOT EXISTS screenplay_replacement_projection_receipts (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        operation_scope_id TEXT NOT NULL UNIQUE,
+        project_id TEXT NOT NULL,
+        target_role TEXT NOT NULL,
+        revision_id TEXT NOT NULL UNIQUE,
+        input_receipt_digest TEXT NOT NULL,
+        output_digest TEXT NOT NULL,
+        projected_by_run_id TEXT NOT NULL,
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
     # Obsolete same-Run records have no valid Agent Tree Run identity and
     # therefore cannot participate in current execution or recovery.
     await db.execute("DROP TABLE IF EXISTS ai_agent_delegations")
@@ -1682,6 +1899,29 @@ async def init_schema(db: DatabaseConnection) -> None:
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
+
+    # ── chapter_annotations（正文批注，锚定在章节纯文本扁平偏移上）───
+    await db.execute("""CREATE TABLE IF NOT EXISTS chapter_annotations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        start_offset INTEGER NOT NULL,
+        end_offset INTEGER NOT NULL,
+        quoted_text TEXT NOT NULL,
+        context_before TEXT NOT NULL DEFAULT '',
+        context_after TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+        source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai')),
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_chapter_annotations_book ON chapter_annotations(book_id)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_chapter_annotations_chapter ON chapter_annotations(chapter_id)
+    """)
 
     # Durable business-source delivery to purra-mem0. This is an outbox only;
     # memory state/version/idempotency remain owned by the component journal.

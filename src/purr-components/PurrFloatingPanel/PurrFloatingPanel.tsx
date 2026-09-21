@@ -3,8 +3,8 @@ import { PurrButton } from '../PurrButton';
 import { PurrTooltip } from '../PurrTooltip';
 import {
   CloseIcon,
-  PinFilledIcon,
-  PinIcon,
+  PinnedIcon,
+  PushpinIcon,
 } from '../icons';
 import "../styles/purr-floating-panel.scss";
 
@@ -193,7 +193,7 @@ export function PurrFloatingPanel({
           <PurrButton
             type="text"
             size="small"
-            icon={isPinned ? <PinFilledIcon /> : <PinIcon />}
+            icon={isPinned ? <PinnedIcon /> : <PushpinIcon />}
             onClick={(e) => {
               e.stopPropagation();
               setPinnedState(!isPinned);

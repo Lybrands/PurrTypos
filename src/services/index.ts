@@ -1,7 +1,11 @@
 import { backendApi } from './backendApi'
 import { platformApi } from '../platform'
+import { writingTechniques } from './writingTechniques'
+import { skills } from './skills'
 
 export const services = {
+  writingTechniques,
+  skills,
   database: {
     getDatabaseInfo: backendApi.getDatabaseInfo,
     exportDatabase: platformApi.exportDatabase,
@@ -115,30 +119,6 @@ export const services = {
     pickStoryBackgroundAttachments: platformApi.pickStoryBackgroundAttachments,
     openStoryBackgroundAttachment: platformApi.openStoryBackgroundAttachment,
   },
-  writingMethods: {
-    listMethods: backendApi.listWritingMethods,
-    getMethod: backendApi.getWritingMethod,
-    createMethod: backendApi.createWritingMethod,
-    updateMethodDraft: backendApi.updateWritingMethodDraft,
-    publishMethod: backendApi.publishWritingMethod,
-    publishBatch: backendApi.publishWritingMethodBatch,
-    copyMethod: backendApi.copyWritingMethod,
-    deleteMethod: backendApi.deleteWritingMethod,
-    createCandidates: backendApi.createWritingMethodCandidates,
-    publishCandidateBatch: backendApi.publishWritingMethodCandidateBatch,
-    listSchemes: backendApi.listWritingSchemes,
-    getScheme: backendApi.getWritingScheme,
-    createScheme: backendApi.createWritingScheme,
-    updateSchemeDraft: backendApi.updateWritingSchemeDraft,
-    publishScheme: backendApi.publishWritingScheme,
-    copyScheme: backendApi.copyWritingScheme,
-    deleteScheme: backendApi.deleteWritingScheme,
-    listBookBindings: backendApi.listBookWritingMethodBindings,
-    bindBook: backendApi.bindBookWritingMethod,
-    reorderBookBindings: backendApi.reorderBookWritingMethodBindings,
-    upgradeBookBinding: backendApi.upgradeBookWritingMethodBinding,
-    unbindBook: backendApi.unbindBookWritingMethod,
-  },
   novelSources: {
     previewImport: backendApi.previewNovelSourceImport,
     confirmImport: backendApi.confirmNovelSourceImport,
@@ -166,6 +146,7 @@ export const services = {
     previewCanon: backendApi.previewContinuationCanon,
     create: backendApi.createContinuation,
     get: backendApi.getContinuation,
+    getPlotMaterials: backendApi.getContinuationPlotMaterials,
   },
   history: {
     commitChapterDiff: backendApi.commitChapterDiff,
@@ -191,6 +172,8 @@ export const services = {
     setSessionReopened: backendApi.setSessionReopened,
     deleteSession: backendApi.deleteSession,
     updateSessionTitle: backendApi.updateSessionTitle,
+    updateSessionPinned: backendApi.updateSessionPinned,
+    reorderSessions: backendApi.reorderSessions,
   },
   conversations: {
     saveConversation: backendApi.saveConversation,
@@ -229,9 +212,16 @@ export const services = {
     getMemoryLinks: backendApi.getMemoryLinks,
     buildMemoryContext: backendApi.buildMemoryContext,
   },
+  annotations: {
+    addAnnotation: backendApi.addAnnotation,
+    updateAnnotation: backendApi.updateAnnotation,
+    deleteAnnotation: backendApi.deleteAnnotation,
+    getAnnotationsByBook: backendApi.getAnnotationsByBook,
+  },
   ai: {
     generateSessionTitle: backendApi.generateSessionTitle,
     getAgentRunSnapshot: backendApi.getAgentRunSnapshot,
+    getSubAgentConversation: backendApi.getSubAgentConversation,
     consumeAgentRunEvents: backendApi.consumeAgentRunEvents,
     getAgentRunPlannerDiagnostics: backendApi.getAgentRunPlannerDiagnostics,
     getAgentRunModelInputDiagnostics: backendApi.getAgentRunModelInputDiagnostics,

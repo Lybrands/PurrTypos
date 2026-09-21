@@ -35,13 +35,16 @@ async def _messages(db, rows):
 
 async def analysis_history(db, revision_id, command_id):
     rows = await db.fetch_all(
-        "SELECT id AS run_id, prompt, final_response AS response FROM ai_agent_runs "
-        "WHERE binding_namespace='novel_source_analysis' AND binding_aggregate_id=? "
+        "SELECT id AS run_id, prompt, CASE WHEN status IN ('failed','canceled') AND final_response=error THEN '' ELSE final_response END AS response FROM ai_agent_runs "
+        "WHERE binding_namespace='purrtypos.novel_analysis' AND binding_aggregate_id=? "
+        "AND (SELECT session_id FROM novel_analysis_session_commands WHERE command_id=ai_agent_runs.binding_command_id) "
+        "= (SELECT session_id FROM novel_analysis_session_commands WHERE command_id=?) "
+        "AND NOT EXISTS (SELECT 1 FROM novel_analysis_superseded_runs WHERE run_id=ai_agent_runs.id) "
         "AND binding_command_id != ? "
         "AND rowid < COALESCE((SELECT MIN(rowid) FROM ai_agent_runs "
-        "WHERE binding_namespace='novel_source_analysis' AND binding_aggregate_id=? "
+        "WHERE binding_namespace='purrtypos.novel_analysis' AND binding_aggregate_id=? "
         "AND binding_command_id=?), 9223372036854775807) "
-        "ORDER BY rowid DESC LIMIT 32", [revision_id, command_id, revision_id, command_id])
+        "ORDER BY rowid DESC LIMIT 32", [revision_id, command_id, command_id, revision_id, command_id])
     return await _messages(db, rows)
 
 

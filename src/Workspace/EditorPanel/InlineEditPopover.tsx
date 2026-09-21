@@ -1,7 +1,13 @@
 import { services } from '@/services'
 import React from 'react'
-import { PurrButton } from '@/purr-components'
-import { CloseIcon, CheckIcon, RedoIcon } from '@/purr-components'
+import { PurrButton, PurrTooltip } from '@/purr-components'
+import {
+  CheckIcon,
+  CloseIcon,
+  HighlightIcon,
+  ImportIcon,
+  RedoIcon,
+} from '@/purr-components'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { StopCircleIcon } from '@/purr-components'
@@ -10,15 +16,39 @@ import AiContextBar from '../AiPanel/components/AiContextBar'
 import type { PromptTemplateContext } from '../AiPanel/promptTemplates'
 import ModelPicker from '../../components/AgentConversation/Composer/ModelPicker'
 import { buildInjectedContext } from './inlineEditContext'
+import { normalizeGeneratedPlainText } from './generationText'
 import { normalizeApiProvider } from '../../modelCatalog'
 import { createAiStreamId } from '../../utils/aiStream'
 import { buildStreamOptions } from '../../agent-runtime/streamOptions'
+import type { InlineApplyResult } from './plugins/EditorHandlePlugin'
 
 export interface InlineCapture {
   text: string
+  flatStart: number
+  flatEnd: number
   restore: () => void
-  replace: (newText: string) => void
+  replace: (newText: string) => InlineApplyResult
+  insertAfter: (newText: string) => InlineApplyResult
 }
+
+/** 改写模式内的快捷预设指令（原选区工具条入口收敛到弹层内） */
+export const PRESETS: { id: string; label: string; prompt: string }[] = [
+  {
+    id: 'polish',
+    label: '润色',
+    prompt: '对下面这段话进行润色，让文字更流畅、生动，保持原意不变，不要拉长篇幅。',
+  },
+  {
+    id: 'shorten',
+    label: '精简',
+    prompt: '把下面这段话改得更精简凝练，保留核心信息与语气，去除冗余与废话。',
+  },
+  {
+    id: 'expand',
+    label: '扩写',
+    prompt: '对下面这段话进行合理扩写，增加画面感与细节描写，保持原风格与语气一致。',
+  },
+]
 
 interface InlineEditPopoverProps {
   capture: InlineCapture
@@ -31,7 +61,13 @@ interface InlineEditPopoverProps {
   chapterId: EntityId | null
   chapterTitle: string
   bookTitle?: string
+  /** 读取编辑器当前章节全文（含未保存修改），用于注入【当前章节】上下文 */
+  getCurrentChapterText: () => string
   onClose: () => void
+  /** 「存为批注」：把回答预填进批注弹层（由外层接管锚点与保存） */
+  onSaveAnnotation?: (answer: string) => void
+  /** 结果落盘成功后通知外层（标记自动保存 source） */
+  onApplied?: (source: string) => void
   // 上下文：关联章节/大纲
   associatedChapterIds: EntityId[]
   setAssociatedChapterIds: (ids: EntityId[]) => void
@@ -60,7 +96,10 @@ export default function InlineEditPopover({
   chapterId,
   chapterTitle,
   bookTitle,
+  getCurrentChapterText,
   onClose,
+  onSaveAnnotation,
+  onApplied,
   associatedChapterIds,
   setAssociatedChapterIds,
   associatedOutlineIds,
@@ -194,12 +233,14 @@ export default function InlineEditPopover({
       const contextWindow = streamOptions.context_window
       if (!contextWindow) throw new Error('请先配置模型上下文窗口')
 
-      const systemPrompt = [
-        '你是一位专业中文写作助手，负责对用户选中的文段进行改写。',
+      // 统一契约：指令可能是改写指令，也可能是提问——按指令意图自行决定输出形态；
+      // 结果区同时提供 替换/插入/存为批注，怎么用由用户决定
+      const finalSystem = [
+        '你是一位专业中文写作助手，围绕用户选中的文段工作。',
         bookTitle ? `当前作品：《${bookTitle}》` : '',
         chapterTitle ? `当前章节：${chapterTitle}` : '',
-        '请严格按用户指令改写，**只输出改写后的纯文本**，不要加任何解释、标题、引号、Markdown 格式或前后缀。',
-        '保持与原文相近的段落数量，除非用户明确要求调整。',
+        '用户指令可能是改写指令或提问：若是改写，**只输出改写后的纯文本**，不加任何解释、标题、引号、Markdown 格式或前后缀，保持与原文相近的段落数量；若是提问，用 Markdown 简洁作答，不要主动改写原文。',
+        '参考资料仅供背景参考，不要原文复述。',
       ]
         .filter(Boolean)
         .join('\n')
@@ -207,8 +248,13 @@ export default function InlineEditPopover({
       // 关联章节/大纲仍在客户端拼装；记忆/伏笔改走后端统一长期记忆编排。
       const injectedContext = await buildInjectedContext({
         bookId,
-        userPrompt: instr,
         contextWindow,
+        currentChapter: chapterId
+          ? { id: chapterId, title: chapterTitle, text: getCurrentChapterText() }
+          : null,
+        selectionFlat: { start: capture.flatStart, end: capture.flatEnd },
+        selectionText: capture.text,
+        instruction: instr,
         associatedChapterIds,
         associatedOutlineIds,
         availableOutlines,
@@ -224,12 +270,12 @@ export default function InlineEditPopover({
         userPromptParts.push(injectedContext)
         userPromptParts.push('')
       }
-      userPromptParts.push(`【改写指令】${instr}`)
+      userPromptParts.push(`【指令】${instr}`)
       userPromptParts.push('')
-      userPromptParts.push('【原文】')
+      userPromptParts.push('【选中文段】')
       userPromptParts.push(capture.text)
       userPromptParts.push('')
-      userPromptParts.push('请直接输出改写后的文本：')
+      userPromptParts.push('请按指令处理上面的选中文段（改写则直接输出改写后的文本，提问则直接作答）：')
       const userPrompt = userPromptParts.join('\n')
 
       services.ai.aiChatStream({
@@ -238,7 +284,7 @@ export default function InlineEditPopover({
         baseURL: model.baseUrl || undefined,
         apiProvider: normalizeApiProvider(model.apiProvider),
         messages: [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: finalSystem },
           { role: 'user', content: userPrompt },
         ],
         options: streamOptions,
@@ -256,11 +302,14 @@ export default function InlineEditPopover({
       availableOutlines,
       bookId,
       bookTitle,
+      capture.flatEnd,
+      capture.flatStart,
       capture.text,
       chapterId,
       chapterTitle,
       chapterSelectOptions,
       cleanupStream,
+      getCurrentChapterText,
       model,
       selectedLongTermMemoryIds,
       selectedForeshadowingIds,
@@ -275,21 +324,36 @@ export default function InlineEditPopover({
     setLoading(false)
   }
 
-  const handleAccept = () => {
-    const clean = result.trim()
-    if (!clean) return
-    window.dispatchEvent(new CustomEvent('inline-edit-accepted', {
-      detail: { chapterId, source: 'inline_edit' },
-    }))
-    capture.replace(clean)
+  // 校验式落盘共用：失败时保留结果并提示，用户可手动复制
+  const applyResult = (applied: InlineApplyResult, source: string) => {
+    if (applied === 'stale') {
+      setError('原文已变化，无法定位原选区；结果已保留，可手动复制。')
+      return false
+    }
+    onApplied?.(source)
     onClose()
+    return true
+  }
+
+  // 替换：净化 Markdown 装饰后替换选区
+  const handleAccept = () => {
+    const clean = normalizeGeneratedPlainText(result)
+    if (!clean) return
+    applyResult(capture.replace(clean), 'inline_edit')
+  }
+
+  // 插入：结果净化后作为新段落插到选区之后，不改动原文
+  const handleInsertAfter = () => {
+    const clean = normalizeGeneratedPlainText(result)
+    if (!clean) return
+    applyResult(capture.insertAfter(clean), 'inline_ask')
   }
 
   const handleRegenerate = () => {
     submit(instruction)
   }
 
-  // 键盘：Esc 关闭；Ctrl/Cmd+Enter 提交；Ctrl/Cmd+Shift+Enter 接受
+  // 键盘：Esc 关闭；Ctrl/Cmd+Enter 提交；Ctrl/Cmd+Shift+Enter 替换选中
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
       e.stopPropagation()
@@ -314,7 +378,7 @@ export default function InlineEditPopover({
       onKeyDown={handleKeyDown}
     >
       <div className="inline-edit-popover-header">
-        <span>Inline 改写</span>
+        <span>Inline 助手</span>
         <PurrButton
           type="text"
           size="small"
@@ -324,7 +388,7 @@ export default function InlineEditPopover({
       </div>
 
       <div className="inline-edit-popover-body">
-        <div className="inline-edit-popover-origin" title="原文">
+        <div className="inline-edit-popover-origin" title="选中文本">
           {capture.text}
         </div>
 
@@ -353,11 +417,30 @@ export default function InlineEditPopover({
           />
         </div>
 
+        <div className="inline-edit-popover-presets">
+          {PRESETS.map((p) => (
+            <PurrTooltip key={p.id} title={p.prompt}>
+              <PurrButton
+                type="text"
+                size="small"
+                className={
+                  'inline-edit-popover-preset-btn' +
+                  (instruction === p.prompt ? ' is-active' : '')
+                }
+                disabled={loading}
+                onClick={() => setInstruction(p.prompt)}
+              >
+                {p.label}
+              </PurrButton>
+            </PurrTooltip>
+          ))}
+        </div>
+
         <div className="inline-edit-popover-input-wrap">
           <textarea
             ref={textareaRef}
             className="inline-edit-popover-textarea"
-            placeholder="告诉 AI 如何改写这段话... (Ctrl+Enter 生成)"
+            placeholder="改写指令或提问，也可点上方预设... (Ctrl+Enter 生成)"
             value={instruction}
             onChange={(e) => setInstruction(e.target.value)}
             rows={3}
@@ -412,6 +495,24 @@ export default function InlineEditPopover({
                     onClick={handleRegenerate}
                   >
                     重新生成
+                  </PurrButton>
+                  {onSaveAnnotation && (
+                    <PurrButton
+                      type="text"
+                      size="small"
+                      icon={<HighlightIcon size={15} />}
+                      onClick={() => onSaveAnnotation(result)}
+                    >
+                      存为批注
+                    </PurrButton>
+                  )}
+                  <PurrButton
+                    type="text"
+                    size="small"
+                    icon={<ImportIcon size={15} />}
+                    onClick={handleInsertAfter}
+                  >
+                    插入正文
                   </PurrButton>
                   <PurrButton
                     type="primary"

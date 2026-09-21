@@ -9,19 +9,21 @@ export interface AiBuiltinProvider {
 }
 
 export interface AiModelPreset {
+  /** 服务商级 preset id（如 zai、deepseek、moonshot、minimax、mimo）。 */
   id: string
   providerId: AiBuiltinProviderId
-  name: string
+  /** 模型名由用户填写；这里只提供输入提示，不内置具体名称。 */
+  namePlaceholder: string
   label: string
   summary: string
   contextWindowOptions: readonly AiContextWindow[]
   contextWindow: AiContextWindow
-  /** 服务商公布的单次总生成上限，包含其计入同一配额的思考 token。 */
+  /** 服务商主推模型登记的默认能力上限；用户可按实际模型覆盖。 */
   maxGenerationTokens?: number
   supportsThinking: boolean
   thinkingOnly: boolean
   thinkingEnabled: boolean
-  /** 该内置模型公开支持的用户可选思考强度。 */
+  /** 该服务商模型公开支持的用户可选思考强度。 */
   reasoningEffortOptions?: readonly AiReasoningEffort[]
   customizeTemperature: boolean
   temperatureThinking: number
@@ -36,5 +38,5 @@ export interface BuiltinModelProfile {
 
 export interface BuiltinModelPresentation {
   provider: AiBuiltinProvider
-  preset: Pick<AiModelPreset, 'id' | 'providerId' | 'name' | 'label' | 'summary' | 'recommended'>
+  preset: Pick<AiModelPreset, 'id' | 'providerId' | 'namePlaceholder' | 'label' | 'summary' | 'recommended'>
 }

@@ -27,6 +27,8 @@ async def ensure_terminal_run_conversation(db, run_id: str) -> int | None:
         run = await get_run(db, normalized_run_id)
         if run is None:
             return None
+        if run.get("parent_run_id") or run.get("root_run_id") not in (None, "", normalized_run_id):
+            return None
         existing_id = run.get("conversation_id")
         status = str(run.get("status") or "")
         if status not in {"done", "blocked", "failed", "canceled"}:
@@ -133,6 +135,8 @@ async def materialize_recovered_run_conversations(
             "SELECT r.id FROM ai_agent_runs AS r "
             "JOIN ai_sessions AS s ON s.id = r.session_id "
             "WHERE r.id = ? "
+            "AND r.parent_run_id IS NULL "
+            "AND (r.root_run_id IS NULL OR r.root_run_id = r.id) "
             "AND ("
             " (r.binding_namespace = 'writing.chat.request' "
             "  AND r.binding_aggregate_id = CAST(r.session_id AS TEXT)) "
@@ -162,6 +166,8 @@ async def materialize_terminal_writing_run_holes(db) -> tuple[str, ...]:
         "  AND s.book_id IS NOT NULL AND s.book_id <> '' "
         "  AND COALESCE(s.scope, 'chapter') IN ('chapter', 'setting'))"
         ") "
+        "AND r.parent_run_id IS NULL "
+        "AND (r.root_run_id IS NULL OR r.root_run_id = r.id) "
         "AND r.status IN ('done', 'blocked', 'failed', 'canceled') "
         "AND r.conversation_id IS NULL "
         "ORDER BY r.create_time ASC, r.rowid ASC"

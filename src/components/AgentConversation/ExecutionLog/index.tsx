@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertCircleIcon, ChevronRightIcon } from '@/purr-components';
+import { ChevronRightIcon } from '@/purr-components';
 import {
   applyExecutionLogAutoOpen,
   getInitialExecutionLogOpenState,
@@ -18,6 +18,8 @@ export interface ExecutionLogProps {
   startedAt?: number;
   durationMs?: number;
   hasError?: boolean;
+  /** 收起态标题行右侧的附加入口（如已结束后收起的子 Agent 概览） */
+  headerExtra?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -62,25 +64,33 @@ export default function ExecutionLog({
   startedAt,
   durationMs,
   hasError = false,
+  headerExtra,
   children,
 }: ExecutionLogProps) {
   const [openState, setOpenState] = React.useState(() =>
-    getInitialExecutionLogOpenState(
-      openStateStore.get(logKey),
-      autoOpen,
-    ),
+    active
+      ? { open: true, manuallySet: false }
+      : getInitialExecutionLogOpenState(
+          openStateStore.get(logKey),
+          autoOpen,
+        ),
   );
   const contentId = React.useId();
   const now = useTicker(active && startedAt != null);
 
   React.useEffect(() => {
+    if (active) {
+      setOpenState({ open: true, manuallySet: false });
+      return;
+    }
     setOpenState(getInitialExecutionLogOpenState(
       readExecutionLogOpenState(openStateStore, logKey),
       autoOpen,
     ));
-  }, [logKey]);
+  }, [active, autoOpen, logKey]);
 
   React.useEffect(() => {
+    if (active) return;
     const nextState = applyExecutionLogAutoOpen(
       openState,
       autoOpen,
@@ -88,7 +98,7 @@ export default function ExecutionLog({
     if (nextState === openState) return;
     writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
-  }, [autoOpen, logKey, openState]);
+  }, [active, autoOpen, logKey, openState]);
 
   const elapsedMs = active && startedAt != null
     ? Math.max(0, now - startedAt)
@@ -100,6 +110,7 @@ export default function ExecutionLog({
       ? formatDuration(elapsedMs)
       : null;
   const toggleOpen = () => {
+    if (active) return;
     const nextState = toggleExecutionLogOpenState(openState);
     writeExecutionLogOpenState(openStateStore, logKey, nextState);
     setOpenState(nextState);
@@ -109,7 +120,7 @@ export default function ExecutionLog({
     <section
       className={`work-log ${openState.open ? "work-log--open" : ""} ${active ? "work-log--active" : ""} ${hasError ? "work-log--error" : ""}`}
     >
-      {hasDetails ? (
+      {hasDetails && !active ? (
         <button
           type="button"
           className="work-log__toggle"
@@ -117,11 +128,13 @@ export default function ExecutionLog({
           aria-expanded={openState.open}
           aria-controls={contentId}
         >
-          <ChevronRightIcon className="work-log__chevron" />
-          {hasError ? <AlertCircleIcon className="work-log__error-icon" /> : null}
           <span>{title}</span>
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
+          ) : null}
+          <ChevronRightIcon className="work-log__chevron" />
+          {headerExtra ? (
+            <span className="work-log__toggle-extra">{headerExtra}</span>
           ) : null}
         </button>
       ) : (
@@ -129,6 +142,9 @@ export default function ExecutionLog({
           <span>{title}</span>
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
+          ) : null}
+          {headerExtra ? (
+            <span className="work-log__toggle-extra">{headerExtra}</span>
           ) : null}
         </div>
       )}
@@ -138,7 +154,7 @@ export default function ExecutionLog({
           className="work-log__collapsible"
           hidden={!openState.open}
         >
-          <div className="work-log__body">{children}</div>
+          <div className="work-log__body">{openState.open ? children : null}</div>
         </div>
       ) : null}
     </section>
@@ -152,7 +168,6 @@ export interface ExecutionLogStepGroupProps {
   activeStartedAt?: number;
   active?: boolean;
   activeLabel?: string;
-  hasError?: boolean;
   children: React.ReactNode;
 }
 
@@ -163,20 +178,20 @@ export function ExecutionLogStepGroup({
   activeStartedAt,
   active = false,
   activeLabel,
-  hasError = false,
   children,
 }: ExecutionLogStepGroupProps) {
   const [open, setOpen] = React.useState(
-    () => stepGroupOpenStateStore.get(groupKey) ?? false,
+    () => active || stepGroupOpenStateStore.get(groupKey) || false,
   );
   const contentId = React.useId();
   const now = useTicker(active && activeStartedAt != null);
 
   React.useEffect(() => {
-    setOpen(stepGroupOpenStateStore.get(groupKey) ?? false);
-  }, [groupKey]);
+    setOpen(active || stepGroupOpenStateStore.get(groupKey) || false);
+  }, [active, groupKey]);
 
   const toggleOpen = () => {
+    if (active) return;
     const nextOpen = !open;
     stepGroupOpenStateStore.set(groupKey, nextOpen);
     setOpen(nextOpen);
@@ -196,20 +211,18 @@ export function ExecutionLogStepGroup({
         onClick={toggleOpen}
         aria-expanded={open}
         aria-controls={contentId}
+        disabled={active}
       >
         <ChevronRightIcon className="work-log-step-group__chevron" />
-        {hasError ? (
-          <AlertCircleIcon className="work-log-step-group__error-icon" />
-        ) : null}
         <span>
           {active
             ? activeLabel
               ? `正在执行 ${activeLabel}`
               : "正在执行"
-            : "执行了"}
+            : "调用了"}
         </span>
         {!active ? (
-          <span className="work-log-step-group__count">{stepCount} 个步骤</span>
+          <span className="work-log-step-group__count">{stepCount} 个工具</span>
         ) : null}
         {totalDurationMs > 0 ? (
           <span className="work-log-step-group__duration">
@@ -223,7 +236,7 @@ export function ExecutionLogStepGroup({
         className="work-log-step-group__collapsible"
         hidden={!open}
       >
-        <div className="work-log-step-group__body">{children}</div>
+        <div className="work-log-step-group__body">{open ? children : null}</div>
       </div>
     </div>
   );

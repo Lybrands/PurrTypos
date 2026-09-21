@@ -1,4 +1,5 @@
 import React from 'react'
+import { SearchIcon } from '../icons'
 import '../styles/purr.scss'
 
 export interface PurrInputRef {
@@ -179,7 +180,7 @@ const Search = React.forwardRef<PurrInputRef, PurrSearchProps>(function Search(
         >
           {loading ? '…' : enterButton === true ? '搜索' : enterButton}
         </button>
-      ) : '⌕')}
+      ) : <SearchIcon />)}
       onPressEnter={(event) => {
         onPressEnter?.(event)
         if (!event.defaultPrevented) onSearch?.(event.currentTarget.value)

@@ -1,4 +1,6 @@
-purra==0.5.0
-purra-openai==0.5.0
-purra-anthropic==0.5.0
-purra-mem0[managed]==0.5.0
+# PurrA 1.0.1 发布版（PyPI）。同版本 rev2 已包含可恢复混批 FAILED 修复，
+# 背景见 docs/design/2026-09-17-recoverable-mixed-tool-batches.md。
+purra==1.0.1
+purra-anthropic==1.0.1
+purra_mem0==1.0.1
+purra-openai==1.0.1

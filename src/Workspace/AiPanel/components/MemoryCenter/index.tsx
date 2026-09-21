@@ -1,14 +1,18 @@
+import InheritedPlotMaterials from '../../../InheritedPlotMaterials'
 import { services } from '@/services'
+import { KNOWLEDGE_TAB } from '../../../utilityPanelTypes'
+import { useWorkspaceStore } from '../../../../stores/workspaceStore'
 import React from 'react'
-import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrRadio, PurrSelect, PurrSpace, PurrSpin, PurrSwitch, PurrTag, PurrTooltip, purrToast, usePurrConfirm } from '@/purr-components'
+import { PurrCollapse, PurrButton, PurrEmpty, PurrInput, PurrModal, PurrRadio, PurrSelect, PurrSpace, PurrSpin, PurrSwitch, PurrTag, PurrTooltip, purrToast, usePurrConfirm } from '@/purr-components'
 import {
   CheckCircleIcon,
   ClockIcon,
   CloseIcon,
   HistoryIcon,
   InboxIcon,
+  LibraryIcon,
   PlusIcon,
-  PinIcon,
+  PushpinIcon,
 } from '@/purr-components'
 import type {
   ComponentMemoryLinkPage,
@@ -86,7 +90,7 @@ const RELATION_OPTIONS = [
 const MEMORY_ERROR_MESSAGES: Record<string, string> = {
   memory_component_unavailable: '本地记忆组件不可用，请检查组件配置后重试。',
   memory_embedding_unconfigured: '尚未配置记忆 Embedding 模型，无法执行语义记忆操作。',
-  memory_model_unconfigured: '尚未配置记忆评审模型，无法生成审核建议。',
+  memory_model_unconfigured: '当前模型不可用，请选择可用的写作模型或单独配置提炼与评审模型。',
   memory_version_conflict: '这条记忆已被其他操作更新，请刷新后重试。',
   memory_context_stale: '记忆来源已经变化，请重新召回后再执行。',
   memory_not_found: '这条记忆已不存在或不属于当前作品。',
@@ -165,6 +169,10 @@ function structuredFieldLabel(key: string): string {
 }
 
 export default function MemoryCenter({ bookId }: MemoryCenterProps) {
+  const openKnowledgeTab = React.useCallback(
+    () => useWorkspaceStore.getState().openUtilityTab(KNOWLEDGE_TAB),
+    [],
+  )
   const confirm = usePurrConfirm()
   const [query, setQuery] = React.useState('')
   const [status, setStatus] = React.useState<UnifiedMemoryStatus | undefined>()
@@ -172,6 +180,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
   const [source, setSource] = React.useState<UnifiedMemorySource | undefined>()
   const [items, setItems] = React.useState<UnifiedMemoryItem[]>([])
   const [loading, setLoading] = React.useState(false)
+  const [semanticUnavailable, setSemanticUnavailable] = React.useState<string>()
   const [creating, setCreating] = React.useState(false)
   const [createOpen, setCreateOpen] = React.useState(false)
   const [newKind, setNewKind] = React.useState<MemoryKind>('canon')
@@ -221,6 +230,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
       purrToast.error(memoryErrorMessage(res.error, '读取记忆失败'))
       return
     }
+    if (!source || source === 'semantic') setSemanticUnavailable(res.data.unavailableSources?.semantic)
     setItems(res.data.items)
     setResolutions((previous) => {
       const next = { ...previous }
@@ -554,8 +564,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
               </div>
               <div className="story-memory-rationale">{item.summary}</div>
               <div className="story-memory-target-key">{item.target_key}</div>
-              <details className="unified-memory-details">
-                <summary>查看结构化字段与证据</summary>
+              <PurrCollapse size="small" className="unified-memory-details" items={[{key: "details", label: "查看结构化字段与证据", children: <>
                 <div className="story-memory-payload">
                   {Object.entries(item.structured_data).map(([key, value]) => (
                     <div className="story-memory-payload-row" key={key}>
@@ -564,7 +573,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
                   ))}
                 </div>
                 {item.evidence_excerpt ? <blockquote className="story-memory-evidence">{item.evidence_excerpt}</blockquote> : null}
-              </details>
+              </>}]} />
             </div>
           ))}
         </div>
@@ -598,8 +607,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
         <div className="unified-memory-content">{item.content}</div>
         {item.summary ? <div className="memory-center-item-summary">{item.summary}</div> : null}
         {(item.evidence_excerpt || Object.keys(item.structured_data).length) ? (
-          <details className="unified-memory-details">
-            <summary>查看来源与详情</summary>
+          <PurrCollapse size="small" className="unified-memory-details" items={[{key: "details", label: "查看来源与详情", children: <>
             {Object.keys(item.structured_data).length ? (
               <div className="story-memory-payload">
                 {Object.entries(item.structured_data).map(([key, value]) => (
@@ -610,7 +618,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
               </div>
             ) : null}
             {item.evidence_excerpt ? <blockquote className="story-memory-evidence">{item.evidence_excerpt}</blockquote> : null}
-          </details>
+          </>}]} />
         ) : null}
       </div>
       <PurrSpace size={6} wrap className="unified-memory-actions">
@@ -625,7 +633,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
             <PurrButton
               size="small"
               type={item.pinned ? 'primary' : 'default'}
-              icon={<PinIcon />}
+              icon={<PushpinIcon />}
               onClick={() => void updateSemantic(item, { pinned: item.pinned ? 0 : 1 })}
             />
           </PurrTooltip>
@@ -651,13 +659,22 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
 
   return (
     <div className="memory-center">
-      <PurrButton onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))}>查看外部创作资料与来源</PurrButton>
+      <InheritedPlotMaterials bookId={bookId} />
       <div className="memory-center-heading">
         <div>
           <div className="memory-center-heading-title">统一记忆中心</div>
           <div className="memory-center-heading-desc">集中管理语义记忆、精确故事状态与 AI 待审核候选。</div>
         </div>
+        <PurrTooltip title="创作资料库">
+          <PurrButton type="text" size="small" className="memory-center-knowledge" icon={<LibraryIcon />} aria-label="打开创作资料库"
+            onClick={openKnowledgeTab} />
+        </PurrTooltip>
       </div>
+      {semanticUnavailable && <p className="memory-center-source-notice" role="status">
+        {semanticUnavailable === 'memory_embedding_unconfigured'
+          ? '语义记忆尚未启用。可在设置中配置记忆 Embedding 模型后重启应用；精确故事状态与 AI 候选仍可查看。'
+          : '语义记忆暂时不可用。请检查记忆组件配置并重启应用；精确故事状态与 AI 候选仍可查看。'}
+      </p>}
 
       <div className="story-memory-policy-grid unified-memory-policy-grid">
         <div className="memory-center-intelligence">
@@ -722,7 +739,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
 
       <section className={`memory-center-create ${createOpen ? 'is-open' : 'is-collapsed'}`} aria-label="手动添加记忆">
         {!createOpen ? (
-          <button type="button" className="memory-center-create-launcher" onClick={() => setCreateOpen(true)} disabled={bookId == null}>
+          <button type="button" className="memory-center-create-launcher" onClick={() => setCreateOpen(true)} disabled={bookId == null || !!semanticUnavailable}>
             <span className="memory-center-create-launcher-icon"><PlusIcon /></span>
             <span className="memory-center-create-launcher-copy">
               <span className="memory-center-create-launcher-title">手动添加记忆</span>

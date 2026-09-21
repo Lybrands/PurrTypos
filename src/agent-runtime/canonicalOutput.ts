@@ -11,8 +11,12 @@ export type CanonicalOutputVisibility = 'public' | 'private' | 'diagnostic'
 
 export type CanonicalOutputEvent = {
   eventId: string
+  rootRunId?: string
+  parentRunId?: string
+  agentId?: string
   outputStreamId: string | null
   runId: string
+  previousRunId?: string | null
   turnId: string | null
   invocationId: string | null
   sequence: number
@@ -60,6 +64,7 @@ export type CanonicalCommentaryBlock = {
   startedAt: string
   committed: boolean
   aborted: boolean
+  stage?: boolean
 }
 
 export type CanonicalPlanningProgress = {
@@ -85,10 +90,19 @@ export type CanonicalAgentProgress = {
   occurredAt: string
 }
 
+export type CanonicalStageOutput = {
+  stageId: string
+  text: string
+  sequence: number
+  occurredAt: string
+}
+
 export type CanonicalDelegation = {
   delegationId: string
   firstSequence: number
   runId: string
+  agentId?: string | null
+  previousRunId?: string | null
   agentName: string
   agentTitle: string | null
   objective: string
@@ -123,6 +137,7 @@ export type CanonicalOutputState = {
   commentaryBlocks: CanonicalCommentaryBlock[]
   planningProgress: CanonicalPlanningProgress[]
   agentProgress: CanonicalAgentProgress[]
+  stageOutputs?: CanonicalStageOutput[]
   operations: Record<string, CanonicalOperation>
   operationOrder: string[]
   delegations: Record<string, CanonicalDelegation>
@@ -154,6 +169,7 @@ export function initialCanonicalOutputState(
     commentaryBlocks: [],
     planningProgress: [],
     agentProgress: [],
+    stageOutputs: [],
     operations: {},
     operationOrder: [],
     delegations: {},
@@ -241,6 +257,10 @@ export function reduceCanonicalOutput(
     return next
   }
 
+  if (event.kind === 'planning.delta') {
+    return appendPlanningDelta(next, event)
+  }
+
   if (event.kind === 'planning.progress') {
     return appendPlanningProgress(next, event)
   }
@@ -299,11 +319,76 @@ function appendPlanningProgress(
     || attempt < 0
     || recordIndex < 1
   ) return state
+  const existingIndex = state.planningProgress.findIndex((item) =>
+    item.outputStreamId === outputStreamId
+    && item.invocationId === invocationId
+    && item.operationId === operationId
+    && item.revision === revision
+    && item.attempt === attempt
+    && item.recordIndex === recordIndex
+  )
+  const validated = {
+    eventId: existingIndex >= 0
+      ? state.planningProgress[existingIndex].eventId
+      : event.eventId,
+    outputStreamId,
+    invocationId,
+    operationId,
+    revision,
+    attempt,
+    recordIndex,
+    text,
+    sequence: existingIndex >= 0
+      ? state.planningProgress[existingIndex].sequence
+      : event.sequence,
+    occurredAt: existingIndex >= 0
+      ? state.planningProgress[existingIndex].occurredAt
+      : event.occurredAt,
+  }
   return {
     ...state,
-    planningProgress: [
-      ...state.planningProgress,
-      {
+    planningProgress: existingIndex >= 0
+      ? state.planningProgress.map((item, index) =>
+          index === existingIndex ? validated : item)
+      : [...state.planningProgress, validated],
+  }
+}
+
+function appendPlanningDelta(
+  state: CanonicalOutputState,
+  event: CanonicalOutputEvent,
+): CanonicalOutputState {
+  if (
+    event.source !== 'provider'
+    || event.channel !== 'commentary'
+    || event.payload.schemaVersion !== 'purra.planning-stream/v1'
+  ) return state
+  const textDelta = stringValue(event.payload.textDelta)
+  const outputStreamId = event.outputStreamId ?? ''
+  const invocationId = event.invocationId ?? ''
+  const operationId = stringValue(event.payload.operationId)
+  const revision = numberValue(event.payload.revision)
+  const attempt = numberValue(event.payload.attempt)
+  const recordIndex = numberValue(event.payload.recordIndex)
+  if (
+    !textDelta || !outputStreamId || !invocationId || !operationId
+    || revision == null || attempt == null || recordIndex == null
+    || !Number.isSafeInteger(revision) || !Number.isSafeInteger(attempt)
+    || !Number.isSafeInteger(recordIndex)
+    || revision < 0 || attempt < 0 || recordIndex < 1
+  ) return state
+  const existingIndex = state.planningProgress.findIndex((item) =>
+    item.outputStreamId === outputStreamId
+    && item.invocationId === invocationId
+    && item.operationId === operationId
+    && item.revision === revision
+    && item.attempt === attempt
+    && item.recordIndex === recordIndex
+  )
+  if (existingIndex < 0) {
+    return {
+      ...state,
+      planningProgress: [...state.planningProgress, {
         eventId: event.eventId,
         outputStreamId,
         invocationId,
@@ -311,11 +396,16 @@ function appendPlanningProgress(
         revision,
         attempt,
         recordIndex,
-        text,
+        text: textDelta,
         sequence: event.sequence,
         occurredAt: event.occurredAt,
-      },
-    ],
+      }],
+    }
+  }
+  return {
+    ...state,
+    planningProgress: state.planningProgress.map((item, index) =>
+      index === existingIndex ? { ...item, text: item.text + textDelta } : item),
   }
 }
 
@@ -391,6 +481,7 @@ function appendCommentary(
       outputStreamId: streamId,
       invocationId: event.invocationId,
       text: delta,
+      stage: event.kind === 'provider.delta_batch',
       firstSequence: event.sequence,
       lastSequence: event.sequence,
       startedAt: event.occurredAt,
@@ -399,6 +490,7 @@ function appendCommentary(
     })
   } else {
     const current = commentaryBlocks[index]
+    if (current.committed || current.aborted || current.invocationId !== event.invocationId) return state
     commentaryBlocks[index] = {
       ...current,
       invocationId: current.invocationId ?? event.invocationId,
@@ -433,6 +525,7 @@ function settleStream(
     ...state,
     commentaryBlocks: state.commentaryBlocks.map((block) =>
       block.outputStreamId === event.outputStreamId
+        && block.invocationId === event.invocationId
         ? {
             ...block,
             committed,
@@ -565,6 +658,24 @@ function applyRuntimeEvent(
     next = applyApprovalRequested(next, data)
   } else if (eventType === 'approval.resolved') {
     next = applyApprovalResolved(next, data)
+  } else if (eventType === 'novel_analysis.stage_output') {
+    const stageId = stringValue(data.stageId)
+    const text = stringValue(data.text).trim()
+    if (stageId && text) {
+      const stage = {
+        stageId,
+        text,
+        sequence: event.sequence,
+        occurredAt: event.occurredAt,
+      }
+      next = {
+        ...next,
+        stageOutputs: [
+          ...(next.stageOutputs ?? []).filter((item) => item.stageId !== stageId),
+          stage,
+        ],
+      }
+    }
   }
   return next
 }
@@ -632,6 +743,10 @@ function applyDelegationEvent(
     delegationId,
     firstSequence: current?.firstSequence ?? event.sequence,
     runId: stringValue(event.payload.runId) || event.runId,
+    agentId: stringValue(event.payload.agentId) || current?.agentId || null,
+    previousRunId: stringValue(event.payload.previousRunId)
+      || current?.previousRunId
+      || null,
     agentName,
     agentTitle: stringValue(event.payload.agentTitle) || null,
     objective: stringValue(event.payload.objective),

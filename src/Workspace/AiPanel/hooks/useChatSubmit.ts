@@ -1,3 +1,4 @@
+import { techniqueOperationId, type WritingTechniqueSelection } from '../../../services/writingTechniques'
 import { services } from '@/services'
 import React from "react";
 import { usePurrToast } from '@/purr-components';
@@ -17,6 +18,7 @@ import {
   resolveTerminalRootOwnership,
 } from '../../../agent-runtime/rootOwnership'
 import { normalizeApiProvider } from "../../../modelCatalog";
+import { isUntitledSessionTitle } from "../../../components/AgentConversation/sessionTitle";
 import {
   countQueuedForSession,
   getSettledSessionActivity,
@@ -39,12 +41,12 @@ import {
 } from "./chatRuntimeStore";
 import { createAiStreamId } from "../../../utils/aiStream";
 import { createBookChunkHost } from './bookChunkHost'
+import { enrichSettledSubAgents } from './subAgentEnrichment'
 import type {
   AiModelConfig,
   AiSession,
   EntityId,
   SettingDiffCardState,
-  WritingMethodOverrides,
 } from '../../../types'
 import {
   createDurableBookRunControl,
@@ -68,6 +70,8 @@ export interface UseChatSubmitParams {
   bookId: EntityId | null | undefined
   chapterId: EntityId | null | undefined
   activeSessionId: number | null
+  /** 零会话发送时自动创建会话；返回新会话 id（失败返回 null） */
+  ensureSession: () => Promise<number | null>
   sessions: AiSession[]
   setSessions: React.Dispatch<React.SetStateAction<AiSession[]>>
   associatedChapterIds: EntityId[]
@@ -78,7 +82,9 @@ export interface UseChatSubmitParams {
   selectedLongTermMemoryIds?: string[]
   selectedMemoryIds?: (number | string)[]
   selectedForeshadowingIds?: (number | string)[]
-  writingMethodOverrides?: WritingMethodOverrides
+  writingTechniqueSelection?: WritingTechniqueSelection
+  writingTechniqueReady?: boolean
+  onWritingTechniqueAccepted?: (selection: WritingTechniqueSelection) => void
   /**
    * 会话作用域：setting = 全局会话（不绑章节），不要求选中章节即可发送；
    * 默认 chapter（必须先选章节）。
@@ -130,6 +136,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     bookId,
     chapterId,
     activeSessionId,
+    ensureSession,
     sessions,
     setSessions,
     associatedChapterIds,
@@ -140,7 +147,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedLongTermMemoryIds,
     selectedMemoryIds,
     selectedForeshadowingIds,
-    writingMethodOverrides,
+    writingTechniqueSelection,
+    writingTechniqueReady,
+    onWritingTechniqueAccepted,
     sessionScope = "chapter",
     onAssistantAttachment,
     associateAssistantIdentities,
@@ -161,7 +170,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
   const queuedSubmissions = getChatRuntimeQueue();
   const dequeueInProgressRef = React.useRef(false);
   const handleSubmitRef = React.useRef<
-    ((override: ChatSubmitOverride) => SubmitResult) | null
+    ((override: ChatSubmitOverride) => Promise<SubmitResult>) | null
   >(null);
 
   const replaceQueuedSubmissions = React.useCallback(
@@ -274,11 +283,11 @@ export function useChatSubmit(params: UseChatSubmitParams) {
 
   /** 可选：从某条用户消息重新编辑并发送，或直接发送指定内容 */
   const handleSubmit = React.useCallback(
-    (submitOverride?: ChatSubmitOverride): SubmitResult => {
+    async (submitOverride?: ChatSubmitOverride): Promise<SubmitResult> => {
       const isResend = typeof submitOverride?.editIndex === "number";
       const rawUserText = (submitOverride?.content ?? prompt).trim();
       const queuedContext = submitOverride?.queuedContext;
-      const targetSessionId = queuedContext?.sessionId ?? activeSessionId;
+      let targetSessionId = queuedContext?.sessionId ?? activeSessionId;
       const targetRuntime = getChatSessionRuntime(targetSessionId);
       if (
         targetSessionId != null
@@ -354,8 +363,29 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       const requestBookId = queuedContext?.bookId ?? bookId
-      const requestChapterId = queuedContext?.chapterId ?? chapterId ?? null
-      const requestSessionScope = queuedContext?.sessionScope ?? sessionScope
+      const queuedChapterId = queuedContext?.chapterId ?? chapterId ?? null
+      // 会话自身绑定是请求章节/scope 的权威来源：作用域切换竞态或队列
+      // 补发时，UI/排队上下文携带的章节可能属于另一作用域（例如章节
+      // 上下文配到全局会话），后端会按 scope 不一致拒绝预订与保存，
+      // 整轮失败。绑定明确时按会话收敛；未知（遗留行/夹具）保持原值。
+      const boundSession = sessions.find(
+        (session) => session.id === (queuedContext?.sessionId ?? activeSessionId),
+      );
+      const sessionChapterBinding = boundSession
+        ? (boundSession.scope === "setting" || boundSession.scope === "screenplay"
+            ? null
+            : boundSession.chapter_id
+          ? String(boundSession.chapter_id)
+          : undefined)
+        : undefined;
+      const requestChapterId = sessionChapterBinding !== undefined
+        ? sessionChapterBinding
+        : queuedChapterId;
+      const requestSessionScope = boundSession?.scope === "setting"
+        ? "setting" as const
+        : boundSession?.scope === "chapter"
+          ? "chapter" as const
+          : (queuedContext?.sessionScope ?? sessionScope)
       const requestCurrentChapterTitle = queuedContext?.currentChapterTitle
         ?? currentChapterTitle
       const requestLocale = queuedContext?.locale
@@ -369,11 +399,34 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         return "rejected";
       }
       if (targetSessionId == null) {
-        appMessage.warning("请先点击上方「+」新建对话，或从历史记录打开会话");
-        return "rejected";
+        // 零会话时发送：自动创建会话后继续本轮提交（见 AiPanel 的 ensureSession）。
+        const createdSessionId = bookId != null
+          ? await ensureSession()
+          : null;
+        if (createdSessionId == null) {
+          appMessage.warning("自动创建对话失败，请确认已选择章节后重试");
+          return "rejected";
+        }
+        targetSessionId = createdSessionId;
       }
       const sessionId = targetSessionId;
-      if ((sessionLoading || getChatRuntimeQueue().some(item => item.sessionId === sessionId && item.editing))
+      if (!queuedContext && writingTechniqueReady === false) {
+        appMessage.warning("写作技法配置仍在加载，请稍后发送");
+        return "rejected";
+      }
+      const requestTechniqueSelection = queuedContext?.writingTechniqueSelection
+        ?? writingTechniqueSelection ?? { mode: 'manual' as const, refs: [] };
+      let techniqueInputId = queuedContext?.writingTechniqueInputId;
+      if (!techniqueInputId) {
+        const reserved = await services.writingTechniques.reserveInput(String(requestBookId), String(sessionId), requestTechniqueSelection, techniqueOperationId());
+        if (!reserved.success || !reserved.data) {
+          appMessage.error(reserved.error || '无法确认本轮写作技法选择');
+          return "rejected";
+        }
+        techniqueInputId = reserved.data.inputId;
+      }
+
+      if (((getChatSessionRuntime(sessionId)?.loading ?? sessionLoading) || getChatRuntimeQueue().some(item => item.sessionId === sessionId && item.editing))
         && !submitOverride?.truncationCommitted) {
         const currentSessionTitle =
           sessions.find((session) => session.id === sessionId)?.title ?? ''
@@ -407,22 +460,13 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           selectedForeshadowingIds: [
             ...(queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds ?? []),
           ],
-          writingMethodOverrides: {
-            forceRevisionIds: [
-              ...(queuedContext?.writingMethodOverrides?.forceRevisionIds
-                ?? writingMethodOverrides?.forceRevisionIds
-                ?? []),
-            ],
-            excludeRevisionIds: [
-              ...(queuedContext?.writingMethodOverrides?.excludeRevisionIds
-                ?? writingMethodOverrides?.excludeRevisionIds
-                ?? []),
-            ],
-          },
+          writingTechniqueSelection: structuredClone(requestTechniqueSelection),
+          writingTechniqueInputId: techniqueInputId,
         };
         const nextQueue = [...getChatRuntimeQueue(), queuedItem];
         const queuedCount = countQueuedForSession(nextQueue, sessionId);
         replaceQueuedSubmissions(nextQueue);
+        onWritingTechniqueAccepted?.(requestTechniqueSelection);
         setChatRuntimeActivity(sessionId, {
           state: "running",
           queuedCount,
@@ -442,11 +486,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         queuedContext?.selectedLongTermMemoryIds ?? selectedLongTermMemoryIds;
       const requestSelectedForeshadowingIds =
         queuedContext?.selectedForeshadowingIds ?? selectedForeshadowingIds;
-      const requestWritingMethodOverrides =
-        queuedContext?.writingMethodOverrides ?? writingMethodOverrides ?? {
-          forceRevisionIds: [],
-          excludeRevisionIds: [],
-        };
+
 
     const baseConversations = submitOverride?.resendBaseMessages
       ?? getChatSessionRuntime(sessionId)?.messages
@@ -483,10 +523,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         selectedForeshadowingIds: [
           ...(requestSelectedForeshadowingIds ?? []),
         ],
-        writingMethodOverrides: {
-          forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
-          excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
-        },
+        writingTechniqueSelection: structuredClone(requestTechniqueSelection),
+        writingTechniqueInputId: techniqueInputId,
       };
       replaceChatRuntimeMessages(sessionId, baseConversations);
       setChatRuntimeLoading(sessionId, true);
@@ -664,10 +702,8 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     const currentSessionTitle =
       sessions.find((s) => s.id === sessionId)?.title ?? "";
     const hasHistoryBeforeThisQuestion = historyMessages.length > 0;
-    const isUntitledSession =
-      currentSessionTitle.trim() === "" || currentSessionTitle === "新对话";
     const needsTitle = queuedContext?.needsTitle
-      ?? (!hasHistoryBeforeThisQuestion && isUntitledSession);
+      ?? (!hasHistoryBeforeThisQuestion && isUntitledSessionTitle(currentSessionTitle));
     const acc = initialAgentAccumulator({
       sessionId,
       userText,
@@ -735,12 +771,21 @@ export function useChatSubmit(params: UseChatSubmitParams) {
       },
       associateAssistantIdentities,
       productAgentProcess,
-      afterSettled: () => {
+      afterSettled: (_outcome, settled) => {
         if (pendingTerminalPersistence.get(sessionId) === persistenceAttempt) {
           pendingTerminalPersistence.delete(sessionId)
         }
         const entry = durableControls.get(sessionId)
         if (entry?.streamId === streamId) durableControls.delete(sessionId)
+        // 根 Run 结算后补齐子 Agent 委派视图（仅在调用过 delegateToAgents
+        // 时发起一次快照读取；直播流本身不转发子 Run 事件）。
+        void enrichSettledSubAgents(
+          settled,
+          getChatSessionRuntime(sessionId)?.messages,
+          { getRunSnapshot: services.ai.getAgentRunSnapshot },
+        ).then((next) => {
+          if (next) replaceChatRuntimeMessages(sessionId, next)
+        }).catch(() => undefined)
       },
       onPersistenceBlocked: () => {
         setChatRuntimeActivity(sessionId, {
@@ -803,6 +848,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
           || terminalOwnership.rootRunId
           || chunk.runId
           || chunk.runResult?.runId
+        if (runId && !queuedContext) onWritingTechniqueAccepted?.(requestTechniqueSelection)
         durableControl?.observeRunId(runId)
         const authoritativeStatus = terminalOwnership.source === 'runResult'
           ? chunk.runResult?.status
@@ -890,10 +936,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
         requestSelectedForeshadowingIds.length > 0
           ? requestSelectedForeshadowingIds
           : undefined,
-      writingMethodOverrides: {
-        forceRevisionIds: [...requestWritingMethodOverrides.forceRevisionIds],
-        excludeRevisionIds: [...requestWritingMethodOverrides.excludeRevisionIds],
-      },
+      writingTechniqueInputId: techniqueInputId,
       chatAgentMode: requestAgentEnabled ? "agent" : "ask",
       contextWindow: streamOptions.context_window,
       expectedConversationIds: requestAgentEnabled
@@ -908,6 +951,7 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedModelConfig,
     conversations,
     bookId,
+    ensureSession,
     chapterId,
     currentChapterTitle,
     activeSessionId,
@@ -923,7 +967,9 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     selectedMemoryIds,
     selectedLongTermMemoryIds,
     selectedForeshadowingIds,
-    writingMethodOverrides,
+    writingTechniqueSelection,
+    writingTechniqueReady,
+    onWritingTechniqueAccepted,
     sessionScope,
     appMessage,
     replaceQueuedSubmissions,
@@ -952,27 +998,23 @@ export function useChatSubmit(params: UseChatSubmitParams) {
     );
     dequeueInProgressRef.current = true;
     replaceQueuedSubmissions(remainingQueue);
-    const result = handleSubmit({
+    void handleSubmit({
       content: nextSubmission.content,
       queuedContext: nextSubmission,
       preservePrompt: true,
-    });
-    queueMicrotask(() => {
-      dequeueInProgressRef.current = false;
-    });
-    if (result !== "started") {
-      const queuedCount = countQueuedForSession(
-        getChatRuntimeQueue(),
-        nextSubmission.sessionId,
-      );
-      setChatRuntimeActivity(
-        nextSubmission.sessionId,
-        getSettledSessionActivity(
-          "failed",
-          queuedCount,
-        ),
-      );
-    }
+    }).then(result => {
+      if (result !== "started") {
+        setChatRuntimeActivity(nextSubmission.sessionId, getSettledSessionActivity(
+          "failed", countQueuedForSession(getChatRuntimeQueue(), nextSubmission.sessionId),
+        ));
+      }
+    }).catch(error => {
+      appMessage.error(error instanceof Error ? error.message : '发送排队请求失败');
+      setChatRuntimeActivity(nextSubmission.sessionId, getSettledSessionActivity(
+        "failed", countQueuedForSession(getChatRuntimeQueue(), nextSubmission.sessionId),
+      ));
+    }).finally(() => { dequeueInProgressRef.current = false });
+
   }, [
     handleSubmit,
     queuedSubmissions,

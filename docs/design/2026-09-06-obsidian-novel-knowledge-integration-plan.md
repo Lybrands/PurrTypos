@@ -1,8 +1,16 @@
 # Obsidian 小说创作资料接入方案
 
-日期：2026-09-06；实施更新：2026-09-07。状态：A–D 首版代码与确定性验证已完成，真实 Provider 对照及 Electron/Obsidian 桌面验收待完成。用户已明确授权代码实现和测试，替代此前仅文档阶段的限制。范围限定 PurrTypos 小说业务、Vault 只读；不修改 PurrA，不涉及剧本，E 阶段留待后续。开发使用临时 Vault 与测试作品，真实 Provider 对照与 Electron/Obsidian 桌面验收尚未完成。
+日期：2026-09-06；实施更新：2026-09-07。状态：A–D 首版代码与确定性验证已完成，真实 Provider 对照及 Electron/Obsidian 桌面验收待完成。范围限定 PurrTypos 小说业务、Vault 只读；不修改 PurrA，不涉及剧本，E 阶段留待后续。开发使用临时 Vault 与测试作品，真实 Provider 对照与 Electron/Obsidian 桌面验收尚未完成。
+
+2026-09-07 架构修订：人物卡、故事背景、设定资料由项目编辑器、Agent 和 Obsidian 编辑同一份 Markdown 正式文件。新的权威存储、已有资料迁移及双入口编辑约束见 [小说创作资料共享 Markdown 存储](2026-09-07-shared-markdown-creation-materials.md)。本篇的只读接入和禁止现有笔记覆盖描述已交付版本；共享文件写入现已实现并有独立验证记录；正文和手动长期记忆不在共享范围。此前只读 A–D 的证据仍只代表该阶段。
+
+2026-09-08：真实个人资料的一次性迁移已完成；产品迁移入口移除，新作品默认共享 Markdown。详见 [迁移验证](../validation/2026-09-08-existing-materials-migration.md)。下文关于不迁移真实资料的描述仅代表此前阶段。
+
+2026-09-10：来源分析已接入精确引文、章节来源和独立创作资料三档规则，覆盖提交、发布与续写继承。见 [依据分档实现与验证](../validation/2026-09-10-analysis-evidence-tiers.md)。
 
 ## 1. 目标与范围
+
+2026-09-09 桌面连接修复：原 `open?path=` 仅派发 URI，不能为未登记目录建立 Obsidian 仓库，因此会出现 `Vault not found`。macOS 现在由 Electron 完成首次登记（一次正常重启确认、退出后重新读取配置、备份与原子替换），使用已登记仓库 ID 打开目录或相对路径笔记。真实 Obsidian 1.13.7 的临时仓库首次连接和笔记打开已验收；当前真实作品端到端验收、其他系统首次自动登记仍未完成。详情见 [首次连接验证](../validation/2026-09-09-obsidian-first-connection.md)。本记录取代下文 URI-only 跳转的当前实现描述，不扩大 Provider 验证结论。
 
 让作者在 Obsidian 中维护小说人物、人物关系、世界背景、时间线、伏笔和创作参考，让 PurrTypos 小说 Agent 在需要时取得有来源、有版本、适用于当前写作任务的资料。准确性目标是减少设定违背、时间线错误和角色提前知情，不能预先承诺提升比例。
 
@@ -224,7 +232,7 @@ Obsidian 使用现有小说检索总预算中的一部分，起始上限为可�
 4. 导出到单独的“更新建议”目录，新建文件使用排他创建、内容校验和持久操作 ID。存在同名文件时不覆盖；重试相同操作返回同一结果。
 5. 新建正式资料由宿主在作者确认后生成状态及身份字段；建议目录中的 AI 文件始终不自动升级为 confirmed。
 
-不将“写前比较 hash，再原子 rename”描述为跨 Obsidian 的并发安全更新：外部编辑器不遵守我们的锁，检查与写入之间仍有竞态。若后续要求自动修改既有文件，应另做协调编辑/插件协议或明确的独占编辑工作流及故障恢复验收。SQLite 事务也不能回滚已落盘的文件，因此文件操作须有 pending/applied/conflict/failed 记录和崩溃后核对流程，不能套用现有数据库原子工具包装后宣称跨存储原子提交。
+不将“写前比较 hash，再原子 rename”描述为跨 Obsidian 的并发安全更新：外部编辑器不遵守应用进程的锁，检查与写入之间仍有竞态。若后续要求自动修改既有文件，应另做协调编辑/插件协议或明确的独占编辑工作流及故障恢复验收。SQLite 事务也不能回滚已落盘的文件，因此文件操作须有 pending/applied/conflict/failed 记录和崩溃后核对流程，不能套用现有数据库原子工具包装后宣称跨存储原子提交。
 
 ## 9. 产品入口与拟新增模块
 
@@ -285,7 +293,7 @@ Obsidian 的关系图依据笔记内链展示全局或局部关联；Canvas 可�
 | `electron/novel_knowledge_ipc.js` 与 preload/前端类型 | 选择目录、绑定授权、校验并派发 Obsidian 来源 URI、跳转失败反馈 |
 | `src/Workspace/KnowledgePanel/` / `src/services/novelKnowledge.ts` | 作品级资料管理、检索/来源预览、Obsidian 跳转及未摄取内容说明 |
 
-复用/修改的现有接点见第 2 节；工具接入还需修改 `WritingToolDependencies`、writing 工具 catalog/schema/policy/display names 及 `backend/skills` 对应文件。资源启动和关闭接入现有宿主 lifespan。实现前重新查看工作区 diff，当前仓库存在大量其他未提交修改，不覆盖或捎带清理。
+复用/修改的现有接点见第 2 节；工具接入还需修改 `WritingToolDependencies`、writing 工具 catalog/schema/policy/display names 及 `backend/skills` 对应文件。资源启动和关闭接入现有宿主 lifespan。
 
 建议管理 API 前缀 `/books/{bookId}/knowledge`，提供 binding、index/status、documents、search、proposals 资源。绑定创建只接受宿主选择授权令牌；模型工具不直接访问这些管理接口。更新需期望版本和稳定命令 ID，重复提交与版本冲突分别返回。不存在、不可用、无匹配、待索引、冲突不能全部返回空列表。
 

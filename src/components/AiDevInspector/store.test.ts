@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AiAgentRunSnapshot } from "../../types.ts";
 import { mergeToolDiagnostics } from './toolDiagnostics.ts';
+import { groupToolPresentation } from './toolPresentation.ts';
+
+test('tool presentation groups stay as one visible action while retaining every receipt', () => {
+  const grouped = groupToolPresentation([
+    { id: 'facts', presentationGroup: { key: 'analysis', label: '保存分析资料' } },
+    { id: 'observations', presentationGroup: { key: 'analysis', label: '保存分析资料' } },
+    { id: 'submit' },
+  ]);
+  assert.deepEqual(grouped.map((item) => item.type), ['group', 'tool']);
+  assert.equal(grouped[0].type, 'group');
+  if (grouped[0].type === 'group') {
+    assert.equal(grouped[0].tools.length, 2);
+  }
+});
 
 test('tool diagnostics merge paged IO without conflating calls or Runs', () => {
   const args = { text: '{"chapter":1}', characters: 13, truncated: false };
@@ -259,6 +273,43 @@ test('conversation lifecycle follows the root Run instead of a child model finis
   assert.equal(lifecycle.status, 'completed');
   assert.equal(lifecycle.ended, true);
   assert.equal(lifecycle.endReason, '正常完成');
+});
+
+test('a continuation rebinds every diagnostic Run in the turn to the new Root', () => {
+  clearAiDebugRuns();
+  const input = {
+    turnId: 'turn-continuation-root',
+    sessionId: 7,
+    prompt: '继续完成结构设计',
+    model: 'model',
+  };
+  recordAgentConversationDebugChunk({
+    ...input,
+    runId: 'run-source-root',
+    conversationRootRunId: 'run-source-root',
+    chunk: canonicalEvent(1, {
+      runId: 'run-source-root',
+      kind: 'run.lifecycle',
+      payload: { status: 'canceled' },
+    }),
+  });
+  recordAgentConversationDebugChunk({
+    ...input,
+    runId: 'run-continuation-root',
+    conversationRootRunId: 'run-continuation-root',
+    chunk: canonicalEvent(2, {
+      runId: 'run-continuation-root',
+      kind: 'run.lifecycle',
+      payload: { status: 'running' },
+    }),
+  });
+
+  const turn = groupAiDebugRunsByTurn(getAiDebugSnapshot().runs)[0];
+  assert.equal(aiDebugTurnRootRunId(turn), 'run-continuation-root');
+  assert.deepEqual(
+    turn.runs.map((run) => run.conversationRootRunId),
+    ['run-continuation-root', 'run-continuation-root'],
+  );
 });
 
 test('diagnostic footer identity stays on the Root Run across child selection', () => {
@@ -682,6 +733,7 @@ test("debug store preserves a canonical tool failure code", () => {
         display: { labelParams: {
           toolName: "getSourceCharacters",
           displayNames: { "zh-CN": "为第 1 集读取林月的人物资料" },
+          presentationGroup: { key: "analysis-checkpoints", label: "保存分析资料" },
         } },
       },
     }));
@@ -712,6 +764,9 @@ test("debug store preserves a canonical tool failure code", () => {
     const tool = getAiDebugSnapshot().runs[0].tools[0];
     assert.equal(tool.name, "getSourceCharacters");
     assert.equal(tool.displayName, "为第 1 集读取林月的人物资料");
+    assert.deepEqual(tool.presentationGroup, {
+      key: "analysis-checkpoints", label: "保存分析资料",
+    });
     assert.equal(tool.status, "failed");
     assert.equal(tool.outcome, "failed");
     assert.equal(tool.errorCode, "tool_scope_violation");
@@ -930,4 +985,25 @@ test("delegations keep status metadata inside the owning Run", () => {
   assert.equal(run.delegationActivities[0].unitId, "ep05");
   assert.equal(run.delegationActivities[0].attempt, 2);
   assert.equal(run.delegationActivities[0].status, "thinking");
+});
+
+import { projectFeedback } from './store.ts';
+test('feedback projection keeps queue order, stream identity and terminal state on replay', () => {
+  const event = (sequence: number, childRunId: string, state: string): CanonicalOutputEvent => ({
+    eventId: `feedback-${sequence}`, runId: 'root', rootRunId: 'root', agentId: 'main',
+    turnId: null, invocationId: null, outputStreamId: null, sequence,
+    source: 'runtime', kind: 'runtime.event', channel: 'lifecycle', visibility: 'public',
+    occurredAt: new Date(sequence * 1000).toISOString(), emittedAt: new Date(sequence * 1000).toISOString(),
+    payload: { eventType: state === 'queued' ? 'agent.feedback.queued' : 'agent.feedback.state',
+      data: { childRunId, state, ...(state === 'streaming' ? { outputStreamId: 'root-stream' } : {}) } },
+  });
+  let rows = projectFeedback([], event(1, 'a', 'queued'));
+  rows = projectFeedback(rows, event(2, 'a', 'streaming'));
+  rows = projectFeedback(rows, event(3, 'b', 'queued'));
+  assert.deepEqual(rows.map(row => row.state), ['streaming', 'queued']);
+  rows = projectFeedback(rows, event(4, 'a', 'completed'));
+  assert.equal(rows[0].outputStreamId, 'root-stream');
+  assert.equal(projectFeedback(rows, event(1, 'a', 'queued')), rows);
+  rows = projectFeedback(rows, event(5, 'b', 'aborted'));
+  assert.deepEqual(rows.map(row => [row.childRunId, row.state]), [['a', 'completed'], ['b', 'aborted']]);
 });

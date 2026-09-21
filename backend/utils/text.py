@@ -9,6 +9,17 @@ import re
 from typing import Any
 
 
+def fold_blank_lines(text: str) -> str:
+    """应用正文规范：段落之间用单个换行分隔，把连续换行（空行）折叠为一个。
+
+    Agent 写入边界使用（editChapterContent / 章节正文 diff 提交）；
+    人工编辑器保存路径不折叠，保留作者手动输入的空行。
+    """
+    if not isinstance(text, str):
+        return text
+    return re.sub(r"\n{2,}", "\n", text).strip()
+
+
 def extract_text_from_lexical(raw: str | Any) -> str:
     """Extract plain text from a Lexical editor JSON state."""
     try:
@@ -35,9 +46,13 @@ def format_characters_as_text(characters: list[dict]) -> str:
     parts: list[str] = []
     for c in characters:
         lines = [f"### {c.get('name', '未命名')}（人物ID:{c.get('id', '')}）"]
+        if c.get("materialLink"):
+            lines.append("资料链接：" + c["materialLink"])
         tags = str(c.get("tags") or "").strip()
         if tags:
             lines.append(f"标签：{tags}")
+        if c.get("inheritedBaseline"):
+            lines.append("原作继承基线（只读历史事实）：\n" + c["inheritedBaseline"] + "\n\n本书后续发展：")
         profile = str(c.get("profile_md") or "").strip()
         if profile:
             lines.append(profile)
@@ -58,9 +73,13 @@ def format_setting_entities_as_text(
         lines = [
             f"### [{type_label}] {e.get('name', '未命名')}（实体ID:{e.get('id', '')}）"
         ]
+        if e.get("materialLink"):
+            lines.append("资料链接：" + e["materialLink"])
         tags = str(e.get("tags") or "").strip()
         if tags:
             lines.append(f"标签：{tags}")
+        if e.get("inheritedBaseline"):
+            lines.append("原作继承基线（只读历史事实）：\n" + e["inheritedBaseline"] + "\n\n本书后续发展：")
         profile = str(e.get("profile_md") or "").strip()
         if profile:
             lines.append(profile)

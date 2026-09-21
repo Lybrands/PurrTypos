@@ -6,6 +6,7 @@ export interface KnowledgeScope {
   characterId?: string
 }
 export interface KnowledgeStatus {
+  sharedStorage?: boolean
   id?: string
   state: string
   directory?: string
@@ -46,6 +47,7 @@ export interface KnowledgePreview {
 }
 const path = (book: string) => `/books/${encodeURIComponent(book)}/knowledge`
 export interface KnowledgeUsage { eventId: number; runId: string; recordedAt: string; documentId: string; revision: string; title: string; scope: Record<string, unknown>; evidenceId: string; locator?: KnowledgeLocator }
+export interface KnowledgeMaterialsStatus { mode: 'database' | 'markdown'; directory?: string; deleted?: Array<{ id: string; name: string }> }
 export const novelKnowledge = {
   usage: (book: string) => apiGet<KnowledgeUsage[]>(`${path(book)}/usage`),
   status: (book: string) => apiGet<KnowledgeStatus>(`${path(book)}/binding`),
@@ -57,4 +59,6 @@ export const novelKnowledge = {
   documents: (book: string) => apiGet<KnowledgeDocument[]>(`${path(book)}/documents`),
   source: (book: string, document: string, revision?: string) => apiGet<KnowledgeSource>(`${path(book)}/documents/${encodeURIComponent(document)}${revision ? `?revision=${encodeURIComponent(revision)}` : ''}`),
   search: (book: string, query: string, mode: 'fulltext' | 'hybrid') => apiPost<KnowledgeSearch>(`${path(book)}/search`, { query, mode }),
+  materialsStatus: (book: string) => apiGet<KnowledgeMaterialsStatus>(`${path(book)}/materials`),
+  restoreMaterial: (book: string, materialId: string) => apiPost<KnowledgeMaterialsStatus>(`${path(book)}/materials/trash/${encodeURIComponent(materialId)}/restore`, {}),
 }

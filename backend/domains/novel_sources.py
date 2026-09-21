@@ -33,6 +33,9 @@ class ParsedSourceSection:
     text: str
     start_character: int
     end_character: int
+    volume_id: str | None = None
+    volume_title: str | None = None
+    section_type: str = "chapter"
 
 
 _HEADING = re.compile(
@@ -76,7 +79,7 @@ def parse_source_sections(content: str) -> tuple[ParsedSourceSection, ...]:
             else re.sub(r"^#{1,6}\s+", "", first_line).strip() or f"第 {ordinal + 1} 节"
         )
         result.append(ParsedSourceSection(ordinal, title, text, start, end))
-    return tuple(result)
+    return _with_volume_structure(result)
 
 
 def apply_source_section_layout(
@@ -113,6 +116,35 @@ def apply_source_section_layout(
         expected_start = end
     if expected_start != len(content):
         raise NovelSourceConflictError("章节结构没有覆盖完整原文")
+    return _with_volume_structure(result)
+
+
+def _with_volume_structure(sections):
+    from dataclasses import replace
+    volume_id = volume_title = None
+    inferred_volumes: dict[str, str] = {}
+    result = []
+    for section in sections:
+        # Whole-book TXT export prefixes leaf chapter headings with their
+        # volume label: `第一卷 ... · 第十二章 ...`. That is still a chapter,
+        # not twelve standalone volumes. Recover the hierarchy without adding
+        # pseudo-sections that do not exist in the source text.
+        prefix, separator, leaf = section.title.partition(" · ")
+        composite_chapter = bool(
+            separator
+            and re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[卷部]", prefix)
+            and re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[章节篇回]", leaf)
+        )
+        is_volume = bool(
+            not composite_chapter
+            and re.match(r"^第[0-9一二三四五六七八九十百千万零〇两]+[卷部]", section.title)
+        )
+        if is_volume:
+            volume_id, volume_title = f"volume:{section.ordinal}", section.title
+        elif composite_chapter:
+            volume_title = prefix
+            volume_id = inferred_volumes.setdefault(prefix, f"volume:{len(inferred_volumes)}")
+        result.append(replace(section, volume_id=volume_id, volume_title=volume_title, section_type="volume" if is_volume else "chapter"))
     return tuple(result)
 
 

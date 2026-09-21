@@ -11,7 +11,8 @@
   border-radius: 6px;
 
   &:hover:not(:disabled),
-  &.is-copied {
+  &.is-copied,
+  &.is-active {
     color: var(--accent);
   }
 }

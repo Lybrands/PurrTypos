@@ -35,7 +35,28 @@ class SqliteNovelSourceRepository:
             + ("" if include_archived else "WHERE w.status = 'active' ")
             + "ORDER BY w.update_time DESC, w.title ASC"
         )
-        return [_work_row(row) for row in rows]
+        drafts = await self._db.fetch_all(
+            "WITH RECURSIVE saved(id) AS ("
+            "SELECT json_extract(summary_json, '$.artifactId') FROM novel_source_analyses "
+            "UNION SELECT json_extract(a.metadata_json, '$.sourceArtifactId') "
+            "FROM ai_agent_artifacts a JOIN saved s ON a.id=s.id "
+            "WHERE json_extract(a.metadata_json, '$.sourceArtifactId') IS NOT NULL) "
+            "SELECT r.work_id, r.id AS revision_id, a.id AS artifact_id "
+            "FROM ai_agent_long_task_units u "
+            "JOIN ai_agent_long_tasks t ON t.id=u.task_id "
+            "JOIN novel_source_revisions r ON r.id=t.owner_id "
+            "JOIN ai_agent_artifacts a ON u.output_ref='novel-analysis://' || a.id "
+            "WHERE t.namespace='purrtypos.novel_analysis' AND t.status='completed' "
+            "AND u.unit_id='artifact:review' AND u.status='completed' "
+            "AND NOT EXISTS(SELECT 1 FROM saved WHERE saved.id=a.id) "
+            "ORDER BY a.rowid DESC")
+        by_work = {}
+        for draft in drafts:
+            by_work.setdefault(draft['work_id'], draft)
+        return [{**_work_row(row),
+            'unsaved_analysis_artifact_id': by_work.get(row['id'], {}).get('artifact_id'),
+            'unsaved_analysis_revision_id': by_work.get(row['id'], {}).get('revision_id')}
+            for row in rows]
 
     async def get_work(self, work_id: str) -> dict[str, Any]:
         row = await self._db.fetch_one(
@@ -107,6 +128,8 @@ class SqliteNovelSourceRepository:
                     text=str(texts.get(chapter["id"], "")),
                     start_character=0,
                     end_character=len(str(texts.get(chapter["id"], ""))),
+                    volume_id=chapter.get("volume_id"),
+                    volume_title=chapter.get("volume_title"),
                 )
                 for index, chapter in enumerate(chapters)
             )
@@ -254,20 +277,13 @@ class SqliteNovelSourceRepository:
     async def delete_work(self, work_id: str) -> None:
         async with self._db.transaction(cancellation_linearizable=True):
             await self._require_work(work_id)
-            evidence_referenced = await self._db.fetch_one(
-                "SELECT 1 AS found FROM novel_source_analyses AS a "
-                "JOIN novel_source_revisions AS r ON r.id = a.source_revision_id "
-                "WHERE r.work_id = ? AND ("
-                "EXISTS (SELECT 1 FROM writing_methods AS m WHERE "
-                "json_extract(m.source_ref_json, '$.analysisId') = a.id OR "
-                "json_extract(m.draft_metadata_json, '$.sourceRef.analysisId') = a.id) OR "
-                "EXISTS (SELECT 1 FROM writing_schemes AS s WHERE "
-                "json_extract(s.source_ref_json, '$.analysisId') = a.id)) LIMIT 1",
-                [work_id],
-            )
+            import asyncio
+            from infrastructure.persistence.writing.technique_file_store import TechniqueFileStore
+            revisions = await self._db.fetch_all("SELECT id FROM novel_source_revisions WHERE work_id=?", [work_id])
+            evidence_referenced = await asyncio.to_thread(TechniqueFileStore(self._db.get_db_path().parent / "writing-library").references_sources, {row["id"] for row in revisions})
             if evidence_referenced:
                 raise NovelSourceConflictError(
-                    "来源已被写作方法或方案引用，不能删除；可以将来源归档"
+                    "来源已被写作技法引用，不能删除；可以将来源归档"
                 )
             revisions = await self._db.fetch_all(
                 "SELECT id FROM novel_source_revisions WHERE work_id = ?", [work_id]
@@ -357,6 +373,11 @@ class SqliteNovelSourceRepository:
                     pass
             for revision in revisions:
                 await self._db.execute(
+                    "DELETE FROM novel_source_section_token_metrics "
+                    "WHERE source_revision_id = ?",
+                    [revision["id"]],
+                )
+                await self._db.execute(
                     "DELETE FROM novel_source_sections WHERE revision_id = ?",
                     [revision["id"]],
                 )
@@ -389,6 +410,11 @@ class SqliteNovelSourceRepository:
                     )
                 except Exception:
                     pass
+            await self._db.execute(
+                "DELETE FROM novel_source_section_token_metrics "
+                "WHERE source_revision_id = ?",
+                [revision_id],
+            )
             await self._db.execute(
                 "DELETE FROM novel_source_sections WHERE revision_id = ?", [revision_id]
             )
@@ -430,13 +456,16 @@ class SqliteNovelSourceRepository:
             locator = {
                 "startCharacter": section.start_character,
                 "endCharacter": section.end_character,
+                **({"volumeId": section.volume_id, "volumeTitle": section.volume_title} if section.volume_id else {}),
             }
             await self._db.execute(
                 "INSERT INTO novel_source_sections "
-                "(id, revision_id, ordinal, title, text_content, content_digest, locator_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(id, revision_id, ordinal, title, text_content, content_digest, "
+                "locator_json, section_type, byte_count, character_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [section_id, revision_id, section.ordinal, section.title,
-                 section.text, digest, _json(locator)],
+                 section.text, digest, _json(locator), section.section_type,
+                 len(section.text.encode("utf-8")), len(section.text)],
             )
             try:
                 await self._db.execute(

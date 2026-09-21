@@ -41,6 +41,11 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     import React from 'react'
     const state = globalThis.__analysisComposerTest
     export const services = state.services
+    export const analysisSessions = {
+      list: async revision => ({success: true, data: [{id: 'session:' + revision, title: '来源对话'}, ...(state.newSession ? [state.newSession] : [])]}),
+      create: async () => { state.newSession = {id: 'new-session', title: '新对话'}; return {success: true, data: state.newSession} },
+      update: async () => ({success: true}),
+    }
     export const useParams = () => ({ workId: state.workId })
     export const useLocation = () => state.location
     const navigate = () => {}
@@ -50,8 +55,8 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     export const usePurrConfirm = () => confirm
     const Empty = () => null
     export default Empty
-    export const AgentConversationPanel = ({ controller }) => { state.controller = controller; return null }
-    export const WritingSkillReview = Empty, NovelAnalysisEvidenceList = Empty
+    export const AgentConversationPanel = ({ controller, extensions }) => { state.controller = controller; state.extensions = extensions; return null }
+    export const WritingSkillReview = Empty
     export const recordAgentConversationDebugChunk = () => {}
     export const PurrButton = Empty, PurrCheckbox = Empty, PurrInput = Object.assign(Empty, { TextArea: Empty })
     export const PurrModal = Empty, PurrSegmented = Empty, PurrSelect = Empty, PurrSpin = Empty
@@ -59,9 +64,9 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     export const ArrowLeftIcon = Empty, ArrowRightIcon = Empty, BookIcon = Empty, DeleteIcon = Empty
     export const FileTextIcon = Empty, HomeIcon = Empty, ImportIcon = Empty, InboxIcon = Empty, SearchIcon = Empty
   `
-  const replaced = new Set(['react-router-dom', '@/services', '@/purr-components', '../components/AppHeader',
+  const replaced = new Set(['../services/analysisSessions', 'react-router-dom', '@/services', '@/purr-components', '../components/AppHeader',
     '../components/AiDevInspector/store', '../components/AgentConversation', '../components/Markdown',
-    './WritingSkillReview', '../components/NovelAnalysisEvidenceModal'])
+    './WritingSkillReview', './SourceTechniqueResults'])
   const vite = await createServer({ appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
     plugins: [{ name: 'analysis-page-service-fixture', enforce: 'pre',
       transform(code, id) {
@@ -90,8 +95,8 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     assert.equal(state.controller.composer.updateModel, updateModel)
     await React.act(async () => state.controller.actions.send('历史尚未加载'))
     assert.equal(state.controller.conversation.queuedSubmissions.length, 0)
-    const run = { runId: 'root-A', commandId: 'command-A', runStatus: 'running', taskStatus: 'completed',
-      prompt: '分析', units: [], artifactRef: 'novel-analysis-artifact://artifact-A', interactionKind: 'analysis' }
+    const run = { runId: 'root-A', commandId: 'command-A', conversationId: 'session:A:v1', runStatus: 'running', taskStatus: 'completed', workflowStatus: 'running',
+      prompt: '分析', units: [], artifactRef: 'novel-analysis://artifact-A', interactionKind: 'analysis' }
     await publish([run])
     assert.equal(state.controller.capabilities.inputDisabled, false)
     assert.equal(state.controller.capabilities.submitMode, 'queue')
@@ -106,10 +111,11 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     const deletedId = state.controller.conversation.queuedSubmissions[1].id
     await React.act(async () => state.controller.actions.updateQueuedSubmission(deletedId, null))
     model.apiKey = 'changed-after-enqueue'
-    await publish([{ ...run, runStatus: 'completed' }])
+    await publish([{ ...run, runStatus: 'completed', workflowStatus: 'completed' }])
     assert.equal(state.requests.length, 0, 'wait for the existing artifact before deciding follow-up')
     await React.act(async () => resolveArtifact({ success: true, data: {
       artifactId: 'artifact-A', facts: [], craftCards: [],
+      techniqueResult: { status: 'insufficient_material', candidate: null, evidenceRefs: [], scopeNotes: [], reason: '没有写法观察' },
     } }))
     assert.equal(state.requests.length, 0, 'Root completion must not send a message being edited')
     await React.act(async () => state.controller.actions.updateQueuedSubmission(queuedId,
@@ -136,9 +142,52 @@ test('analysis page waits for history and Root completion, freezes queued runtim
     assert.equal(state.controller.composer.value, 'A 的新草稿')
     assert.equal(state.controller.conversation.queuedSubmissions.length, 0)
     assert.equal(state.requests.length, 1, 'late completion must not resubmit the accepted request')
-    await publish([{ ...run, taskId: 'completed-task' }])
+    await publish([{ ...run, taskId: 'completed-task', workflowStatus: 'completed' }])
     await React.act(async () => state.controller.actions.abort())
     assert.deepEqual(state.canceledRoots, ['root-A'], 'stop must target the still-running Root when its Task has completed')
+    state.workId = 'C'
+    await React.act(async () => render())
+    await publish([])
+    await React.act(async () => state.controller.actions.send('没有分析结果也只问原文'))
+    assert.equal(state.requests.length, 2)
+    assert.equal(state.requests[1].artifactId, undefined)
+    assert.equal(state.requests[1].prompt, '没有分析结果也只问原文')
+    await React.act(async () => acceptRequest({ success: true }))
+    const cRun = {...run, runId: 'c-answer', commandId: state.requests[1].commandId, taskId: null, artifactRef: undefined,
+      conversationId: 'session:C:v1', interactionKind: 'follow_up', runStatus: 'done', conversationStatus: 'finalized', workflowStatus: 'completed', finalResponse: '之前的回答'}
+    await publish([cRun])
+    assert.ok(state.controller.conversation.messages.some(message => message.content === '之前的回答'))
+    await React.act(async () => state.controller.composer.setValue('尚未发送的草稿'))
+    const editedIndex = state.controller.conversation.messages.findIndex(message => message.role === 'user')
+    assert.ok(editedIndex >= 0)
+    await React.act(async () => state.controller.actions.editMessage(editedIndex, '编辑后重新发送的问题'))
+    assert.equal(state.requests.length, 3, 'editing a historical message must dispatch a real request')
+    assert.equal(state.requests[2].prompt, '编辑后重新发送的问题')
+    assert.equal(state.requests[2].conversationId, 'session:C:v1')
+    assert.equal(state.requests[2].revisionId, 'C:v1')
+    assert.equal(state.requests[2].replaceRunId, 'c-answer')
+    assert.equal(state.requests[2].artifactId, undefined, 'edited requests must not borrow the latest result')
+    assert.equal(state.controller.composer.value, '尚未发送的草稿')
+    await React.act(async () => acceptRequest({ success: true }))
+    const editedRun = { ...cRun, runId: 'edited-answer', commandId: state.requests[2].commandId,
+      prompt: state.requests[2].prompt, finalResponse: '重新生成的回答' }
+    await publish([editedRun])
+    assert.ok(!state.controller.conversation.messages.some(message => message.content === '之前的回答'))
+    assert.ok(state.controller.conversation.messages.some(message => message.content === '重新生成的回答'))
+    await React.act(async () => state.controller.actions.createSession())
+    assert.equal(state.controller.conversation.activeSessionId, 'new-session')
+    assert.equal(state.controller.conversation.messages.length, 0)
+    await React.act(async () => state.controller.composer.setValue('新对话草稿'))
+    await React.act(async () => state.controller.actions.selectSession('session:C:v1'))
+    assert.ok(state.controller.conversation.messages.some(message => message.content === '重新生成的回答'))
+    await React.act(async () => state.controller.actions.selectSession('new-session'))
+    assert.equal(state.controller.composer.value, '新对话草稿')
+    await React.act(async () => state.controller.actions.selectSession('session:C:v1'))
+    await publish([{...cRun, runId:'later-question', artifactRef:undefined}, {...cRun, artifactRef:'novel-analysis://owned-result'}])
+    assert.ok(state.extensions.renderAssistantAttachment({role:'assistant', agentRunId:'c-answer'}))
+    assert.equal(state.extensions.renderAssistantAttachment({role:'assistant', agentRunId:'later-question'}), null)
+
+
   } finally {
     if (root) await React.act(async () => root.unmount())
     await vite.close()

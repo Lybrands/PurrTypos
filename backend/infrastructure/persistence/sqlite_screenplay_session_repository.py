@@ -121,7 +121,7 @@ class SqliteScreenplaySessionRepository:
 
     async def _require_project(self, project_id: str) -> dict[str, Any]:
         project = await self._db.fetch_one(
-            "SELECT id, title, source_book_id FROM screenplay_projects "
+            "SELECT id, source_book_id FROM screenplay_projects "
             "WHERE id = ? AND source_snapshot_json IS NOT NULL",
             [str(project_id or "").strip()],
         )
@@ -130,12 +130,13 @@ class SqliteScreenplaySessionRepository:
         return project
 
     async def _insert(self, project: dict[str, Any]) -> dict[str, Any]:
+        # 标题留空走 ai_sessions.title 列默认值「新对话」，与写作会话的
+        # 命名约定一致；首轮对话结束后由前端调用标题生成接口改名。
         session_id = await self._db.execute_and_get_id(
             "INSERT INTO ai_sessions "
-            "(title, scope, screenplay_project_id, book_id, chapter_id) "
-            "VALUES (?, 'screenplay', ?, ?, NULL)",
+            "(scope, screenplay_project_id, book_id, chapter_id) "
+            "VALUES ('screenplay', ?, ?, NULL)",
             [
-                f"{str(project.get('title') or '剧本项目')} · Agent",
                 str(project["id"]),
                 project.get("source_book_id"),
             ],

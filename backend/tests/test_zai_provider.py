@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,32 @@ class _FakeClient:
 
     def close(self):
         self.close_calls += 1
+
+
+def test_zai_transport_does_not_preempt_agent_invocation_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from infrastructure.models import zai_chat
+
+    captured = {}
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "zai",
+        SimpleNamespace(ZhipuAiClient=CapturingClient),
+    )
+    zai_chat._create_client("secret", "https://open.bigmodel.cn/api/paas/v4/")
+
+    timeout = captured["timeout"]
+    assert captured["max_retries"] == 0
+    assert timeout.connect == 15.0
+    assert timeout.read == 305.0
+    assert timeout.write == 30.0
+    assert timeout.pool == 30.0
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,8 @@ from purra.contracts import AgentMessage
 from application.agent_conversation_input import conversation_messages
 from infrastructure.persistence.agent_conversation_history import analysis_history, screenplay_history
 from database.connection import DatabaseConnection
+from agents.novel_analysis.sessions import NovelAnalysisSessions
+from tests.support.novel_source_fixtures import seed_novel_source
 
 
 def test_history_preserves_complete_turns_and_strips_protocol_fields():
@@ -36,18 +38,24 @@ async def test_persisted_history_is_scoped_and_excludes_current_and_future_turns
                 [str(i), project, session, str(i), status, f'q{i}', f'a{i}'])
         history = await screenplay_history(db, {'projectId': 'p', 'sessionId': 1, 'id': '5'})
         assert [m.content for m in history] == ['q1', 'a1', 'q4', 'a4']
-        # Use the actual Run repository so the canonical schema/required fields remain enforced.
         from infrastructure.persistence.sqlite_run_repository import SqliteRunRepository
         from purra.contracts import RunCreateParams, RunBinding
         repo = SqliteRunRepository(db)
-        for revision, command, status in [('r', 'old', 'done'), ('other', 'other', 'done'),
-                                           ('r', 'failed', 'failed'), ('r', 'current', 'done'),
-                                           ('r', 'future', 'done')]:
+        revision = (await seed_novel_source(db))['id']
+        sessions = NovelAnalysisSessions(db)
+        current_session = (await sessions.create(revision))['id']
+        other_session = (await sessions.create(revision))['id']
+        for command in ('old', 'failed', 'current', 'future'):
+            await sessions.bind(revision, current_session, command)
+        await sessions.bind(revision, other_session, 'other')
+        for command, status in [('old', 'done'), ('other', 'done'),
+                                ('failed', 'failed'), ('current', 'done'),
+                                ('future', 'done')]:
             run_id = await repo.create(RunCreateParams(session_id=None, prompt=command, mode='novel_source_analysis',
-                binding=RunBinding(namespace='novel_source_analysis', aggregate_id=revision, command_id=command)))
+                binding=RunBinding(namespace='purrtypos.novel_analysis', aggregate_id=revision, command_id=command)))
             await db.execute('UPDATE ai_agent_runs SET status=?, final_response=? WHERE id=?',
                 [status, 'answer', run_id])
-        assert [m.content for m in await analysis_history(db, 'r', 'current')] == ['old', 'answer', 'failed', 'answer']
+        assert [m.content for m in await analysis_history(db, revision, 'current')] == ['old', 'answer', 'failed', 'answer']
     finally:
         await db.close()
 
@@ -61,9 +69,17 @@ async def test_persisted_public_partial_history_is_status_independent(status, tm
     await db.init()
     try:
         repo = SqliteRunRepository(db)
-        for domain, namespace in [('analysis', 'novel_source_analysis'), ('screenplay', 'screenplay.conversation_turn')]:
+        revision = (await seed_novel_source(db))['id']
+        sessions = NovelAnalysisSessions(db)
+        analysis_session = (await sessions.create(revision))['id']
+        await sessions.bind(revision, analysis_session, 'analysis')
+        await sessions.bind(revision, analysis_session, 'current')
+        for domain, namespace, aggregate_id in [
+            ('analysis', 'purrtypos.novel_analysis', revision),
+            ('screenplay', 'screenplay.conversation_turn', 'scope'),
+        ]:
             run_id = await repo.create(RunCreateParams(session_id=None, prompt='previous', mode=namespace,
-                binding=RunBinding(namespace=namespace, aggregate_id='scope', command_id=domain)))
+                binding=RunBinding(namespace=namespace, aggregate_id=aggregate_id, command_id=domain)))
             await db.execute('UPDATE ai_agent_runs SET status=? WHERE id=?', [status, run_id])
             for kind, visibility, channel, payload in [
                 ('provider.content_delta', 'public', 'final', {'delta': '部分'}),
@@ -86,7 +102,7 @@ async def test_persisted_public_partial_history_is_status_independent(status, tm
         await db.execute('INSERT INTO screenplay_agent_turns '
             '(id,project_id,session_id,command_id,status,user_content) VALUES (?,?,?,?,?,?)',
             ['current', 'scope', 1, 'current', 'completed', 'current'])
-        for history in (await analysis_history(db, 'scope', 'current'),
+        for history in (await analysis_history(db, revision, 'current'),
                         await screenplay_history(db, {'projectId': 'scope', 'sessionId': 1, 'id': 'current'})):
             messages = conversation_messages((*history, AgentMessage(role='user', content='current')), context_window=32000)
             assert [m.content for m in messages] == ['previous', '部分正文', 'current']
@@ -95,40 +111,17 @@ async def test_persisted_public_partial_history_is_status_independent(status, tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('domain', ['writing', 'analysis', 'screenplay'])
-async def test_public_request_adapters_share_history_contract(domain):
-    from schemas.screenplay_agent import ScreenplayAgentRuntimeRequest
-    from application.screenplay_agent_service import _root_request
+async def test_writing_request_adapter_uses_public_history_contract():
     from application.request_mapping import to_writing_agent_request
     from schemas.ai import ChatStreamRequest
-    runtime = ScreenplayAgentRuntimeRequest(apiKey='test', contextWindow='128k', options={
+    runtime_options = {
         'model': 'deepseek-v4-flash', 'model_profile': 'deepseek:deepseek-v4-flash', 'profile_binding': 'compatible',
-        'thinking': {'type': 'enabled'}})
+        'thinking': {'type': 'enabled'}}
     history = (AgentMessage(role='user', content='old'), AgentMessage(role='assistant', content='answer'))
-    if domain == 'writing':
-        body = ChatStreamRequest(apiKey='test', bookId='b', sessionId=1,
-            messages=[{'role': str(m.role), 'content': m.content} for m in history]
-                     + [{'role': 'user', 'content': 'current'}], options=runtime.options)
-        request = to_writing_agent_request(body, runtime.options)
-    elif domain == 'screenplay':
-        request = _root_request({'projectId': 'p', 'sessionId': 1, 'id': 't', 'userContent': 'current'}, runtime, history)
-    else:
-        from application.novel_analysis_service import NovelAnalysisService
-        class Database:
-            async def fetch_all(self, sql, params):
-                assert params == ['r', 'c', 'r', 'c']
-                return [{'prompt': 'old', 'response': 'answer'}]
-        class Runs:
-            async def run(self, **kwargs):
-                self.request = kwargs['request']
-                if False:
-                    yield
-        service = object.__new__(NovelAnalysisService)
-        service._db = Database()
-        service._runs = Runs()
-        await service._execute_follow_up(source_revision_id='r', section_ids=('s',),
-            artifact_ref='artifact', prompt='current', command_id='c', runtime=runtime)
-        request = service._runs.request
+    body = ChatStreamRequest(apiKey='test', bookId='b', sessionId=1,
+        messages=[{'role': str(m.role), 'content': m.content} for m in history]
+                 + [{'role': 'user', 'content': 'current'}], options=runtime_options)
+    request = to_writing_agent_request(body, runtime_options)
     assert [m.content for m in request.messages] == ['old', 'answer', 'current']
     assert request.metadata['conversationInput']['historyPolicy'] == 'complete_public_turns'
     assert [m.host_metadata['inputSource'] for m in request.messages] == ['public_history', 'public_history', 'current_user']

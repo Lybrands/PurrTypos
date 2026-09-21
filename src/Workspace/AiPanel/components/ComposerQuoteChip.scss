@@ -1,0 +1,93 @@
+// 输入框上方「引用」胶囊（渲染在 agent-composer__floating-content 内）
+
+.composer-quote-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 0 2px 0 8px;
+  border-radius: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-light);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1;
+
+  &__label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 260px;
+    cursor: default;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__remove {
+    flex-shrink: 0;
+    height: 20px;
+    width: 20px;
+    min-width: 20px;
+  }
+}
+
+// hover 展开面板（渲染在 popover 容器里，脱离面板层级）
+// 整体高度由 PurrPopover 的 maxHeight 自适应（锚点侧剩余空间 + 内部滚动）
+.composer-quote-chip__preview {
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  &-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  &-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  &-title {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &-item-remove {
+    flex-shrink: 0;
+    height: 20px;
+    width: 20px;
+    min-width: 20px;
+    color: var(--text-muted);
+
+    &:hover {
+      color: var(--danger);
+    }
+  }
+
+  &-quote {
+    margin: 0;
+    padding: 6px 10px;
+    // 单条也限高，避免一条长引文占满整个面板
+    max-height: 140px;
+    overflow: auto;
+    border-left: 3px solid var(--primary, var(--border-base));
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.06);
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+}

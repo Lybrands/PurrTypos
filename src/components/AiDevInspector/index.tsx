@@ -1,8 +1,12 @@
+import { KNOWLEDGE_TAB } from '../../Workspace/utilityPanelTypes'
+import { useWorkspaceStore } from '../../stores/workspaceStore'
 import React from "react";
 import { PurrButton } from "@/purr-components";
 import type { AiTaskPlan } from "../../agent-runtime";
 import TaskPlanCard from "../AgentConversation/TaskProgress/TaskPlanCard";
 import ToolDiagnosticsCard from "./ToolDiagnosticsCard";
+import { groupToolPresentation } from "./toolPresentation";
+import ViewportBlock from "../ViewportBlock";
 import DiagnosticText, { characterCount } from "./DiagnosticText";
 import type {
   AiErrorReport,
@@ -204,10 +208,10 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
           </>
         )}
         {tool.argumentsValue !== undefined && (
-          <DiagnosticText label="参数" text={formatJson(tool.argumentsValue)} />
+          <DiagnosticText label="参数" value={tool.argumentsValue} />
         )}
         {tool.result !== undefined && (
-          <DiagnosticText label="结果" text={formatJson(tool.result)} />
+          <DiagnosticText label="结果" value={tool.result} />
         )}
         {tool.argumentsValue === undefined && tool.result === undefined && (
           <div className="ai-dev-inspector__notice">
@@ -217,6 +221,65 @@ function ToolCard({ tool }: { tool: AiDebugTool }) {
       </div>
     </details>
   );
+}
+
+function groupedToolStatus(tools: AiDebugTool[]): {
+  text: string;
+  state: 'running' | 'failed' | 'completed';
+} {
+  const completed = tools.filter((tool) => tool.status === 'completed').length;
+  const running = tools.filter((tool) => tool.status === 'running').length;
+  const failed = tools.length - completed - running;
+  if (running > 0) {
+    return { state: 'running', text: `保存中 · ${completed}/${tools.length}` };
+  }
+  if (failed > 0) {
+    return { state: 'failed', text: `部分失败 · ${completed}/${tools.length}` };
+  }
+  return { state: 'completed', text: `已完成 · ${tools.length} 条` };
+}
+
+function ToolPresentationGroupCard({
+  label,
+  tools,
+}: {
+  label: string;
+  tools: AiDebugTool[];
+}) {
+  const status = groupedToolStatus(tools);
+  return <details
+    className="ai-dev-inspector__tool-presentation-group"
+    data-status={status.state}
+  >
+    <summary>
+      <span>
+        <strong>{label}</strong>
+        <small>{tools.length} 条独立、可恢复的落盘记录</small>
+      </span>
+      <em>{status.text}</em>
+    </summary>
+    <div className="ai-dev-inspector__tool-list ai-dev-inspector__tool-presentation-group-body">
+      <div className="ai-dev-inspector__notice">
+        普通对话只显示这一项；展开后可核对各分段工具操作。
+      </div>
+      {tools.map((tool) => <ToolCard
+        key={`${tool.batchIndex}-${tool.id}`}
+        tool={tool}
+      />)}
+    </div>
+  </details>;
+}
+
+function ToolPresentationList({ tools }: { tools: AiDebugTool[] }) {
+  return <div className="ai-dev-inspector__tool-list">
+    {groupToolPresentation(tools).map((item) => item.type === 'tool'
+      ? <ToolCard key={`${item.tool.batchIndex}-${item.tool.id}`} tool={item.tool} />
+      : <ToolPresentationGroupCard
+        key={`group-${item.groupKey}`}
+        label={item.label}
+        tools={item.tools}
+      />)}
+  </div>;
 }
 
 interface FailureDiagnosis {
@@ -414,10 +477,7 @@ function ModelCallRow({
           : <span>未传入工具</span>}
       </div>
       {call.parameters ? (
-        <details className="ai-dev-inspector__model-parameters">
-          <summary>调用前请求配置（已脱敏） <small>{characterCount(formatJson(call.parameters)).toLocaleString()} 字符</small></summary>
-          <pre>{formatJson(call.parameters)}</pre>
-        </details>
+        <DiagnosticText label="调用前请求配置（已脱敏）" value={call.parameters} />
       ) : null}
     </details>
   );
@@ -730,15 +790,15 @@ export function ModelInputDiagnosticsCard({
               {call.round != null ? <span>round {call.round}</span> : null}
               {call.attempt != null ? <span>attempt {call.attempt}</span> : null}
               {call.revision != null ? <span>revision {call.revision}</span> : null}
-              <span>{call.messages.length} 条消息 · {call.messages.reduce((sum, message) => sum + characterCount(formatJson(message)), 0).toLocaleString()} 字符（诊断序列化）</span>
+              <span>{call.messages.length} 条消息</span>
             </summary>
             {call.novelKnowledge?.length ? <details><summary>创作资料输入凭据 · {call.novelKnowledge.length} 个片段</summary>{call.novelKnowledge.map((receipt) => <div key={receipt.evidenceId}>
               <strong>{receipt.metadata.title}</strong> · 修订 {receipt.metadata.revision.slice(0, 12)} · {receipt.metadata.reasons.join(' / ')}
-              <DiagnosticText label="适用章节与知情范围" text={formatJson(receipt.metadata.scope)} />
-              <PurrButton onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))}>查看资料来源</PurrButton>
+              <DiagnosticText label="适用章节与知情范围" value={receipt.metadata.scope} />
+              <PurrButton onClick={() => useWorkspaceStore.getState().openUtilityTab(KNOWLEDGE_TAB)}>查看资料来源</PurrButton>
             </div>)}</details> : null}
             {call.sdkRequest ? (
-              <DiagnosticText label="SDK 参数核验（已脱敏）" text={formatJson(call.sdkRequest)} />
+              <DiagnosticText label="SDK 参数核验（已脱敏）" value={call.sdkRequest} />
             ) : null}
             {call.captured ? (
               <div className="ai-dev-inspector__messages">
@@ -748,7 +808,7 @@ export function ModelInputDiagnosticsCard({
                     <DiagnosticText
                       key={`${call.eventRowId}:${messageIndex}`}
                       label={`#${messageIndex + 1} · ${role}`}
-                      text={formatJson(message)}
+                      value={message}
                     />
                   );
                 })}
@@ -885,23 +945,14 @@ function RunTechnicalDetails({
           </details>
         ) : null}
 
-        <details className="ai-dev-inspector__text-block">
-          <summary>请求参数 <small>{characterCount(formatJson(run.request.meta)).toLocaleString()} 字符</small></summary>
-          <pre>{formatJson(run.request.meta)}</pre>
-        </details>
+        <DiagnosticText label="请求参数" value={run.request.meta} />
 
         {run.request.messages.length > 0 ? (
           <details className="ai-dev-inspector__text-block">
             <summary>入口请求消息 <small>{run.request.messages.length} 条 · 后端处理前</small></summary>
             <div className="ai-dev-inspector__messages">
               {run.request.messages.map((message, index) => (
-                <details
-                  className={`ai-dev-inspector__message ai-dev-inspector__message--${message.role}`}
-                  key={`${message.role}-${index}`}
-                >
-                  <summary><span>{message.role}</span><small>#{index + 1} · {characterCount(formatJson(message.content)).toLocaleString()} 字符</small></summary>
-                  <pre>{formatJson(message.content)}</pre>
-                </details>
+                <DiagnosticText key={`${message.role}-${index}`} label={`#${index + 1} · ${message.role}`} value={message.content} />
               ))}
             </div>
           </details>
@@ -950,6 +1001,8 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
   const [open, setOpen] = React.useState(false);
   React.useEffect(() => setOpen(false), [run.id]);
   const isRoot = Boolean(rootRunId && run.agentRunId === rootRunId);
+  const isChild = Boolean(run.parentRunId && run.agentId);
+  const isRequest = !run.agentRunId;
   const elapsed = (run.finishedAt ?? now) - run.startedAt;
   const modelCallRows = [
     ...run.modelCalls.map((call) => ({
@@ -983,8 +1036,8 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
       >
         <summary>
           <div>
-            <span>{isRoot ? "主 AGENT" : `执行段 ${index + 1}`}</span>
-            <strong>{isRoot ? "主流程" : run.source || run.taskType}</strong>
+            <span>{isRoot ? "主 AGENT" : isChild ? "子 AGENT" : isRequest ? "请求记录" : "历史 RUN · 关系未确认"}</span>
+            <strong>{isRoot ? "统一输出与工具执行" : run.source || run.taskType}</strong>
             <small title={usage ? tokenUsageTitle(usage) : undefined}>
               {isRoot ? `${run.source} · ` : ""}{formatTime(run.startedAt)}
               {usage ? ` · ${tokenUsageText(usage)}` : ""}
@@ -1005,7 +1058,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
             <span><b>{run.tools.length}</b>工具调用</span>
             {usage ? <>
               <span title={tokenUsageTitle(usage)}>
-                <b>{tokenUsageText(usage)}</b>本段消耗
+                <b>{tokenUsageText(usage)}</b>当前 Run 消耗
               </span>
               <span><b>{formatTokens(usage.inputTokens)} / {formatTokens(usage.generationTokens)}</b>输入 / 生成</span>
               {usage.reasoningTokens != null && usage.reasoningTokens > 0 ? (
@@ -1028,9 +1081,7 @@ const RunTimelineItem = React.memo(function RunTimelineItem({
               <div className="ai-dev-inspector__section-title">
                 <span>工具执行</span><small>{run.tools.length} 个</small>
               </div>
-              <div className="ai-dev-inspector__tool-list">
-                {run.tools.map((tool) => <ToolCard key={`${tool.batchIndex}-${tool.id}`} tool={tool} />)}
-              </div>
+              <ToolPresentationList tools={run.tools} />
             </div>
           ) : null}
 
@@ -1137,7 +1188,7 @@ function ConversationTimeline({
         <div className="ai-dev-inspector__turn-facts">
           <span>{formatTime(turn.startedAt)} 开始</span>
           <span>{formatDuration(finishedAt - turn.startedAt)}</span>
-          <span>{runs.length} 个执行段</span>
+          <span>{runs.filter(run => run.parentRunId && run.agentId).length} 个已确认子 Agent · {runs.length} 条 Run 记录</span>
           <span>{modelCallCount} 次模型调用</span>
           <span>{toolCallCount} 次工具调用</span>
           {turnUsage ? (
@@ -1162,14 +1213,30 @@ function ConversationTimeline({
         status={rootRun?.status ?? lifecycle.status}
       />
 
+      <section className="ai-dev-inspector__feedback-panel">
+        <div className="ai-dev-inspector__section-title"><strong>子 Agent 反馈 → 主 Agent 说明</strong><small>按反馈到达顺序</small></div>
+        <p>子 Agent 可并行执行；公开说明由主 Agent 排队逐条输出。工具调用保留在所属 Run 内。</p>
+        {(rootRun?.feedback ?? []).length ? <ol>
+          {rootRun!.feedback!.map((feedback, index) => {
+            const child = runs.find(run => run.agentRunId === feedback.childRunId);
+            const labels = { queued: '已返回 · 等待主 Agent 说明', started: '主 Agent 准备说明', streaming: '主 Agent 正在说明', completed: '主 Agent 已完成说明', aborted: '说明中断 · 需要核对' };
+            return <li key={feedback.childRunId} data-feedback-state={feedback.state}>
+              <div><strong>{child?.source || `子 Agent 反馈 ${index + 1}`}</strong><span>{labels[feedback.state]}</span></div>
+              <small>{feedback.executionStatus ? `执行结果：${({ done: '已完成', failed: '失败', canceled: '已取消' } as Record<string, string>)[feedback.executionStatus] || feedback.executionStatus}` : child ? `最近执行记录：${STATUS_LABELS[child.status]}` : '执行详情尚未加载'} · {formatTime(Date.parse(feedback.receivedAt))} 收到</small>
+              {feedback.text ? <details><summary>查看主 Agent 的对应说明</summary><pre>{feedback.text}</pre></details> : null}
+              <details><summary>反馈关联记录</summary><dl><dt>子 Agent Run</dt><dd>{feedback.childRunId}</dd><dt>主 Agent 输出流</dt><dd>{feedback.outputStreamId || '尚未观察到公开文本'}</dd></dl></details>
+            </li>;
+          })}
+        </ol> : <p>尚未观察到反馈记录。历史 Run 完成状态不能证明主 Agent 已公开说明。</p>}
+      </section>
       <div className="ai-dev-inspector__timeline-heading">
-        <strong>执行过程</strong>
-        <span>按发生顺序排列</span>
+        <strong>Agent 与所属 Run</strong>
+        <span>按开始时间排列 · 可并行</span>
       </div>
       <div className="ai-dev-inspector__timeline">
         {runs.map((run, index) => (
+          <ViewportBlock key={run.id} id={`diagnostic:${run.id}`} estimate={100} keepMounted>
           <RunTimelineItem
-            key={run.id}
             run={run}
             index={index}
             total={runs.length}
@@ -1177,6 +1244,7 @@ function ConversationTimeline({
             isCurrent={run.id === currentRunId}
             now={isAiDebugRunActive(run) ? now : run.finishedAt ?? run.updatedAt}
           />
+          </ViewportBlock>
         ))}
       </div>
     </div>
@@ -1192,8 +1260,8 @@ export default function AiDevInspector() {
   );
   return visible ? <VisibleAiDevInspector /> : (
     <button type="button" className="ai-dev-inspector-launcher"
-      aria-label="打开 AI 诊断" onClick={() => setAiDebugInspectorVisible(true)}>
-      AI 诊断
+      aria-label="打开 AI 对话诊断" onClick={() => setAiDebugInspectorVisible(true)}>
+      AI 对话诊断
     </button>
   );
 }
@@ -1284,7 +1352,7 @@ function VisibleAiDevInspector() {
     <aside
       className={`ai-dev-inspector ${collapsed ? "ai-dev-inspector--collapsed" : ""}`}
       style={{ left: position.x, top: position.y }}
-      aria-label="当前 AI 任务诊断"
+      aria-label="当前 AI 对话诊断"
     >
       <header
         className="ai-dev-inspector__header"
@@ -1296,7 +1364,7 @@ function VisibleAiDevInspector() {
         <div className="ai-dev-inspector__title">
           <span className={`ai-dev-inspector__live-dot ai-dev-inspector__live-dot--${status}`} />
           <div>
-            <strong>{collapsed ? "AI 诊断" : "当前任务诊断"}</strong>
+            <strong>{collapsed ? "AI 对话诊断" : "当前 AI 对话诊断"}</strong>
             <small>{currentTurn?.source ?? "等待任务"} · {STATUS_LABELS[status]}</small>
           </div>
         </div>
@@ -1315,7 +1383,7 @@ function VisibleAiDevInspector() {
             {collapsed ? "▣" : "—"}
           </button>
           {!collapsed ? (
-            <button type="button" onClick={() => setAiDebugInspectorVisible(false)} aria-label="关闭调试面板" title="下次提交新任务时打开">
+            <button type="button" onClick={() => setAiDebugInspectorVisible(false)} aria-label="关闭 AI 对话诊断" title="下次提交新任务时打开">
               ×
             </button>
           ) : null}
@@ -1337,7 +1405,7 @@ function VisibleAiDevInspector() {
           </div>
 
           <footer className="ai-dev-inspector__footer">
-            <span>本轮 Root Run ID</span>
+            <span>{aiDebugTurnRootRunId(currentTurn) ? "本轮 Root Run ID" : "本轮请求 ID"}</span>
             <code title={aiDebugTurnDiagnosticId(currentTurn)}>
               {aiDebugTurnDiagnosticId(currentTurn)}
             </code>

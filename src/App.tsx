@@ -11,10 +11,23 @@ import {
 } from 'react-router-dom'
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
-import { Book, type AiModelConfig, type EntityId, type MemoryEmbeddingConfig } from './types'
+import {
+  Book,
+  type AiModelConfig,
+  type AiProviderCapacityPolicy,
+  type EntityId,
+  type MemoryEmbeddingConfig,
+} from './types'
 import { applyModelRuntimeConfigPatch } from './modelCatalog'
+import { migrateLegacyModelConfigs } from './models/migration'
 import { installModelDescriptors } from './models/registry'
 import './App.scss'
+import {
+  DEFAULT_AGENT_OPERATION_MODE,
+  normalizeAgentOperationMode,
+  setAgentOperationMode,
+  type AgentOperationMode,
+} from './agentOperationMode'
 
 const HomePage = lazy(() => import('./HomePage'))
 const BookshelfPage = lazy(() => import('./BookshelfPage'))
@@ -22,12 +35,13 @@ const Workspace = lazy(() => import('./Workspace'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const ScreenplayAgentPage = lazy(() => import('./ScreenplayAgentPage'))
 const WritingMethodsPage = lazy(() => import('./WritingMethodsPage'))
+const SkillsPage = lazy(() => import('./SkillsPage'))
 const NovelSourcesPage = lazy(() => import('./NovelSourcesPage'))
 const AiDevInspector = import.meta.env.DEV
   ? lazy(() => import('./components/AiDevInspector'))
   : null
 
-type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'novelSources' | 'workspace'
+type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'skills' | 'novelSources' | 'workspace'
 type BooksStatus = 'idle' | 'loading' | 'loaded'
 type SettingsLocationState = { returnTo?: string }
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
@@ -71,6 +85,8 @@ export default function App() {
         ? 'bookshelf'
         : contentPath === '/writing-methods'
           ? 'writingMethods'
+        : contentPath === '/skills'
+          ? 'skills'
         : contentPath === '/novel-sources' || contentPath.startsWith('/novel-sources/')
           ? 'novelSources'
         : 'home'
@@ -84,6 +100,7 @@ export default function App() {
     getStoredLastOpenedBookId,
   )
   const [modelConfigs, setModelConfigs] = React.useState<AiModelConfig[]>([])
+  const [providerCapacityPolicies, setProviderCapacityPolicies] = React.useState<AiProviderCapacityPolicy[]>([])
   const [memoryModelId, setMemoryModelId] = React.useState('')
   const [memoryEmbeddingConfig, setMemoryEmbeddingConfig] = React.useState<MemoryEmbeddingConfig | null>(null)
   const configuredModelConfigs = React.useMemo(
@@ -91,14 +108,25 @@ export default function App() {
     [modelConfigs],
   )
   const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
+  const [agentPreventSystemSleep, setAgentPreventSystemSleep] = React.useState(false)
+  const [agentOperationMode, setAgentOperationModeState] = React.useState<AgentOperationMode>(DEFAULT_AGENT_OPERATION_MODE)
 
   React.useEffect(() => {
     services.settings.getSettings().then((res) => {
       if (!res.success || !res.data) return
       if (res.data.model_descriptors) installModelDescriptors(res.data.model_descriptors)
       setSyncOutlineChapter(!!res.data.sync_outline_chapter)
+      setAgentPreventSystemSleep(res.data.agent_prevent_system_sleep === true)
+      const operationMode = normalizeAgentOperationMode(res.data.agent_operation_mode)
+      setAgentOperationModeState(operationMode)
+      setAgentOperationMode(operationMode)
       if (Array.isArray(res.data.ai_model_configs)) {
-        setModelConfigs(res.data.ai_model_configs)
+        const { configs, changed } = migrateLegacyModelConfigs(res.data.ai_model_configs)
+        setModelConfigs(configs)
+        if (changed) void services.settings.setSettings({ ai_model_configs: configs })
+      }
+      if (Array.isArray(res.data.ai_provider_capacity_policies)) {
+        setProviderCapacityPolicies(res.data.ai_provider_capacity_policies)
       }
       setMemoryModelId(typeof res.data.memory_model_id === 'string' ? res.data.memory_model_id : '')
       const embedding = res.data.memory_embedding_config
@@ -115,16 +143,32 @@ export default function App() {
     services.settings.setSettings({ ai_model_configs: configs })
   }, [])
 
-  const saveMemoryConfiguration = React.useCallback((
-    modelId: string,
-    embedding: MemoryEmbeddingConfig | null,
-  ) => {
-    setMemoryModelId(modelId)
-    setMemoryEmbeddingConfig(embedding)
-    void services.settings.setSettings({
-      memory_model_id: modelId,
-      memory_embedding_config: embedding,
+  const memorySaveQueue = React.useRef(Promise.resolve())
+  const providerCapacitySaveQueue = React.useRef(Promise.resolve())
+  const saveProviderCapacityPolicies = React.useCallback((policies: AiProviderCapacityPolicy[]) => {
+    setProviderCapacityPolicies(policies)
+    const request = providerCapacitySaveQueue.current.catch(() => undefined).then(async () => {
+      const result = await services.settings.setSettings({ ai_provider_capacity_policies: policies })
+      if (!result.success) throw new Error('保存 Provider 端点并发策略失败')
     })
+    providerCapacitySaveQueue.current = request
+    return request
+  }, [])
+
+  const saveMemoryConfiguration = React.useCallback((
+    patch: import('./SettingsPage/useMemoryAutosave').MemoryConfigurationPatch,
+  ): Promise<void> => {
+    const request = memorySaveQueue.current.catch(() => undefined).then(async () => {
+      const result = await services.settings.setSettings({
+        ...(patch.modelId !== undefined ? { memory_model_id: patch.modelId } : {}),
+        ...(patch.embedding !== undefined ? { memory_embedding_config: patch.embedding } : {}),
+      })
+      if (!result.success) throw new Error('保存配置失败')
+      if (patch.modelId !== undefined) setMemoryModelId(patch.modelId)
+      if (patch.embedding !== undefined) setMemoryEmbeddingConfig(patch.embedding)
+    })
+    memorySaveQueue.current = request
+    return request
   }, [])
 
   const updateModelConfig = React.useCallback((
@@ -146,6 +190,29 @@ export default function App() {
     setSyncOutlineChapter(value)
     services.settings.setSettings({ sync_outline_chapter: value })
   }, [])
+
+  const handleAgentPreventSystemSleepChange = React.useCallback(async (value: boolean) => {
+    setAgentPreventSystemSleep(value)
+    const result = await services.settings.setSettings({ agent_prevent_system_sleep: value })
+    if (!result.success) {
+      setAgentPreventSystemSleep(!value)
+      appMessage.error('保存后台运行设置失败')
+      return
+    }
+    await window.purrDesktop?.refreshAgentPowerSaveState?.().catch(() => undefined)
+  }, [appMessage])
+
+  const handleAgentOperationModeChange = React.useCallback(async (value: AgentOperationMode) => {
+    const previous = agentOperationMode
+    setAgentOperationModeState(value)
+    setAgentOperationMode(value)
+    const result = await services.settings.setSettings({ agent_operation_mode: value })
+    if (!result.success) {
+      setAgentOperationModeState(previous)
+      setAgentOperationMode(previous)
+      appMessage.error('保存默认操作类型失败')
+    }
+  }, [agentOperationMode, appMessage])
 
   const loadBooks = React.useCallback(async () => {
     setBooksStatus('loading')
@@ -179,6 +246,10 @@ export default function App() {
 
   const handleEnterWritingMethods = React.useCallback(() => {
     navigate('/writing-methods')
+  }, [navigate])
+
+  const handleEnterSkills = React.useCallback(() => {
+    navigate('/skills')
   }, [navigate])
 
   const handleEnterNovelSources = React.useCallback(() => {
@@ -267,9 +338,9 @@ export default function App() {
   return (
     <div className={`app-root app-root--${page} app-root--ambient-${ambientPage}`}>
       <div className="app-ambient-glow" aria-hidden="true" />
-      {page === 'home' && (
+      {page === 'home' && !showSettings && (
         <div className="app-global-actions">
-          <GlobalActions />
+          <GlobalActions onOpenSettings={handleOpenSettings} />
         </div>
       )}
       <main className="app-main">
@@ -303,11 +374,16 @@ export default function App() {
                 onContinuationCreated={loadBooks}
                 onOpenNovelSources={handleEnterNovelSources}
                 onOpenWritingMethods={handleEnterWritingMethods}
+                onOpenSkills={handleEnterSkills}
+                onOpenSettings={handleOpenSettings}
                 onBack={handleBackToHome}
               />
             )} />
             <Route path="/writing-methods" element={(
-              <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} />
+              <WritingMethodsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} onOpenSettings={handleOpenSettings} />
+            )} />
+            <Route path="/skills" element={(
+              <SkillsPage onBack={handleEnterBookshelf} onHome={handleBackToHome} onOpenSettings={handleOpenSettings} />
             )} />
             <Route path="/novel-sources/:workId?" element={(
               <NovelSourcesPage
@@ -316,6 +392,7 @@ export default function App() {
                 onUpdateModelConfig={updateModelConfig}
                 onBack={handleEnterBookshelf}
                 onHome={handleBackToHome}
+                onOpenSettings={handleOpenSettings}
               />
             )} />
             <Route path="/books/:bookId" element={activeBook ? (
@@ -344,12 +421,19 @@ export default function App() {
             <SettingsPage
               modelConfigs={modelConfigs}
               onSaveModelConfigs={saveModelConfigs}
+              providerCapacityPolicies={providerCapacityPolicies}
+              onSaveProviderCapacityPolicies={saveProviderCapacityPolicies}
               memoryModelId={memoryModelId}
               memoryEmbeddingConfig={memoryEmbeddingConfig}
               onSaveMemoryConfiguration={saveMemoryConfiguration}
               onClose={handleCloseSettings}
+              onHome={() => navigate('/', { replace: true })}
               syncOutlineChapter={syncOutlineChapter}
               onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
+              agentPreventSystemSleep={agentPreventSystemSleep}
+              onAgentPreventSystemSleepChange={handleAgentPreventSystemSleepChange}
+              agentOperationMode={agentOperationMode}
+              onAgentOperationModeChange={handleAgentOperationModeChange}
             />
           </Suspense>
         </div>

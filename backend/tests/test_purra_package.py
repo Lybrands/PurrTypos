@@ -16,13 +16,7 @@ import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-PURRA_VERSION = "0.5.0"
-PURRA_REQUIREMENTS = (
-    "purra==0.5.0",
-    "purra-openai==0.5.0",
-    "purra-anthropic==0.5.0",
-    "purra-mem0[managed]==0.5.0",
-)
+PURRA_VERSION = "1.0.1"
 RUNTIME_CONSTRAINTS = {
     "httpx>=0.28.0,<1",
     "httpx2>=2.7.0,<3",
@@ -104,27 +98,38 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
+PUBLISHED_PINS = {
+    "purra": "purra==1.0.1",
+    "purra_anthropic": "purra-anthropic==1.0.1",
+    "purra_mem0": "purra_mem0==1.0.1",
+    "purra_openai": "purra-openai==1.0.1",
+}
+
+
 @pytest.mark.parametrize("package", [purra, purra_openai, purra_anthropic, purra_mem0])
-def test_purra_is_loaded_from_the_pinned_published_distribution(package):
+def test_purra_is_loaded_from_the_published_release(package):
     requirements = tuple(
         line.strip()
         for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
             encoding="utf-8"
         ).splitlines()
-        if line.strip()
+        if line.strip() and not line.lstrip().startswith("#")
     )
     name = package.__name__
     package_path = Path(package.__file__).resolve()
     distribution = metadata.distribution(name)
     distribution_root = Path(distribution.locate_file("")).resolve()
 
-    assert requirements == PURRA_REQUIREMENTS
+    assert PUBLISHED_PINS[name] in requirements
     assert distribution.version == PURRA_VERSION
+    # PyPI 安装没有 direct_url.json；存在即说明装回了本地候选/直链产物。
     assert distribution.read_text("direct_url.json") is None
     assert package_path == distribution_root / name / "__init__.py"
     assert "site-packages" in package_path.parts
     assert not package_path.is_relative_to((ROOT_DIR.parent / "purra").resolve())
     assert not (ROOT_DIR / "packages" / "purra").exists()
+    assert not (BACKEND_DIR / "vendor").exists()
+    assert not (BACKEND_DIR / "purra-candidate.json").exists()
 
 
 def test_provider_gateway_exports_come_from_installed_wheels():

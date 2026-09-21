@@ -484,7 +484,7 @@ async def test_core_rejects_host_owned_fields_omitted_from_strict_schema():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["propose", "confirm"])
-async def test_non_read_multi_call_batch_rejects_before_scope_approval_or_handler(mode):
+async def test_non_read_multi_call_batch_fails_recoverably_before_scope_approval_or_handler(mode):
     order = []
 
     async def _scope(state, arguments, signal=None):
@@ -523,7 +523,8 @@ async def test_non_read_multi_call_batch_rejects_before_scope_approval_or_handle
         sink,
     )
 
-    assert result.outcome is ToolBatchOutcome.REJECTED
+    # 可恢复失败：结果回传模型拆批重发；授权类拒绝才保持 REJECTED 终态。
+    assert result.outcome is ToolBatchOutcome.FAILED
     assert result.error == "multi_call_batch_requires_read_only_tools"
     assert [item.error for item in result.results] == [
         "multi_call_batch_requires_read_only_tools",
@@ -673,7 +674,7 @@ async def test_scope_cache_approval_and_handler_run_in_fixed_order():
     )
 
     assert result.outcome is ToolBatchOutcome.COMPLETED
-    assert order == ["scope", "cache", "approval", "handler"]
+    assert order == ["scope", "cache", "approval", "scope", "handler"]
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,6 @@ import React from 'react'
 import {
   CheckCircleIcon,
   ClockIcon,
-  CloseCircleIcon,
   EditIcon,
   FileSearchIcon,
 } from '@/purr-components'
@@ -46,14 +45,16 @@ function renderDuration(row: ToolCallRow, now: number) {
 
 function renderToolRow(row: ToolCallRow, now: number) {
   if (row.outcome === 'context_error') {
+    // 静默处理失败：不展示红色图标，行尾以普通文字标注（与成功行同色）
     return (
       <div
         key={row.index}
-        className="bubble-tool-call-line bubble-tool-call-line--error"
+        className="bubble-tool-call-line bubble-tool-call-line--failed"
       >
-        <CloseCircleIcon className="bubble-tool-call-icon" />
+        <span className="bubble-tool-call-spacer" aria-hidden />
         <span>{row.text}</span>
         {renderDuration(row, now)}
+        <span className="bubble-tool-call-failed-tag">调用失败</span>
       </div>
     )
   }

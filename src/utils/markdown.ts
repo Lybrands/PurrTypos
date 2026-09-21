@@ -5,6 +5,22 @@ import { gfm } from 'turndown-plugin-gfm'
 
 /** 空段落占位符：用于保留连续空白行，避免 Turndown 的 join() 把多个空段落合并成一个 */
 const BLANK_PLACEHOLDER = '\u200B'
+const YAML_FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/
+const YAML_CODE_BLOCK = /^```(?:yaml)?\r?\n(---\r?\n[\s\S]*?\r?\n---)\r?\n```(?:\r?\n|$)/
+
+export function yamlFrontmatterToMarkdown(value: string): string {
+  const match = value.match(YAML_FRONTMATTER)
+  if (!match) return value
+  const body = value.slice(match[0].length).replace(/^\r?\n/, '')
+  return `\`\`\`yaml\n${match[0].trimEnd()}\n\`\`\`${body ? `\n\n${body}` : ''}`
+}
+
+export function markdownToYamlFrontmatter(value: string): string {
+  const match = value.match(YAML_CODE_BLOCK)
+  if (!match) return value
+  const body = value.slice(match[0].length).replace(/^\r?\n/, '')
+  return `${match[1]}${body ? `\n\n${body}` : '\n'}`
+}
 
 /** 单元格文本转 GFM 表格单元格：转义管道符并 trim */
 function cellText(text: string): string {

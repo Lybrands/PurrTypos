@@ -38,6 +38,21 @@ class StabilityEvidenceGateway(Protocol):
         limit: int = 20,
     ) -> list[dict[str, Any]]: ...
 
+    async def get_novel_analysis_reliability(
+        self,
+        *,
+        session_id: int | None = None,
+        book_id: str | None = None,
+        screenplay_project_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]: ...
+
+    async def list_novel_analysis_reliability_baselines(
+        self,
+        *,
+        limit: int = 24,
+    ) -> list[dict[str, Any]]: ...
+
 
 async def get_scoped_agent_stability_trend(
     gateway: StabilityEvidenceGateway,
@@ -121,6 +136,20 @@ async def get_scoped_agent_stability_trend(
     report["comparisonWindowSize"] = comparison_window_size
     report["scope"] = {"type": resolved_scope, "id": scope_id}
     report["windowLimit"] = int(limit)
+    reliability = await gateway.get_novel_analysis_reliability(
+        limit=limit,
+        **query_scope,
+    )
+    reliability["baselines"] = {
+        "scope": "global",
+        "availableForScope": resolved_scope == "global",
+        "snapshots": (
+            await gateway.list_novel_analysis_reliability_baselines()
+            if resolved_scope == "global"
+            else []
+        ),
+    }
+    report["novelAnalysisReliability"] = reliability
     return report
 
 

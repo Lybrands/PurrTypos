@@ -82,6 +82,7 @@ async def test_tool_io_is_correlated_and_redacted_without_reasoning_or_other_run
             "toolCallId": "read",
             "toolName": "readSourceChapters",
             "displayNames": {"zh-CN": "为第 1 集读取《第一章 清河桥》的原文"},
+            "presentationGroup": {"key": "analysis-checkpoints", "label": "保存分析资料"},
         }},
     })
     await append_event(db, run, "tool.results", {"results": [
@@ -106,6 +107,9 @@ async def test_tool_io_is_correlated_and_redacted_without_reasoning_or_other_run
     assert calls["read"]["name"] == "readSourceChapters"
     assert calls["read"]["displayName"] == "为第 1 集读取《第一章 清河桥》的原文"
     assert calls["read"]["operationId"] == "operation-read-chapter-1"
+    assert calls["read"]["presentationGroup"] == {
+        "key": "analysis-checkpoints", "label": "保存分析资料",
+    }
     assert '"chapterId": "chapter-1"' in calls["read"]["arguments"]["text"]
     assert isinstance(json.loads(calls["read"]["arguments"]["text"])["nested"], str)
     assert "正文" in calls["read"]["result"]["text"]

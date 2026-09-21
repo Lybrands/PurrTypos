@@ -320,3 +320,38 @@ async def test_session_delete_wins_before_reservation_without_orphan(receipt_db)
     with pytest.raises(ValueError, match="session does not exist"):
         await reserving
     assert await store.get("chat-after-delete") is None
+
+
+async def test_child_runs_do_not_fence_the_session_frontier(receipt_db):
+    """子 Agent 子 Run 继承 session_id 但不会物化成对话，不能计入前沿。"""
+    db, store = receipt_db
+    conversation_id = await db.execute_and_get_id(
+        "INSERT INTO ai_conversations (session_id, prompt, response) "
+        "VALUES (7, '委派问题', '委派回答')"
+    )
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, conversation_id, status, prompt) "
+        "VALUES ('run-root', 7, ?, 'done', '委派问题')",
+        [conversation_id],
+    )
+    # 会话曾委派子 Agent：子 Run 带 session_id、无 conversation、已终态。
+    await db.execute(
+        "INSERT INTO ai_agent_runs "
+        "(id, session_id, parent_run_id, root_run_id, agent_id, status, prompt) "
+        "VALUES ('agent-run-9', 7, 'run-root', 'run-root', 'agent-9', "
+        "'done', '子任务')"
+    )
+
+    receipt = await store.reserve(
+        request_id="chat-after-delegation",
+        session_id=7,
+        request_digest="sha256:after",
+        book_id="book-1",
+        chapter_id="chapter-1",
+        expected_conversation_ids=[conversation_id],
+        # 前端只可能从对话行收集到根 Run。
+        expected_run_ids=["run-root"],
+    )
+
+    assert receipt.status == "accepted"

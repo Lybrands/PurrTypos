@@ -57,7 +57,8 @@ async def lifespan(application: FastAPI):
         clear_agent_composition,
         set_agent_composition,
     )
-    from application.composition_factory import create_agent_composition
+    from agents.shared.acceptance_rollout import resolve_process_rollout_policy
+    from application.composition_factory import create_versioned_agent_composition
     from database.connection import DatabaseConnection
     from dependencies import clear_db, set_db
 
@@ -71,8 +72,11 @@ async def lifespan(application: FastAPI):
     composition: AgentComposition | None = None
     orphan_monitor: asyncio.Task[None] | None = None
     artifact_monitor: asyncio.Task[None] | None = None
+    novel_analysis_recovery_monitor: asyncio.Task[None] | None = None
+    novel_analysis_baseline_monitor: asyncio.Task[None] | None = None
     orphan_monitor_stop: asyncio.Event | None = None
     artifact_monitor_stop: asyncio.Event | None = None
+    novel_analysis_recovery_stop: asyncio.Event | None = None
     knowledge_resource = None
     try:
         data_dir = DATA_DIR if DATA_DIR and DATA_DIR != Path("") else None
@@ -96,7 +100,6 @@ async def lifespan(application: FastAPI):
                 recovered_approvals,
             )
 
-        from config import SKILLS_DIR
         from application.agent_orphan_recovery_service import (
             AgentOrphanRecoveryService,
         )
@@ -106,11 +109,11 @@ async def lifespan(application: FastAPI):
 
         await SqliteWritingChatRequestStore(db).recover_unbound()
 
-        skills_dir = (
-            SKILLS_DIR
-            if SKILLS_DIR and SKILLS_DIR != Path("")
-            else Path(__file__).parent / "skills"
-        )
+        from application.builtin_skills import ensure_builtin_skills
+
+        for skill_id in await ensure_builtin_skills(db):
+            logging.getLogger(__name__).info("Published builtin skill %s", skill_id)
+
         from application.memory_component import (
             MemoryComponentConfigurationError,
             create_memory_component_resource,
@@ -143,11 +146,14 @@ async def lifespan(application: FastAPI):
                 "Memory component is unavailable: %s",
                 error.code,
             )
-        composition = create_agent_composition(
+        rollout_policy = resolve_process_rollout_policy(
+            data_dir=data_dir,
+        )
+        composition = create_versioned_agent_composition(
             db,
             execution_db=execution_db,
-            skills_dir=skills_dir,
             memory_resource=memory_resource,
+            agent_rollout_policy=rollout_policy,
         )
         recovered_long_tasks = await (
             composition.long_task_repository.recover_after_restart()
@@ -159,9 +165,10 @@ async def lifespan(application: FastAPI):
                 ", ".join(recovered_long_tasks),
             )
         orphan_recovery = AgentOrphanRecoveryService(db, composition)
-        recovered_runs = await orphan_recovery.recover(
-            after_restart=True,
-        )
+        # Startup does not prove that another process holding a live lease is
+        # dead. Normal orphan recovery honours persisted lease deadlines and
+        # will reclaim genuinely abandoned work after expiry.
+        recovered_runs = await orphan_recovery.recover(after_restart=False)
         from infrastructure.persistence.run_conversation_store import (
             materialize_terminal_writing_run_holes,
         )
@@ -174,14 +181,14 @@ async def lifespan(application: FastAPI):
                 ", ".join(recovered_runs),
             )
 
-        from infrastructure.persistence.sqlite_screenplay_agent_repository import (
-            SqliteScreenplayAgentRepository,
+        from agents.screenplay.recovery_service import (
+            ScreenplayReplacementRecoveryService,
         )
 
-        recovered_turn_ids = await SqliteScreenplayAgentRepository(
+        recovered_turn_ids = await ScreenplayReplacementRecoveryService(
             db,
-            owner_id="screenplay-startup-recovery",
-        ).recover_after_restart()
+            composition,
+        ).recover_stale_admissions()
         if recovered_turn_ids:
             logging.getLogger(__name__).warning(
                 "Recovered %s screenplay Turn projection(s) after restart",
@@ -213,6 +220,32 @@ async def lifespan(application: FastAPI):
         )
 
         set_agent_composition(composition)
+
+        from agents.novel_analysis.automatic_recovery import (
+            NovelAnalysisReplacementAutomaticRecovery,
+            monitor_novel_analysis_replacement_recovery,
+        )
+        from agents.novel_analysis.reliability_baseline import (
+            NovelAnalysisReliabilityBaselineService,
+            monitor_novel_analysis_reliability_baseline,
+        )
+        novel_analysis_recovery = NovelAnalysisReplacementAutomaticRecovery(
+            db,
+            composition,
+        )
+        novel_analysis_baseline = NovelAnalysisReliabilityBaselineService(db)
+        recovered_novel_analyses = await novel_analysis_recovery.recover_due()
+        if recovered_novel_analyses:
+            logging.getLogger(__name__).info(
+                "Dispatched automatic recovery for %s novel-analysis task(s) after startup",
+                len(recovered_novel_analyses),
+            )
+        try:
+            await novel_analysis_baseline.capture_due()
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to capture startup novel-analysis reliability baseline",
+            )
         if memory_resource is not None:
             from application.memory_delivery import MemoryDeliveryService
             from application.memory_operations import MemoryApplicationService
@@ -237,6 +270,7 @@ async def lifespan(application: FastAPI):
 
         orphan_monitor_stop = asyncio.Event()
         artifact_monitor_stop = asyncio.Event()
+        novel_analysis_recovery_stop = asyncio.Event()
         orphan_monitor = asyncio.create_task(
             monitor_orphaned_runs(
                 recover_orphans=orphan_recovery.recover,
@@ -256,9 +290,22 @@ async def lifespan(application: FastAPI):
                 stop_event=artifact_monitor_stop,
             )
         )
+        novel_analysis_recovery_monitor = asyncio.create_task(
+            monitor_novel_analysis_replacement_recovery(
+                novel_analysis_recovery,
+                stop_event=novel_analysis_recovery_stop,
+            )
+        )
+        novel_analysis_baseline_monitor = asyncio.create_task(
+            monitor_novel_analysis_reliability_baseline(
+                novel_analysis_baseline,
+                stop_event=novel_analysis_recovery_stop,
+            )
+        )
 
         from routers import (
             ai,
+            annotations,
             articles,
             books,
             chapter_diff,
@@ -274,17 +321,19 @@ async def lifespan(application: FastAPI):
             prompt_templates,
             screenplay_v2,
             sessions,
+            skills,
             setting_diff,
             setting_entities,
             settings,
             story_memory,
-            writing_methods,
+            writing_techniques,
             novel_sources,
             novel_knowledge,
             story_background,
         )
 
         application.include_router(books.router, prefix="/api")
+        application.include_router(annotations.router, prefix="/api")
         application.include_router(outlines.router, prefix="/api")
         application.include_router(chapters.router, prefix="/api")
         application.include_router(articles.router, prefix="/api")
@@ -302,7 +351,8 @@ async def lifespan(application: FastAPI):
         application.include_router(setting_diff.router, prefix="/api")
         application.include_router(setting_entities.router, prefix="/api")
         application.include_router(story_memory.router, prefix="/api")
-        application.include_router(writing_methods.router, prefix="/api")
+        application.include_router(writing_techniques.router, prefix="/api")
+        application.include_router(skills.router, prefix="/api")
         application.include_router(novel_sources.router, prefix="/api")
         application.include_router(novel_knowledge.router, prefix="/api")
         application.include_router(continuations.router, prefix="/api")
@@ -316,10 +366,16 @@ async def lifespan(application: FastAPI):
                 artifact_monitor_stop.set()
             if orphan_monitor_stop is not None:
                 orphan_monitor_stop.set()
+            if novel_analysis_recovery_stop is not None:
+                novel_analysis_recovery_stop.set()
             if artifact_monitor is not None:
                 await artifact_monitor
             if orphan_monitor is not None:
                 await orphan_monitor
+            if novel_analysis_recovery_monitor is not None:
+                await novel_analysis_recovery_monitor
+            if novel_analysis_baseline_monitor is not None:
+                await novel_analysis_baseline_monitor
         finally:
             try:
                 if composition is not None:
@@ -348,13 +404,14 @@ async def lifespan(application: FastAPI):
 app = FastAPI(title="PurrTypos Backend", version="0.5.2", lifespan=lifespan)
 
 # CORS：本服务**仅供本机 Electron 渲染进程**调用。
-# - "null" 来自打包后 file:// 加载的页面发起 fetch 时 Origin 为 "null"。
+# - "app://." 来自当前 Electron 打包协议；"null" 保留给 file://
+#   加载的本机页面。
 # - regex 覆盖 Vite dev server (http://localhost:5174) 与本机其他端口。
 # 之前的 ``allow_origins=["*"]`` 让任何跨域脚本都能命中本机 API，对桌面端
 # 是不必要的攻击面。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["null"],
+    allow_origins=["app://.", "null"],
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],

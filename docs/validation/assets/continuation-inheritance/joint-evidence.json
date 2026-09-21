@@ -1,0 +1,306 @@
+{
+  "model": "kimi-k2.6",
+  "protocol": "openai-compatible",
+  "endpointHost": "api.moonshot.cn",
+  "synthetic": true,
+  "jointPassed": true,
+  "run": {
+    "id": "run_69852d07272d4995",
+    "mode": "agent",
+    "status": "done",
+    "error": null,
+    "model_attempt_count": 7,
+    "input_tokens": 73873,
+    "output_tokens": 2357,
+    "reasoning_tokens": 1495,
+    "unreported_usage_attempts": 0,
+    "unreported_reasoning_attempts": 0,
+    "create_time": "2026-09-07 19:28:28",
+    "update_time": "2026-09-07 19:29:19"
+  },
+  "elapsedSeconds": 51.9,
+  "usage": {
+    "inputTokens": 73873,
+    "generationTokens": 2357,
+    "reasoningTokens": 1495,
+    "cachedInputTokens": 49152,
+    "totalTokens": 76230
+  },
+  "usageEventCount": 7,
+  "defaultTechniques": [
+    {
+      "kind": "technique",
+      "id": "tech_8ac394fcf4765df09cd600bc847781df",
+      "versionId": "9d16b01ce459b044e0e42c2967e6dddbb97972961bc29a735d970bd2ed623da7"
+    }
+  ],
+  "sourceText": "# 第一章\n缆绳绷紧。叶珂攥住吊篮边沿。铁钩响了一声。还不能松手。\n吊篮蹭过墙面。她缩回手指。墙缝里落下碎灰。先护住指节。\n篮底终于贴住平台，她解开腰带，扶着栏杆站稳。脚下是几块颜色深浅不同的旧木板，靠墙一侧铺着粗布，布角压了一只缺耳的茶杯；越过护栏，可以看见晾衣绳从这幢楼牵到对面，几件衬衫在清晨的光里缓慢翻面。",
+  "sourceCharacters": 157,
+  "entrySha256": "46de666abbcbde86bf8885c2ea689836ea2f1d44f23110d49991cf0055dbdff8",
+  "entryInActualInput": true,
+  "historyInActualInput": true,
+  "materialKindsInActualInput": [
+    "background",
+    "character"
+  ],
+  "toolNames": [
+    "readContinuationSourceSection",
+    "readContinuationSourceSection",
+    "listBookCharacters",
+    "listWritingChapters",
+    "getStoryBackground",
+    "createWritingChapter",
+    "editChapterContent"
+  ],
+  "createdChapters": [
+    {
+      "chapterId": "pHF46osE",
+      "title": "第2章",
+      "parentId": null
+    }
+  ],
+  "chapterProposals": [
+    {
+      "chapterId": "pHF46osE",
+      "beforeText": "",
+      "proposedText": "她松开栏杆，掌心还留着铁锈的凉意。平台上风不大，却从楼缝间漏进来，掀动粗布一角，露出底下更深的霉斑。她弯腰拾起那只缺耳茶杯，杯底有半圈干涸的茶渍，像谁喝剩了最后一轮。身后吊篮轻轻晃了一下，铁钩又响了一声。她没有回头，把茶杯放回原处，布角重新压好。朝那扇半掩的门走去时，旧木板在鞋底发出轻微的挤压声。门板漆皮剥落，露出底下更深的木纹，门缝里没光，却有股淡淡的烟草味飘出来，混着旧木头受潮后的腥气。她停住，手指搭在门把上，顿了顿，然后推开了半寸。",
+      "source": "ai_tool_edit"
+    }
+  ],
+  "sourceAnalysisRuns": [
+    {
+      "id": "run_55aca5b2efbf4521",
+      "mode": "novel_source_analysis",
+      "status": "done",
+      "error": null,
+      "model_attempt_count": 2,
+      "input_tokens": 2376,
+      "output_tokens": 3401,
+      "reasoning_tokens": 2684,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:04:00",
+      "update_time": "2026-09-07 19:09:58"
+    },
+    {
+      "id": "run_bb2c5c15315d441a",
+      "mode": "novel_analysis_unit",
+      "status": "failed",
+      "error": "tool_call_truncated",
+      "model_attempt_count": 1,
+      "input_tokens": 1831,
+      "output_tokens": 8192,
+      "reasoning_tokens": 7939,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:04:28",
+      "update_time": "2026-09-07 19:06:10"
+    },
+    {
+      "id": "run_e600653f99fd4302",
+      "mode": "novel_analysis_unit",
+      "status": "done",
+      "error": null,
+      "model_attempt_count": 2,
+      "input_tokens": 10061,
+      "output_tokens": 6595,
+      "reasoning_tokens": 4634,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:06:10",
+      "update_time": "2026-09-07 19:07:38"
+    },
+    {
+      "id": "run_5d9e63e7cde54635",
+      "mode": "novel_analysis_unit",
+      "status": "done",
+      "error": null,
+      "model_attempt_count": 5,
+      "input_tokens": 20059,
+      "output_tokens": 4076,
+      "reasoning_tokens": 3179,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:07:38",
+      "update_time": "2026-09-07 19:08:37"
+    },
+    {
+      "id": "run_65b0a40dd6824335",
+      "mode": "novel_analysis_unit",
+      "status": "done",
+      "error": null,
+      "model_attempt_count": 5,
+      "input_tokens": 30251,
+      "output_tokens": 3555,
+      "reasoning_tokens": 1832,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:08:37",
+      "update_time": "2026-09-07 19:09:35"
+    }
+  ],
+  "writingAttempts": [
+    {
+      "id": "run_a8c4310582174f16",
+      "mode": "agent",
+      "status": "failed",
+      "error": "approval_timed_out",
+      "model_attempt_count": 3,
+      "input_tokens": 31636,
+      "output_tokens": 725,
+      "reasoning_tokens": 649,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:09:58",
+      "update_time": "2026-09-07 19:15:19",
+      "operationErrorCodes": [
+        "approval_timed_out"
+      ]
+    },
+    {
+      "id": "run_46c05b5b9e854fd9",
+      "mode": "agent",
+      "status": "canceled",
+      "error": null,
+      "model_attempt_count": 4,
+      "input_tokens": 42317,
+      "output_tokens": 1768,
+      "reasoning_tokens": 1491,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:16:38",
+      "update_time": "2026-09-07 19:17:45",
+      "operationErrorCodes": []
+    },
+    {
+      "id": "run_5cc24490d9d2419c",
+      "mode": "agent",
+      "status": "failed",
+      "error": "max_model_rounds",
+      "model_attempt_count": 6,
+      "input_tokens": 63580,
+      "output_tokens": 407,
+      "reasoning_tokens": 276,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:18:02",
+      "update_time": "2026-09-07 19:18:24",
+      "operationErrorCodes": []
+    },
+    {
+      "id": "run_491dafde71f14088",
+      "mode": "agent",
+      "status": "failed",
+      "error": "tool_execution_failed",
+      "model_attempt_count": 5,
+      "input_tokens": 54057,
+      "output_tokens": 1295,
+      "reasoning_tokens": 1199,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:19:07",
+      "update_time": "2026-09-07 19:19:40",
+      "operationErrorCodes": [
+        "tool_execution_failed"
+      ]
+    },
+    {
+      "id": "run_5fc13fe25bb24322",
+      "mode": "agent",
+      "status": "failed",
+      "error": "model_gateway_error",
+      "model_attempt_count": 5,
+      "input_tokens": 54501,
+      "output_tokens": 742,
+      "reasoning_tokens": 653,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:21:24",
+      "update_time": "2026-09-07 19:21:50",
+      "operationErrorCodes": [
+        "chapter_order_changed"
+      ]
+    },
+    {
+      "id": "run_be2e6354b0f0454b",
+      "mode": "agent",
+      "status": "failed",
+      "error": "tool_execution_failed",
+      "model_attempt_count": 6,
+      "input_tokens": 65637,
+      "output_tokens": 458,
+      "reasoning_tokens": 355,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:22:25",
+      "update_time": "2026-09-07 19:22:49",
+      "operationErrorCodes": [
+        "tool_execution_failed"
+      ]
+    },
+    {
+      "id": "run_fa3a4a99b43147fa",
+      "mode": "agent",
+      "status": "done",
+      "error": null,
+      "model_attempt_count": 8,
+      "input_tokens": 86991,
+      "output_tokens": 2431,
+      "reasoning_tokens": 1721,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:23:56",
+      "update_time": "2026-09-07 19:24:50",
+      "operationErrorCodes": []
+    },
+    {
+      "id": "run_3feabc075c054a99",
+      "mode": "agent",
+      "status": "failed",
+      "error": "model_gateway_error",
+      "model_attempt_count": 4,
+      "input_tokens": 43139,
+      "output_tokens": 795,
+      "reasoning_tokens": 715,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:25:21",
+      "update_time": "2026-09-07 19:25:44",
+      "operationErrorCodes": [
+        "chapter_order_changed"
+      ]
+    },
+    {
+      "id": "run_23e921bf4bf34762",
+      "mode": "agent",
+      "status": "failed",
+      "error": "model_gateway_error",
+      "model_attempt_count": 5,
+      "input_tokens": 54271,
+      "output_tokens": 674,
+      "reasoning_tokens": 520,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:26:40",
+      "update_time": "2026-09-07 19:27:04",
+      "operationErrorCodes": [
+        "chapter_order_changed"
+      ]
+    },
+    {
+      "id": "run_69852d07272d4995",
+      "mode": "agent",
+      "status": "done",
+      "error": null,
+      "model_attempt_count": 7,
+      "input_tokens": 73873,
+      "output_tokens": 2357,
+      "reasoning_tokens": 1495,
+      "unreported_usage_attempts": 0,
+      "unreported_reasoning_attempts": 0,
+      "create_time": "2026-09-07 19:28:28",
+      "update_time": "2026-09-07 19:29:19",
+      "operationErrorCodes": []
+    }
+  ]
+}

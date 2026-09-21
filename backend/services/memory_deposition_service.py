@@ -292,6 +292,10 @@ async def _record_chunks(
     db: Any, *, book_id: str, source_base: str, text: str,
     metadata: Mapping[str, Any], inference: bool, state: str = "active",
 ) -> tuple[str, ...]:
+    if source_base.startswith(('character:', 'setting-entity:', 'story-background:', 'setting-diff:')):
+        shared = await db.fetch_one('SELECT book_id FROM creation_material_books WHERE book_id=?', [book_id])
+        if shared:
+            return await record_deleted_source(db, book_id=book_id, source_base=source_base)
     if inference and not await is_setting_enabled(
         db, MEMORY_INTELLIGENCE_ENABLED_KEY
     ):

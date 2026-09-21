@@ -6,6 +6,7 @@ from database.crud import chapter_diff as diff_crud
 from database.crud.articles import save_article
 from dependencies import get_db
 from schemas.chapter_diff import CommitDiffRequest
+from utils.text import fold_blank_lines
 
 router = APIRouter(tags=["chapter-diff"])
 
@@ -17,8 +18,11 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
     from services import memory_deposition_service
     from services.story_memory_analysis_service import invalidate_saved_chapter
 
+    # 接受的片段由 LLM 生成，可能带段间空行；落库前折叠为单换行的正文规范。
+    # 历史表的 before/after_text 保持请求原样，忠实记录用户批准的 diff。
+    content = fold_blank_lines(body.content)
     async with db.transaction(cancellation_linearizable=True):
-        await save_article(db, chapterId, body.content)
+        await save_article(db, chapterId, content)
         book_id = await memory_deposition_service.resolve_book_id_for_chapter(
             db, chapterId
         )
@@ -27,7 +31,7 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
                 db,
                 book_id=book_id,
                 chapter_id=chapterId,
-                content=body.content,
+                content=content,
             )
         diff_id = await diff_crud.insert_diff_history(
             db,
@@ -62,7 +66,7 @@ async def commit_chapter_diff(chapterId: str, body: CommitDiffRequest):
                         db,
                         book_id=book_id,
                         chapter_id=chapterId,
-                        content=body.content,
+                        content=content,
                         automatic=True,
                     )
                 )

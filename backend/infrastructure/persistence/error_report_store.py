@@ -203,19 +203,57 @@ async def _agent_run_task_diagnostics(
     db: "DatabaseConnection",
     run_id: str,
 ) -> dict[str, Any]:
-    """Recover task type for historical reports without storing prompt text."""
+    """Attach a content-free task state snapshot to a Run error report."""
 
     task = await db.fetch_one(
-        "SELECT kind FROM ai_agent_long_tasks WHERE created_by_run_id = ? "
-        "ORDER BY create_time DESC LIMIT 1",
-        [run_id],
+        "SELECT t.id, t.kind, t.status, t.total_units, t.completed_units, "
+        "t.failed_units, t.state_reason_code, t.state_reason_scope "
+        "FROM ai_agent_long_tasks AS t WHERE t.created_by_run_id = ? "
+        "OR EXISTS (SELECT 1 FROM ai_agent_long_task_runs AS relation "
+        "WHERE relation.task_id = t.id AND relation.run_id = ?) "
+        "ORDER BY t.create_time DESC LIMIT 1",
+        [run_id, run_id],
     )
     if task is None:
         return {}
     kind = str(task.get("kind") or "").strip()
-    if kind == "screenplay_draft_generation":
-        return {"taskType": "持久化长任务 · 剧本正文分批创作"}
-    return {"taskType": f"持久化长任务 · {kind or '通用任务'}"}
+    latest = await db.fetch_one(
+        "SELECT event_type, reason_code, reason_scope, create_time "
+        "FROM ai_agent_long_task_events WHERE task_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        [task["id"]],
+    )
+    event_count = await db.fetch_one(
+        "SELECT COUNT(*) AS count FROM ai_agent_long_task_events WHERE task_id = ?",
+        [task["id"]],
+    )
+    task_type = (
+        "持久化长任务 · 剧本正文分批创作"
+        if kind == "screenplay_draft_generation"
+        else f"持久化长任务 · {kind or '通用任务'}"
+    )
+    diagnostics: dict[str, Any] = {
+        "taskType": task_type,
+        "taskWorkflowStatus": task.get("status"),
+        "taskUnitProgress": {
+            "completed": int(task.get("completed_units") or 0),
+            "total": int(task.get("total_units") or 0),
+            "failed": int(task.get("failed_units") or 0),
+        },
+        "taskEventCount": int((event_count or {}).get("count") or 0),
+    }
+    if task.get("state_reason_code"):
+        diagnostics["taskReasonCode"] = task["state_reason_code"]
+    if task.get("state_reason_scope"):
+        diagnostics["taskReasonScope"] = task["state_reason_scope"]
+    if latest is not None:
+        diagnostics["taskLatestEvent"] = {
+            "type": latest.get("event_type"),
+            "reasonCode": latest.get("reason_code"),
+            "reasonScope": latest.get("reason_scope"),
+            "at": latest.get("create_time"),
+        }
+    return diagnostics
 
 
 async def _agent_run_failure_diagnostics(
@@ -233,6 +271,7 @@ async def _agent_run_failure_diagnostics(
     )
     diagnosis: dict[str, Any] = {}
     trace_diagnosis: dict[str, Any] = {}
+    terminal_error_code = ""
     for row in rows:
         payload = _event_payload(row.get("payload_json"))
         event_type = str(row.get("event_type") or "")
@@ -293,7 +332,7 @@ async def _agent_run_failure_diagnostics(
         elif event_type == "run.failed":
             error_code = str(payload.get("error") or "").strip()
             if error_code:
-                diagnosis.setdefault("failureErrorCode", error_code)
+                terminal_error_code = error_code
 
     if not diagnosis:
         diagnosis.update(trace_diagnosis)
@@ -306,6 +345,25 @@ async def _agent_run_failure_diagnostics(
         ):
             if trace_diagnosis.get(key):
                 diagnosis[key] = trace_diagnosis[key]
+    prior_error_code = str(diagnosis.get("failureErrorCode") or "").strip()
+    if terminal_error_code and terminal_error_code != prior_error_code:
+        if prior_error_code:
+            for source, target in (
+                ("failureStage", "lastToolFailureStage"),
+                ("failureOutcome", "lastToolFailureOutcome"),
+                ("failureTool", "lastToolFailureTool"),
+                ("failureToolCallId", "lastToolFailureToolCallId"),
+                ("failureErrorCode", "lastToolFailureErrorCode"),
+            ):
+                if source in diagnosis:
+                    diagnosis[target] = diagnosis.pop(source)
+        diagnosis.update({
+            "failureStage": "agent_runtime",
+            "failureOutcome": "failed",
+            "failureErrorCode": terminal_error_code,
+        })
+    elif terminal_error_code:
+        diagnosis["failureErrorCode"] = terminal_error_code
     error_code = str(diagnosis.get("failureErrorCode") or "").strip()
     if error_code:
         diagnosis["failureReason"] = _failure_reason(
@@ -347,5 +405,7 @@ def _failure_reason(error_code: str, tool_name: str) -> str:
         "missing_required_tool_call": "当前步骤必须调用工具，但模型没有返回结构化工具调用。",
         "planning_contract_violation": "规划结果引用了当前运行不可用或未授权的能力。",
         "context_setup_failed": "后端在组装可信项目上下文时发生异常。",
+        "provider_circuit_open": "模型服务正在冷却恢复，尚未发起新的调用。",
+        "provider_capacity_limited": "模型服务当前处理容量已满，任务将稍后恢复。",
         "upstream_stream_interrupted": "模型服务的流式连接在返回完整结果前中断。",
     }.get(error_code, f"Agent 以错误代码 {error_code} 终止。")

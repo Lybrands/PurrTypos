@@ -427,11 +427,15 @@ test('book adapter maps history, current messages, queue, model and actions', ()
     id: 7,
     title: '第一轮',
     createdAt: '2026-08-12 09:30:00',
+    pinned: false,
+    sortOrder: null,
   }])
   assert.deepEqual(controller.conversation.history?.sessions, [{
     id: 8,
     title: '已关闭对话',
     createdAt: '2026-08-11 08:00:00',
+    pinned: false,
+    sortOrder: null,
   }])
   assert.deepEqual(controller.conversation.messages, [...historyMessages, ...messages])
   assert.deepEqual(controller.conversation.queuedSubmissions, [{
@@ -459,8 +463,8 @@ test('book adapter derives queue capabilities and chapter send availability', ()
 
   assert.deepEqual(running.capabilities, {
     inputDisabled: false,
-    sessionNavigationDisabled: false,
     submitMode: 'queue',
+    sessionlessSend: true,
   })
   assert.equal(unavailable.composer.submitDisabled, true)
 })
@@ -485,6 +489,43 @@ test('book hydration keeps typing editable while blocking send and edit actions'
   await controller.actions.editMessage(0, '不能截断尚未恢复的会话')
   assert.equal(sends, 0)
   assert.equal(edits, 0)
+})
+
+test('missing chapter surfaces a disabled hint while keeping the composer editable', () => {
+  const noChapter = createBookConversationController({
+    ...bindings,
+    sessions: [],
+    activeSessionId: null,
+    prompt: '写点什么',
+    initializing: false,
+    composerDisabledHint: '请先选择一个章节',
+  })
+  assert.equal(noChapter.composer.disabledHint, '请先选择一个章节')
+  assert.equal(noChapter.capabilities.inputDisabled, false)
+})
+
+test('zero sessions no longer block send; loading still does', () => {
+  // 零会话：发送可用（发送路径自动建会话），而不是把 ready/submitDisabled 锁在 activeSessionId 上
+  const zeroSessions = createBookConversationController({
+    ...bindings,
+    sessions: [],
+    activeSessionId: null,
+    prompt: '续写下一章',
+    initializing: false,
+  })
+  assert.equal(zeroSessions.composer.ready, true)
+  assert.equal(zeroSessions.composer.submitDisabled, false)
+
+  // 会话列表尚未加载完：保持禁发，避免未知会话状态下重复建会话
+  const loading = createBookConversationController({
+    ...bindings,
+    sessions: [],
+    activeSessionId: null,
+    prompt: '续写下一章',
+    initializing: true,
+  })
+  assert.equal(loading.composer.ready, false)
+  assert.equal(loading.composer.submitDisabled, true)
 })
 
 test('paused book activity is terminal and the panel contract accepts a new request', () => {

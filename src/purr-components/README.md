@@ -34,6 +34,9 @@ src/purr-components/
 ├── PurrSteps/
 │   ├── PurrSteps.tsx
 │   └── index.ts
+├── PurrCollapse/
+│   ├── PurrCollapse.tsx
+│   └── index.ts
 ├── icons/
 ├── styles/
 └── index.ts
@@ -74,5 +77,10 @@ src/purr-components/
 - `PurrRadio` 用于紧凑的行内单选，选中状态统一为圆形对勾。
 - `PurrRadio.Button` 用于分段式短选项，不显示额外选择标记。
 - `PurrChoiceCard` 用于“标题 + 说明”的单选卡片，与 `PurrRadio` 共用选择标记和原生单选语义。
+
+## 折叠内容
+
+- `PurrCollapse` 用于页面内按需展开的补充内容，支持多项独立展开或手风琴模式。
+- 业务页面不直接实现 `details/summary` 的替代样式；新交互统一复用该组件。
 
 运行 `npm run check:purr-components` 可以检查这些边界。

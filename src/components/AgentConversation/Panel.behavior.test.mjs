@@ -1,3 +1,7 @@
+// Calendar-day label expectations below only hold in one timezone; pin it so
+// the suite is hermetic on POSIX dev machines and UTC CI runners.
+process.env.TZ = 'Asia/Shanghai'
+
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import React from 'react'
@@ -10,6 +14,7 @@ let AgentConversationPanel
 let AgentMessageFooter
 let ExecutionLog
 let ExecutionLogStepGroup
+let AgentTaskProgress
 let buildAgentModelLabels
 let formatAgentMessageTime
 
@@ -28,6 +33,9 @@ before(async () => {
   ;({ default: ExecutionLog, ExecutionLogStepGroup } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/ExecutionLog/index.tsx',
   ))
+  ;({ default: AgentTaskProgress } = await vite.ssrLoadModule(
+    '/src/components/AgentConversation/TaskProgress/index.tsx',
+  ))
   ;({ buildAgentModelLabels, formatAgentMessageTime } = await vite.ssrLoadModule(
     '/src/components/AgentConversation/messageMetadata.ts',
   ))
@@ -41,7 +49,6 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   const controller = {
     capabilities: {
       inputDisabled: false,
-      sessionNavigationDisabled: false,
       submitMode: 'send',
     },
     conversation: {
@@ -101,26 +108,93 @@ test('initializing keeps the textarea editable while both Enter and send are dis
   assert.match(markup, /正在恢复对话/)
 })
 
-test('message time uses local calendar-day labels before falling back to a date', () => {
-  const now = new Date('2026-08-27T00:30:00')
+test('paused work exposes resume but not the live-generation stop action', () => {
+  const controller = {
+    capabilities: {
+      inputDisabled: false,
+      submitMode: 'send',
+    },
+    conversation: {
+      identity: 'session:7:paused-1',
+      sessions: [{ id: 7, title: 'A' }],
+      activeSessionId: 7,
+      messages: [],
+      activities: {},
+      queuedSubmissions: [],
+      initializing: false,
+      running: false,
+      stopping: false,
+      paused: true,
+      resuming: false,
+      resumeLabel: '立即继续',
+    },
+    composer: {
+      value: '',
+      setValue: () => undefined,
+      placeholder: '输入任务',
+      ariaLabel: '输入任务',
+      submitDisabled: false,
+      selectedModel: {
+        id: 'model-1', name: 'model-1', supportsThinking: false,
+        thinkingOnly: false, apiKey: 'test', baseUrl: '',
+      },
+      modelConfigs: [],
+      selectModel: () => undefined,
+      openModelSettings: () => undefined,
+    },
+    actions: {
+      selectSession: () => undefined,
+      createSession: () => undefined,
+      closeSession: () => undefined,
+      renameSession: () => undefined,
+      send: () => undefined,
+      abort: () => undefined,
+      resume: () => undefined,
+      editMessage: () => undefined,
+      resolveToolApproval: async () => ({ success: true }),
+    },
+  }
 
-  assert.equal(formatAgentMessageTime('2026-08-27T23:43:00', now), '23:43')
-  assert.equal(formatAgentMessageTime('2026-08-26T23:43:00', now), '昨天 23:43')
-  assert.equal(formatAgentMessageTime('2026-08-25T08:43:00', now), '前天 08:43')
-  assert.equal(formatAgentMessageTime('2026-08-23T08:43:00', now), '8月23日 08:43')
-  assert.equal(formatAgentMessageTime('2025-12-30T08:43:00', now), '2025年12月30日 08:43')
+  const markup = renderToStaticMarkup(
+    React.createElement(AgentConversationPanel, { controller, indexOpen: false }),
+  )
+
+  assert.match(markup, /立即继续/)
+  assert.doesNotMatch(markup, /aria-label="停止生成"/)
 })
 
-test('active execution log title does not append animated ellipsis', () => {
+test('message time uses local calendar-day labels before falling back to a date', () => {
+  const now = new Date('2026-08-27T00:30:00+08:00')
+
+  assert.equal(formatAgentMessageTime('2026-08-27T15:43:00Z', now), '23:43')
+  assert.equal(formatAgentMessageTime('2026-08-26T15:43:00Z', now), '昨天 23:43')
+  assert.equal(formatAgentMessageTime('2026-08-25T00:43:00Z', now), '前天 08:43')
+  assert.equal(formatAgentMessageTime('2026-08-23T00:43:00Z', now), '8月23日 08:43')
+  assert.equal(formatAgentMessageTime('2025-12-30T00:43:00Z', now), '2025年12月30日 08:43')
+})
+
+test('active execution log remains expanded and does not append animated ellipsis', () => {
   const markup = renderToStaticMarkup(React.createElement(ExecutionLog, {
     logKey: 'active-without-dots',
     title: '正在进行',
     active: true,
-    autoOpen: true,
+    autoOpen: false,
+    children: React.createElement('span', null, '执行详情'),
   }))
 
   assert.match(markup, /正在进行/)
   assert.doesNotMatch(markup, /a-blink-dots|\.\.\./)
+  assert.equal(
+    parseHTML(`<html><body>${markup}</body></html>`)
+      .document.querySelector('.work-log__collapsible')
+      ?.hasAttribute('hidden'),
+    false,
+  )
+  assert.equal(
+    parseHTML(`<html><body>${markup}</body></html>`)
+      .document.querySelector('.work-log__toggle')?.tagName,
+    'DIV',
+  )
 })
 
 test('execution panel shows status while nested groups retain their execution heading', () => {
@@ -144,19 +218,28 @@ test('execution panel shows status while nested groups retain their execution he
     const innerTitle = document.querySelector('.work-log-step-group__toggle').textContent
     assert.match(outerTitle, active ? /正在进行/ : /已完成/)
     assert.doesNotMatch(outerTitle, /个步骤|读取剧本交付物/)
-    assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /执行了9 个步骤/)
+    assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /调用了9 个工具/)
     assert.doesNotMatch(innerTitle, /正在进行|已完成/)
-    assert.match(markup, /读取剧本交付物/)
+    if (active) {
+      assert.match(markup, /读取剧本交付物/)
+      assert.equal(document.querySelector('.work-log__toggle').tagName, 'DIV')
+      assert.equal(document.querySelector('.work-log-step-group__toggle').disabled, true)
+      assert.equal(document.querySelector('.work-log__collapsible').hasAttribute('hidden'), false)
+      assert.equal(document.querySelector('.work-log-step-group__collapsible').hasAttribute('hidden'), false)
+    }
+    else assert.doesNotMatch(markup, /读取剧本交付物/)
   }
 })
 
 test('assistant footer places actions before hover-only time', () => {
   const today = new Date()
-  const todayAt0843 = [
+  const todayAt0843 = new Date(
     today.getFullYear(),
-    String(today.getMonth() + 1).padStart(2, '0'),
-    String(today.getDate()).padStart(2, '0'),
-  ].join('-') + 'T08:43:00'
+    today.getMonth(),
+    today.getDate(),
+    8,
+    43,
+  ).toISOString()
   const model = {
     id: 'model-1',
     name: 'deepseek-v4-flash',
@@ -293,7 +376,6 @@ test('mounted initializing panel rejects real Enter and click until current sess
   const controller = {
     capabilities: {
       inputDisabled: false,
-      sessionNavigationDisabled: false,
       submitMode: 'send',
     },
     conversation: {
@@ -303,6 +385,7 @@ test('mounted initializing panel rejects real Enter and click until current sess
       messages: [],
       activities: {},
       queuedSubmissions: [],
+      history: { sessions: [], loading: false },
       initializing: true,
       running: false,
       stopping: false,
@@ -332,6 +415,8 @@ test('mounted initializing panel rejects real Enter and click until current sess
       createSession: () => undefined,
       closeSession: () => undefined,
       renameSession: () => undefined,
+      loadSessionHistory: () => undefined,
+      openHistorySession: () => undefined,
       send: () => { sends += 1 },
       abort: () => undefined,
       editMessage: () => undefined,
@@ -343,13 +428,17 @@ test('mounted initializing panel rejects real Enter and click until current sess
     await act(async () => {
       root.render(React.createElement(AgentConversationPanel, {
         controller,
-        indexOpen: false,
+        indexOpen: true,
       }))
     })
     const textarea = window.document.querySelector('textarea[aria-label="输入任务"]')
     const send = window.document.querySelector('button[aria-label="发送"]')
+    const newSession = window.document.querySelector('button[aria-label="新建对话"]')
+    const history = window.document.querySelector('button[aria-label="打开历史对话"]')
     assert.equal(textarea.disabled, false)
     assert.equal(send.disabled, true)
+    assert.equal(newSession.disabled, false)
+    assert.equal(history.disabled, false)
     send.dispatchEvent(new window.Event('click', { bubbles: true }))
     assert.equal(sends, 0)
 
@@ -365,7 +454,7 @@ test('mounted initializing panel rejects real Enter and click until current sess
     await act(async () => {
       root.render(React.createElement(AgentConversationPanel, {
         controller: ready,
-        indexOpen: false,
+        indexOpen: true,
       }))
     })
     window.document.querySelector('button[aria-label="发送"]')

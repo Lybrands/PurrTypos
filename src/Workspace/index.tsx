@@ -1,40 +1,50 @@
 import { services } from '@/services'
 import React, { Suspense, lazy } from 'react'
+import type { LexicalEditor } from 'lexical'
 import {
-  ArrowLeftIcon,
   DashboardIcon,
-  HomeIcon,
+  LibraryIcon,
+  ManuscriptIcon,
+  OutlineIcon,
   StoryMemoryIcon,
   StorySettingIcon,
 } from '@/purr-components'
-import { PurrButton, PurrSpin, PurrTooltip } from '@/purr-components'
-import type { LexicalEditor } from 'lexical'
+import { PurrSpin } from '@/purr-components'
 import AppHeader, { type HeaderPanelToggle } from '../components/AppHeader'
-import type { Chapter, AiModelConfig, EntityId } from '../types'
-import { getWritingOutlineWithChapters } from './utils'
-import WorkspaceContext from './WorkspaceContext'
-import type { WorkspaceContextValue } from './WorkspaceContext'
+import type { AiModelConfig, EntityId } from '../types'
 import WorkspaceSearchPanel from './WorkspaceSearchPanel'
 import { DiffProvider } from './diff/DiffContext'
 import { SettingDiffProvider } from './settingDiff/SettingDiffContext'
 import CommandPalette, { type CommandItem } from './CommandPalette'
 import DockedPanel from './DockedPanel'
 import WorkspaceUtilityPanel from './WorkspaceUtilityPanel'
+import { getWritingOutlineWithChapters } from './utils'
+import { registerWritingChaptersFetcher } from '../stores/workspaceStore'
 import { usePanelLayout } from './hooks/usePanelLayout'
-import { useActiveChapter } from './hooks/useActiveChapter'
-import { useWorkspaceSearch } from './hooks/useWorkspaceSearch'
 import { useWorkspaceShortcuts } from './hooks/useWorkspaceShortcuts'
 import { buildPaletteCommands } from './workspaceCommands'
 import NotebookToolbar from './DirectorNotebook/NotebookToolbar'
-import type { OpenSettingPanelDetail } from './SettingPanel'
 import {
-  DASHBOARD_TAB,
   CANON_TAB,
-  KNOWLEDGE_TAB,
+  DASHBOARD_TAB,
   EDITOR_TAB_KEY,
+  KNOWLEDGE_TAB,
   SETTING_TAB,
-  type WorkspaceUtilityTab,
 } from './utilityPanelTypes'
+import {
+  lexicalEditorRef,
+  reloadWritingChapters,
+  setActiveChapter as setWorkspaceActiveChapter,
+  useActiveChapterId,
+  useBookWordWanDisplay,
+  useSearchContentVersion,
+  useWorkspaceStore,
+} from '../stores/workspaceStore'
+import { restoreActiveChapter } from '../stores/activeChapterStore'
+import {
+  updatePanelLayout,
+  usePanelLayoutStore,
+} from '../stores/panelLayoutStore'
 import './workspaceSearch.scss'
 
 const DirectorNotebook = lazy(() => import('./DirectorNotebook'))
@@ -48,11 +58,8 @@ const PanelFallback = () => (
 /**
  * AI-Centric 工作区：AI 固定居中，章节停靠在左侧，正文与辅助功能共享右侧标签面板。
  *
- * 主区域规则见 hooks/usePanelLayout；本组件只负责组合：
- * - 布局状态（usePanelLayout）+ 快捷键（useWorkspaceShortcuts）
- * - 活跃章节持久化（useActiveChapter）+ 写作目录加载
- * - 全局搜索（useWorkspaceSearch）
- * - WorkspaceContext 组装与各停靠面板 / 命令面板渲染
+ * 共享状态全部在 src/stores/（按字段窄订阅，替代原 WorkspaceContext）；
+ * 本组件只负责组合：布局（usePanelLayout→panelLayoutStore）+ 快捷键 + 挂载各面板。
  */
 interface WorkspaceProps {
   bookId?: EntityId | null
@@ -70,92 +77,93 @@ interface WorkspaceProps {
 
 type WorkspaceFullscreenPanel = 'right' | null
 
-export default function Workspace({ bookId, bookTitle, enableVolume = false, creationMode = 'original', onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, syncOutlineChapter = false, onReady }: WorkspaceProps) {
+/**
+ * 字数统计观察者：只有这个 null 渲染组件订阅高频的 searchContentVersion，
+ * 正文输入不再把整棵工作台树拖着重渲染。
+ */
+function BookWordCountWatcher({ bookId }: { bookId: EntityId | null }) {
+  const contentVersion = useSearchContentVersion()
+  const setDisplay = useWorkspaceStore((s) => s.setBookWordWanDisplay)
+  React.useEffect(() => {
+    if (bookId == null || String(bookId).trim() === '') {
+      setDisplay(null)
+      return
+    }
+    const t = window.setTimeout(() => {
+      void services.books.getBookWordCount({ bookId }).then((res) => {
+        setDisplay(
+          res.success && res.data != null && typeof res.data.count === 'number'
+            ? (res.data.count / 10000).toFixed(2)
+            : null,
+        )
+      })
+    }, 400)
+    return () => clearTimeout(t)
+  }, [bookId, contentVersion, setDisplay])
+  return null
+}
+
+export default function Workspace({ bookId, bookTitle, enableVolume = false, creationMode = 'original', onBack, onGoHome, onOpenSettings, modelConfigs = [], onUpdateModelConfig, onReady }: WorkspaceProps) {
   const {
     panelState,
     updateFloating,
   } = usePanelLayout()
 
   const [fullscreenPanel, setFullscreenPanel] = React.useState<WorkspaceFullscreenPanel>(null)
-  const [utilityTabs, setUtilityTabs] = React.useState<WorkspaceUtilityTab[]>([])
-  const [activeRightTabKey, setActiveRightTabKey] = React.useState<string>(EDITOR_TAB_KEY)
+  const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
+
+  const activeRightTabKey = useWorkspaceStore((s) => s.activeRightTabKey)
+  const utilityTabs = useWorkspaceStore((s) => s.utilityTabs)
+  const settingOpenRequest = useWorkspaceStore((s) => s.settingOpenRequest)
+  const setActiveRightTabKeyAction = useWorkspaceStore((s) => s.setActiveRightTabKey)
+  const writingChapters = useWorkspaceStore((s) => s.writingChapters)
+  const activeWritingChapterId = useActiveChapterId()
+  const bookWordWanDisplay = useBookWordWanDisplay()
+  const toggleUtilityTab = useWorkspaceStore((s) => s.toggleUtilityTab)
+  const closeUtilityTabAction = useWorkspaceStore((s) => s.closeUtilityTab)
+  const setBookIdentity = useWorkspaceStore((s) => s.setBookIdentity)
+  const resetUtilityPanel = useWorkspaceStore((s) => s.resetUtilityPanel)
   const activeUtilityTabKey =
     activeRightTabKey === EDITOR_TAB_KEY ? null : activeRightTabKey
-  const [settingOpenRequest, setSettingOpenRequest] = React.useState<OpenSettingPanelDetail | null>(null)
+  const editorTabActive = panelState.right.open && activeRightTabKey === EDITOR_TAB_KEY
+  const resolvedBookId = bookId ?? null
 
-  const openUtilityTab = React.useCallback((tab: WorkspaceUtilityTab) => {
-    setUtilityTabs((currentTabs) => {
-      const existingIndex = currentTabs.findIndex((item) => item.key === tab.key)
-      if (existingIndex < 0) return [...currentTabs, tab]
-      const nextTabs = [...currentTabs]
-      nextTabs[existingIndex] = tab
-      return nextTabs
-    })
-    setActiveRightTabKey(tab.key)
-    updateFloating('right', { open: true })
-  }, [updateFloating])
-
-  const toggleUtilityTab = React.useCallback((tab: WorkspaceUtilityTab) => {
-    if (panelState.right.open && activeRightTabKey === tab.key) {
-      setActiveRightTabKey(EDITOR_TAB_KEY)
-      return
-    }
-    openUtilityTab(tab)
-  }, [activeRightTabKey, openUtilityTab, panelState.right.open])
-
-  const closeUtilityTab = React.useCallback((key: string) => {
-    setUtilityTabs((currentTabs) => {
-      const closingIndex = currentTabs.findIndex((tab) => tab.key === key)
-      if (closingIndex < 0) return currentTabs
-      const nextTabs = currentTabs.filter((tab) => tab.key !== key)
-      setActiveRightTabKey((currentKey) => {
-        if (currentKey !== key) return currentKey
-        return nextTabs[Math.min(closingIndex, nextTabs.length - 1)]?.key ?? EDITOR_TAB_KEY
-      })
-      return nextTabs
-    })
-  }, [])
-
-  const collapseRightPanel = React.useCallback(() => {
-    setFullscreenPanel(null)
-    updateFloating('right', { open: false })
-  }, [updateFloating])
-
-  const toggleRightPanelFullscreen = React.useCallback(() => {
-    setFullscreenPanel((currentPanel) => currentPanel === 'right' ? null : 'right')
-  }, [])
-
-  const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const toggleCommandPalette = React.useCallback(
     () => setCommandPaletteOpen((open) => !open),
     [],
   )
-  useWorkspaceShortcuts({ toggleCommandPalette })
 
-  React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{
-        panel?: string
-        open?: boolean
-        setting?: OpenSettingPanelDetail
-      }>).detail
-      if (detail?.open === false) return
-      if (detail?.panel === 'setting') {
-        if (detail.setting) setSettingOpenRequest(detail.setting)
-        openUtilityTab(SETTING_TAB)
-      } else if (detail?.panel === 'knowledge') {
-        openUtilityTab(KNOWLEDGE_TAB)
-      } else if (detail?.panel === 'dashboard') {
-        openUtilityTab(DASHBOARD_TAB)
-      }
+  /** 章节栏开合切换（快捷键 / 命令面板共用） */
+  const toggleChapterSidebar = React.useCallback(() => {
+    const open = usePanelLayoutStore.getState().left.open
+    updatePanelLayout('left', { open: !open })
+  }, [])
+
+  const collapseRightPanel = React.useCallback(() => {
+    setFullscreenPanel(null)
+    updatePanelLayout('right', { open: false })
+  }, [])
+
+  /** 正文面板切换：面板开且当前是正文标签则收起，否则展开并切回正文 */
+  const toggleEditorPanel = React.useCallback(() => {
+    const layout = usePanelLayoutStore.getState()
+    const activeKey = useWorkspaceStore.getState().activeRightTabKey
+    if (layout.right.open && activeKey === EDITOR_TAB_KEY) {
+      setFullscreenPanel(null)
+      updatePanelLayout('right', { open: false })
+      return
     }
-    window.addEventListener('workspace-open-panel', handler as EventListener)
-    return () => window.removeEventListener('workspace-open-panel', handler as EventListener)
-  }, [openUtilityTab])
+    useWorkspaceStore.getState().setActiveRightTabKey(EDITOR_TAB_KEY)
+    updatePanelLayout('right', { open: true })
+  }, [])
+
+  useWorkspaceShortcuts({
+    toggleCommandPalette,
+    onToggleChapterSidebar: toggleChapterSidebar,
+    onToggleEditorPanel: toggleEditorPanel,
+  })
 
   React.useEffect(() => {
-    setUtilityTabs([])
-    setActiveRightTabKey(EDITOR_TAB_KEY)
     setFullscreenPanel(null)
   }, [bookId])
 
@@ -168,90 +176,40 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [fullscreenPanel])
 
-  const [writingOutlineId, setWritingOutlineId] = React.useState<EntityId | null>(null)
-  const [writingChapters, setWritingChapters] = React.useState<Chapter[]>([])
-
-  const {
-    activeChapterId: activeWritingChapterId,
-    activeChapterTitle: activeWritingChapterTitle,
-    setActiveChapter: handleWritingSelect,
-  } = useActiveChapter(bookId)
-
-  /** 本书总字数（万），与后端规则一致；null 表示尚未拉取 */
-  const [bookWordWanDisplay, setBookWordWanDisplay] = React.useState<string | null>(null)
-
-  const containerRef = React.useRef<HTMLDivElement>(null)
-
-  const lexicalEditorRef = React.useRef<LexicalEditor | null>(null)
-  const setLexicalEditorRef = React.useCallback((e: LexicalEditor | null) => {
-    lexicalEditorRef.current = e
+  // ── 注册目录拉取器（store 与服务层解耦，services 链留在组件层）───
+  React.useEffect(() => {
+    registerWritingChaptersFetcher(getWritingOutlineWithChapters)
   }, [])
 
-  const {
-    workspaceSearchQuery,
-    setWorkspaceSearchQuery,
-    workspaceSearchActiveIndex,
-    setWorkspaceSearchActiveIndex,
-    workspaceSearchMatchTotal,
-    searchContentVersion,
-    goToNextWorkspaceSearch,
-    goToPrevWorkspaceSearch,
-    notifyWorkspaceSearchContentChanged,
-  } = useWorkspaceSearch({ lexicalEditorRef, activeChapterId: activeWritingChapterId })
-
-  const loadWritingChapters = React.useCallback(async () => {
-    const data = await getWritingOutlineWithChapters(bookId)
-    if (!data) return
-    setWritingOutlineId(data.outlineId)
-    setWritingChapters(data.chapters)
-  }, [bookId])
-
+  // ── 书籍身份写入 store（挂载 / 切书）────────────────────────────
   React.useEffect(() => {
-    loadWritingChapters()
-  }, [loadWritingChapters])
+    setBookIdentity({
+      bookId: resolvedBookId,
+      bookTitle: bookTitle ?? '',
+      enableVolume,
+    })
+  }, [resolvedBookId, bookTitle, enableVolume, setBookIdentity])
 
+  // ── 切书：功能标签复位 + 恢复该书上次选中的章节 + 重拉目录 ──────
   React.useEffect(() => {
-    if (bookId == null || String(bookId).trim() === '') {
-      setBookWordWanDisplay(null)
-      return
-    }
-    const t = window.setTimeout(() => {
-      void services.books.getBookWordCount({ bookId }).then((res) => {
-        if (res.success && res.data != null && typeof res.data.count === 'number') {
-          setBookWordWanDisplay((res.data.count / 10000).toFixed(2))
-        } else {
-          setBookWordWanDisplay(null)
-        }
-      })
-    }, 400)
-    return () => clearTimeout(t)
-  }, [bookId, searchContentVersion])
-
-  React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ chapterId: EntityId; title: string }>).detail
-      const nextId = detail?.chapterId ?? null
-      const nextTitle = detail?.title ?? ''
-      if (nextId == null || String(nextId).trim() === '') return
-      handleWritingSelect(nextId, nextTitle)
-      loadWritingChapters()
-    }
-    window.addEventListener('chapter-created', handler)
-    return () => window.removeEventListener('chapter-created', handler)
-  }, [loadWritingChapters, handleWritingSelect])
+    resetUtilityPanel()
+    const entry = restoreActiveChapter(resolvedBookId)
+    setWorkspaceActiveChapter(entry?.id ?? null, entry?.title ?? '')
+    void reloadWritingChapters(resolvedBookId)
+  }, [resolvedBookId, resetUtilityPanel])
 
   /**
    * 删除写作章节后清理对应的 chapter / volume 大纲记录。
    * 后端不会级联删除大纲，因此按 writing_chapter_id 匹配并清理。
    */
   const handleWritingChapterDeleted = React.useCallback(async (writingChapterId: EntityId) => {
-    if (bookId == null) return
+    if (resolvedBookId == null) return
     const wcKey = String(writingChapterId)
     for (const fetcher of [
       services.outlines.getChapterOutlines,
       services.outlines.getVolumeOutlines,
     ] as const) {
-      const res = await fetcher(bookId)
+      const res = await fetcher(resolvedBookId)
       if (!res.success) continue
       const list = res.data ?? []
       const matched = list.find(
@@ -262,64 +220,51 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
         break
       }
     }
-    closeUtilityTab(`outline:chapter:${wcKey}`)
-    closeUtilityTab(`outline:volume:${wcKey}`)
-  }, [bookId, closeUtilityTab])
+    closeUtilityTabAction(`outline:chapter:${wcKey}`)
+    closeUtilityTabAction(`outline:volume:${wcKey}`)
+  }, [resolvedBookId, closeUtilityTabAction])
 
-  const handleWritingChaptersChange = React.useCallback((outlineId: EntityId, chapterList: Chapter[]) => {
-    setWritingOutlineId(outlineId)
-    setWritingChapters(chapterList || [])
+  const handleLexicalEditor = React.useCallback((editor: LexicalEditor | null) => {
+    lexicalEditorRef.current = editor
   }, [])
 
-  // ─── WorkspaceContext 值 ──────────────────────────────────────
-  const workspaceContextValue = React.useMemo<WorkspaceContextValue>(() => ({
-    bookId: bookId ?? null,
-    bookTitle: bookTitle ?? '',
-    enableVolume,
-    syncOutlineChapter,
-    activeChapterId: activeWritingChapterId,
-    activeChapterTitle: activeWritingChapterTitle,
-    writingChapters,
-    writingOutlineId,
-    utilityPanelOpen: panelState.right.open,
-    activeUtilityTabKey,
-    openUtilityTab,
-    toggleUtilityTab,
-    setActiveChapter: handleWritingSelect,
-    setChaptersData: handleWritingChaptersChange,
-    loadWritingChapters,
-    workspaceSearchQuery,
-    setWorkspaceSearchQuery,
-    workspaceSearchActiveIndex,
-    setWorkspaceSearchActiveIndex,
-    goToNextWorkspaceSearch,
-    goToPrevWorkspaceSearch,
-    notifyWorkspaceSearchContentChanged,
-    lexicalEditorRef,
-    setLexicalEditorRef,
-    workspaceSearchMatchTotal,
-  }), [
-    bookId, bookTitle, enableVolume, syncOutlineChapter,
-    activeWritingChapterId, activeWritingChapterTitle,
-    writingChapters, writingOutlineId,
-    panelState.right.open, activeUtilityTabKey,
-    openUtilityTab, toggleUtilityTab,
-    handleWritingSelect, handleWritingChaptersChange, loadWritingChapters,
-    workspaceSearchQuery,
-    setWorkspaceSearchQuery,
-    workspaceSearchActiveIndex,
-    setWorkspaceSearchActiveIndex,
-    goToNextWorkspaceSearch,
-    goToPrevWorkspaceSearch,
-    notifyWorkspaceSearchContentChanged,
-    setLexicalEditorRef,
-    workspaceSearchMatchTotal,
-  ])
+  const toggleRightPanelFullscreen = React.useCallback(() => {
+    setFullscreenPanel((currentPanel) => currentPanel === 'right' ? null : 'right')
+  }, [])
+
+  const editorContent = (
+    <div className="panel panel-editor workspace-search-include">
+      <Suspense fallback={<PanelFallback />}>
+        <EditorPanel
+          bookTitle={bookTitle ?? ''}
+          modelConfigs={modelConfigs}
+          onUpdateModelConfig={onUpdateModelConfig}
+          onLexicalEditor={handleLexicalEditor}
+          fullscreen={fullscreenPanel === 'right'}
+        />
+      </Suspense>
+    </div>
+  )
 
   /**
    * 顶栏工具统一在右侧「正文 / 功能」组合面板中打开对应标签。
+   * 正文入口固定在最左：写作者随时可以一键回到正文（被功能标签挤走也不迷路）。
    */
   const headerPanelToggles = React.useMemo<HeaderPanelToggle[]>(() => [
+    {
+      key: 'editor',
+      icon: <ManuscriptIcon style={{ fontSize: 16 }} />,
+      tooltip: editorTabActive ? '收起正文面板' : '正文',
+      active: editorTabActive,
+      onClick: toggleEditorPanel,
+    },
+    {
+      key: 'chapters',
+      icon: <OutlineIcon style={{ fontSize: 16 }} />,
+      tooltip: panelState.left.open ? '收起章节列表' : '章节列表',
+      active: panelState.left.open,
+      onClick: toggleChapterSidebar,
+    },
     ...(creationMode === 'continuation' ? [{
       key: 'canon',
       icon: <StoryMemoryIcon style={{ fontSize: 16 }} />,
@@ -329,7 +274,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       active: panelState.right.open && activeUtilityTabKey === CANON_TAB.key,
       onClick: () => toggleUtilityTab(CANON_TAB),
     }] : []),
-    { key: 'knowledge', icon: <StoryMemoryIcon style={{ fontSize: 16 }} />, tooltip: '创作资料库', active: activeUtilityTabKey === KNOWLEDGE_TAB.key, onClick: () => toggleUtilityTab(KNOWLEDGE_TAB) },
+    { key: 'knowledge', icon: <LibraryIcon style={{ fontSize: 16 }} />, tooltip: '创作资料库', active: activeUtilityTabKey === KNOWLEDGE_TAB.key, onClick: () => toggleUtilityTab(KNOWLEDGE_TAB) },
     {
       key: 'setting',
       icon: <StorySettingIcon style={{ fontSize: 16 }} />,
@@ -348,33 +293,39 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       active: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key,
       onClick: () => toggleUtilityTab(DASHBOARD_TAB),
     },
-  ], [activeUtilityTabKey, creationMode, panelState.right.open, toggleUtilityTab])
+  ], [creationMode, editorTabActive, panelState.left.open, panelState.right.open, activeUtilityTabKey, toggleChapterSidebar, toggleEditorPanel, toggleUtilityTab])
 
   const paletteCommands = React.useMemo<CommandItem[]>(
     () =>
       buildPaletteCommands({
+        chapterSidebarOpen: panelState.left.open,
+        editorPanelActive: panelState.right.open && activeRightTabKey === EDITOR_TAB_KEY,
+        onToggleChapterSidebar: toggleChapterSidebar,
+        onToggleEditorPanel: toggleEditorPanel,
         settingPanelActive: panelState.right.open && activeUtilityTabKey === SETTING_TAB.key,
         dashboardPanelActive: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key,
         onToggleSettingPanel: () => toggleUtilityTab(SETTING_TAB),
         onToggleDashboardPanel: () => toggleUtilityTab(DASHBOARD_TAB),
         writingChapters,
         activeWritingChapterId,
-        onChapterSelect: handleWritingSelect,
+        onChapterSelect: (id, title) => setWorkspaceActiveChapter(id, title),
         onOpenSettings,
       }),
     [
+      panelState.left.open,
       panelState.right.open,
+      activeRightTabKey,
       activeUtilityTabKey,
+      toggleChapterSidebar,
+      toggleEditorPanel,
       toggleUtilityTab,
       writingChapters,
       activeWritingChapterId,
-      handleWritingSelect,
       onOpenSettings,
     ],
   )
 
   return (
-    <WorkspaceContext.Provider value={workspaceContextValue}>
     <DiffProvider>
     <SettingDiffProvider key={String(bookId ?? 'no-book')} bookId={bookId}>
       <AppHeader
@@ -390,30 +341,10 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             (bookTitle || 'PurrTypos')
           )
         }
-        left={
-          <>
-            {onGoHome && (
-              <PurrTooltip title="返回首页">
-                <PurrButton
-                  type="text"
-                  size="small"
-                  icon={<HomeIcon style={{ fontSize: 14 }} />}
-                  onClick={onGoHome}
-                />
-              </PurrTooltip>
-            )}
-            {onBack && (
-              <PurrTooltip title="返回书架">
-                <PurrButton
-                  type="text"
-                  size="small"
-                  icon={<ArrowLeftIcon style={{ fontSize: 14 }} />}
-                  onClick={onBack}
-                />
-              </PurrTooltip>
-            )}
-          </>
-        }
+        navigation={{
+          home: onGoHome ? { label: '返回首页', onClick: onGoHome } : undefined,
+          back: onBack ? { label: '返回书架', onClick: onBack } : undefined,
+        }}
         showActions
         right={<NotebookToolbar />}
         panelToggles={headerPanelToggles}
@@ -425,7 +356,6 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       <div
         className={`app-body app-body--ai-centric${panelState.right.open || fullscreenPanel === 'right' ? '' : ' app-body--right-panel-collapsed'}`}
         id="workspace-search-scope"
-        ref={containerRef}
       >
         {panelState.left.open && (
           <DockedPanel
@@ -454,7 +384,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             className="workspace-chapter-rail"
             style={{ '--chapter-hover-width': `${panelState.left.width}px` } as React.CSSProperties}
             tabIndex={0}
-            aria-label="悬停展开章节边栏"
+            aria-label="章节列表面板（悬停展开）"
           >
             <div className="workspace-chapter-hover-panel">
               <div className="panel panel-left workspace-search-include">
@@ -497,24 +427,12 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             className={`workspace-dock--right-panel${fullscreenPanel === 'right' ? ' workspace-dock--fullscreen' : ''}`}
           >
             <WorkspaceUtilityPanel
-              bookId={bookId ?? null}
+              bookId={resolvedBookId}
               tabs={utilityTabs}
               activeKey={activeRightTabKey}
-              onActiveKeyChange={setActiveRightTabKey}
-              onCloseTab={closeUtilityTab}
-              editorContent={(
-                <div className="panel panel-editor workspace-search-include">
-                  <Suspense fallback={<PanelFallback />}>
-                    <EditorPanel
-                      bookTitle={bookTitle ?? ''}
-                      modelConfigs={modelConfigs}
-                      onUpdateModelConfig={onUpdateModelConfig}
-                      onLexicalEditor={setLexicalEditorRef}
-                      fullscreen={fullscreenPanel === 'right'}
-                    />
-                  </Suspense>
-                </div>
-              )}
+              onActiveKeyChange={setActiveRightTabKeyAction}
+              onCloseTab={closeUtilityTabAction}
+              editorContent={editorContent}
               onCollapse={collapseRightPanel}
               fullscreen={fullscreenPanel === 'right'}
               onToggleFullscreen={toggleRightPanelFullscreen}
@@ -526,27 +444,16 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             className="workspace-editor-rail"
             style={{ '--editor-hover-width': `${panelState.right.width}px` } as React.CSSProperties}
             tabIndex={0}
-            aria-label="悬停展开正文与工作台功能面板"
+            aria-label="正文与工作台功能面板（悬停展开）"
           >
             <div className="workspace-editor-hover-panel">
               <WorkspaceUtilityPanel
-                bookId={bookId ?? null}
+                bookId={resolvedBookId}
                 tabs={utilityTabs}
                 activeKey={activeRightTabKey}
-                onActiveKeyChange={setActiveRightTabKey}
-                onCloseTab={closeUtilityTab}
-                editorContent={(
-                  <div className="panel panel-editor workspace-search-include">
-                    <Suspense fallback={<PanelFallback />}>
-                      <EditorPanel
-                        bookTitle={bookTitle ?? ''}
-                        modelConfigs={modelConfigs}
-                        onUpdateModelConfig={onUpdateModelConfig}
-                        onLexicalEditor={setLexicalEditorRef}
-                      />
-                    </Suspense>
-                  </div>
-                )}
+                onActiveKeyChange={setActiveRightTabKeyAction}
+                onCloseTab={closeUtilityTabAction}
+                editorContent={editorContent}
                 dockCollapsed
                 onExpandDock={() => updateFloating('right', { open: true })}
                 settingOpenRequest={settingOpenRequest}
@@ -555,6 +462,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
           </div>
         )}
 
+        <BookWordCountWatcher bookId={resolvedBookId} />
       </div>
       <CommandPalette
         open={commandPaletteOpen}
@@ -563,6 +471,5 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       />
     </SettingDiffProvider>
     </DiffProvider>
-    </WorkspaceContext.Provider>
   )
 }

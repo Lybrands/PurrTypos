@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -16,6 +16,7 @@ from purra.contracts import (
     ModelRequest,
     RunProvenance,
 )
+from purra.output import AgentOutputEvent
 from application.request_mapping import (
     UnsupportedCallerToolContractError,
     build_chat_provider_options,
@@ -513,7 +514,7 @@ async def get_agent_run_tool_diagnostics(run_id: str, after: int = 0):
     """Read private tool IO only through the development diagnostics gate."""
     from config import DEV_DIAGNOSTICS_ENABLED
     from dependencies import get_db
-    from application.screenplay_tool_presentation import (
+    from agents.screenplay.historical_tool_presentation import (
         reproject_screenplay_tool_diagnostics,
     )
     from infrastructure.persistence.run_store import get_run
@@ -624,7 +625,7 @@ async def get_latest_session_agent_run(
     """Return the latest session-owned Run for page recovery."""
 
     from application.agent_composition import get_agent_composition
-    from application.agent_run_queries import AgentRunQueryService
+    from agents.shared.run_query import VersionedAgentRunQueryService
     from dependencies import get_db
     from infrastructure.persistence.run_store import (
         get_latest_run_for_session,
@@ -675,9 +676,10 @@ async def get_latest_session_agent_run(
                 if receipt is not None else None
             ),
         }
-    snapshot = await AgentRunQueryService(
+    snapshot = await VersionedAgentRunQueryService(
         composition.run_snapshot_reader,
         composition.output_repository,
+        composition.agent_implementation_router,
         product_event_query=SqliteWritingProposalReadModel(db),
     ).get_snapshot(str(run["id"]), limit=500)
     if snapshot is None:
@@ -703,8 +705,10 @@ async def get_agent_run_snapshot(
 ):
     """Return a resumable Run snapshot and durable events after a cursor."""
 
+    from agents.shared.run_query import VersionedAgentRunQueryService
     from application.agent_run_queries import AgentRunQueryService
     from application.agent_composition import get_agent_composition
+    from application.sub_agent_runs import related_runs_for_root
     from application.writing_proposal_read_model import (
         SqliteWritingProposalReadModel,
     )
@@ -716,11 +720,28 @@ async def get_agent_run_snapshot(
     run = await get_run(db, run_id)
     if run is None:
         return {"success": False, "error": "Agent Run 不存在"}
-    snapshot = await AgentRunQueryService(
-        composition.run_snapshot_reader,
-        composition.output_repository,
-        product_event_query=SqliteWritingProposalReadModel(db),
-    ).get_snapshot(
+    query_options = {
+        "product_event_query": SqliteWritingProposalReadModel(db),
+        # 通用子 Run 投影：根 Run 快照附带 relatedRuns 与 delegations，
+        # 前端据此还原子 Agent 委派视图（写作/分析共用）。
+        "related_runs_provider": lambda run_id_value: related_runs_for_root(
+            db, composition.run_tree_repository, run_id_value
+        ),
+    }
+    if run.get("parent_run_id"):
+        query = AgentRunQueryService(
+            composition.run_snapshot_reader,
+            composition.output_repository,
+            **query_options,
+        )
+    else:
+        query = VersionedAgentRunQueryService(
+            composition.run_snapshot_reader,
+            composition.output_repository,
+            composition.agent_implementation_router,
+            **query_options,
+        )
+    snapshot = await query.get_snapshot(
         run_id,
         after_event_id=after,
         limit=limit,
@@ -730,6 +751,91 @@ async def get_agent_run_snapshot(
     return {"success": True, "data": snapshot}
 
 
+@router.get("/ai/agent-runs/{run_id}/sub-agent-conversation")
+async def get_sub_agent_conversation(run_id: str):
+    """Return every completed turn leading to the selected Child Run."""
+
+    from application.agent_composition import get_agent_composition
+    from application.sub_agent_result_presentation import present_sub_agent_result
+    from dependencies import get_db
+    from infrastructure.persistence.run_store import get_run
+    from purra.errors import ContractViolationError
+
+    run = await get_run(get_db(), run_id)
+    if run is None:
+        return {"success": False, "error": "Agent Run 不存在"}
+    if not run.get("parent_run_id"):
+        return {"success": False, "error": "该 Run 不是子 Agent 对话"}
+
+    composition = get_agent_composition()
+    tree_runs = []
+    try:
+        selected_tree_run = await composition.run_tree_repository.get_run(run_id)
+    except ContractViolationError:
+        selected_tree_run = None
+    if selected_tree_run is not None:
+        agent_id = selected_tree_run.agent_id
+        current = selected_tree_run
+        seen = set()
+        while current is not None:
+            if current.run_id in seen or current.agent_id != agent_id:
+                raise HTTPException(status_code=409, detail="子 Agent 对话链无效")
+            seen.add(current.run_id)
+            tree_runs.append(current)
+            if current.previous_run_id is None:
+                break
+            current = await composition.run_tree_repository.get_run(
+                current.previous_run_id
+            )
+        tree_runs.reverse()
+    else:
+        agent_id = str(run.get("agent_id") or run_id)
+        tree_runs = [None]
+
+    turns = []
+    for tree_run in tree_runs:
+        turn_run_id = tree_run.run_id if tree_run is not None else run_id
+        stored = run if turn_run_id == run_id else await get_run(get_db(), turn_run_id)
+        status = str((stored or {}).get("status") or "")
+        if status in {"pending", "queued"}:
+            display_status = "queued"
+        elif status in {"claimed", "running", "waiting"}:
+            display_status = "running"
+        elif status == "done":
+            display_status = "done"
+        elif status == "canceled":
+            display_status = "canceled"
+        else:
+            display_status = "failed"
+        final_response = str((stored or {}).get("final_response") or "")
+        if status == "done" and not final_response:
+            try:
+                final_response = await composition.output_repository.load_validated_result(
+                    turn_run_id
+                )
+            except ContractViolationError:
+                final_response = ""
+        turns.append({
+            "runId": turn_run_id,
+            "prompt": (
+                tree_run.objective if tree_run is not None
+                else str((stored or {}).get("prompt") or "")
+            ),
+            "finalResponse": present_sub_agent_result(final_response),
+            "status": display_status,
+        })
+
+    return {
+        "success": True,
+        "data": {
+            "version": 2,
+            "agentId": agent_id,
+            "selectedRunId": run_id,
+            "turns": turns,
+        },
+    }
+
+
 @router.get("/ai/agent-runs/{run_id}/events")
 async def stream_agent_run_events(
     request: Request, run_id: str,
@@ -737,7 +843,7 @@ async def stream_agent_run_events(
     after: int = Query(default=0, ge=0),
 ):
     from application.agent_composition import get_agent_composition
-    from application.agent_run_queries import AgentRunQueryService
+    from agents.shared.run_query import VersionedAgentRunQueryService
     from application.agent_event_stream import stream_agent_pages, projection_version
     from dependencies import get_db
     from infrastructure.persistence.run_store import get_run
@@ -746,7 +852,11 @@ async def stream_agent_run_events(
     run = await get_run(get_db(), run_id)
     if run is None or run.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="Agent Run 不存在于当前会话")
-    query = AgentRunQueryService(composition.run_snapshot_reader, composition.output_repository)
+    query = VersionedAgentRunQueryService(
+        composition.run_snapshot_reader,
+        composition.output_repository,
+        composition.agent_implementation_router,
+    )
 
     async def read_page(cursor):
         snapshot = await query.get_snapshot(run_id, after_event_id=cursor, limit=500)
@@ -767,37 +877,6 @@ async def stream_agent_run_events(
         request=request, read_page=read_page,
         notifications=composition.output_notifications, after=after,
     ))
-
-
-@router.get("/ai/agent-runtime-regressions")
-async def get_agent_runtime_regressions():
-    """Run content-free operational incidents against the current evaluator."""
-    from application.operations.deterministic_checks import (
-        run_runtime_regression_suite,
-    )
-
-    return {"success": True, "data": run_runtime_regression_suite()}
-
-
-@router.get("/ai/agent-security-redteam")
-async def get_agent_security_redteam():
-    """Run deterministic, content-free host security boundary checks."""
-    from application.operations.deterministic_checks import (
-        run_agent_security_redteam_suite,
-    )
-
-    return {"success": True, "data": run_agent_security_redteam_suite()}
-
-
-@router.get("/ai/agent-stability-quality-gate")
-async def get_agent_stability_quality_gate():
-    """Run promoted failure-classification incidents as a release gate."""
-
-    from application.operations.deterministic_checks import (
-        run_agent_stability_quality_gate,
-    )
-
-    return {"success": True, "data": run_agent_stability_quality_gate()}
 
 
 # ── POST /ai/models ─────────────────────────────────────────────
@@ -934,6 +1013,17 @@ async def _stream_composed_agent(
     stream_end = object()
     subscriber_attached = True
 
+    # 领域效果是 PRIVATE 事件，handle.subscribe 只流 PUBLIC，因此 effect
+    # 永远不会出现在 service_stream 里。输出仓库持久化领域效果时会同步
+    # 回调 domain_projector（composition 装配的广播器），这里注册本条
+    # SSE 的队列直接接收桥接块。
+    broadcaster = getattr(composition, "domain_effect_broadcaster", None)
+    unregister_effects: Callable[[], None] | None = (
+        broadcaster.register(queue)
+        if callable(getattr(broadcaster, "register", None))
+        else None
+    )
+
     async def _execute_run() -> None:
         nonlocal subscriber_attached
         try:
@@ -984,6 +1074,8 @@ async def _stream_composed_agent(
         # Closing the response only detaches this subscriber. The composition
         # owns execution_task until the durable Run reaches a terminal state.
         subscriber_attached = False
+        if unregister_effects:
+            unregister_effects()
 
 
 @router.post("/ai/chat/stream")
@@ -1123,6 +1215,9 @@ async def chat_stream(
                 ),
             })
         except Exception:
+            logger.exception(
+                "[ai/chat/stream] failed before Writing Agent Run binding"
+            )
             if run_binding_lifecycle is not None:
                 receipt = await run_binding_lifecycle.on_start_failed(
                     "request_start_failed",

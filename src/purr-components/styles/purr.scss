@@ -287,7 +287,10 @@
     background-color var(--transition-fast),
     box-shadow var(--transition-fast);
 
-  &:hover { border-color: var(--border-strong); }
+  &:hover:not(:has(:disabled)) {
+    border-color: var(--border-strong);
+    background: var(--bg-panel);
+  }
 
   &:focus-within {
     border-color: var(--accent);
@@ -306,6 +309,12 @@
   padding: 0 8px;
   font-size: var(--font-size-sm);
 }
+.purr-input__suffix {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+.purr-input-search .purr-input__suffix .purr-icon { font-size: 16px; }
 .purr-input--embedded {
   min-height: calc(var(--control-height) - 2px);
   padding-inline: 0;
@@ -1348,6 +1357,80 @@
 .purr-tabs__panel {
   height: 100%;
   min-height: 0;
+}
+
+/* ─── Collapse ──────────────────────────────────────── */
+.purr-collapse {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+
+.purr-collapse__item + .purr-collapse__item {
+  border-top: 1px solid var(--border-light);
+}
+
+.purr-collapse__header {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  transition: background var(--transition-fast);
+
+  &:hover { background: var(--bg-hover-list); }
+}
+
+.purr-collapse__trigger {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 12px;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  flex: 1;
+
+  &:hover { background: transparent; }
+  &:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+  &:disabled { color: var(--text-disabled); cursor: not-allowed; }
+}
+
+.purr-collapse__extra {
+  display: flex;
+  padding-right: 8px;
+  align-items: center;
+  flex: none;
+}
+
+.purr-collapse__chevron {
+  color: var(--text-muted);
+  font-size: 13px;
+  transition: transform var(--transition-fast);
+}
+
+.purr-collapse__trigger[aria-expanded='true'] .purr-collapse__chevron {
+  transform: rotate(90deg);
+}
+
+.purr-collapse__label {
+  min-width: 0;
+  flex: 1;
+  font-weight: var(--font-weight-semibold);
+}
+
+.purr-collapse__content {
+  padding: 2px 12px 12px 33px;
+  color: var(--text-secondary);
+}
+
+.purr-collapse--small .purr-collapse__trigger {
+  min-height: 36px;
+  padding-block: 6px;
+  font-size: var(--font-size-sm);
 }
 
 /* ─── Select / tags input ────────────────────────────── */

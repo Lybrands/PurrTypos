@@ -368,3 +368,74 @@
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
+
+.dashboard-character-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.dashboard-chapter-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dashboard-chapter-modal-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dashboard-chapter-modal-top-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dashboard-chapter-modal-label {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.dashboard-chapter-modal-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 46vh;
+  overflow-y: auto;
+  gap: 2px;
+}
+
+.dashboard-chapter-modal-item {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.dashboard-chapter-modal-item:hover {
+  background: var(--bg-subtle);
+}
+
+.dashboard-chapter-modal-index {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.dashboard-chapter-modal-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-chapter-modal-mentions {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}

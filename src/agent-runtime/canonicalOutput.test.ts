@@ -103,6 +103,43 @@ test('runtime event text does not impersonate Provider deltas', () => {
   assert.equal(state.finalText, 'Provider text')
 })
 
+test('validated novel-analysis stage output is retained as public narration', () => {
+  const state = replayCanonicalOutput([
+    event(1, {
+      source: 'runtime',
+      kind: 'runtime.event',
+      channel: 'commentary',
+      payload: {
+        eventType: 'novel_analysis.stage_output',
+        data: {
+          stageId: 'task:map:extract',
+          text: '人物关系已经形成较稳定的判断。林月与苏文的双线由错位走向汇合。',
+        },
+      },
+    }),
+    event(2, {
+      source: 'runtime',
+      kind: 'runtime.event',
+      channel: 'commentary',
+      payload: {
+        eventType: 'novel_analysis.stage_output',
+        data: {
+          stageId: 'task:map:extract',
+          text: '人物关系已经复核。林月与苏文的双线汇合推动了组织线展开。',
+        },
+      },
+    }),
+  ])
+
+  assert.deepEqual(state.stageOutputs, [{
+    stageId: 'task:map:extract',
+    text: '人物关系已经复核。林月与苏文的双线汇合推动了组织线展开。',
+    sequence: 2,
+    occurredAt: '2026-08-12T08:00:02+00:00',
+  }])
+  assert.equal(state.finalText, '')
+})
+
 test('Provider delta batches replay as ordered public text', () => {
   const state = replayCanonicalOutput([
     event(1, {
@@ -248,6 +285,50 @@ test('Provider public progress replays separately from final text and reasoning'
   assert.equal(state.finalText, '')
   assert.equal(state.commentaryText, '')
   assert.equal(JSON.stringify(state).includes('provider.progress_delta'), false)
+})
+
+test('planning text deltas grow one preview and validated progress replaces it', () => {
+  const base = {
+    source: 'provider' as const,
+    kind: 'planning.delta',
+    channel: 'commentary' as const,
+    outputStreamId: 'planning-stream',
+    invocationId: 'planning-invocation',
+    payload: {
+      schemaVersion: 'purra.planning-stream/v1',
+      operationId: 'planning-1',
+      revision: 0,
+      attempt: 0,
+      recordIndex: 1,
+      sourceChunkIndex: 1,
+      sourcePartIndex: 1,
+      textDelta: '先核对',
+    },
+  }
+  let state = reduceCanonicalOutput(initialCanonicalOutputState(), event(1, base))
+  state = reduceCanonicalOutput(state, event(2, {
+    ...base,
+    payload: {
+      ...base.payload,
+      sourceChunkIndex: 2,
+      textDelta: '范围，再安排步骤。',
+    },
+  }))
+  assert.deepEqual(state.planningProgress.map((item) => item.text), [
+    '先核对范围，再安排步骤。',
+  ])
+  state = reduceCanonicalOutput(state, event(3, {
+    ...base,
+    kind: 'planning.progress',
+    payload: {
+      schemaVersion: 'purra.planning-stream/v1',
+      operationId: 'planning-1', revision: 0, attempt: 0, recordIndex: 1,
+      sourceStart: 0, sourceEnd: 80,
+      text: '先核对范围，再安排步骤。',
+    },
+  }))
+  assert.equal(state.planningProgress.length, 1)
+  assert.equal(state.planningProgress[0].text, '先核对范围，再安排步骤。')
 })
 
 test('terminal Root lifecycle restores its authoritative final response', () => {
@@ -418,4 +499,40 @@ test('approval lifecycle is replayed from canonical runtime events', () => {
     summary: '将当前候选稿写入正文',
     status: 'approved',
   })
+})
+
+test('stage batches preserve entry order, identity, deduplication and independent final state', () => {
+  const batch = event(1, {
+    source: 'provider', kind: 'provider.delta_batch', channel: 'commentary',
+    outputStreamId: 'stage-1', invocationId: 'stage-invoke',
+    payload: { entries: [
+      { kind: 'provider.content_delta', payload: { delta: 'A' } },
+      { kind: 'provider.reasoning_delta', payload: { delta: 'PRIVATE' } },
+      { kind: 'provider.content_delta', payload: { delta: 'B' } },
+    ] },
+  })
+  let state = reduceCanonicalOutput(initialCanonicalOutputState(), batch)
+  assert.equal(state.commentaryBlocks[0].text, 'AB')
+  assert.equal(state.commentaryBlocks[0].stage, true)
+  assert.equal(state.runTerminal, false)
+  assert.equal(state.finalText, '')
+  assert.equal(reduceCanonicalOutput(state, batch), state)
+  state = reduceCanonicalOutput(state, event(2, {
+    ...batch, eventId: 'wrong-invocation', sequence: 2, invocationId: 'foreign',
+  }))
+  assert.equal(state.commentaryBlocks[0].text, 'AB')
+  state = reduceCanonicalOutput(state, event(3, {
+    kind: 'stream.aborted', channel: 'commentary', outputStreamId: 'stage-1',
+    invocationId: 'stage-invoke', payload: { errorCode: 'interrupted' },
+  }))
+  assert.equal(state.commentaryBlocks[0].aborted, true)
+  state = reduceCanonicalOutput(state, { ...batch, eventId: 'late', sequence: 4 })
+  assert.equal(state.commentaryBlocks[0].text, 'AB')
+  assert.equal(state.runTerminal, false)
+  state = reduceCanonicalOutput(state, event(5, {
+    source: 'provider', kind: 'provider.content_delta', channel: 'final',
+    outputStreamId: 'final', invocationId: 'final-invoke', payload: { delta: 'Final' },
+  }))
+  assert.equal(state.finalText, 'Final')
+  assert.equal(state.commentaryBlocks[0].text, 'AB')
 })

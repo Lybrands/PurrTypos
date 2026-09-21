@@ -1,4 +1,6 @@
 import { services } from '@/services'
+import { notifyChapterContentUpdated } from '../../stores/workspaceStore'
+import { useAiProposalBridge } from '../../stores/aiProposalBridge'
 import React from 'react'
 import { usePurrToast } from '@/purr-components'
 import type { EntityId } from '../../types'
@@ -196,9 +198,7 @@ export function DiffProvider({ children }: { children: React.ReactNode }) {
     }
 
     // 通知 EditorPanel 重新拉一次正文
-    window.dispatchEvent(new CustomEvent('chapter-content-updated', {
-      detail: { chapterId },
-    }))
+    notifyChapterContentUpdated(chapterId)
 
     appMessage.success(
       `已应用：接受 ${stats.accepted} 段，拒绝 ${stats.rejected} 段` +
@@ -216,24 +216,19 @@ export function DiffProvider({ children }: { children: React.ReactNode }) {
 
   // 监听 AI 工具 editChapterContent 推送的 diff 提议：
   // 来源是 useChatSubmit 收到 chunk.proposedChapterDiff 后 dispatch 的全局事件
+  // AI 提议章节 diff（经 aiProposalBridge 投递；排空队列逐条处理）
+  const chapterDiffQueueLength = useAiProposalBridge((state) => state.chapterDiffQueue.length)
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as
-        | {
-            chapterId: EntityId
-            beforeText: string
-            proposedText: string
-            source?: string
-          }
-        | undefined
-      if (!detail || detail.chapterId == null) return
+    if (chapterDiffQueueLength === 0) return
+    for (const detail of useAiProposalBridge.getState().drainChapterDiff()) {
+      if (detail.chapterId == null) continue
 
       const k = key(detail.chapterId)
       if (sessionsRef.current[k]) {
         // 已有未完成会话：保留旧会话，提示用户先处理。
         // 这是常见场景：协作模式下 AI 会连续多次 editChapterContent。
         appMessage.warning('当前章节已有未完成的差异，请先在编辑区接受/拒绝后再继续与 AI 交互')
-        return
+        continue
       }
       startDiff({
         chapterId: detail.chapterId,
@@ -242,9 +237,7 @@ export function DiffProvider({ children }: { children: React.ReactNode }) {
         source: detail.source || 'ai_tool_edit',
       })
     }
-    window.addEventListener('ai-propose-chapter-diff', handler as EventListener)
-    return () => window.removeEventListener('ai-propose-chapter-diff', handler as EventListener)
-  }, [startDiff, appMessage])
+  }, [chapterDiffQueueLength, startDiff, appMessage])
 
   const value = React.useMemo<DiffContextValue>(() => ({
     sessions,

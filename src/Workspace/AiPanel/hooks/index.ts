@@ -11,6 +11,11 @@ export {
   type UseChatSubmitParams,
 } from "./useChatSubmit";
 export {
+  useChatScopeMemory,
+  loadChatScopeMap,
+  rememberChatScope,
+} from "./useChatScopeMemory";
+export {
   type ChatSessionActivity,
   type ChatSessionActivityState,
 } from "./chatQueue";

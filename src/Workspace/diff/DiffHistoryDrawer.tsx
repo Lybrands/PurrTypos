@@ -1,4 +1,5 @@
 import { services } from '@/services'
+import { notifyChapterContentUpdated } from '../../stores/workspaceStore'
 import React from 'react'
 import { PurrButton, PurrDrawer, PurrEmpty, PurrSpin, PurrTag, PurrTooltip, usePurrConfirm, usePurrToast } from '@/purr-components'
 import { HistoryIcon, RollbackIcon } from '@/purr-components'
@@ -76,9 +77,7 @@ export default function DiffHistoryDrawer({
           const res = await services.history.rollbackChapterDiff({ diffId: item.id })
           if (res?.success && chapterId != null) {
             appMessage.success('已回滚')
-            window.dispatchEvent(new CustomEvent('chapter-content-updated', {
-              detail: { chapterId },
-            }))
+            notifyChapterContentUpdated(chapterId)
             reload()
           } else {
             appMessage.error('回滚失败')

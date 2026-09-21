@@ -1347,3 +1347,78 @@
     animation: none;
   }
 }
+
+.ai-dev-inspector__feedback-panel {
+  padding: 14px; margin: 12px 0; border: 1px solid var(--border-color, #dedee5); border-radius: 10px;
+  p, small { font-size: 12px; opacity: .75; line-height: 1.6; }
+  ol { padding-left: 20px; margin-bottom: 0; }
+  li { padding: 10px 0; border-top: 1px solid var(--border-color, #dedee5); }
+  li > div { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; font-size: 12px; }
+  [data-feedback-state="streaming"] > div { color: #3b82f6; }
+  [data-feedback-state="aborted"] > div { color: #d97706; }
+  details { font-size: 11px; margin-top: 6px; }
+  dd { margin: 2px 0 8px; overflow-wrap: anywhere; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+}
+
+
+.ai-dev-inspector__tool-presentation-group {
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border-light));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent-light) 34%, var(--bg-elevated));
+
+  > summary {
+    display: flex;
+    min-height: 36px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 9px;
+    cursor: pointer;
+    list-style: none;
+
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    > span {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    strong {
+      overflow: hidden;
+      color: var(--text-primary);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    small,
+    em {
+      color: var(--text-muted);
+      font-size: 9px;
+      font-style: normal;
+    }
+  }
+
+  &[data-status="running"] > summary em {
+    color: var(--accent);
+  }
+
+  &[data-status="failed"] {
+    border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
+  }
+
+  &[data-status="failed"] > summary em {
+    color: var(--danger);
+  }
+}
+
+.ai-dev-inspector__tool-presentation-group-body {
+  padding: 7px;
+  border-top: 1px solid var(--border-light);
+}

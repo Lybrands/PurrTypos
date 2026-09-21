@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from application.novel_source_service import NovelSourceService
 from database.connection import DatabaseConnection
@@ -11,6 +12,19 @@ from domains.novel_sources import (
     apply_source_section_layout,
     parse_source_sections,
 )
+from schemas.novel_sources import ResumeNovelAnalysisRequest
+
+
+def test_resume_analysis_contract_rejects_retired_failed_retry_flag() -> None:
+    with pytest.raises(ValidationError, match="retryFailed"):
+        ResumeNovelAnalysisRequest.model_validate({
+            "runtime": {
+                "modelConfigId": "model-1",
+                "apiKey": "secret",
+                "options": {"model": "test-model"},
+            },
+            "retryFailed": True,
+        })
 
 
 @pytest.fixture
@@ -31,6 +45,17 @@ def test_parser_is_deterministic_and_keeps_single_section_fallback():
     assert [item.title for item in first] == ["前言", "第一章 起点", "第二章 变化"]
     assert "正文 B" in first[-1].text
     assert parse_source_sections("没有章节标题的全文")[0].title == "全文"
+
+
+def test_exported_volume_prefix_does_not_turn_every_chapter_into_a_volume():
+    source = (
+        "# 第1卷 第一卷 · 第1章 起点\n正文 A\n\n"
+        "# 第1卷 第一卷 · 第2章 变化\n正文 B"
+    )
+    sections = parse_source_sections(source)
+    assert [item.section_type for item in sections] == ["chapter", "chapter"]
+    assert [item.volume_id for item in sections] == ["volume:0", "volume:0"]
+    assert [item.volume_title for item in sections] == ["第1卷 第一卷", "第1卷 第一卷"]
 
 
 def test_reviewed_section_layout_must_cover_source_contiguously():
@@ -100,6 +125,28 @@ async def test_preview_writes_nothing_and_confirmation_creates_one_immutable_rev
     assert revision["version_no"] == 1
     assert [item["title"] for item in revision["sections"]] == ["第一章", "第二章"]
     assert all("text_content" not in item for item in revision["sections"])
+    persisted_metrics = await db.fetch_all(
+        "SELECT byte_count, character_count FROM novel_source_sections "
+        "WHERE revision_id = ? ORDER BY ordinal",
+        [revision["id"]],
+    )
+    assert persisted_metrics == [
+        {
+            "byte_count": len(item.encode("utf-8")),
+            "character_count": len(item),
+        }
+        for item in ["# 第一章\n正文一\n\n", "# 第二章\n正文二"]
+    ]
+    metric_columns = {
+        row["name"]
+        for row in await db.fetch_all(
+            "PRAGMA table_info(novel_source_section_token_metrics)"
+        )
+    }
+    assert {
+        "source_revision_id", "section_id", "tokenizer_id",
+        "tokenizer_version", "token_count", "count_kind", "content_digest",
+    }.issubset(metric_columns)
 
     section = await service.get_section(revision["id"], revision["sections"][1]["id"])
     assert section["text_content"].endswith("正文二")
@@ -107,18 +154,27 @@ async def test_preview_writes_nothing_and_confirmation_creates_one_immutable_rev
     assert matches[0]["id"] == section["id"]
 
 
-async def test_single_section_and_changed_content_require_explicit_reconfirmation(db):
+async def test_import_without_checkboxes_preserves_content_digest_guard(db):
     service = NovelSourceService(db)
     preview = service.preview_external_import(
         file_name="source.txt", extension=".txt", content="完整单节正文"
     )
-    with pytest.raises(NovelSourceConflictError, match="按单节"):
-        await service.confirm_external_import(
-            title="单节", file_name="source.txt", extension=".txt",
-            content="完整单节正文", expected_content_digest=preview["contentDigest"],
-            confirm_single_section=False, rights_confirmed=True,
-            model_data_boundary_confirmed=True,
-        )
+    from schemas.novel_sources import ConfirmSourceImportRequest
+
+    request = ConfirmSourceImportRequest(
+        title="单节", fileName="source.txt", extension=".txt",
+        content="完整单节正文", expectedContentDigest=preview["contentDigest"],
+    )
+    revision = await service.confirm_external_import(
+        title=request.title, file_name=request.fileName, extension=request.extension,
+        content=request.content, expected_content_digest=request.expectedContentDigest,
+    )
+    assert len(revision["sections"]) == 1
+    metadata = revision["source_metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    assert metadata["rightsConfirmed"] is False
+    assert metadata["modelDataBoundaryConfirmed"] is False
     with pytest.raises(NovelSourceConflictError, match="已变化"):
         await service.confirm_external_import(
             title="单节", file_name="source.txt", extension=".txt",
@@ -302,14 +358,10 @@ async def test_source_work_with_writing_method_evidence_reference_must_be_archiv
         "('analysis-evidence', ?, 1, 0, 1, 'digest', '{}')",
         [revision["id"]],
     )
-    await db.execute(
-        "INSERT INTO writing_methods "
-        "(id, name, method_type, source_type, source_ref_json) VALUES "
-        "('method-evidence', '证据方法', 'technique', 'analysis_candidate', ?)",
-        [json.dumps({"analysisId": "analysis-evidence", "craftCardId": "craft-1"})],
-    )
+    from application.writing_technique_service import WritingTechniqueService
+    await WritingTechniqueService(db).create_draft(operation_id="source-evidence", owner={"sourceRevisionId": revision["id"], "analysisId": "analysis-evidence"})
 
-    with pytest.raises(NovelSourceConflictError, match="写作方法或方案引用"):
+    with pytest.raises(NovelSourceConflictError, match="写作技法引用"):
         await service.delete_work(revision["work_id"])
 
     archived = await service.archive_work(revision["work_id"])

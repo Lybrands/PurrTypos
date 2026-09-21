@@ -1,13 +1,12 @@
 import React from 'react'
 import {
-  CheckCircleIcon,
   CloseIcon,
-  ClockIcon,
   LoadingIcon,
   MessageIcon,
   PanelToggleIcon,
-  PauseCircleIcon,
+  PinnedIcon,
   PlusIcon,
+  PushpinIcon,
   PurrButton,
   PurrEmpty,
   PurrInput,
@@ -18,6 +17,11 @@ import type {
   AgentSessionId,
 } from '../../../agent-runtime'
 import type { AgentConversationSession } from '../controller'
+import {
+  computeSessionReorder,
+  sortConversationSessionsForDisplay,
+  type SessionDropTarget,
+} from '../sessionView'
 import './index.scss'
 
 export type { AgentConversationActivity } from '../../../agent-runtime'
@@ -30,11 +34,9 @@ interface AgentConversationIndexProps<
   editingSessionId: TSession['id'] | null
   editingTitle: string
   isCurrentSessionEmpty?: boolean
-  disabled?: boolean
   context?: React.ReactNode
   extraActions?: React.ReactNode
   sessionActivities?: Partial<Record<AgentSessionId, AgentConversationActivity>>
-  getActivityLabel?: (activity: AgentConversationActivity) => string
   emptyDescription?: React.ReactNode
   onActiveSessionChange: (sessionId: TSession['id']) => void
   onEditingSessionIdChange: (sessionId: TSession['id'] | null) => void
@@ -43,15 +45,10 @@ interface AgentConversationIndexProps<
   onNewSession: () => void
   onCloseSession: (session: TSession) => void
   onCollapse: () => void
-}
-
-function ActivityIcon({ activity }: { activity: AgentConversationActivity }) {
-  if (activity.state === 'running') return <LoadingIcon spin />
-  if (activity.state === 'queued') return <ClockIcon />
-  if (activity.state === 'paused') return <PauseCircleIcon />
-  if (activity.state === 'completed') return <CheckCircleIcon />
-  if (activity.state === 'canceled') return <PauseCircleIcon />
-  return <CloseIcon />
+  /** 拖拽排序回调：按目标展示顺序回传全部会话 ID；不传则列表不支持拖拽 */
+  onReorderSessions?: (orderedIds: TSession['id'][]) => void
+  /** 置顶/取消置顶；不传则不显示置顶按钮 */
+  onToggleSessionPinned?: (sessionId: TSession['id'], pinned: boolean) => void
 }
 
 function formatSessionTime(value?: string) {
@@ -66,15 +63,6 @@ function formatSessionTime(value?: string) {
   }).format(date)
 }
 
-function defaultActivityLabel(activity: AgentConversationActivity) {
-  if (activity.state === 'running') return '生成中'
-  if (activity.state === 'queued') return '等待发送'
-  if (activity.state === 'paused') return '任务已暂停'
-  if (activity.state === 'completed') return '已完成'
-  if (activity.state === 'failed') return '生成失败'
-  return '已终止'
-}
-
 export default function AgentConversationIndex<
   TSession extends AgentConversationSession = AgentConversationSession,
 >({
@@ -83,11 +71,9 @@ export default function AgentConversationIndex<
   editingSessionId,
   editingTitle,
   isCurrentSessionEmpty = false,
-  disabled = false,
   context,
   extraActions,
   sessionActivities = {},
-  getActivityLabel = defaultActivityLabel,
   emptyDescription = '暂无对话',
   onActiveSessionChange,
   onEditingSessionIdChange,
@@ -96,8 +82,64 @@ export default function AgentConversationIndex<
   onNewSession,
   onCloseSession,
   onCollapse,
+  onReorderSessions,
+  onToggleSessionPinned,
 }: AgentConversationIndexProps<TSession>) {
   const hasBlankSession = sessions.length > 0 && isCurrentSessionEmpty
+  const orderedSessions = React.useMemo(
+    () => sortConversationSessionsForDisplay(sessions),
+    [sessions],
+  )
+  const canReorder = onReorderSessions != null
+  const [draggingId, setDraggingId] = React.useState<AgentSessionId | null>(null)
+  const [dropTarget, setDropTarget] = React.useState<SessionDropTarget | null>(null)
+
+  const clearDragState = React.useCallback(() => {
+    setDraggingId(null)
+    setDropTarget(null)
+  }, [])
+
+  const handleItemDragStart = (
+    event: React.DragEvent<HTMLDivElement>,
+    session: TSession,
+  ) => {
+    event.dataTransfer.effectAllowed = 'move'
+    // Firefox 需要设置数据后才会启动拖拽
+    event.dataTransfer.setData('text/plain', String(session.id))
+    setDraggingId(session.id)
+  }
+
+  const handleItemDragOver = (
+    event: React.DragEvent<HTMLDivElement>,
+    session: TSession,
+  ) => {
+    if (!canReorder || draggingId == null || draggingId === session.id) return
+    if (Boolean(sessions.find((item) => item.id === draggingId)?.pinned)
+      !== Boolean(session.pinned)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const rect = event.currentTarget.getBoundingClientRect()
+    setDropTarget({
+      id: session.id,
+      before: event.clientY < rect.top + rect.height / 2,
+    })
+  }
+
+  const handleItemDrop = (
+    event: React.DragEvent<HTMLDivElement>,
+    session: TSession,
+  ) => {
+    if (!canReorder || draggingId == null) return
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    const target: SessionDropTarget = {
+      id: session.id,
+      before: event.clientY < rect.top + rect.height / 2,
+    }
+    const orderedIds = computeSessionReorder(orderedSessions, draggingId, target)
+    clearDragState()
+    if (orderedIds) onReorderSessions(orderedIds)
+  }
 
   return (
     <aside className="agent-conversation-index" aria-label="AI 对话记录">
@@ -120,7 +162,7 @@ export default function AgentConversationIndex<
               type="text"
               size="small"
               icon={<PlusIcon />}
-              disabled={disabled || hasBlankSession}
+              disabled={hasBlankSession}
               onClick={onNewSession}
               aria-label="新建对话"
             />
@@ -131,28 +173,34 @@ export default function AgentConversationIndex<
       <div className="agent-conversation-index__list">
         {sessions.length === 0 ? (
           <PurrEmpty image={false} description={emptyDescription} />
-        ) : [...sessions].reverse().map((session) => {
+        ) : orderedSessions.map((session) => {
           const active = session.id === activeSessionId
           const activity = sessionActivities[session.id]
+          const editing = editingSessionId === session.id
+          const dropHint = dropTarget?.id === session.id && draggingId !== session.id
+            ? (dropTarget.before ? ' is-drop-before' : ' is-drop-after')
+            : ''
           return (
             <div
               key={session.id}
-              className={`agent-conversation-index__item${active ? ' is-active' : ''}${activity ? ` is-${activity.state}` : ''}`}
+              className={`agent-conversation-index__item${active ? ' is-active' : ''}${activity ? ` is-${activity.state}` : ''}${draggingId === session.id ? ' is-dragging' : ''}${dropHint}`}
               role="button"
-              tabIndex={disabled ? -1 : 0}
-              aria-disabled={disabled}
-              onClick={() => {
-                if (!disabled) onActiveSessionChange(session.id)
-              }}
+              tabIndex={0}
+              draggable={canReorder && !editing}
+              onDragStart={(event) => handleItemDragStart(event, session)}
+              onDragEnd={clearDragState}
+              onDragOver={(event) => handleItemDragOver(event, session)}
+              onDrop={(event) => handleItemDrop(event, session)}
+              onClick={() => onActiveSessionChange(session.id)}
               onKeyDown={(event) => {
-                if (disabled || (event.key !== 'Enter' && event.key !== ' ')) return
+                if (event.key !== 'Enter' && event.key !== ' ') return
                 event.preventDefault()
                 onActiveSessionChange(session.id)
               }}
             >
               <MessageIcon className="agent-conversation-index__icon" />
               <div className="agent-conversation-index__meta">
-                {editingSessionId === session.id ? (
+                {editing ? (
                   <PurrInput
                     size="small"
                     value={editingTitle}
@@ -168,7 +216,6 @@ export default function AgentConversationIndex<
                     className="agent-conversation-index__title"
                     title={session.title || '新对话'}
                     onDoubleClick={(event) => {
-                      if (disabled) return
                       event.stopPropagation()
                       onEditingSessionIdChange(session.id)
                       onEditingTitleChange(session.title || '新对话')
@@ -178,27 +225,49 @@ export default function AgentConversationIndex<
                   </span>
                 )}
                 <div className="agent-conversation-index__subline">
+                  {session.pinned ? (
+                    <PinnedIcon
+                      className="agent-conversation-index__pinned-mark"
+                      aria-label="已置顶"
+                    />
+                  ) : null}
                   <span className="agent-conversation-index__time">
                     {formatSessionTime(session.createdAt)}
                   </span>
-                  {activity ? (
+                  {activity?.state === 'running' ? (
                     <span
-                      className={`agent-conversation-index__status agent-conversation-index__status--${activity.state}`}
+                      className="agent-conversation-index__status agent-conversation-index__status--running"
                       role="status"
+                      aria-label="对话进行中"
                     >
-                      <ActivityIcon activity={activity} />
-                      <span>{getActivityLabel(activity)}</span>
+                      <LoadingIcon spin />
                     </span>
                   ) : null}
                 </div>
               </div>
+              {onToggleSessionPinned ? (
+                <PurrTooltip title={session.pinned ? '取消置顶' : '置顶'}>
+                  <PurrButton
+                    type="text"
+                    size="small"
+                    icon={session.pinned ? <PinnedIcon /> : <PushpinIcon />}
+                    className="agent-conversation-index__pin"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onToggleSessionPinned(session.id, !session.pinned)
+                    }}
+                    aria-label={session.pinned
+                      ? `取消置顶 ${session.title || '新对话'}`
+                      : `置顶 ${session.title || '新对话'}`}
+                  />
+                </PurrTooltip>
+              ) : null}
               <PurrTooltip title="关闭对话">
                 <PurrButton
                   type="text"
                   size="small"
                   icon={<CloseIcon />}
                   className="agent-conversation-index__close"
-                  disabled={disabled}
                   onClick={(event) => {
                     event.stopPropagation()
                     onCloseSession(session)

@@ -9,6 +9,7 @@ import type {
 } from '../../../agent-runtime/chunkHandlers/types'
 import type { AgentConversationMessage } from '../../../agent-runtime/contracts'
 import { settingDiffCard } from '../settingDiffProjection'
+import { proposeSettingDiff } from '../../../stores/aiProposalBridge'
 
 export type BookSettingDiffAttachmentHandler = (
   message: AgentConversationMessage,
@@ -50,9 +51,7 @@ export function handleProposedSettingDiff(
   const card = settingDiffCard(p)
   if (!card) return
 
-  window.dispatchEvent(
-    new CustomEvent("ai-propose-setting-diff", { detail: p }),
-  );
+  proposeSettingDiff(p);
 
   const proposedName =
     p.kind === "character" || p.kind === "entity"

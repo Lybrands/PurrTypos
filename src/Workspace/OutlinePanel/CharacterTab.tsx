@@ -1,12 +1,14 @@
 import { services } from '@/services'
+import { requestGlobalChatPrefill } from '../../stores/chatPrefillStore'
+import { useSettingsRevision } from '../../stores/settingsInvalidationStore'
 import React from 'react'
+import { useMaterialRefresh } from './useMaterialRefresh'
 import { AiChatIcon, PlusIcon, UserIcon, DeleteIcon, EditIcon, SettingsIcon, HistoryIcon } from '@/purr-components'
-import { PurrButton, PurrEmpty, PurrInput, PurrModal, PurrSelect, PurrTag, PurrTooltip } from '@/purr-components'
-import KnowledgeMarkdownEditor from '@/components/KnowledgeMarkdownEditor'
+import { PurrButton, PurrEmpty, PurrModal, PurrTag, PurrTooltip } from '@/purr-components'
 import type { Character, CharacterOption, EntityId } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
-import { getBookCharacters } from '../utils'
 import CharacterOptionsModal from './CharacterOptionsModal'
+import MaterialProfileEditorModal from './MaterialProfileEditorModal'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
 import { settingSessionKey, useSettingDiff } from '../settingDiff/SettingDiffContext'
 import SettingHistoryDrawer from '../SettingPanel/SettingHistoryDrawer'
@@ -61,6 +63,7 @@ export default function CharacterTab({
   onFocusCharacterHandled,
 }: CharacterTabProps) {
   const { message } = useAppFeedback()
+  const [loadError, setLoadError] = React.useState('')
   const [characters, setCharacters] = React.useState<Character[]>([])
   const [editModalOpen, setEditModalOpen] = React.useState(false)
   const [editTarget, setEditTarget] = React.useState<Character | null>(null)
@@ -81,8 +84,9 @@ export default function CharacterTab({
 
   const loadCharacters = React.useCallback(async () => {
     if (bookId == null) return
-    const list = await getBookCharacters(bookId)
-    setCharacters(list)
+    const res = await services.characters.getCharacters({ bookId })
+    setLoadError(res.success ? '' : res.error || '无法读取资料')
+    setCharacters(res.success ? res.data || [] : [])
   }, [bookId])
 
   const loadOptions = React.useCallback(async () => {
@@ -90,20 +94,19 @@ export default function CharacterTab({
     if (res.success && res.data) setTagOptions(res.data)
   }, [])
 
+  useMaterialRefresh(loadCharacters)
+
   React.useEffect(() => {
     loadCharacters()
     loadOptions()
   }, [loadCharacters, loadOptions])
 
-  // AI 工具创建/修改人物后刷新列表（面板可能与 AI 对话同屏开着）
+  // AI 工具创建/修改人物后刷新列表（修订号驱动，仅 character 变化时触发）
+  const characterRevision = useSettingsRevision('character')
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ kind?: string }>).detail
-      if (detail?.kind === 'character') loadCharacters()
-    }
-    window.addEventListener('setting-updated', handler)
-    return () => window.removeEventListener('setting-updated', handler)
-  }, [loadCharacters])
+    if (characterRevision === 0) return
+    loadCharacters()
+  }, [characterRevision, loadCharacters])
 
   React.useEffect(() => {
     onActionActiveChange?.(editModalOpen || !!deleteTarget || configOpen)
@@ -151,6 +154,7 @@ export default function CharacterTab({
       name,
       tags: draftTags.join(', '),
       profile_md: draftProfileMd,
+      baseRevision: editTarget?.baseRevision,
     }
     setSaving(true)
     try {
@@ -171,15 +175,12 @@ export default function CharacterTab({
 
   /** 打开 AI 全局对话并携带人物上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((c: Character) => {
-    window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
-    window.dispatchEvent(new CustomEvent('open-setting-chat', {
-      detail: { prefill: `关于人物「${c.name}」：` },
-    }))
+    requestGlobalChatPrefill(`关于人物「${c.name}」：`)
   }, [])
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return
-    const res = await services.characters.deleteCharacter({ id: deleteTarget.id })
+    const res = await services.characters.deleteCharacter({ id: deleteTarget.id, baseRevision: deleteTarget.baseRevision })
     if (res.success) {
       message.success('已删除')
       setDeleteTarget(null)
@@ -196,6 +197,8 @@ export default function CharacterTab({
       </div>
     )
   }
+
+  if (loadError && !editModalOpen) return <p role="alert">{loadError} <PurrButton onClick={() => void loadCharacters()}>重新读取</PurrButton></p>
 
   return (
     <div className="character-tab">
@@ -231,7 +234,7 @@ export default function CharacterTab({
           </div>
         ) : (
           characters.map((c, index) => {
-            const preview = profilePreview(c.profile_md)
+            const preview = profilePreview([c.inheritedBaseline, c.profile_md].filter(Boolean).join("\n"))
             const isFocus = focusCharacterId === c.id
             const hasDiff = diff.hasSession(settingSessionKey('character', c.id))
             return (
@@ -261,6 +264,7 @@ export default function CharacterTab({
                     </div>
                   )}
                 </div>
+
                 <div className="character-card-actions">
                   <PurrButton
                     type="text"
@@ -315,44 +319,7 @@ export default function CharacterTab({
         onRestored={loadCharacters}
       />
 
-      <PurrModal
-        title={editTarget ? '编辑人物' : '新建人物'}
-        open={editModalOpen}
-        onOk={handleSave}
-        onCancel={closeModal}
-        okText={editTarget ? '保存' : '创建'}
-        cancelText="取消"
-        okButtonProps={{ loading: saving }}
-        width={680}
-        destroyOnHidden
-        className="character-edit-modal"
-      >
-        <div className="character-edit-meta">
-          <PurrInput
-            placeholder="人物姓名（必填）"
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            maxLength={50}
-            className="character-edit-name"
-          />
-          <PurrSelect
-            mode="tags"
-            placeholder="标签：选择或输入，回车确认"
-            value={draftTags}
-            onChange={setDraftTags}
-            options={tagOptions.map((t) => ({ label: t.value, value: t.value }))}
-            maxCount={10}
-            className="character-edit-tags"
-          />
-        </div>
-        <KnowledgeMarkdownEditor
-          documentKey={`character:${editTarget?.id ?? 'new'}`}
-          value={draftProfileMd}
-          onChange={setDraftProfileMd}
-          ariaLabel="人物档案"
-          className="character-edit-profile"
-        />
-      </PurrModal>
+      <MaterialProfileEditorModal kind="character" open={editModalOpen} creating={!editTarget} name={draftName} tags={draftTags} profileMd={draftProfileMd} documentKey={`character:${editTarget?.id ?? 'new'}`} onNameChange={setDraftName} onTagsChange={setDraftTags} onProfileChange={setDraftProfileMd} onOk={handleSave} onCancel={closeModal} tagOptions={tagOptions.map((item) => ({ label: item.value, value: item.value }))} inheritedBaseline={editTarget?.inheritedBaseline} saving={saving} />
 
       <CharacterOptionsModal
         open={configOpen}

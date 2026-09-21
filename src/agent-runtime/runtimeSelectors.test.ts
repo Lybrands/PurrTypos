@@ -241,6 +241,75 @@ test('active request switches to actual usage once the provider reports it', () 
   assert.equal(usage.source, 'provider')
 })
 
+test('estimate anchor is calibrated by a trusted earlier measurement', () => {
+  // 上一轮：估算 25000，实测 20000（比例 0.8，落在信任区间内）。
+  // 本轮只有估算 60000 —— 校准为 48000，与上一轮实测口径可比。
+  const usage = calculateContextUsage({
+    messages: [
+      {
+        role: 'assistant',
+        content: 'previous answer',
+        model: 'test-model',
+        contextBudget: {
+          windowTokens: 200000,
+          estimatedInputTokens: 20000,
+          toolSchemaTokens: 5000,
+          actualInputTokens: 20000,
+        },
+      },
+      { role: 'user', content: 'new question' },
+      {
+        role: 'assistant',
+        content: '',
+        model: 'test-model',
+        contextBudget: {
+          windowTokens: 200000,
+          estimatedInputTokens: 50000,
+          toolSchemaTokens: 10000,
+          outputReserveTokens: 8000,
+        },
+      },
+    ],
+    windowTokens: 200000,
+    modelName: 'test-model',
+  })
+
+  assert.equal(usage.usedTokens, Math.round(60000 * 0.8))
+  assert.equal(usage.source, 'estimate')
+})
+
+test('snapshot baseline is the single regime and wins over the thin whole-conversation estimate', () => {
+  // 可见对话的薄估算远大于快照基线（后端装配了裁剪/压缩后的输入）：
+  // 指示器必须显示快照口径 —— 它与预算、压缩和溢出判断同源，
+  // 不再与「用户看到的对话长度」两种口径取 max 来回切换。
+  const longVisibleHistory = Array.from({ length: 200 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' : 'assistant',
+    content: '这是一段相当长的历史消息内容，用于把全程薄估算推到远超快照基线，'.repeat(2),
+  }))
+  const usage = calculateContextUsage({
+    messages: [
+      ...longVisibleHistory,
+      {
+        role: 'assistant',
+        content: '',
+        model: 'test-model',
+        contextBudget: {
+          windowTokens: 200000,
+          estimatedInputTokens: 12000,
+          toolSchemaTokens: 1000,
+          outputReserveTokens: 8000,
+        },
+      },
+    ],
+    windowTokens: 200000,
+    modelName: 'test-model',
+  })
+
+  // 前提自检：全程薄估算（约每条 64+4 token）确实远超 13000。
+  assert.ok(longVisibleHistory.length * 68 > 13000)
+  assert.equal(usage.usedTokens, 13000)
+})
+
 test('context indicator grows with the assistant content already streamed', () => {
   const baseParams = {
     messages: [{
@@ -472,10 +541,10 @@ test('novel-analysis timing resumes the shared ticker and freezes terminal durat
   }
 
   assert.deepEqual(buildNovelAnalysisTiming({
-    ...baseRun, runStatus: 'running', taskStatus: 'running',
+    ...baseRun, runStatus: 'running', taskStatus: 'running', workflowStatus: 'running',
   }, startedAt + 6500, 15000), { turnStartedAt: 8500 })
   assert.deepEqual(buildNovelAnalysisTiming({
-    ...baseRun, runStatus: 'failed', taskStatus: 'failed',
+    ...baseRun, runStatus: 'failed', taskStatus: 'failed', workflowStatus: 'failed',
     updateTime: '2026-08-28 10:00:09.250',
   }, startedAt + 20000, 30000), { durationMs: 9250 })
 })

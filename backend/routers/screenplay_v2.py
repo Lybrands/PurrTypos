@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header
 from fastapi.responses import Response
 
-from application.screenplay_v2_service import ScreenplayV2ProjectService
+from agents.screenplay.project_service import ScreenplayV2ProjectService
 from dependencies import get_db
 from routers.screenplay_conversations import router as conversation_router
 from schemas.screenplay_v2 import (

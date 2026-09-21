@@ -6,10 +6,14 @@ import pytest
 
 from database.connection import DatabaseConnection
 from application.continuation_service import ContinuationService
-from application.writing_agent_profile import WritingAgentProfile
-from application.writing_method_service import WritingMethodService
-from domains.writing.contracts import WritingDomainContext
-from purra.contracts import AgentMessage, AgentRunRequest, MessageRole, ModelRequest
+from agents.writing.profile import WritingReplacementProfile
+from purra.contracts import (
+    AgentMessage,
+    AgentRunRequest,
+    DomainContext,
+    MessageRole,
+    ModelRequest,
+)
 import json
 
 
@@ -59,7 +63,7 @@ async def test_import_from_buffer_rejects_non_purrtypos_database(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_export_import_preserves_method_source_canon_and_run_binding(tmp_path: Path):
+async def test_database_import_preserves_source_canon_and_run_binding(tmp_path: Path):
     source = DatabaseConnection(tmp_path / "source-full")
     target = DatabaseConnection(tmp_path / "target-full")
     await source.init()
@@ -95,11 +99,6 @@ async def test_export_import_preserves_method_source_canon_and_run_binding(tmp_p
             "(id, analysis_id, owner_type, owner_id, section_id, excerpt, excerpt_digest) "
             "VALUES ('evidence-1', 'analysis-1', 'fact', 'fact-1', 'source-section', '甲开门。', 'excerpt-digest')"
         )
-        methods = WritingMethodService(source)
-        method = await methods.create_method(
-            name="门后悬念", method_type="technique", markdown="# 门后悬念\n逐步揭示。"
-        )
-        method_revision = await methods.publish_method(method["id"])
         continuation = ContinuationService(source)
         preview = await continuation.preview_canon(
             source_revision_id="source-rev",
@@ -112,19 +111,16 @@ async def test_export_import_preserves_method_source_canon_and_run_binding(tmp_p
             source_analysis_id="analysis-1",
             fork_section_id="source-section",
             expected_snapshot_digest=preview["snapshotDigest"],
-            writing_method_bindings=[{
-                "bindingType": "method", "revisionId": method_revision["id"],
-            }],
+            operation_id="import-fixture",
         )
-        profile = WritingAgentProfile(
-            source, skills_dir=Path(__file__).resolve().parent.parent / "skills"
-        )
+        profile = WritingReplacementProfile(source)
         prepared = await profile.prepare_request(AgentRunRequest(
             messages=(AgentMessage(role=MessageRole.USER, content="续写"),),
             model=ModelRequest(provider="test", model="model"),
-            domain_context=WritingDomainContext(
-                book_id=created["book"]["id"]
-            ).to_core_context(),
+            domain_context=DomainContext(
+                namespace="purrtypos.writing",
+                payload={"book_id": created["book"]["id"]},
+            ),
         ))
         binding = profile.run_binding_attributes(prepared)
         await source.execute(
@@ -135,10 +131,6 @@ async def test_export_import_preserves_method_source_canon_and_run_binding(tmp_p
         )
 
         await target.import_from_buffer(await source.export_to_buffer())
-        assert await target.fetch_one(
-            "SELECT content_digest FROM writing_method_revisions WHERE id = ?",
-            [method_revision["id"]],
-        ) == {"content_digest": method_revision["content_digest"]}
         assert await target.fetch_one(
             "SELECT source_revision_id, canon_snapshot_id FROM continuation_bindings "
             "WHERE target_book_id = ?",

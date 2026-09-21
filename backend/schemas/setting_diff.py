@@ -35,6 +35,7 @@ class CommitCharacterDiffRequest(BaseModel):
     accepted_segments: int = 0
     rejected_segments: int = 0
     resolution: SettingDiffResolution | None = None
+    baseRevision: str | None = None
 
 
 class CommitBackgroundDiffRequest(BaseModel):
@@ -47,6 +48,7 @@ class CommitBackgroundDiffRequest(BaseModel):
     accepted_segments: int = 0
     rejected_segments: int = 0
     resolution: SettingDiffResolution | None = None
+    baseRevision: str | None = None
 
 
 class CommitEntityDiffRequest(BaseModel):
@@ -61,3 +63,4 @@ class CommitEntityDiffRequest(BaseModel):
     accepted_segments: int = 0
     rejected_segments: int = 0
     resolution: SettingDiffResolution | None = None
+    baseRevision: str | None = None

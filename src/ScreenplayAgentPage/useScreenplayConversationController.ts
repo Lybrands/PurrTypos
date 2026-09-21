@@ -82,7 +82,9 @@ export function createScreenplayConversationController(
     capabilities: getAgentConversationCapabilities({
       running: bindings.running,
       readOnly: bindings.project.status === 'archived',
-      sessionLoading: bindings.initializing,
+      // 发送路径（runAgent）要求已有会话；零会话只出现在加载间隙
+      // （initializing 已禁发），不声明自动建会话能力。
+      sessionlessSend: false,
     }),
     conversation: {
       identity: bindings.conversationIdentity

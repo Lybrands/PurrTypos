@@ -248,7 +248,7 @@ class MemoryApplicationService:
     ) -> list[dict[str, Any]]:
         clean_key = self._trusted_key(key)
         await self._require_book(book_id)
-        providers = self._providers(clean_key, inference=True)
+        providers = self._providers(clean_key, inference=True, book_id=book_id)
         try:
             async with self._resource_memory(
                 book_id,
@@ -398,7 +398,7 @@ class MemoryApplicationService:
     ) -> dict[str, Any]:
         clean_key = self._key("review", operation_key)
         await self._require_book(book_id)
-        providers = self._providers(clean_key, inference=True)
+        providers = self._providers(clean_key, inference=True, book_id=book_id)
         try:
             async with self._resource_memory(
                 book_id,
@@ -938,7 +938,7 @@ class MemoryApplicationService:
             raise MemoryOperationError("memory_book_not_found")
         return clean
 
-    def _providers(self, key: str, *, inference: bool):
+    def _providers(self, key: str, *, inference: bool, book_id: str | None = None):
         resource = self._require_resource()
         budget = MemoryBudget(
             key=f"budget:{key}",
@@ -948,7 +948,12 @@ class MemoryApplicationService:
             max_output_tokens=1_200 if inference else 0,
             result_capacity_target_tokens=1_200 if inference else 1,
         )
-        complete = self._complete if inference else self._unexpected_completion
+        async def complete_for_book(messages, result_capacity_target_tokens, signal):
+            return await self._complete(
+                messages, result_capacity_target_tokens, signal, book_id=book_id,
+            )
+
+        complete = complete_for_book if inference else self._unexpected_completion
         return resource.providers(budget=budget, complete=complete)
 
     def _resource_memory(self, book_id: str, *, providers, allow_inference: bool):
@@ -969,8 +974,10 @@ class MemoryApplicationService:
         messages,
         result_capacity_target_tokens,
         signal,
+        *,
+        book_id: str | None = None,
     ) -> ModelCompletion:
-        config = await self._strict_memory_model()
+        config = await self._strict_memory_model(book_id=book_id)
         service = ModelRequestService()
         return await service.complete(
             api_key=str(config["apiKey"]), runtime=service.runtime_from_settings(config),
@@ -978,10 +985,14 @@ class MemoryApplicationService:
             messages=messages, signal=signal, db=self._db,
         )
 
-    async def _strict_memory_model(self) -> dict[str, Any]:
+    async def _strict_memory_model(self, *, book_id: str | None = None) -> dict[str, Any]:
         selected_id = str(
             await get_setting_value(self._db, MEMORY_MODEL_ID_KEY) or ""
         ).strip()
+        if not selected_id and book_id:
+            selected_id = str(await get_setting_value(
+                self._db, f"writing_current_model:{book_id}",
+            ) or "").strip()
         configs = await get_setting_value(self._db, "ai_model_configs")
         selected = next(
             (

@@ -30,6 +30,7 @@ export interface AiContextBarBindings {
 }
 
 export interface AiContextBarProps extends AiContextBarBindings {
+  expanded?: boolean;
   bookId: EntityId | null;
   chapterId: EntityId | null;
   /** 提示词模版相关 */
@@ -40,6 +41,7 @@ export interface AiContextBarProps extends AiContextBarBindings {
 }
 
 export default function AiContextBar({
+  expanded = false,
   bookId,
   chapterId,
   associatedChapterIds,
@@ -63,7 +65,7 @@ export default function AiContextBar({
 }: AiContextBarProps) {
   if (bookId == null) return null;
   return (
-    <div className="ai-context-bar">
+    <div className={`ai-context-bar ${expanded ? "ai-context-bar--expanded" : ""}`}>
       <PurrTooltip title="关联章节与大纲">
         <span className="purr-popup-trigger">
           <PurrPopover
@@ -104,7 +106,7 @@ export default function AiContextBar({
             icon={<LinkIcon style={{ fontSize: 14 }} />}
             className="ai-context-icon-btn"
             aria-label="关联章节与大纲"
-          />
+          >{expanded ? "关联章节与大纲" : null}</PurrButton>
           </PurrPopover>
         </span>
       </PurrTooltip>
@@ -116,10 +118,11 @@ export default function AiContextBar({
           aria-label="注入设定"
           onClick={onOpenMemoryModal}
           className={`ai-context-icon-btn ${selectedLongTermMemoryIds.length || selectedMemoryIds.length || selectedForeshadowingIds.length ? "ai-memory-btn--has-selection" : ""}`}
-        />
+        >{expanded ? "注入设定与记忆" : null}</PurrButton>
       </PurrTooltip>
       {onInsertPrompt ? (
         <PromptTemplatePicker
+          showLabel={expanded}
           currentPrompt={currentPrompt ?? ""}
           onInsert={onInsertPrompt}
           context={promptTemplateContext ?? {}}

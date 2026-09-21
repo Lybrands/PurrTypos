@@ -5,6 +5,7 @@ Character CRUD.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from database.crud.material_authority import material_crud
 
 if TYPE_CHECKING:
     from database.connection import DatabaseConnection
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 
 # ── characters ───────────────────────────────────────────────────
 
+@material_crud("character", "list")
 async def get_characters(
     db: DatabaseConnection, book_id: str
 ) -> list[dict[str, Any]]:
@@ -21,6 +23,7 @@ async def get_characters(
     )
 
 
+@material_crud("character", "create")
 async def create_character(
     db: DatabaseConnection, book_id: str, data: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -43,6 +46,7 @@ async def create_character(
     )
 
 
+@material_crud("character", "update")
 async def update_character(
     db: DatabaseConnection, character_id: int, data: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -64,5 +68,6 @@ async def update_character(
     )
 
 
+@material_crud("character", "delete")
 async def delete_character(db: DatabaseConnection, character_id: int) -> None:
     await db.execute("DELETE FROM characters WHERE id = ?", [character_id])

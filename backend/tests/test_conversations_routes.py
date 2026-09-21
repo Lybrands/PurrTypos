@@ -22,6 +22,21 @@ from tests.support.asgi_sse import request_json
 pytestmark = pytest.mark.asyncio
 
 
+async def test_child_run_is_rejected_by_conversation_save_api(temp_db):
+    from infrastructure.persistence.run_store import create_run
+
+    root = await create_run(temp_db, session_id=1, prompt="root", mode="agent")
+    child = await create_run(temp_db, session_id=1, prompt="private", mode="agent",
+                             root_run_id=root, parent_run_id=root)
+    await temp_db.execute("UPDATE ai_agent_runs SET status='done' WHERE id=?", [child])
+    with pytest.raises(HTTPException) as error:
+        await save_conversation(SaveConversationRequest(
+            sessionId=1, prompt="private", response="private", agentRunId=child,
+        ))
+    assert error.value.status_code == 409
+    assert await temp_db.fetch_all("SELECT id FROM ai_conversations") == []
+
+
 @pytest_asyncio.fixture
 async def temp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from services import memory_deposition_service

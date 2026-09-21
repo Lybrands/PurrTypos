@@ -6,4 +6,5 @@ from pydantic import BaseModel
 
 
 class SaveStoryBackgroundRequest(BaseModel):
+    baseRevision: str | None = None
     content: str

@@ -5,12 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from application.novel_analysis_service import NovelAnalysisService
 from application.novel_source_service import NovelSourceService
 from dependencies import get_db
 from domains.novel_sources import NovelSourceError
 from exceptions import AppError
 from schemas.novel_sources import (
+    AnalysisSessionUpdate,
     ArchiveSourceWorkRequest,
     ConfirmSourceImportRequest,
     FollowUpNovelAnalysisRequest,
@@ -21,7 +21,34 @@ from schemas.novel_sources import (
     ReviewNovelAnalysisRequest,
     StartNovelAnalysisRequest,
 )
-from domains.novel_analysis import NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX
+from agents.novel_analysis.attempt_artifact import (
+    NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE,
+)
+from agents.novel_analysis.review_projection import (
+    NovelAnalysisReviewProjection,
+    NovelAnalysisReviewProjectionError,
+)
+from agents.novel_analysis.run_projection import (
+    NovelAnalysisReplacementRunProjection,
+)
+from agents.novel_analysis.stream_projection import (
+    VersionedNovelAnalysisStreamQuery,
+)
+from agents.novel_analysis.review_artifact import (
+    NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE,
+)
+from agents.novel_analysis.publication_service import (
+    NovelAnalysisPublicationError,
+    NovelAnalysisReplacementPublicationService,
+)
+from agents.novel_analysis.product_service import (
+    VersionedNovelAnalysisProductService,
+)
+from agents.novel_analysis.sessions import NovelAnalysisSessions
+from agents.novel_analysis.published_query import NovelAnalysisPublishedQuery
+from infrastructure.persistence.sqlite_artifact_repository import (
+    SqliteArtifactRepository,
+)
 
 
 router = APIRouter(tags=["novel-sources"])
@@ -31,10 +58,14 @@ def _service() -> NovelSourceService:
     return NovelSourceService(get_db())
 
 
-def _analysis_service() -> NovelAnalysisService:
+def _analysis_control_service() -> VersionedNovelAnalysisProductService:
     from application.agent_composition import get_agent_composition
 
-    return NovelAnalysisService(get_db(), get_agent_composition())
+    composition = get_agent_composition()
+    return VersionedNovelAnalysisProductService(
+        get_db(),
+        composition,
+    )
 
 
 async def _call(awaitable):
@@ -155,7 +186,8 @@ async def start_analysis(
     body: StartNovelAnalysisRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-    return _ok(await _analysis_service().start(
+    await NovelAnalysisSessions(get_db()).bind(revision_id, body.conversationId, idempotency_key)
+    return _ok(await _analysis_control_service().start(
         source_revision_id=revision_id,
         command_id=idempotency_key,
         prompt=body.prompt,
@@ -172,9 +204,15 @@ async def follow_up_analysis(
     body: FollowUpNovelAnalysisRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-    return _ok(await _analysis_service().follow_up(
+    await NovelAnalysisSessions(get_db()).bind(revision_id, body.conversationId, idempotency_key)
+    if body.replaceRunId:
+        return _ok(await _analysis_control_service().replace_turn(
+            source_revision_id=revision_id, command_id=idempotency_key,
+            target_run_id=body.replaceRunId, prompt=body.prompt, runtime=body.runtime,
+        ))
+    return _ok(await _analysis_control_service().follow_up(
         source_revision_id=revision_id,
-        artifact_ref=NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + body.artifactId,
+        artifact_id=body.artifactId,
         prompt=body.prompt,
         command_id=idempotency_key,
         runtime=body.runtime,
@@ -183,7 +221,21 @@ async def follow_up_analysis(
 
 @router.get("/novel-source-revisions/{revision_id}/analysis-runs")
 async def list_analysis_runs(revision_id: str):
-    return _ok(await _analysis_service().list_for_revision(revision_id))
+    from application.agent_composition import get_agent_composition
+
+    composition = get_agent_composition()
+    replacement = await NovelAnalysisReplacementRunProjection(
+        get_db(),
+        long_tasks=composition.long_task_repository,
+    ).list_for_revision(revision_id)
+    return _ok(sorted(
+        replacement,
+        key=lambda item: (
+            str(item.get("createTime") or ""),
+            str(item.get("runId") or ""),
+        ),
+        reverse=True,
+    ))
 
 
 @router.get("/novel-source-revisions/{revision_id}/analysis-events")
@@ -193,12 +245,11 @@ async def stream_analysis_events(
 ):
     from application.agent_composition import get_agent_composition
     from application.agent_event_stream import stream_agent_pages
-    from application.novel_analysis_stream import NovelAnalysisStreamQuery
 
     composition = get_agent_composition()
-    query = NovelAnalysisStreamQuery(
+    query = VersionedNovelAnalysisStreamQuery(
         get_db(), output_repository=composition.output_journal,
-        analysis_service=_analysis_service(),
+        long_tasks=composition.long_task_repository,
     )
     # Validate scope before opening the response so a deleted source is a 404,
     # not an endless sequence of failed SSE reconnections.
@@ -219,7 +270,7 @@ async def stream_analysis_events(
 
 @router.post("/novel-analysis-tasks/{task_id}/pause")
 async def pause_analysis(task_id: str, body: PauseNovelAnalysisRequest):
-    return _ok(await _analysis_service().pause(
+    return _ok(await _analysis_control_service().pause(
         task_id,
         expected_revision=body.expectedTaskRevision,
     ))
@@ -231,24 +282,44 @@ async def resume_analysis(
     body: ResumeNovelAnalysisRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-    return _ok(await _analysis_service().resume(
+    return _ok(await _analysis_control_service().resume(
         task_id=task_id,
         run_command_id=idempotency_key,
         runtime=body.runtime,
-        retry_failed=body.retryFailed,
     ))
 
 
 @router.post("/novel-analysis-tasks/{task_id}/cancel")
 async def cancel_analysis(task_id: str):
-    return _ok(await _analysis_service().cancel(task_id))
+    return _ok(await _analysis_control_service().cancel(task_id))
 
 
 @router.get("/novel-analysis-artifacts/{artifact_id}")
 async def get_analysis_artifact(artifact_id: str):
-    return _ok(await _analysis_service().get_artifact(
-        NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + artifact_id
-    ))
+    artifact = await SqliteArtifactRepository(get_db()).load(artifact_id)
+    if (
+        artifact is not None
+        and artifact.namespace == NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE
+    ):
+        try:
+            return _ok(await NovelAnalysisReviewProjection(get_db()).load(
+                artifact_id
+            ))
+        except NovelAnalysisReviewProjectionError as error:
+            raise AppError(str(error), 409) from error
+    if (
+        artifact is not None
+        and artifact.namespace == NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE
+    ):
+        try:
+            return _ok(
+                await NovelAnalysisReplacementPublicationService(
+                    get_db()
+                ).load_reviewed(artifact_id)
+            )
+        except (NovelAnalysisPublicationError, ValueError) as error:
+            raise AppError(str(error), 409) from error
+    raise NotFoundError("来源分析结果不存在")
 
 
 @router.post("/novel-analysis-artifacts/{artifact_id}/review")
@@ -257,25 +328,105 @@ async def review_analysis_artifact(
     body: ReviewNovelAnalysisRequest,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-    return _ok(await _analysis_service().review(
-        artifact_ref=NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + artifact_id,
-        command_id=idempotency_key,
-        payload=body.model_dump(mode="json"),
-    ))
+    artifact = await SqliteArtifactRepository(get_db()).load(artifact_id)
+    if (
+        artifact is not None
+        and artifact.namespace in {
+            NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE,
+            NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE,
+        }
+    ):
+        try:
+            return _ok(await NovelAnalysisReplacementPublicationService(
+                get_db()
+            ).review(
+                source_artifact_id=artifact_id,
+                command_id=idempotency_key,
+                payload=body.model_dump(mode="json"),
+            ))
+        except (NovelAnalysisPublicationError, ValueError) as error:
+            raise AppError(str(error), 422) from error
+    if artifact is None:
+        raise AppError("来源分析结果不存在", 404)
+    raise AppError("来源分析结果类型不支持审核", 409)
 
 
 @router.post("/novel-analysis-artifacts/{artifact_id}/publish")
 async def publish_analysis_artifact(artifact_id: str):
-    return _ok(await _analysis_service().publish(
-        NOVEL_ANALYSIS_ARTIFACT_REF_PREFIX + artifact_id
-    ))
+    artifact = await SqliteArtifactRepository(get_db()).load(artifact_id)
+    if (
+        artifact is not None
+        and artifact.namespace == NOVEL_ANALYSIS_ATTEMPT_ARTIFACT_NAMESPACE
+    ):
+        raise AppError("请先审核分析结果再发布", 409)
+    if (
+        artifact is not None
+        and artifact.namespace == NOVEL_ANALYSIS_REVIEWED_ARTIFACT_NAMESPACE
+    ):
+        try:
+            return _ok(await NovelAnalysisReplacementPublicationService(
+                get_db()
+            ).publish(artifact_id))
+        except (NovelAnalysisPublicationError, ValueError) as error:
+            raise AppError(str(error), 409) from error
+    if artifact is None:
+        raise AppError("来源分析结果不存在", 404)
+    raise AppError("来源分析结果类型不支持发布", 409)
 
 
 @router.get("/novel-source-revisions/{revision_id}/analyses")
 async def list_published_analyses(revision_id: str):
-    return _ok(await _analysis_service().list_published(revision_id))
+    return _ok(await NovelAnalysisPublishedQuery(get_db()).list_for_revision(
+        revision_id
+    ))
 
 
 @router.get("/novel-source-analyses/{analysis_id}")
 async def get_published_analysis(analysis_id: str):
-    return _ok(await _analysis_service().get_published(analysis_id))
+    return _ok(await NovelAnalysisPublishedQuery(get_db()).get(analysis_id))
+
+
+@router.get("/novel-source-revisions/{revision_id}/conversations")
+async def list_analysis_conversations(revision_id: str):
+    return _ok(await NovelAnalysisSessions(get_db()).list(revision_id))
+
+
+@router.post("/novel-source-revisions/{revision_id}/conversations")
+async def create_analysis_conversation(revision_id: str):
+    return _ok(await NovelAnalysisSessions(get_db()).create(revision_id))
+
+
+@router.patch("/novel-source-revisions/{revision_id}/conversations/{identity}")
+async def update_analysis_conversation(revision_id: str, identity: str, body: AnalysisSessionUpdate):
+    await NovelAnalysisSessions(get_db()).update(revision_id, identity, body.title, body.closed)
+    return _ok()
+
+
+@router.delete("/novel-source-revisions/{revision_id}/conversations/{identity}")
+async def delete_analysis_conversation(revision_id: str, identity: str):
+    from application.agent_cancellation_service import AgentCancellationService
+    from application.agent_composition import get_agent_composition
+
+    db = get_db()
+    sessions = NovelAnalysisSessions(get_db())
+    active_run_ids = await sessions.active_run_ids(revision_id, identity)
+    active_task_ids = await sessions.active_task_ids(revision_id, identity)
+    cancellation = (
+        AgentCancellationService(db, get_agent_composition())
+        if active_run_ids else None
+    )
+    for run_id in active_run_ids:
+        row = await db.fetch_one(
+            "SELECT status FROM ai_agent_runs WHERE id = ?",
+            [run_id],
+        )
+        if (
+            cancellation is not None
+            and row is not None
+            and row.get("status") == "running"
+        ):
+            await cancellation.cancel(run_id)
+    for task_id in active_task_ids:
+        await _analysis_control_service().cancel(task_id)
+    await sessions.delete(revision_id, identity)
+    return _ok()

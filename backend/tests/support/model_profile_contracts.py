@@ -27,7 +27,8 @@ async def assert_profile_adapter_contract(profile: ModelProfile) -> None:
         context_window_tokens=1_000_000,
     ).digest()
 
-    model = sorted(profile.model_names)[0]
+    # 服务商级 profile 不登记具体模型名，契约用占位名驱动适配器。
+    model = sorted(profile.model_names)[0] if profile.model_names else f"{profile.profile_id}-model"
     invocation = ModelInvocation(
         request=ModelRequest(
             provider="openai",

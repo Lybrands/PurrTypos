@@ -963,6 +963,44 @@ test('screenplay replay projects authorized unit work and final-response text un
   )
 })
 
+test('delegated child output is isolated from the root and remains inspectable', () => {
+  const replay = new AgentChunkReplay()
+  const seed = {
+    turnId: 'turn-child-inspection', rootRunId: 'root-child-inspection',
+    sessionId: 540, userContent: '检查资料', model: model.name,
+    turnStartedAt: performance.now(),
+  }
+  const dependencies = { cfg: model, appMessage }
+  replay.dispatch({ ...seed, eventRunId: seed.rootRunId, runRole: 'root' }, canonical(seed.rootRunId, 1, {
+    kind: 'delegation.event', channel: 'delegation', payload: {
+      eventType: 'status', delegationId: 'delegation-reader', runId: 'child-reader',
+      agentName: 'reader', agentTitle: '资料核对 Agent', objective: '核对第一章', status: 'running',
+    },
+  }), dependencies)
+  const childSeed = { ...seed, eventRunId: 'child-reader', runRole: 'unit' }
+  replay.dispatch(childSeed, canonical('child-reader', 1, {
+    outputStreamId: 'child-commentary', source: 'provider',
+    kind: 'provider.content_delta', channel: 'commentary', payload: { delta: '正在核对原文。' },
+  }), dependencies)
+  replay.dispatch(childSeed, canonical('child-reader', 2, {
+    outputStreamId: 'child-final', source: 'provider',
+    kind: 'provider.content_delta', channel: 'final', payload: { delta: '核对完成。' },
+  }), dependencies)
+  replay.dispatch(childSeed, canonical('child-reader', 3, {
+    outputStreamId: 'child-final', kind: 'stream.committed', channel: 'final', payload: {},
+  }), dependencies)
+
+  const assistant = replay.assistant(seed.turnId)
+  assert.equal(assistant?.content, '')
+  assert.equal(assistant?.commentaryBlocks, undefined)
+  assert.equal(assistant?.subAgentActivities?.[0]?.message.content, '核对完成。')
+  assert.deepEqual(assistant?.subAgentActivities?.[0]?.message.commentaryBlocks, undefined)
+  assert.equal(
+    assistant?.subAgentActivities?.[0]?.message.canonicalOutput?.commentaryBlocks[0]?.text,
+    '正在核对原文。',
+  )
+})
+
 test('raw Provider events are visible before transport completion', () => {
   const replay = new AgentChunkReplay()
   const seed = {
@@ -1199,6 +1237,41 @@ test('paused durable task emits no formal answer and resume commits once', () =>
 
   assert.equal(replay.assistant('turn-paused')?.content, '候选稿已发布。')
   assert.equal(replay.assistant('turn-paused')?.model, 'resumed-model')
+})
+
+test('historical source Root events do not cancel a resumed turn replay', () => {
+  const replay = new AgentChunkReplay()
+  const dependencies = { cfg: model, appMessage }
+  const currentRoot = {
+    turnId: 'turn-resumed-history',
+    rootRunId: 'run-continuation',
+    sessionId: 7,
+    userContent: '继续完成结构设计',
+    turnStartedAt: performance.now(),
+  }
+
+  replay.dispatch({
+    ...currentRoot,
+    eventRunId: 'run-source',
+    runRole: 'related',
+  }, { done: true, aborted: true }, dependencies)
+
+  assert.equal(replay.assistant(currentRoot.turnId), undefined)
+
+  const activeSeed = {
+    ...currentRoot,
+    eventRunId: 'run-continuation',
+    runRole: 'root',
+  }
+  replay.dispatch(activeSeed, canonical('run-continuation', 1, {
+    turnId: currentRoot.turnId,
+    kind: 'run.lifecycle',
+    payload: { status: 'running' },
+  }), dependencies)
+  replay.dispatch(activeSeed, { done: true, model: 'resumed-model' }, dependencies)
+
+  assert.equal(replay.assistant(currentRoot.turnId)?.agentRunId, 'run-continuation')
+  assert.equal(replay.assistant(currentRoot.turnId)?.termination, undefined)
 })
 
 test('paused resume switches the canonical root once and blocks late same-run terminal chunks', () => {

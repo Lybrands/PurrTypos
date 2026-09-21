@@ -11,7 +11,7 @@ export const platformApi = isElectron
 export const runtimeCapabilities: RuntimeCapabilities = {
   runtime: isElectron ? 'electron' : 'browser',
   openLocalPath: isElectron,
-  openDatabaseDirectory: isElectron,
+  openDatabaseDirectory: true,
   nativeSaveDialog: isElectron,
   directoryExport: isElectron,
 }

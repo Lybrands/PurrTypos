@@ -122,8 +122,8 @@ _OUTLINE_AB_REPLACEMENT = _ab_replacement_pattern(
 _CHAPTER_AB_REPLACEMENT = _ab_replacement_pattern(
     r"(?:\u5173\u8054)?\u5927\u7eb2"
 )
-_CHAPTER_SOURCE_TOOL = "getChapterContent"
-_OUTLINE_SOURCE_TOOL = "queryOutline"
+_CHAPTER_SOURCE_TOOL = "readWritingChapters"
+_OUTLINE_SOURCE_TOOL = "readWritingOutlines"
 ATOMIC_CONTINUITY_VISIBLE_ORDER_GUIDANCE = (
     "用户要求“先分析再建议”或执行计划含 analyze/review 时，只通过每个四行"
     "单元内第 2 行证据在前、第 3、4 行建议在后来体现；不要展示额外分析过程。"
@@ -786,7 +786,7 @@ def _outline_source_texts(
     for value in _host_tool_payloads(messages, _OUTLINE_SOURCE_TOOL):
         if not isinstance(value, Mapping):
             continue
-        outlines = value.get("outlines")
+        outlines = value.get("items")
         if not isinstance(outlines, Sequence) or isinstance(
             outlines,
             (str, bytes, bytearray),
@@ -819,14 +819,23 @@ def _chapter_source_texts(
     for value in _host_tool_payloads(messages, _CHAPTER_SOURCE_TOOL):
         if not isinstance(value, Mapping):
             continue
-        chapter_id = str(value.get("chapterId") or "").strip()
-        plain_text = value.get("plainText")
-        if (
-            chapter_id == current_chapter_id
-            and isinstance(plain_text, str)
-            and plain_text.strip()
+        chapters = value.get("items")
+        if not isinstance(chapters, Sequence) or isinstance(
+            chapters,
+            (str, bytes, bytearray),
         ):
-            sources.append(plain_text)
+            continue
+        for chapter in chapters:
+            if not isinstance(chapter, Mapping):
+                continue
+            chapter_id = str(chapter.get("id") or "").strip()
+            content = chapter.get("content")
+            if (
+                chapter_id == current_chapter_id
+                and isinstance(content, str)
+                and content.strip()
+            ):
+                sources.append(content)
     return _unique_nonempty(sources)
 
 
@@ -1015,7 +1024,7 @@ def _atomic_repair_guidance(
 def _grounding_repair_guidance(expected_item_count: int) -> str:
     return (
         "连续性审阅中的 A/B 必须逐字来自本轮真实来源：A 只能从"
-        "关联大纲正文或 queryOutline 结果中选择，B 只能从 getChapterContent "
+        "关联大纲正文或 readWritingOutlines 结果中选择，B 只能从 readWritingChapters "
         "正文结果中选择。不得根据候选回答、常识或记忆补造证据。请重新输出恰好 "
         f"{expected_item_count} 个四行检查项，每侧只引用能在对应来源中直接找到的"
         "最短原文片段；若任一来源不可用，必须停止猜测。"

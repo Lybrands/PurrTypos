@@ -115,3 +115,24 @@ async def usage(book_id: str):
                     'reasons': meta.get('reasons'), 'evidenceId': receipt.get('evidenceId')})
         return items
     return await call(read())
+
+
+@router.get('/materials')
+async def material_status(book_id: str):
+    from application.creation_material_service import materials
+    return {'success': True, 'data': await materials(get_db()).status(book_id)}
+
+
+@router.post('/materials/navigation')
+async def material_navigation(book_id: str, x_knowledge_host: str = Header(default='')):
+    secret = os.environ.get('PURRTYPOS_KNOWLEDGE_HOST_SECRET', '')
+    if not secret or not hmac.compare_digest(secret, x_knowledge_host):
+        raise AppError('desktop_navigation_required', 403)
+    from application.creation_material_service import materials
+    return {'success': True, 'data': await materials(get_db()).navigation(book_id)}
+
+
+@router.post('/materials/trash/{material_id}/restore')
+async def restore_material(book_id: str, material_id: str):
+    from application.creation_material_service import materials
+    return {'success': True, 'data': await materials(get_db()).restore(book_id, material_id)}

@@ -72,7 +72,7 @@ async def test_database_export_returns_complete_archive_without_component(
             "purrtypos.db",
         }
         manifest = json.loads(archive.read("backup-manifest.json"))
-        assert manifest["format"] == "purrtypos.full-backup/v1"
+        assert manifest["format"] == "purrtypos.full-backup/v2"
         assert manifest["componentPresent"] is False
         assert manifest["credentialsIncluded"] is False
         assert archive.read("purrtypos.db").startswith(b"SQLite format 3\x00")
@@ -176,6 +176,12 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
     await temp_db.execute(
         "INSERT INTO ai_foreshadowing (book_id, chapter_id, content) VALUES (?, ?, ?)",
         ["book1", "chapter1", "foreshadowing"],
+    )
+    await temp_db.execute(
+        "INSERT INTO chapter_annotations "
+        "(book_id, chapter_id, start_offset, end_offset, quoted_text, note) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ["book1", "chapter1", 3, 8, "quoted", "note"],
     )
     await temp_db.execute(
         "INSERT INTO story_memory_deltas "
@@ -301,6 +307,7 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "ai_favorites",
         "ai_memories",
         "ai_foreshadowing",
+        "chapter_annotations",
         "story_memory_records",
         "story_memory_deltas",
         "story_memory_analysis_runs",

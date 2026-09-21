@@ -20,7 +20,6 @@ export interface ChapterOutlinePanelProps {
   target: ChapterOutlineTarget | null
   bookId: EntityId | null | undefined
   /** 创建/更新成功后通知外层（用于关联状态刷新等） */
-  onChanged?: () => void
 }
 
 /**
@@ -37,7 +36,6 @@ export interface ChapterOutlinePanelProps {
 export default function ChapterOutlinePanel({
   target,
   bookId,
-  onChanged,
 }: ChapterOutlinePanelProps) {
   const appMessage = usePurrToast()
   const [loading, setLoading] = React.useState(false)
@@ -110,7 +108,6 @@ export default function ChapterOutlinePanel({
         const res = await services.outlines.ensureGlobalOutline(bookId)
         if (res.success && res.data) {
           setOutline(res.data)
-          onChanged?.()
         } else {
           appMessage.error(res.error || '创建总纲失败')
         }
@@ -126,14 +123,13 @@ export default function ChapterOutlinePanel({
       })
       if (res.success) {
         setOutline(res.data)
-        onChanged?.()
       } else {
         appMessage.error(res.error || '创建大纲失败')
       }
     } finally {
       setCreating(false)
     }
-  }, [mode, chapter, bookId, creating, appMessage, onChanged])
+  }, [mode, chapter, bookId, creating, appMessage])
 
   const handleOpenSource = React.useCallback(async () => {
     if (!outline?.file_path) return
@@ -215,7 +211,6 @@ export default function ChapterOutlinePanel({
                 outlineId={outline.id}
                 markdownContent={outline.markdown_content ?? null}
                 onSaved={() => {
-                  onChanged?.()
                   void reload()
                 }}
               />

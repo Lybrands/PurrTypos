@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from database.crud.material_authority import material_crud
 
 if TYPE_CHECKING:
     from database.connection import DatabaseConnection
@@ -24,6 +25,7 @@ def normalize_entity_type(value: Any) -> str:
     return v if v in ENTITY_TYPES else "other"
 
 
+@material_crud("entity", "list")
 async def get_setting_entities(
     db: DatabaseConnection, book_id: str, entity_type: str | None = None
 ) -> list[dict[str, Any]]:
@@ -39,6 +41,7 @@ async def get_setting_entities(
     )
 
 
+@material_crud("entity", "read")
 async def get_setting_entity(
     db: DatabaseConnection, entity_id: int
 ) -> dict[str, Any] | None:
@@ -47,6 +50,7 @@ async def get_setting_entity(
     )
 
 
+@material_crud("entity", "create")
 async def create_setting_entity(
     db: DatabaseConnection, book_id: str, data: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -64,6 +68,7 @@ async def create_setting_entity(
     return await get_setting_entity(db, int(entity_id))
 
 
+@material_crud("entity", "update")
 async def update_setting_entity(
     db: DatabaseConnection, entity_id: int, data: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -87,6 +92,7 @@ async def update_setting_entity(
     return await get_setting_entity(db, entity_id)
 
 
+@material_crud("entity", "delete")
 async def delete_setting_entity(db: DatabaseConnection, entity_id: int) -> None:
     async with db.transaction():
         await db.execute(

@@ -2,6 +2,9 @@
 node_modules
 
 # Build / distribution
+# build/ contains source scripts; ignore only its generated icons.
+/build/icon.png
+/build/icon.ico
 dist
 dist-electron
 build-resources
@@ -10,6 +13,10 @@ backend/dist
 backend/build
 out
 release
+*.tsbuildinfo
+coverage/
+.cache/
+.vite/
 
 # Environment & secrets
 .env
@@ -56,9 +63,30 @@ Desktop.ini
 
 # IDE (personal / machine-specific; keep shared .vscode tasks if you commit them)
 .idea/
+*.code-workspace
+*.swp
+*.swo
 
 # Local isolated implementation worktrees
 .worktrees/
 
-# Personal development notes
-docs/design/Pure Agent Handoff.md
+# Personal development notes and local prototypes
+/docs/design/Pure Agent Handoff.md
+/docs/local/
+/.superpowers/
+/sketches/
+
+# Private local data backups
+local-backups/
+*.purrbackup
+purrtypos.db
+purrtypos.db-wal
+purrtypos.db-shm
+
+# Shared material vaults and the seeded skills library are runtime data
+backend/creation-materials/
+backend/writing-library/
+backend/.writing-library.lock
+
+# ZCode session-local artifacts
+.zcode/

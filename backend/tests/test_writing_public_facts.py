@@ -4,8 +4,8 @@ import pytest
 
 from purra.contracts import AgentRunResult, RunStatus
 from purra.json_values import thaw_json_value
-from domains.writing.public_facts import WritingPublicFactsProvider
-from domains.writing.response import WritingResponseContract
+from agents.writing.public_facts import WritingPublicFactsProvider
+from agents.writing.response_contract import WritingResponseContract
 from application.request_mapping import (
     to_writing_agent_request,
     writing_run_options,

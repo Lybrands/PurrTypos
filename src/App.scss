@@ -223,7 +223,7 @@
   min-width: 280px !important;
 }
 
-/* 收起后不占布局宽度；窗口最左侧仅保留不可见的 hover 感应区。 */
+/* 收起后不占布局宽度；侧边仅保留不可见的悬停感应区（入口由顶栏图标与快捷键承载）。 */
 .workspace-chapter-rail {
   position: absolute;
   top: 0;

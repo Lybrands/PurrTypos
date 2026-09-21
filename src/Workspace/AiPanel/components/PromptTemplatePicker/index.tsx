@@ -22,9 +22,11 @@ export interface PromptTemplatePickerProps {
   /** 自动填充上下文 */
   context: PromptTemplateContext;
   disabled?: boolean;
+  showLabel?: boolean;
 }
 
 export default function PromptTemplatePicker({
+  showLabel = false,
   currentPrompt,
   onInsert,
   context,
@@ -232,7 +234,7 @@ export default function PromptTemplatePicker({
             className="ai-context-icon-btn"
             disabled={disabled}
             aria-label="插入提示词模版"
-          />
+          >{showLabel ? "插入提示词模板" : null}</PurrButton>
           </PurrPopover>
         </span>
       </PurrTooltip>

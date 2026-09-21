@@ -7,15 +7,19 @@ from collections.abc import Mapping, Sequence
 from uuid import uuid4
 
 from constants import BOOK_COLORS
-from domains.novel_analysis import canonical_digest
+from application.canonical_json import canonical_json_digest
 from exceptions import AppError, NotFoundError
-from infrastructure.persistence.writing.sqlite_writing_method_repository import (
-    SqliteWritingMethodRepository,
-)
 from utils.id_utils import short_id8
 
 
 CANON_FACT_KINDS = frozenset({
+    "background",
+    "character_summary", "relationship_summary",
+    "story_summary",
+    "setting",
+    "location",
+    "faction",
+    "item",
     "character_identity",
     "character_state",
     "relationship",
@@ -31,7 +35,6 @@ CANON_FACT_KINDS = frozenset({
 class ContinuationService:
     def __init__(self, db) -> None:
         self._db = db
-        self._methods = SqliteWritingMethodRepository(db)
 
     async def preview_canon(
         self,
@@ -69,11 +72,11 @@ class ContinuationService:
         if analysis is None:
             raise AppError("正式来源分析与来源版本不匹配", 409)
         fork = await self._db.fetch_one(
-            "SELECT id, revision_id, ordinal, title, content_digest "
+            "SELECT id, revision_id, ordinal, title, content_digest, section_type "
             "FROM novel_source_sections WHERE id = ? AND revision_id = ?",
             [fork_section_id, source_revision_id],
         )
-        if fork is None:
+        if fork is None or fork["section_type"] != "chapter":
             raise AppError("分叉点必须是来源版本中的完整章节末尾", 409)
         fork_ordinal = int(fork["ordinal"])
         if fork_ordinal > int(analysis["coverage_end_ordinal"]):
@@ -88,41 +91,40 @@ class ContinuationService:
             fact_kind = str(fact["fact_kind"])
             if fact_kind not in CANON_FACT_KINDS:
                 continue
-            evidence = await self._db.fetch_all(
-                "SELECT e.section_id, e.excerpt_digest, s.ordinal "
-                "FROM novel_source_analysis_evidence AS e "
-                "JOIN novel_source_sections AS s ON s.id = e.section_id "
-                "WHERE e.analysis_id = ? AND e.owner_type = 'fact' "
-                "AND e.owner_id = ? AND s.revision_id = ? AND s.ordinal <= ? "
-                "ORDER BY s.ordinal, e.id",
-                [
-                    source_analysis_id,
-                    fact["id"],
-                    source_revision_id,
-                    fork_ordinal,
-                ],
-            )
-            if not evidence:
-                raise AppError("正史事实缺少分叉点以前的合法证据", 409)
             records.append({
                 "sourceFactId": str(fact["id"]),
                 "factKind": fact_kind,
+                "claimNature": fact.get("claim_nature") or "fact",
                 "subjectKey": str(fact["subject_key"]),
                 "predicate": str(fact["predicate"]),
                 "value": json.loads(str(fact["value_json"])),
+                "lifecycleStatus": str(fact.get("lifecycle_status") or "active"),
                 "contentDigest": str(fact["content_digest"]),
-                "evidence": [{
-                    "sectionId": str(item["section_id"]),
-                    "sectionOrdinal": int(item["ordinal"]),
-                    "excerptDigest": str(item["excerpt_digest"]),
-                } for item in evidence],
+                "firstSectionOrdinal": int(fact["first_section_ordinal"]),
+                "lastSectionOrdinal": int(fact["last_section_ordinal"]),
             })
+        from application.source_analysis_techniques import results
+        techniques = await results(self._db, source_analysis_id, fork_ordinal, include_candidates=True)
+        sections = await self._db.fetch_all(
+            "SELECT id,ordinal,section_type,title,content_digest,locator_json FROM novel_source_sections WHERE revision_id=? AND ordinal<=? ORDER BY ordinal",
+            [source_revision_id, fork_ordinal])
         canonical = {
             "sourceRevisionId": source_revision_id,
             "sourceAnalysisId": source_analysis_id,
             "forkSectionId": fork_section_id,
             "forkOrdinal": fork_ordinal,
             "records": records,
+            "startingPoint": {
+                "forkSectionId": fork_section_id,
+                "sourceFactIds": [record["sourceFactId"] for record in records if record["factKind"] in {
+                    "character_state", "character_knowledge", "event", "timeline", "unresolved_plot", "foreshadowing"
+                }],
+            },
+            "sections": sections,
+            "techniques": techniques,
+            "defaultTechniques": [item["ref"] for item in techniques if item["available"]],
+            "materialMapping": [{"sourceFactId": r["sourceFactId"], "sourceKey": r["subjectKey"],
+                "kind": "character" if r["factKind"] in {"character_identity", "character_state", "character_knowledge", "relationship", "character_summary", "relationship_summary"} else "background" if r["factKind"] in {"background", "story_summary"} else "plot" if r["factKind"] in {"event", "timeline", "unresolved_plot", "foreshadowing"} else "entity"} for r in records],
         }
         return {
             **canonical,
@@ -130,7 +132,7 @@ class ContinuationService:
             "sourceTitle": str(revision["source_title"]),
             "sourceVersionNo": int(revision["version_no"]),
             "forkSectionTitle": str(fork["title"]),
-            "snapshotDigest": canonical_digest(canonical),
+            "snapshotDigest": canonical_json_digest(canonical),
         }
 
     async def create_continuation(
@@ -142,12 +144,23 @@ class ContinuationService:
         fork_section_id: str,
         expected_snapshot_digest: str,
         enable_volume: bool = False,
-        writing_method_bindings: Sequence[Mapping[str, str]] = (),
+        operation_id: str,
+        use_source_techniques: bool = True,
     ) -> dict:
+        if not str(operation_id or "").strip():
+            raise AppError("创建需要稳定的 operationId", 422)
         normalized_title = str(title or "").strip()
         if not normalized_title:
             raise AppError("续写作品名称不能为空", 422)
+        request_digest = canonical_json_digest({"title": normalized_title, "revision": source_revision_id,
+            "analysis": source_analysis_id, "fork": fork_section_id, "digest": expected_snapshot_digest,
+            "volume": enable_volume, "useSourceTechniques": use_source_techniques})
         async with self._db.transaction(cancellation_linearizable=True):
+            previous = await self._db.fetch_one("SELECT * FROM continuation_operations WHERE operation_id=?", [operation_id])
+            if previous:
+                if previous["request_digest"] != request_digest:
+                    raise AppError("同一创建操作不能修改继承清单", 409)
+                return await self.get_continuation(previous["book_id"])
             preview = await self._preview_canon(
                 source_revision_id=source_revision_id,
                 source_analysis_id=source_analysis_id,
@@ -155,6 +168,27 @@ class ContinuationService:
             )
             if preview["snapshotDigest"] != str(expected_snapshot_digest or "").strip():
                 raise AppError("正史预览已变化，请重新确认", 409)
+            from application.writing_technique_service import WritingTechniqueService
+            library = WritingTechniqueService(self._db)
+            selected = []
+            for item in preview["techniques"] if use_source_techniques else []:
+                if not item["available"]:
+                    continue
+                ref = item["ref"]
+                if item["stage"] == "candidate":
+                    # Copy the frozen candidate: do not publish/mutate the source
+                    # result or change its preview digest. File operations replay
+                    # deterministically if the surrounding SQL transaction fails.
+                    token = f"continuation:{operation_id}:{ref['id']}:{ref['versionId']}"
+                    draft = await library.create_draft(operation_id=token + ":copy", from_version=ref,
+                        owner={"sourceAnalysisId": source_analysis_id, "sourceRevisionId": source_revision_id, "sourceRef": ref})
+                    sealed = await library.seal("technique", draft["techniqueId"], draft["draftId"],
+                        expected_revision=0, expected_tree_digest=draft["treeDigest"], operation_id=token + ":seal")
+                    ref = sealed["sealedRef"]
+                    await library.publish("technique", ref["id"], ref=ref,
+                        expected_published_head=None, operation_id=token + ":publish")
+                selected.append(ref)
+            preview = {**preview, "defaultTechniques": selected, "useSourceTechniques": use_source_techniques}
             count = await self._db.fetch_one("SELECT COUNT(*) AS count FROM books")
             color = BOOK_COLORS[int((count or {}).get("count") or 0) % len(BOOK_COLORS)]
             book_id = short_id8()
@@ -222,16 +256,22 @@ class ContinuationService:
                     fork_section_id,
                     preview["forkOrdinal"],
                     snapshot_id,
-                    canonical_digest(binding_canonical),
+                    canonical_json_digest(binding_canonical),
                 ],
             )
-            for binding in writing_method_bindings:
-                await self._methods.bind_book_revision(
-                    book_id=book_id,
-                    binding_type=str(binding.get("bindingType") or ""),
-                    revision_id=str(binding.get("revisionId") or ""),
-                    source="continuation_create",
-                )
+            await self._db.execute(
+                "INSERT INTO continuation_source_sections SELECT ?,id,revision_id,ordinal,section_type,title,text_content,content_digest,locator_json FROM novel_source_sections WHERE revision_id=? AND ordinal<=?",
+                [book_id, source_revision_id, preview["forkOrdinal"]])
+            await self._db.execute("INSERT INTO continuation_operations VALUES (?,?,?,?)",
+                [operation_id, request_digest, book_id, json.dumps(preview, ensure_ascii=False)])
+            from application.writing_technique_access import WritingTechniqueAccess
+            access = WritingTechniqueAccess(self._db)
+            for ref in preview["defaultTechniques"]:
+                await access.grant(book_id, ref)
+            from application.writing_technique_service import WritingTechniqueService
+            await WritingTechniqueService(self._db).set_selection("book", book_id, preview["defaultTechniques"])
+            from application.continuation_materials import initialize_materials
+            await initialize_materials(self._db, book_id, preview)
         return await self.get_continuation(book_id)
 
     async def get_continuation(self, book_id: str) -> dict:
@@ -255,7 +295,10 @@ class ContinuationService:
             "SELECT * FROM continuation_canon_records WHERE snapshot_id = ? ORDER BY id",
             [row["canon_snapshot_id"]],
         )
+        operation = await self._db.fetch_one("SELECT manifest_json FROM continuation_operations WHERE book_id=?", [book_id])
+        manifest = json.loads(operation["manifest_json"]) if operation else None
         return {
+            "inheritance": manifest,
             "book": {
                 key: row[key]
                 for key in (
@@ -268,9 +311,9 @@ class ContinuationService:
                 "sourceWorkId": row["source_work_id"],
                 "sourceRevisionId": row["source_revision_id"],
                 "sourceAnalysisId": row["source_analysis_id"],
-                "sourceTitle": row["source_title"] or "已删除来源",
+                "sourceTitle": row["source_title"] or (manifest or {}).get("sourceTitle", "已删除来源"),
                 "forkSectionId": row["fork_section_id"],
-                "forkSectionTitle": row["fork_section_title"] or "原分叉章节已删除",
+                "forkSectionTitle": row["fork_section_title"] or (manifest or {}).get("forkSectionTitle", "原分叉章节已删除"),
                 "forkOrdinal": row["fork_ordinal"],
                 "canonSnapshotId": row["canon_snapshot_id"],
                 "canonSnapshotDigest": row["canon_snapshot_digest"],

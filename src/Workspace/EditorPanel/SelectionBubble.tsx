@@ -1,84 +1,101 @@
 import React from 'react'
 import { PurrButton, PurrTooltip } from '@/purr-components'
-import { BulbIcon } from '@/purr-components'
+import {
+  AiChatIcon,
+  HighlightIcon,
+  LinkIcon,
+} from '@/purr-components'
 
-// ── 预设改写指令 ──────────────────────────────────────────────────
-export const PRESETS: { id: string; label: string; prompt: string }[] = [
-  {
-    id: 'polish',
-    label: '润色',
-    prompt: '对下面这段话进行润色，让文字更流畅、生动，保持原意不变，不要拉长篇幅。',
-  },
-  {
-    id: 'shorten',
-    label: '精简',
-    prompt: '把下面这段话改得更精简凝练，保留核心信息与语气，去除冗余与废话。',
-  },
-  {
-    id: 'expand',
-    label: '扩写',
-    prompt: '对下面这段话进行合理扩写，增加画面感与细节描写，保持原风格与语气一致。',
-  },
-]
+const GAP = 8
+const BUBBLE_HEIGHT = 36
+const VIEWPORT_MARGIN = 8
 
-/** 选区上方浮出的快捷改写工具条；上方空间不足时翻转到下方。 */
+/**
+ * 选区上方浮出的快捷工具条。
+ * - 入口均为单图标：AI（改写/提问统一弹层）· 批注 · 引用，语义靠 tooltip
+ * - 位置自适应视口：上方空间不足翻到下方；左右越界时向内收（测量后钳制）
+ */
 export default function SelectionBubble({
   rect,
-  onPreset,
-  onCustom,
+  onAi,
+  onAnnotate,
+  onQuote,
 }: {
   rect: DOMRect
-  onPreset: (p: (typeof PRESETS)[number]) => void
-  onCustom: () => void
+  onAi: () => void
+  onAnnotate: () => void
+  onQuote: () => void
 }) {
-  const style = React.useMemo<React.CSSProperties>(() => {
-    const GAP = 8
-    const BUBBLE_HEIGHT = 36
+  const toolbarRef = React.useRef<HTMLDivElement>(null)
+
+  // 期望位置：选区上方居中，不够则翻到下方
+  const preferred = React.useMemo(() => {
     const top =
-      rect.top - BUBBLE_HEIGHT - GAP > 8
+      rect.top - BUBBLE_HEIGHT - GAP > VIEWPORT_MARGIN
         ? rect.top - BUBBLE_HEIGHT - GAP
         : rect.bottom + GAP
-    const centerX = rect.left + rect.width / 2
     return {
-      position: 'fixed',
       top,
-      left: centerX,
-      transform: 'translateX(-50%)',
+      left: rect.left + rect.width / 2,
     }
   }, [rect])
 
+  // 渲染后按实测宽度把中心点钳进视口，避免左右溢出屏幕
+  const [pos, setPos] = React.useState(preferred)
+  React.useLayoutEffect(() => {
+    const el = toolbarRef.current
+    const width = el?.offsetWidth ?? 0
+    const height = el?.offsetHeight ?? BUBBLE_HEIGHT
+    const minLeft = VIEWPORT_MARGIN + width / 2
+    const maxLeft = Math.max(minLeft, window.innerWidth - VIEWPORT_MARGIN - width / 2)
+    const minTop = VIEWPORT_MARGIN
+    const maxTop = Math.max(minTop, window.innerHeight - VIEWPORT_MARGIN - height)
+    setPos({
+      top: Math.min(Math.max(preferred.top, minTop), maxTop),
+      left: Math.min(Math.max(preferred.left, minLeft), maxLeft),
+    })
+  }, [preferred])
+
   return (
     <div
+      ref={toolbarRef}
       className="inline-edit-toolbar"
-      style={style}
+      style={{ position: 'fixed', top: pos.top, left: pos.left, transform: 'translateX(-50%)' }}
       onMouseDown={(e) => {
         // 阻止 mousedown 抢走 editor 焦点，否则会导致选区闪失。
         e.preventDefault()
       }}
     >
-      {PRESETS.map((p) => (
-        <PurrTooltip key={p.id} title={p.prompt}>
-          <PurrButton
-            type="text"
-            size="small"
-            className="inline-edit-toolbar-btn"
-            onClick={() => onPreset(p)}
-          >
-            {p.label}
-          </PurrButton>
-        </PurrTooltip>
-      ))}
-      <div className="inline-edit-toolbar-sep" />
-      <PurrTooltip title="自定义指令改写">
+      <PurrTooltip title="就选中文段改写或提问（弹层内可切换处理方式）">
         <PurrButton
           type="text"
           size="small"
           className="inline-edit-toolbar-btn"
-          icon={<BulbIcon />}
-          onClick={onCustom}
-        >
-          自定义
-        </PurrButton>
+          icon={<AiChatIcon size={15} />}
+          aria-label="AI 改写或提问"
+          onClick={onAi}
+        />
+      </PurrTooltip>
+      <div className="inline-edit-toolbar-sep" />
+      <PurrTooltip title="给选中文段添加批注">
+        <PurrButton
+          type="text"
+          size="small"
+          className="inline-edit-toolbar-btn"
+          icon={<HighlightIcon size={15} />}
+          aria-label="批注"
+          onClick={onAnnotate}
+        />
+      </PurrTooltip>
+      <PurrTooltip title="引用选中文段到 AI 对话（可同时引用多条）">
+        <PurrButton
+          type="text"
+          size="small"
+          className="inline-edit-toolbar-btn"
+          icon={<LinkIcon size={15} />}
+          aria-label="引用"
+          onClick={onQuote}
+        />
       </PurrTooltip>
     </div>
   )

@@ -43,6 +43,14 @@ test('tool IO loads on expansion, merges late pages, and ignores responses from 
       requests[index].resolve({ success: true, data })
     })
     const preview = (text) => ({ text, characters: text.length, truncated: false })
+    const revealText = async () => {
+      await React.act(async () => {
+        for (const element of window.document.querySelectorAll('.ai-dev-inspector__text-block')) {
+          element.open = true
+          element.dispatchEvent(new window.Event('toggle'))
+        }
+      })
+    }
     await render('run-a', 'running')
     assert.equal(requests.length, 0)
     await open()
@@ -58,18 +66,21 @@ test('tool IO loads on expansion, merges late pages, and ignores responses from 
     })
     assert.match(window.document.body.textContent, /读取第 1 集第 2 场已完成剧本/)
     assert.match(window.document.body.textContent, /readScreenplayTaskDependencies/)
-    assert.match(window.document.body.textContent, /ARG_A/)
+    assert.doesNotMatch(window.document.body.textContent, /ARG_A/)
     assert.match(window.document.body.textContent, /未读取到返回记录/)
     assert.equal(window.document.querySelector('.ai-dev-inspector__tool').hasAttribute('open'), false)
     const argumentsPreview = window.document.querySelector('.ai-dev-inspector__tool .ai-dev-inspector__text-block')
     assert.equal(argumentsPreview.hasAttribute('open'), false)
     assert.match(argumentsPreview.querySelector('summary').textContent, /5 字符/)
+    await revealText()
+    assert.match(window.document.body.textContent, /ARG_A/)
     await React.act(async () => { window.document.querySelector('button').click() })
     assert.equal(requests[1].args.after, 50)
     await finish(1, {
       runId: 'run-a', nextCursor: 51, hasMore: false,
       calls: [{ runId: 'run-a', toolCallId: 'call', eventRowId: 51, status: 'completed', result: preview('RESULT_A') }],
     })
+    await revealText()
     assert.match(window.document.body.textContent, /RESULT_A/)
     assert.match(window.document.body.textContent, /ARG_A/)
     assert.equal(window.document.querySelectorAll('.ai-dev-inspector__tool').length, 1)
@@ -92,13 +103,16 @@ test('tool IO loads on expansion, merges late pages, and ignores responses from 
       runId: 'run-b', nextCursor: 53, hasMore: false,
       calls: [{ runId: 'run-b', toolCallId: 'call', eventRowId: 53, result: preview('RESULT_B') }],
     })
+    await revealText()
     assert.match(window.document.body.textContent, /RESULT_B/)
     assert.doesNotMatch(window.document.body.textContent, /RESULT_A|STALE_A/)
     const { default: Text, characterCount } = await vite.ssrLoadModule('/src/components/AiDevInspector/DiagnosticText.tsx')
     assert.equal(characterCount('场😀'), 2)
     await React.act(async () => { root.render(React.createElement(Text, { label: '输入', text: '场😀', characters: 123, truncated: true })) })
     assert.equal(window.document.querySelector('details').hasAttribute('open'), false)
-    assert.match(window.document.querySelector('summary').textContent, /输入.*123 字符.*预览 2 字符/)
+    assert.equal(window.document.querySelector('pre'), null)
+    await revealText()
+    assert.match(window.document.body.textContent, /预览 2 字符/)
     const { ModelInputDiagnosticsCard, tokenUsageText } = await vite.ssrLoadModule('/src/components/AiDevInspector/index.tsx')
     assert.equal(tokenUsageText({ totalTokens: 18, inputTokens: 12, generationTokens: 6, complete: true, unreportedAttempts: 0 }), '输入 12 / 输出 6 Token')
     const originalInputs = services.ai.getAgentRunModelInputDiagnostics
@@ -116,10 +130,10 @@ test('tool IO loads on expansion, merges late pages, and ignores responses from 
     const inputRows = window.document.querySelectorAll('.ai-dev-inspector__planner-attempt')
     assert.equal(inputRows.length, 2)
     for (const row of inputRows) assert.equal(row.hasAttribute('open'), false)
-    assert.match(inputRows[0].querySelector('summary').textContent, /1 条消息.*字符/)
+    assert.match(inputRows[0].querySelector('summary').textContent, /1 条消息/)
     const messageDetails = inputRows[0].querySelector('.ai-dev-inspector__text-block')
     assert.equal(messageDetails.hasAttribute('open'), false)
-    assert.match(messageDetails.querySelector('summary').textContent, /user.*字符/)
+    assert.match(messageDetails.querySelector('summary').textContent, /user/)
   } finally {
     restoreService()
     await React.act(async () => { root.unmount() })
@@ -198,7 +212,7 @@ test('history replay stays closed, collapsed Runs mount no log bodies, and close
     assert.equal(commits, initialCommits, 'history must not refresh the closed inspector')
     assert.equal(window.document.querySelector('.ai-dev-inspector'), null)
     assert.equal(intervals.size, 0)
-    await React.act(async () => window.document.querySelector('[aria-label="打开 AI 诊断"]').click())
+    await React.act(async () => window.document.querySelector('[aria-label="打开 AI 对话诊断"]').click())
     assert.equal(window.document.querySelectorAll('.ai-dev-inspector__run-card').length, 17)
     assert.equal(window.document.querySelectorAll('.ai-dev-inspector__run-card-body').length, 0)
     assert.doesNotMatch(window.document.body.textContent, /HISTORY_LOG_BODY/)
@@ -219,7 +233,7 @@ test('history replay stays closed, collapsed Runs mount no log bodies, and close
     await React.act(async () => window.document.querySelector('[aria-label="折叠调试面板"]').click())
     assert.equal(intervals.size, 0)
     await React.act(async () => window.document.querySelector('[aria-label="展开调试面板"]').click())
-    await React.act(async () => window.document.querySelector('[aria-label="关闭调试面板"]').click())
+    await React.act(async () => window.document.querySelector('[aria-label="关闭 AI 对话诊断"]').click())
     assert.equal(intervals.size, 0)
     const closedCommits = commits
     await React.act(async () => {

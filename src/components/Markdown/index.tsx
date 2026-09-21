@@ -2,6 +2,7 @@ import React from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { yamlFrontmatterToMarkdown } from "@/utils/markdown";
 import "./index.scss";
 
 const REMARK_PLUGINS = [remarkGfm];
@@ -17,12 +18,14 @@ export interface MarkdownProps {
   children: string;
   className?: string;
   preserveSoftBreaks?: boolean;
+  yamlFrontmatter?: boolean;
 }
 
 function MarkdownInner({
   children,
   className,
   preserveSoftBreaks = false,
+  yamlFrontmatter = false,
 }: MarkdownProps) {
   return (
     <div className={[
@@ -34,7 +37,7 @@ function MarkdownInner({
         remarkPlugins={REMARK_PLUGINS}
         components={MARKDOWN_COMPONENTS}
       >
-        {children}
+        {yamlFrontmatter ? yamlFrontmatterToMarkdown(children) : children}
       </ReactMarkdown>
     </div>
   );
@@ -45,5 +48,6 @@ export default React.memo(
   (prev, next) =>
     prev.children === next.children
     && prev.className === next.className
-    && prev.preserveSoftBreaks === next.preserveSoftBreaks,
+    && prev.preserveSoftBreaks === next.preserveSoftBreaks
+    && prev.yamlFrontmatter === next.yamlFrontmatter,
 );

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from hashlib import blake2s
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from graphlib import CycleError, TopologicalSorter
@@ -14,6 +15,7 @@ from purra.contracts import SessionId
 from purra.errors import ContractViolationError
 from purra.json_values import thaw_json_mapping
 from purra.long_tasks import (
+    BudgetExhaustionDisposition,
     LongTaskCreateCommand,
     LongTaskBudgetLimits,
     LongTaskRecord,
@@ -36,6 +38,33 @@ from purra.recovery import (
 LongTaskClaimGuard = Callable[[LongTaskRecord, LongTaskUnitRecord], Awaitable[bool]]
 
 
+async def append_long_task_event(
+    db,
+    *,
+    task_id: str,
+    event_type: str,
+    source_key: str,
+    reason_code: str | None = None,
+    reason_scope: str | None = None,
+    payload: Mapping[str, object] | None = None,
+) -> None:
+    """Write an idempotent, non-content task recovery fact."""
+
+    await db.execute(
+        "INSERT OR IGNORE INTO ai_agent_long_task_events "
+        "(task_id, event_type, reason_code, reason_scope, payload_json, source_key) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            str(task_id),
+            str(event_type)[:80],
+            str(reason_code)[:240] if reason_code else None,
+            str(reason_scope)[:32] if reason_scope else None,
+            _json_dump(dict(payload or {})),
+            str(source_key)[:300],
+        ],
+    )
+
+
 class SqliteLongTaskRepository:
     def __init__(self, db, *, claim_guard: LongTaskClaimGuard | None = None) -> None:
         self._db = db
@@ -55,6 +84,12 @@ class SqliteLongTaskRepository:
         command: LongTaskCreateCommand,
     ) -> LongTaskRecord:
         normalized_id = _required(task_id, "long task id")
+        metadata = {
+            **thaw_json_mapping(command.metadata),
+            "budgetExhaustionDisposition": (
+                command.budget_exhaustion_disposition.value
+            ),
+        }
         try:
             async with self._mutation_transaction():
                 await self._db.execute(
@@ -73,7 +108,7 @@ class SqliteLongTaskRepository:
                         command.max_parallelism,
                         command.deadline_at_ms,
                         _json_dump(command.budget_limits.to_mapping()),
-                        _json_dump(command.metadata),
+                        _json_dump(metadata),
                     ],
                 )
                 await self._db.execute(
@@ -357,6 +392,22 @@ class SqliteLongTaskRepository:
         worker_id: str,
         lease_duration_ms: int,
     ) -> LongTaskUnitRecord | None:
+        return await self._claim_unit(task_id, worker_id=worker_id,
+                                      lease_duration_ms=lease_duration_ms)
+
+    async def claim_unit(
+        self, task_id: str, unit_id: str, *, worker_id: str,
+        lease_duration_ms: int,
+    ) -> LongTaskUnitRecord | None:
+        return await self._claim_unit(
+            task_id, unit_id=_required(unit_id, "long task unit id"),
+            worker_id=worker_id, lease_duration_ms=lease_duration_ms,
+        )
+
+    async def _claim_unit(
+        self, task_id: str, *, worker_id: str, lease_duration_ms: int,
+        unit_id: str | None = None,
+    ) -> LongTaskUnitRecord | None:
         normalized_worker = _required(worker_id, "long task worker id")
         if int(lease_duration_ms) <= 0:
             raise ValueError("long task lease duration must be positive")
@@ -432,8 +483,11 @@ class SqliteLongTaskRepository:
                 return None
             row = await self._db.fetch_one(
                 "SELECT u.* FROM ai_agent_long_task_units AS u "
-                "WHERE u.task_id = ? AND u.attempt < u.max_attempts AND ("
-                "u.status IN ('pending', 'waiting_retry') OR "
+                "WHERE u.task_id = ? AND (? IS NULL OR u.unit_id = ?) "
+                "AND u.attempt < u.max_attempts AND ("
+                "u.status = 'pending' OR "
+                "(u.status = 'waiting_retry' AND COALESCE(CAST("
+                "json_extract(u.metadata_json, '$.retryNotBeforeMs') AS INTEGER), 0) <= ?) OR "
                 "(u.status IN ('claimed', 'running') "
                 "AND COALESCE(u.lease_expires_at_ms, 0) <= ?)) "
                 "AND NOT EXISTS ("
@@ -444,7 +498,7 @@ class SqliteLongTaskRepository:
                 "WHERE prerequisite.status IS NULL "
                 "OR prerequisite.status <> 'completed') "
                 "ORDER BY u.position ASC LIMIT 1",
-                [task.id, now_ms],
+                [task.id, unit_id, unit_id, now_ms, now_ms],
             )
             if row is None:
                 return None
@@ -456,7 +510,8 @@ class SqliteLongTaskRepository:
                 "UPDATE ai_agent_long_task_units SET status = 'claimed', "
                 "attempt = attempt + 1, worker_id = ?, lease_expires_at_ms = ?, "
                 "lease_epoch = lease_epoch + 1, settled_by_worker_id = NULL, "
-                "run_id = NULL, update_time = CURRENT_TIMESTAMP "
+                "run_id = NULL, metadata_json = json_remove(metadata_json, "
+                "'$.retryNotBeforeMs', '$.retryBackoffMs'), update_time = CURRENT_TIMESTAMP "
                 "WHERE task_id = ? AND unit_id = ?",
                 [normalized_worker, lease_expires, task.id, str(row["unit_id"])],
             )
@@ -511,6 +566,16 @@ class SqliteLongTaskRepository:
                 if isinstance(item, Mapping)
             ]
             normalized_run_id = _required(run_id, "long task unit run id")
+            if unit.run_id is not None:
+                if unit.run_id != normalized_run_id:
+                    raise ContractViolationError("A Unit attempt cannot change its Run", code="long_task_unit_run_conflict")
+                return unit
+            duplicate = await self._db.fetch_one(
+                "SELECT unit_id FROM ai_agent_long_task_units WHERE task_id = ? AND run_id = ? AND unit_id <> ? LIMIT 1",
+                [task.id, normalized_run_id, unit.id],
+            )
+            if duplicate is not None:
+                raise ContractViolationError("A Run cannot belong to two task Units", code="long_task_unit_run_conflict")
             if not any(
                 str(item.get("runId") or "") == normalized_run_id
                 for item in run_history
@@ -611,6 +676,7 @@ class SqliteLongTaskRepository:
                     == _required(worker_id, "long task worker id")
                     and
                     unit.output_ref == result.output_ref
+                    and (result.run_id is None or unit.run_id == result.run_id)
                     and unit.artifact_digest == result.artifact_digest
                     and thaw_json_mapping(unit.validation_receipt)
                     == thaw_json_mapping(result.validation_receipt)
@@ -625,6 +691,16 @@ class SqliteLongTaskRepository:
                 worker_id=worker_id,
                 lease_epoch=lease_epoch,
             )
+            if unit.run_id is not None and result.run_id is not None and result.run_id != unit.run_id:
+                raise ContractViolationError("Unit result belongs to a different Run", code="long_task_unit_run_conflict")
+            selected_run = result.run_id or unit.run_id
+            if selected_run is not None:
+                duplicate = await self._db.fetch_one(
+                    "SELECT unit_id FROM ai_agent_long_task_units WHERE task_id = ? AND run_id = ? AND unit_id <> ? LIMIT 1",
+                    [task.id, selected_run, unit.id],
+                )
+                if duplicate is not None:
+                    raise ContractViolationError("A Run cannot belong to two task Units", code="long_task_unit_run_conflict")
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = 'completed', "
                 "output_ref = ?, run_id = COALESCE(?, run_id), worker_id = NULL, "
@@ -679,27 +755,77 @@ class SqliteLongTaskRepository:
                 FailureDisposition.RESUME_CHECKPOINT,
             }:
                 target = LongTaskUnitStatus.WAITING_RETRY
+            elif disposition is FailureDisposition.PAUSE_RECOVERABLE:
+                target = LongTaskUnitStatus.BLOCKED
             elif disposition is FailureDisposition.SPLIT_PART:
                 target = LongTaskUnitStatus.NEEDS_SPLIT
             elif disposition is FailureDisposition.CANCEL:
                 target = LongTaskUnitStatus.CANCELED
             else:
                 target = LongTaskUnitStatus.FAILED
+            now_ms = int(time.time() * 1000)
+            unit_metadata = dict(thaw_json_mapping(unit.metadata))
+            retry_wait_spent_ms = _metadata_non_negative_int(
+                unit_metadata.get("retryWaitSpentMs"),
+            )
+            retry_not_before_ms = (
+                _retry_not_before_ms(
+                    task.id,
+                    unit.id,
+                    attempt=unit.attempt,
+                    now_ms=now_ms,
+                )
+                if target is LongTaskUnitStatus.WAITING_RETRY
+                else None
+            )
+            retry_backoff_ms = (
+                retry_not_before_ms - now_ms
+                if retry_not_before_ms is not None
+                else None
+            )
+            retry_wait_budget_exhausted = bool(
+                retry_backoff_ms is not None
+                and retry_wait_spent_ms + retry_backoff_ms
+                > _retry_wait_budget_ms(task)
+            )
+            if retry_wait_budget_exhausted:
+                target = LongTaskUnitStatus.BLOCKED
+                retry_not_before_ms = None
+                retry_backoff_ms = None
+                unit_metadata["retryWaitBudgetExceeded"] = True
+            elif retry_not_before_ms is not None and retry_backoff_ms is not None:
+                unit_metadata["retryNotBeforeMs"] = retry_not_before_ms
+                unit_metadata["retryBackoffMs"] = retry_backoff_ms
+                unit_metadata["retryWaitSpentMs"] = (
+                    retry_wait_spent_ms + retry_backoff_ms
+                )
+                unit_metadata.pop("retryWaitBudgetExceeded", None)
+            else:
+                unit_metadata.pop("retryNotBeforeMs", None)
+                unit_metadata.pop("retryBackoffMs", None)
+                unit_metadata.pop("retryWaitSpentMs", None)
+            stored_disposition = (
+                FailureDisposition.PAUSE_RECOVERABLE
+                if retry_wait_budget_exhausted
+                else disposition
+            )
             await self._db.execute(
                 "UPDATE ai_agent_long_task_units SET status = ?, worker_id = NULL, "
                 "lease_expires_at_ms = NULL, error_code = ?, "
                 "failure_json = ?, disposition = ?, "
                 "max_attempts = max_attempts + ?, "
+                "metadata_json = ?, "
                 "update_time = CURRENT_TIMESTAMP WHERE task_id = ? AND unit_id = ?",
                 [
                     target.value,
                     decision.code[:240],
                     _json_dump(_failure_payload(decision)),
-                    disposition.value,
+                    stored_disposition.value,
                     int(
                         disposition is FailureDisposition.RESUME_CHECKPOINT
                         and unit.attempt >= unit.max_attempts
                     ),
+                    _json_dump(unit_metadata),
                     unit.task_id,
                     unit.id,
                 ],
@@ -709,6 +835,47 @@ class SqliteLongTaskRepository:
                 LongTaskUnitStatus.NEEDS_SPLIT,
             }:
                 await self._touch_task(task)
+            elif target is LongTaskUnitStatus.BLOCKED:
+                if decision.scope is FailureScope.SYSTEMIC:
+                    await self._set_task_state_reason(
+                        task,
+                        code=decision.code,
+                        scope="system",
+                    )
+                    await self._schedule_system_recovery(
+                        task,
+                        reason_code=decision.code,
+                        now_ms=now_ms,
+                    )
+                    await self._update_task_status(task, LongTaskStatus.PAUSED)
+                    await self._db.execute(
+                        "UPDATE ai_agent_long_task_units SET status = 'pending', "
+                        "max_attempts = max_attempts + 1, worker_id = NULL, "
+                        "lease_expires_at_ms = NULL, error_code = COALESCE(error_code, ?), "
+                        "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
+                        "AND unit_id <> ? AND status IN ('claimed', 'running')",
+                        [decision.code[:240], task.id, unit.id],
+                    )
+                    updated = await self._require(task.id)
+                    await append_long_task_event(
+                        self._db,
+                        task_id=updated.id,
+                        event_type="task_paused",
+                        reason_code=decision.code,
+                        reason_scope="system",
+                        source_key=f"{updated.id}:paused:{updated.revision}",
+                        payload={
+                            "blockedUnitId": unit.id,
+                            "automaticRecoveryAttempt": _metadata_non_negative_int(
+                                updated.metadata.get("automaticRecoveryAttempt"),
+                            ),
+                            "autoResumeNotBeforeMs": _metadata_non_negative_int(
+                                updated.metadata.get("autoResumeNotBeforeMs"),
+                            ),
+                        },
+                    )
+                else:
+                    await self._touch_task(task)
             elif target is LongTaskUnitStatus.CANCELED:
                 await self._update_task_status(task, LongTaskStatus.CANCELED)
             else:
@@ -920,12 +1087,27 @@ class SqliteLongTaskRepository:
         *,
         reason_code: str = "execution_recovery_after_restart",
     ) -> tuple[str, ...]:
-        """Pause every process-owned task and release its active unit."""
+        """Pause only tasks whose Unit and Root leases have actually expired.
+
+        A second desktop/backend process can briefly share the same database.
+        Process startup is therefore not proof that existing work is orphaned.
+        """
 
         async with self._db.transaction(cancellation_linearizable=True):
+            now_ms = int(time.time() * 1000)
             rows = await self._db.fetch_all(
-                "SELECT id FROM ai_agent_long_tasks "
-                "WHERE status = 'running' ORDER BY create_time ASC"
+                "SELECT task.id FROM ai_agent_long_tasks task "
+                "WHERE task.status = 'running' "
+                "AND NOT EXISTS (SELECT 1 FROM ai_agent_long_task_units unit "
+                "WHERE unit.task_id = task.id "
+                "AND unit.status IN ('claimed', 'running') "
+                "AND unit.lease_expires_at_ms > ?) "
+                "AND NOT EXISTS (SELECT 1 FROM ai_agent_long_task_runs binding "
+                "JOIN ai_agent_runs run ON run.id = binding.run_id "
+                "WHERE binding.task_id = task.id AND run.status = 'running' "
+                "AND run.lease_expires_at_ms > ?) "
+                "ORDER BY task.create_time ASC",
+                [now_ms, now_ms],
             )
             task_ids = tuple(str(row["id"]) for row in rows)
             for task_id in task_ids:
@@ -941,11 +1123,38 @@ class SqliteLongTaskRepository:
                     "AND status IN ('claimed', 'running')",
                     [str(reason_code or "execution_recovery_after_restart")[:240], task_id],
                 )
+                await self._set_task_state_reason(
+                    task,
+                    code=reason_code,
+                    scope="system",
+                )
+                await self._schedule_system_recovery(
+                    task,
+                    reason_code=reason_code,
+                    now_ms=now_ms,
+                )
                 await self._db.execute(
                     "UPDATE ai_agent_long_tasks SET status = 'paused', "
                     "revision = revision + 1, update_time = CURRENT_TIMESTAMP "
                     "WHERE id = ? AND status = 'running'",
                     [task_id],
+                )
+                updated = await self._require(task_id)
+                await append_long_task_event(
+                    self._db,
+                    task_id=updated.id,
+                    event_type="recovery_after_restart",
+                    reason_code=reason_code,
+                    reason_scope="system",
+                    source_key=f"{updated.id}:recovery-after-restart:{updated.revision}",
+                    payload={
+                        "automaticRecoveryAttempt": _metadata_non_negative_int(
+                            updated.metadata.get("automaticRecoveryAttempt"),
+                        ),
+                        "autoResumeNotBeforeMs": _metadata_non_negative_int(
+                            updated.metadata.get("autoResumeNotBeforeMs"),
+                        ),
+                    },
                 )
             return task_ids
 
@@ -971,6 +1180,22 @@ class SqliteLongTaskRepository:
                 raise ValueError(
                     f"long task cannot transition from {task.status.value}"
                 )
+            pause_scope = (
+                "user"
+                if str(reason_code or "").startswith("user_")
+                else "system"
+            )
+            await self._set_task_state_reason(
+                task,
+                code=reason_code or "manual_pause",
+                scope=pause_scope,
+            )
+            if pause_scope == "system":
+                await self._schedule_system_recovery(
+                    task,
+                    reason_code=reason_code or "manual_pause",
+                    now_ms=int(time.time() * 1000),
+                )
             await self._update_task_status(task, LongTaskStatus.PAUSED)
             # A pause is a checkpoint boundary, not a five-minute lease wait.
             # Any in-flight executor is signaled by the application composition;
@@ -983,17 +1208,38 @@ class SqliteLongTaskRepository:
                 "AND status IN ('claimed', 'running')",
                 [str(reason_code or "").strip()[:240] or None, task.id],
             )
-            return await self._require(task.id)
+            updated = await self._require(task.id)
+            await append_long_task_event(
+                self._db,
+                task_id=updated.id,
+                event_type="task_paused",
+                reason_code=reason_code or "manual_pause",
+                reason_scope=pause_scope,
+                source_key=f"{updated.id}:paused:{updated.revision}",
+                payload={
+                    "automaticRecoveryAttempt": _metadata_non_negative_int(
+                        updated.metadata.get("automaticRecoveryAttempt"),
+                    ),
+                    "autoResumeNotBeforeMs": _metadata_non_negative_int(
+                        updated.metadata.get("autoResumeNotBeforeMs"),
+                    ),
+                },
+            )
+            return updated
 
     async def resume(
         self,
         task_id: str,
         *,
         additional_attempts: int = 0,
+        recovery_source: str = "user",
     ) -> LongTaskRecord:
         extra_attempts = int(additional_attempts)
         if extra_attempts < 0:
             raise ValueError("additional long task attempts cannot be negative")
+        normalized_recovery_source = str(recovery_source or "").strip()
+        if normalized_recovery_source not in {"user", "automatic"}:
+            raise ValueError("long task recovery source is invalid")
         async with self._mutation_transaction():
             task = await self._require(task_id)
             if task.cancellation_requested_at_ms is not None:
@@ -1019,13 +1265,59 @@ class SqliteLongTaskRepository:
                     "update_time = CURRENT_TIMESTAMP WHERE id = ?",
                     [task.id],
                 )
-                return await self._require(task.id)
+                await self._clear_task_state_reason(
+                    task,
+                    preserve_automatic_recovery=(
+                        normalized_recovery_source == "automatic"
+                    ),
+                )
+                updated = await self._require(task.id)
+                await append_long_task_event(
+                    self._db,
+                    task_id=updated.id,
+                    event_type="task_resumed",
+                    source_key=f"{updated.id}:resumed:{updated.revision}",
+                    payload={
+                        "additionalAttempts": extra_attempts,
+                        "recoverySource": normalized_recovery_source,
+                    },
+                )
+                return updated
             if task.status is not LongTaskStatus.PAUSED:
                 raise ValueError(f"long task cannot transition from {task.status.value}")
             if extra_attempts:
                 raise ValueError("paused long task does not accept retry attempts")
+            # A blocked transient Unit exhausted only its automatic attempts.
+            # A user-requested resume grants it one new attempt without
+            # invalidating completed sibling outputs.
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'pending', "
+                "max_attempts = max_attempts + 1, worker_id = NULL, "
+                "lease_expires_at_ms = NULL, metadata_json = json_remove(metadata_json, "
+                "'$.retryNotBeforeMs', '$.retryBackoffMs', '$.retryWaitSpentMs', "
+                "'$.retryWaitBudgetExceeded'), update_time = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status = 'blocked'",
+                [task.id],
+            )
+            await self._clear_task_state_reason(
+                task,
+                preserve_automatic_recovery=(
+                    normalized_recovery_source == "automatic"
+                ),
+            )
             await self._update_task_status(task, LongTaskStatus.RUNNING)
-            return await self._require(task.id)
+            updated = await self._require(task.id)
+            await append_long_task_event(
+                self._db,
+                task_id=updated.id,
+                event_type="task_resumed",
+                source_key=f"{updated.id}:resumed:{updated.revision}",
+                payload={
+                    "additionalAttempts": 0,
+                    "recoverySource": normalized_recovery_source,
+                },
+            )
+            return updated
 
     async def cancel(self, task_id: str) -> LongTaskRecord:
         async with self._mutation_transaction():
@@ -1181,30 +1473,10 @@ class SqliteLongTaskRepository:
             elif done == task.total_units:
                 await self._update_task_status(task, LongTaskStatus.COMPLETED)
             elif blocked and not active:
-                blocked_unit = await self._db.fetch_one(
-                    "SELECT unit_id, error_code FROM ai_agent_long_task_units "
-                    "WHERE task_id = ? AND required = 1 AND status = 'blocked' "
-                    "ORDER BY position ASC LIMIT 1",
-                    [task.id],
-                )
-                code = str(
-                    (blocked_unit or {}).get("error_code")
-                    or "long_task_no_runnable_work"
-                )
-                await self._db.execute(
-                    "UPDATE ai_agent_long_task_units SET status = 'failed', "
-                    "error_code = COALESCE(error_code, ?), "
-                    "disposition = 'fail_permanent', "
-                    "worker_id = NULL, lease_expires_at_ms = NULL, "
-                    "update_time = CURRENT_TIMESTAMP WHERE task_id = ? "
-                    "AND required = 1 AND status = 'blocked'",
-                    [code, task.id],
-                )
-                await self._refresh_task_totals(task.id)
-                await self._update_task_status(
-                    await self._require(task.id),
-                    LongTaskStatus.FAILED,
-                )
+                # A retryable Unit is a durable checkpoint.  Keep its failure
+                # record and completed siblings for an explicit resume rather
+                # than turning a transient outage into a failed task.
+                await self._update_task_status(task, LongTaskStatus.PAUSED)
             return await self._require(task.id)
 
     async def _require(self, task_id: str) -> LongTaskRecord:
@@ -1284,6 +1556,57 @@ class SqliteLongTaskRepository:
         task: LongTaskRecord,
         budget_kind: str,
     ) -> LongTaskRecord:
+        if (
+            task.budget_exhaustion_disposition
+            is BudgetExhaustionDisposition.PAUSE_RECOVERABLE
+        ):
+            # A task profile may opt into an explicit budget-recovery path.
+            # Preserve successful Unit artifacts; leave the rest blocked until
+            # a new user-authorized Root grants its next bounded allocation.
+            failure = _json_dump({
+                "category": "runtime_budget",
+                "code": "runtime_budget_exceeded",
+                "scope": "budget",
+                "budgetKind": budget_kind,
+            })
+            await self._db.execute(
+                "UPDATE ai_agent_long_task_units SET status = 'blocked', "
+                "worker_id = NULL, lease_expires_at_ms = NULL, "
+                "error_code = 'runtime_budget_exceeded', failure_json = ?, "
+                "disposition = 'pause_recoverable', "
+                "metadata_json = json_set(COALESCE(metadata_json, '{}'), "
+                "'$.budgetKind', ?), update_time = CURRENT_TIMESTAMP "
+                "WHERE task_id = ? AND status NOT IN "
+                "('completed', 'expanded', 'failed', 'canceled')",
+                [failure, budget_kind, task.id],
+            )
+            await self._refresh_task_totals(task.id)
+            current = await self._require(task.id)
+            if (
+                not current.status.terminal
+                and current.status is not LongTaskStatus.PAUSED
+            ):
+                await self._set_task_state_reason(
+                    current,
+                    code="runtime_budget_exceeded",
+                    scope="budget",
+                )
+                await self._update_task_status(current, LongTaskStatus.PAUSED)
+            updated = await self._require(task.id)
+            if (
+                updated.status is LongTaskStatus.PAUSED
+                and updated.revision != current.revision
+            ):
+                await append_long_task_event(
+                    self._db,
+                    task_id=updated.id,
+                    event_type="budget_paused",
+                    reason_code="runtime_budget_exceeded",
+                    reason_scope="budget",
+                    source_key=f"{updated.id}:budget-paused:{updated.revision}",
+                    payload={"budgetKind": str(budget_kind)[:80]},
+                )
+            return updated
         await self._db.execute(
             "UPDATE ai_agent_long_task_units SET status = 'failed', "
             "worker_id = NULL, lease_expires_at_ms = NULL, "
@@ -1305,6 +1628,120 @@ class SqliteLongTaskRepository:
             "UPDATE ai_agent_long_tasks SET status = ?, revision = revision + 1, "
             "update_time = CURRENT_TIMESTAMP WHERE id = ?",
             [target.value, task.id],
+        )
+        if target not in {
+            LongTaskStatus.COMPLETED,
+            LongTaskStatus.FAILED,
+            LongTaskStatus.CANCELED,
+        }:
+            return
+        updated = await self._require(task.id)
+        await append_long_task_event(
+            self._db,
+            task_id=updated.id,
+            event_type=f"task_{target.value}",
+            reason_code=(
+                "task_canceled"
+                if target is LongTaskStatus.CANCELED
+                else "task_terminal"
+            ),
+            reason_scope=("user" if target is LongTaskStatus.CANCELED else "unknown"),
+            source_key=f"{updated.id}:terminal:{target.value}:{updated.revision}",
+            payload={"previousStatus": task.status.value},
+        )
+
+    async def _set_task_state_reason(self, task, *, code: str, scope: str) -> None:
+        normalized_code = str(code or "").strip()[:240]
+        normalized_scope = str(scope or "").strip()
+        if normalized_scope not in {"system", "user", "budget", "unknown"}:
+            raise ValueError("long task state reason scope is invalid")
+        await self._db.execute(
+            "UPDATE ai_agent_long_tasks SET state_reason_code = ?, "
+            "state_reason_scope = ?, update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            [normalized_code or None, normalized_scope, task.id],
+        )
+
+    async def _clear_task_state_reason(
+        self,
+        task,
+        *,
+        preserve_automatic_recovery: bool = False,
+    ) -> None:
+        recovery_paths = (
+            "'$.autoResumeNotBeforeMs', '$.autoRecoveryBudgetExceeded', "
+            "'$.autoRecoveryReasonCode'"
+            if preserve_automatic_recovery
+            else (
+                "'$.autoResumeNotBeforeMs', '$.automaticRecoveryAttempt', "
+                "'$.automaticRecoveryWaitSpentMs', '$.autoRecoveryBudgetExceeded', "
+                "'$.autoRecoveryReasonCode'"
+            )
+        )
+        await self._db.execute(
+            "UPDATE ai_agent_long_tasks SET state_reason_code = NULL, "
+            "state_reason_scope = NULL, metadata_json = json_remove(metadata_json, "
+            + recovery_paths
+            + "), "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            [task.id],
+        )
+
+    async def _schedule_system_recovery(
+        self,
+        task: LongTaskRecord,
+        *,
+        reason_code: str,
+        now_ms: int,
+    ) -> None:
+        """Persist bounded task-level recovery timing before pausing its Root."""
+
+        metadata = dict(thaw_json_mapping(task.metadata))
+        attempt = _metadata_non_negative_int(metadata.get("automaticRecoveryAttempt")) + 1
+        spent_ms = _metadata_non_negative_int(
+            metadata.get("automaticRecoveryWaitSpentMs"),
+        )
+        due_ms = _retry_not_before_ms(
+            task.id,
+            "system-recovery",
+            attempt=attempt,
+            now_ms=now_ms,
+        )
+        delay_ms = due_ms - now_ms
+        if spent_ms + delay_ms > _retry_wait_budget_ms(task):
+            metadata.pop("autoResumeNotBeforeMs", None)
+            metadata["automaticRecoveryAttempt"] = attempt
+            metadata["automaticRecoveryWaitSpentMs"] = spent_ms
+            metadata["autoRecoveryBudgetExceeded"] = True
+        else:
+            metadata["autoResumeNotBeforeMs"] = due_ms
+            metadata["automaticRecoveryAttempt"] = attempt
+            metadata["automaticRecoveryWaitSpentMs"] = spent_ms + delay_ms
+            metadata["autoRecoveryReasonCode"] = str(reason_code or "")[:240]
+            metadata.pop("autoRecoveryBudgetExceeded", None)
+        await self._db.execute(
+            "UPDATE ai_agent_long_tasks SET metadata_json = ?, "
+            "update_time = CURRENT_TIMESTAMP WHERE id = ?",
+            [_json_dump(metadata), task.id],
+        )
+        await append_long_task_event(
+            self._db,
+            task_id=task.id,
+            event_type="recovery_scheduled",
+            reason_code=reason_code,
+            reason_scope="system",
+            source_key=f"{task.id}:recovery-scheduled:{attempt}",
+            payload={
+                "automaticRecoveryAttempt": attempt,
+                "autoResumeNotBeforeMs": _metadata_non_negative_int(
+                    metadata.get("autoResumeNotBeforeMs"),
+                ),
+                "automaticRecoveryWaitSpentMs": _metadata_non_negative_int(
+                    metadata.get("automaticRecoveryWaitSpentMs"),
+                ),
+                "autoRecoveryBudgetExceeded": bool(
+                    metadata.get("autoRecoveryBudgetExceeded"),
+                ),
+            },
         )
 
     async def _touch_task(self, task):
@@ -1345,6 +1782,12 @@ def _task(row: dict[str, Any] | None) -> LongTaskRecord:
         deadline_at_ms=row.get("deadline_at_ms"),
         budget_limits=_budget_limits(
             _json_load(row.get("budget_limits_json"), {})
+        ),
+        budget_exhaustion_disposition=BudgetExhaustionDisposition(
+            _json_load(row.get("metadata_json"), {}).get(
+                "budgetExhaustionDisposition",
+                BudgetExhaustionDisposition.PAUSE_RECOVERABLE.value,
+            )
         ),
         cancellation_requested_at_ms=row.get("cancel_requested_at_ms"),
         usage=_usage_mapping(_json_load(row.get("usage_json"), {})),
@@ -1535,6 +1978,10 @@ def _metadata_session_id(value: object) -> SessionId | None:
 
 
 def _matches_create(task, units, command: LongTaskCreateCommand) -> bool:
+    requested_metadata = {
+        **thaw_json_mapping(command.metadata),
+        "budgetExhaustionDisposition": command.budget_exhaustion_disposition.value,
+    }
     if (
         task.namespace != command.namespace
         or task.kind != command.kind
@@ -1543,7 +1990,9 @@ def _matches_create(task, units, command: LongTaskCreateCommand) -> bool:
         or task.max_parallelism != command.max_parallelism
         or task.deadline_at_ms != command.deadline_at_ms
         or task.budget_limits != command.budget_limits
-        or thaw_json_mapping(task.metadata) != thaw_json_mapping(command.metadata)
+        or task.budget_exhaustion_disposition
+        != command.budget_exhaustion_disposition
+        or thaw_json_mapping(task.metadata) != requested_metadata
         or len(units) != len(command.units)
     ):
         return False
@@ -1571,6 +2020,47 @@ def _failure_payload(decision: FailureDecision) -> dict[str, object]:
         "checkpointAvailable": decision.checkpoint_available,
         "partSplittable": decision.part_splittable,
     }
+
+
+def _retry_not_before_ms(
+    task_id: str,
+    unit_id: str,
+    *,
+    attempt: int,
+    now_ms: int,
+) -> int:
+    """Return a durable exponential retry deadline with stable jitter.
+
+    The jitter is derived from the task/unit/attempt identity rather than a
+    process-local random source, so a restart neither loses the schedule nor
+    turns a batch of retries into a synchronized provider burst.
+    """
+
+    exponent = min(max(0, int(attempt) - 1), 6)
+    base_ms = min(60_000, 1_000 * (2 ** exponent))
+    digest = blake2s(
+        f"{task_id}:{unit_id}:{attempt}".encode("utf-8"),
+        digest_size=4,
+    ).digest()
+    jitter_ms = int.from_bytes(digest, "big") % (max(1, base_ms // 4) + 1)
+    return int(now_ms) + base_ms + jitter_ms
+
+
+def _retry_wait_budget_ms(task: LongTaskRecord) -> int:
+    policy = thaw_json_mapping(task.metadata).get("retryPolicy")
+    if isinstance(policy, Mapping):
+        configured = _metadata_non_negative_int(policy.get("maxAutomaticWaitMs"))
+        if configured > 0:
+            return min(configured, 900_000)
+    return 120_000
+
+
+def _metadata_non_negative_int(value: object) -> int:
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, numeric)
 
 
 def _unique_ordered(values) -> tuple[str, ...]:

@@ -5,7 +5,9 @@ import {
   MasterOutlineIcon,
   StoryMemoryIcon,
 } from '@/purr-components'
-import { useWorkspace } from '../WorkspaceContext'
+import { EDITOR_TAB_KEY } from '../utilityPanelTypes'
+import { useActiveRightTabKey, useWorkspaceStore } from '../../stores/workspaceStore'
+import { usePanelLayoutStore } from '../../stores/panelLayoutStore'
 import {
   GLOBAL_OUTLINE_TAB,
   MEMORY_TAB,
@@ -27,7 +29,10 @@ const TOOLS: ToolDef[] = [
 
 /** 工作台顶部的全书级工具入口；内容统一在右侧组合面板中以标签打开。 */
 export default function NotebookToolbar() {
-  const { utilityPanelOpen, activeUtilityTabKey, toggleUtilityTab } = useWorkspace()
+  const utilityPanelOpen = usePanelLayoutStore((s) => s.right.open)
+  const activeRightTabKey = useActiveRightTabKey()
+  const activeUtilityTabKey = activeRightTabKey === EDITOR_TAB_KEY ? null : activeRightTabKey
+  const toggleUtilityTab = useWorkspaceStore((s) => s.toggleUtilityTab)
 
   return (
     <div className="notebook-toolbar">

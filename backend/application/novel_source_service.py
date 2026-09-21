@@ -72,9 +72,9 @@ class NovelSourceService:
         document_count: int = 1,
         skipped_file_count: int = 0,
         expected_content_digest: str,
-        confirm_single_section: bool,
-        rights_confirmed: bool,
-        model_data_boundary_confirmed: bool,
+        confirm_single_section: bool = False,
+        rights_confirmed: bool = False,
+        model_data_boundary_confirmed: bool = False,
         section_layout: list[dict[str, object]] | None = None,
         work_id: str | None = None,
     ) -> dict[str, Any]:
@@ -93,10 +93,6 @@ class NovelSourceService:
             if section_layout is not None
             else parse_source_sections(content)
         )
-        if len(sections) == 1 and not confirm_single_section:
-            raise NovelSourceConflictError("未识别到可靠章节结构，请确认按单节来源导入")
-        if not rights_confirmed or not model_data_boundary_confirmed:
-            raise NovelSourceConflictError("必须确认使用权和外部模型数据边界")
         return await self._repository.create_external_revision(
             title=str(title or "").strip() or preview["suggestedTitle"],
             sections=sections,
@@ -109,8 +105,8 @@ class NovelSourceService:
                 "importKind": preview["importKind"],
                 "documentCount": preview["documentCount"],
                 "skippedFileCount": preview["skippedFileCount"],
-                "rightsConfirmed": True,
-                "modelDataBoundaryConfirmed": True,
+                "rightsConfirmed": rights_confirmed,
+                "modelDataBoundaryConfirmed": model_data_boundary_confirmed,
                 "sectionLayout": "reviewed" if section_layout is not None else "detected",
             },
             work_id=work_id,

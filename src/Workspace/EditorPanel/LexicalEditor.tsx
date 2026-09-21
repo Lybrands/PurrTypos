@@ -11,12 +11,13 @@ import { ListNode, ListItemNode } from '@lexical/list'
 import { ListPlugin } from '@lexical/react/LexicalListPlugin'
 import { editorStateToText, reformatArticleText } from './plugins/editorText'
 import { EditorHandlePlugin, type LexicalEditorHandle } from './plugins/EditorHandlePlugin'
-import { IdleDetectPlugin } from './plugins/IdleDetectPlugin'
+import { ExposeLexicalEditorPlugin, FocusPlaceholderPlugin, KeyPlugin } from './plugins/misc'
 import { SelectionChangePlugin } from './plugins/SelectionChangePlugin'
 import { LoadContentPlugin } from './plugins/LoadContentPlugin'
-import { ExposeLexicalEditorPlugin, FocusPlaceholderPlugin, KeyPlugin } from './plugins/misc'
 import { FormatToolbar } from './plugins/FormatToolbar'
 import { WordRulerPlugin } from './plugins/WordRulerPlugin'
+import { AnnotationPlugin } from './plugins/AnnotationPlugin'
+import type { ChapterAnnotation } from '../../types'
 
 // 对外 API 保持稳定：这些符号原本就从本文件导出
 export { editorStateToText, reformatArticleText }
@@ -34,11 +35,9 @@ interface LexicalEditorProps {
   onLexicalEditor?: (editor: LexicalEditor | null) => void
   /** 选区变化回调：非空文本选区时返回 text + rect，否则 null。 */
   onSelectionChange?: (payload: { text: string; rect: DOMRect } | null) => void
-  /** Ghost text 空闲检测：开启后 idleMs 毫秒无输入则触发 onGhostIdle。 */
-  ghostEnabled?: boolean
-  onGhostIdle?: (payload: { prefix: string; cursorRect: DOMRect }) => void
-  /** 任意编辑/光标变化：父组件用来 cancel 正在显示的 ghost。 */
-  onGhostReset?: () => void
+  /** 批注高亮：非空时渲染正文高亮层 */
+  annotations?: ChapterAnnotation[]
+  onAnnotationClick?: (annotation: ChapterAnnotation) => void
 }
 
 const theme = {
@@ -70,9 +69,8 @@ const LexicalEditorComponentInner = React.forwardRef<LexicalEditorHandle, Lexica
   showFormatToolbar = false,
   onLexicalEditor,
   onSelectionChange,
-  ghostEnabled = false,
-  onGhostIdle,
-  onGhostReset,
+  annotations,
+  onAnnotationClick,
 }, ref) {
   const [focused, setFocused] = React.useState(false)
   const initialConfig = React.useMemo(
@@ -122,12 +120,8 @@ const LexicalEditorComponentInner = React.forwardRef<LexicalEditorHandle, Lexica
 
         <KeyPlugin onKeyTrigger={onKeyTrigger} />
         {onSelectionChange && <SelectionChangePlugin onSelectionChange={onSelectionChange} />}
-        {ghostEnabled && onGhostIdle && onGhostReset && (
-          <IdleDetectPlugin
-            enabled={ghostEnabled}
-            onIdle={onGhostIdle}
-            onChangeAny={onGhostReset}
-          />
+        {annotations && annotations.length > 0 && (
+          <AnnotationPlugin annotations={annotations} onAnnotationClick={onAnnotationClick} />
         )}
       </div>
     </LexicalComposer>

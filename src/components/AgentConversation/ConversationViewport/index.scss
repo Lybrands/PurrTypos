@@ -9,7 +9,6 @@
   height: 100%;
   min-height: 0;
   overflow-y: auto;
-  padding-block: 18px;
   background: linear-gradient(
     180deg,
     color-mix(in srgb, var(--accent-light) 13%, transparent),
@@ -62,12 +61,14 @@
   min-width: 0;
   padding-inline: 22px;
   flex-direction: column;
-  gap: 18px;
 }
 
+// 上下间距必须内建在消息项自身：消息列表由 react-virtuoso 虚拟化并按项高度
+// 计算滚动定位，滚动容器的 padding 与列表级 gap 不参与定位，写在容器上是死代码。
 .agent-conversation__message {
   width: 100%;
   min-width: 0;
+  padding-block: 12px;
 
   &.is-user {
     display: flex;
@@ -131,12 +132,11 @@
 }
 
 @media (max-width: 720px) {
-  .agent-conversation {
-    padding-block: 16px;
-  }
-
   .agent-conversation__turns {
     padding-inline: 16px;
   }
 
+  .agent-conversation__message {
+    padding-block: 10px;
+  }
 }

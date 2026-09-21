@@ -33,6 +33,7 @@ test('main window authorization, backend revalidation and truthful dispatch stat
   const copied = []
   const uri = 'obsidian://open?path=%2Ftmp%2Fnote.md'
   registerNovelKnowledgeIpc({
+    obsidianConnection: { open: async source => { opened.push(source.uri); return { status: 'dispatched' } } },
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     dialog: { showOpenDialog: async () => ({ filePaths: ['/tmp/vault/book'] }) },
     shell: { openExternal: async (value) => opened.push(value), showItemInFolder: () => {} },
@@ -51,4 +52,9 @@ test('main window authorization, backend revalidation and truthful dispatch stat
   await handlers.get('novel-knowledge-open')(event, { bookId: 'book', documentId: 'doc', action: 'copy' })
   assert.deepEqual(copied, ['/tmp/note.md'])
   assert.equal(opened.length, 1)
+  const library = await handlers.get('novel-knowledge-open-library')(event, 'book')
+  assert.equal(library.success, true)
+  assert.equal(calls[2].url, 'http://localhost:1/api/books/book/knowledge/materials/navigation')
+  assert.equal(calls[2].options.headers['X-Knowledge-Host'], 'host')
+  assert.deepEqual(opened, [uri, uri])
 })

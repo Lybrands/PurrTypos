@@ -18,6 +18,8 @@ import { hasRenderableErrorMessage } from '../AssistantOutput/errorNoticeMessage
 import { buildAssistantCopyView } from '../assistantCopy'
 import AgentMessageCopyButton from '../MessageCopyButton'
 import AgentMessageEditButton from '../MessageEditButton'
+import AgentMessageQuoteButton from '../MessageQuoteButton'
+import { splitUserQuote } from '../userQuote'
 import AgentMessageEditor from '../MessageEditor'
 import AgentMessageFooter from '../MessageFooter'
 import AgentUserMessageBody from '../UserMessageBody'
@@ -47,6 +49,8 @@ import {
   type ViewportEditTarget,
 } from '../viewportSession'
 import './index.scss'
+import type { SubAgentReader } from '../DelegationStatus'
+import type { ToolLabelContext } from '../AssistantOutput/timeline'
 
 export interface AgentConversationProps {
   sessionIdentity: string
@@ -74,6 +78,8 @@ export interface AgentConversationProps {
   onSubmitErrorReport?: (
     reportId: string,
   ) => Promise<{ success: boolean; error?: string }>
+  subAgentReader?: SubAgentReader
+  toolLabelContext?: ToolLabelContext
 }
 
 const VirtuosoList = React.forwardRef<HTMLDivElement, ListProps>(
@@ -158,6 +164,8 @@ export default function ConversationViewport({
   onStructuredAnswer,
   onResolveToolApproval,
   onSubmitErrorReport,
+  subAgentReader,
+  toolLabelContext,
 }: AgentConversationProps) {
   const virtuosoRef = React.useRef<VirtuosoHandle>(null)
   const scrollerCleanupRef = React.useRef<(() => void) | null>(null)
@@ -333,6 +341,10 @@ export default function ConversationViewport({
     void onEditMessage(index, content)
   }, [editingTarget, messages, onEditMessage, sessionIdentity])
 
+  const handleOutputDetach = React.useCallback((value: boolean) => {
+    if (value) detachFromOutput()
+  }, [detachFromOutput])
+
   const renderMessage = React.useCallback((index: number, message: AgentConversationMessage) => {
     const isLast = index === messages.length - 1
     if (message.role === 'user') {
@@ -344,6 +356,8 @@ export default function ConversationViewport({
       const startEditing = canEdit
         ? () => setEditingTarget(createViewportEditTarget(sessionIdentity, index, message))
         : undefined
+      const quoteLines = splitUserQuote(message.content).quoteLines
+      const hasQuote = quoteLines.length > 0
       return (
         <article
           className={`agent-conversation__message is-user${editing ? ' is-editing' : ''}`}
@@ -362,8 +376,9 @@ export default function ConversationViewport({
               <AgentMessageFooter
                 side="user"
                 sentAt={message.sentAt}
-                actions={canCopy || startEditing ? (
+                actions={canCopy || startEditing || hasQuote ? (
                   <>
+                    {hasQuote ? <AgentMessageQuoteButton quoteLines={quoteLines} /> : null}
                     {canCopy ? <AgentMessageCopyButton content={message.content} /> : null}
                     {startEditing ? <AgentMessageEditButton onClick={startEditing} /> : null}
                   </>
@@ -389,6 +404,7 @@ export default function ConversationViewport({
       isLastAssistant,
       loading,
       showPlaceholder,
+      deferPlainText: true,
     })
     if (!assistantMessageVisible({
       hasVisibleContent,
@@ -410,12 +426,12 @@ export default function ConversationViewport({
             loading={loading}
             isLastAssistant={isLastAssistant}
             showPlaceholder={showPlaceholder}
-            setScrolledUpByReason={(value) => {
-              if (value) detachFromOutput()
-            }}
+            setScrolledUpByReason={handleOutputDetach}
             onStructuredAnswer={onStructuredAnswer}
             onResolveToolApproval={onResolveToolApproval}
             onSubmitErrorReport={onSubmitErrorReport}
+            subAgentReader={subAgentReader}
+            toolLabelContext={toolLabelContext}
           />
         ) : null}
         {attachment ? (
@@ -433,6 +449,7 @@ export default function ConversationViewport({
               {extraActions}
               {copyView.visible ? (
                 <AgentMessageCopyButton
+                  plainTextFromMarkdown
                   content={copyView.plainText}
                   markdownContent={copyView.markdown}
                   label="复制回复纯文本"
@@ -447,7 +464,7 @@ export default function ConversationViewport({
     afterAssistantMessage,
     afterAssistantMessageActions,
     cancelMessageEdit,
-    detachFromOutput,
+    handleOutputDetach,
     editingTarget,
     latestAssistantIndex,
     loading,
@@ -479,6 +496,7 @@ export default function ConversationViewport({
           ref={virtuosoRef}
           data={messages}
           initialTopMostItemIndex={{ index: messages.length - 1, align: 'end' }}
+          increaseViewportBy={{ top: 400, bottom: 400 }}
           alignToBottom={!userDetached}
           followOutput={userDetached ? false : 'auto'}
           scrollerRef={handleScrollerRef}

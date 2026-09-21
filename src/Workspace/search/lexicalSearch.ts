@@ -1,65 +1,11 @@
-import {
-  $createRangeSelection,
-  $getRoot,
-  $setSelection,
-  $isElementNode,
-  type LexicalEditor,
-} from 'lexical'
+import { type LexicalEditor } from 'lexical'
 import { editorStateToText } from '../EditorPanel/LexicalEditor'
+import {
+  $applyFlatSelection,
+  findAllMatchStarts,
+} from '../EditorPanel/selectionAnchor'
 
-export function findAllMatchStarts(text: string, query: string): number[] {
-  const q = query.trim()
-  if (!q) return []
-  const lower = text.toLowerCase()
-  const ql = q.toLowerCase()
-  const out: number[] = []
-  let from = 0
-  while (from <= lower.length - ql.length) {
-    const idx = lower.indexOf(ql, from)
-    if (idx === -1) break
-    out.push(idx)
-    from = idx + ql.length
-  }
-  return out
-}
-
-/** 与 editorStateToText 同一套扁平规则下的起止偏移，设置选区 */
-function $selectFlatOffsets(start: number, end: number): void {
-  const root = $getRoot()
-  const children = root.getChildren()
-  let pos = 0
-  let anchorKey: string | null = null
-  let anchorOffset = 0
-  let focusKey: string | null = null
-  let focusOffset = 0
-
-  for (let pi = 0; pi < children.length; pi++) {
-    const block = children[pi]
-    const textNodes = $isElementNode(block) ? block.getAllTextNodes() : []
-    for (const tn of textNodes) {
-      const len = tn.getTextContent().length
-      const ns = pos
-      const ne = pos + len
-      if (start >= ns && start < ne) {
-        anchorKey = tn.getKey()
-        anchorOffset = start - ns
-      }
-      if (end > ns && end <= ne) {
-        focusKey = tn.getKey()
-        focusOffset = end - ns
-      }
-      pos = ne
-    }
-    if (pi < children.length - 1) pos += 1
-  }
-
-  if (anchorKey != null && focusKey != null) {
-    const sel = $createRangeSelection()
-    sel.anchor.set(anchorKey, anchorOffset, 'text')
-    sel.focus.set(focusKey, focusOffset, 'text')
-    $setSelection(sel)
-  }
-}
+export { findAllMatchStarts }
 
 /**
  * 将选区矩形滚入可视区域（与 Lexical 内部 scrollIntoViewIfNeeded 同源思路）：
@@ -125,7 +71,7 @@ export function selectLexicalSearchMatch(editor: LexicalEditor, query: string, m
     if (matchIndex < 0 || matchIndex >= starts.length) return
     const s = starts[matchIndex]
     const e = s + q.length
-    $selectFlatOffsets(s, e)
+    $applyFlatSelection(s, e)
   })
 
   const rootEl = editor.getRootElement()

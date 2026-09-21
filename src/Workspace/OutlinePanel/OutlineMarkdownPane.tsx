@@ -9,7 +9,11 @@ import KnowledgeMarkdownEditor, {
 } from '@/components/KnowledgeMarkdownEditor'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
 import OutlineHistoryDrawer from './OutlineHistoryDrawer'
-import { useWorkspace } from '../WorkspaceContext'
+import {
+    notifyWorkspaceSearchContentChanged,
+    useBookId,
+    useSearchQuery,
+  } from '../../stores/workspaceStore'
 import type { EntityId } from '../../types'
 import CharacterTab from './CharacterTab'
 import './StoryBackgroundTab.scss'
@@ -28,7 +32,8 @@ interface OutlineMarkdownPaneProps {
 const OutlineMarkdownPane = forwardRef<OutlineMarkdownPaneRef, OutlineMarkdownPaneProps>(
   function OutlineMarkdownPane({ outlineId, markdownContent, onSaved }, ref) {
     const appMessage = usePurrToast()
-    const { bookId, workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
+    const bookId = useBookId()
+    const workspaceSearchQuery = useSearchQuery()
 
     React.useEffect(() => {
       notifyWorkspaceSearchContentChanged()
