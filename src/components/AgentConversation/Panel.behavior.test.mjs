@@ -218,7 +218,7 @@ test('execution panel shows status while nested groups retain their execution he
     const innerTitle = document.querySelector('.work-log-step-group__toggle').textContent
     assert.match(outerTitle, active ? /正在进行/ : /已完成/)
     assert.doesNotMatch(outerTitle, /个步骤|读取剧本交付物/)
-    assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /执行了9 个步骤/)
+    assert.match(innerTitle, active ? /正在执行 读取剧本交付物/ : /调用了9 个工具/)
     assert.doesNotMatch(innerTitle, /正在进行|已完成/)
     if (active) {
       assert.match(markup, /读取剧本交付物/)

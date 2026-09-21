@@ -16,7 +16,22 @@ import type { AgentConversationMessage } from '../../agent-runtime/contracts'
 import { getActiveTaskPlan } from '../../agent-runtime/taskPlan'
 import { buildUserQuotesPrefill } from '../../components/AgentConversation/userQuote'
 import { AgentConversationPanel } from '../../components/AgentConversation'
-import { useWorkspace } from '../WorkspaceContext'
+import {
+    useActiveChapterId,
+    useActiveChapterTitle,
+    useBookId,
+    useBookTitle,
+    useWritingChapters,
+  } from '../../stores/workspaceStore'
+import { useChatPrefillStore } from '../../stores/chatPrefillStore'
+import { useQuoteStore } from '../../stores/quoteStore'
+import { useSettingsInvalidationStore } from '../../stores/settingsInvalidationStore'
+import {
+  evictSettingDiffOwner,
+  hydrateSettingDiffResolution,
+  proposeSettingDiff,
+  useAiProposalBridge,
+} from '../../stores/aiProposalBridge'
 import {
   useAssociatedContext,
   useAiModelPrefs,
@@ -102,18 +117,12 @@ export default function AiPanel({
   }, [onReady])
 
   const appMessage = usePurrToast()
-  const {
-    activeChapterId: chapterId,
-    activeChapterTitle,
-    bookId,
-    bookTitle,
-    writingChapters,
-  } = useWorkspace()
+  const chapterId = useActiveChapterId()
+  const activeChapterTitle = useActiveChapterTitle()
+  const bookId = useBookId()
+  const bookTitle = useBookTitle()
+  const writingChapters = useWritingChapters()
   const [prompt, setPromptState] = React.useState('')
-  /** 正文选区「引用」状态（可多条）：输入框上方状态条展示，发送时拼进消息 */
-  const [pendingQuotes, setPendingQuotes] = React.useState<
-    Array<{ quote: string; chapterTitle?: string }>
-  >([])
   /** 人物目录：把 Agent 工具参数中的 characterIds 解析成人物名（工具行文案用） */
   const [bookCharacters, setBookCharacters] = React.useState<Array<{ id: number; name: string }>>([])
   const [characterCatalogRevision, bumpCharacterCatalog] = React.useReducer((value: number) => value + 1, 0)
@@ -131,11 +140,12 @@ export default function AiPanel({
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [bookId, characterCatalogRevision])
+  // 设定数据变化（AI 写工具 / 设定 diff 提交）→ 刷新人物目录
+  const settingsInvalidationSeq = useSettingsInvalidationStore((state) => state.seq)
   React.useEffect(() => {
-    const refetch = () => bumpCharacterCatalog()
-    window.addEventListener('setting-updated', refetch)
-    return () => window.removeEventListener('setting-updated', refetch)
-  }, [])
+    if (settingsInvalidationSeq === 0) return
+    bumpCharacterCatalog()
+  }, [settingsInvalidationSeq])
   const [conversations, setConversations] = React.useState<AgentConversationMessage[]>([])
   const [loading, setLoading] = React.useState(false)
   const [conversationInitializing, setConversationInitializing] = React.useState(false)
@@ -228,37 +238,38 @@ export default function AiPanel({
     })
   }, [attachmentManager])
 
+  // 设定 diff 审阅完成（经 aiProposalBridge）：落附件并持久化提议解决状态
+  const resolvedQueueLength = useAiProposalBridge((state) => state.resolvedQueue.length)
   React.useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<SettingDiffCardState>).detail
-      if (!detail?.proposalId) return
-      attachmentManager.resolve(detail)
-      const owner = attachmentManager.ownerForProposal(detail.proposalId)
-      if (!owner) return
-      const assistant = owner.message
-      const runId = assistant?.agentRunId
-      if (!runId) return
-      void persistBookProposalResolution({
-        wait: () => new Promise<void>((resolve) => window.setTimeout(resolve, 300)),
-        save: () => services.conversations.saveConversation({
-          sessionId: owner.sessionId,
-          bookId: owner.bookId,
-          chapterId: owner.chapterId,
-          prompt: owner.prompt,
-          response: '',
-          agentRunId: runId,
-          agentProcess: attachmentManager.productProjection(assistant),
-        }),
-      }).then((saved) => {
-        if (!saved) appMessage.error('设定审阅状态保存失败，请稍后重试')
-      })
+    if (resolvedQueueLength === 0) return
+    for (const detail of useAiProposalBridge.getState().drainResolved()) {
+      resolveSettingDiffBody(detail)
     }
-    window.addEventListener('setting-diff-resolved', handler as EventListener)
-    return () => window.removeEventListener('setting-diff-resolved', handler as EventListener)
-  }, [
-    appMessage,
-    attachmentManager,
-  ])
+  }, [resolvedQueueLength, appMessage, attachmentManager])
+
+  const resolveSettingDiffBody = (detail: SettingDiffCardState | undefined) => {
+    if (!detail?.proposalId) return
+    attachmentManager.resolve(detail)
+    const owner = attachmentManager.ownerForProposal(detail.proposalId)
+    if (!owner) return
+    const assistant = owner.message
+    const runId = assistant?.agentRunId
+    if (!runId) return
+    void persistBookProposalResolution({
+      wait: () => new Promise<void>((resolve) => window.setTimeout(resolve, 300)),
+      save: () => services.conversations.saveConversation({
+        sessionId: owner.sessionId,
+        bookId: owner.bookId,
+        chapterId: owner.chapterId,
+        prompt: owner.prompt,
+        response: '',
+        agentRunId: runId,
+        agentProcess: attachmentManager.productProjection(assistant),
+      }),
+    }).then((saved) => {
+      if (!saved) appMessage.error('设定审阅状态保存失败，请稍后重试')
+    })
+  }
   const setPrompt = React.useCallback<React.Dispatch<React.SetStateAction<string>>>(
     (next) => {
       setPromptState((current) => {
@@ -279,40 +290,23 @@ export default function AiPanel({
     ? conversationLifecycleRef.current.getDraft(activeSessionId)
     : prompt
 
+  // 「与 AI 讨论设定」预填请求（大纲页入口经 chatPrefillStore 发起）
+  const chatPrefillSeq = useChatPrefillStore((state) => state.seq)
   React.useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ prefill?: string }>).detail
-      openGlobalChat()
-      pendingSettingSessionRef.current = true
-      if (detail?.prefill) {
-        pendingSettingPromptRef.current = detail.prefill
-        setPromptState(detail.prefill)
-      }
+    if (chatPrefillSeq === 0) return
+    const { prefill } = useChatPrefillStore.getState()
+    openGlobalChat()
+    pendingSettingSessionRef.current = true
+    if (prefill) {
+      pendingSettingPromptRef.current = prefill
+      setPromptState(prefill)
     }
-    window.addEventListener('open-setting-chat', handler as EventListener)
-    return () => window.removeEventListener('open-setting-chat', handler as EventListener)
-  }, [openGlobalChat])
+  }, [chatPrefillSeq, openGlobalChat])
 
-  // 正文选区「引用」：结构化状态挂在输入框上方（悬停看全文，可移除），
-  // 支持连续引用多条；发送时才拼进消息内容；切换会话即失效
+  // 正文选区「引用」在 quoteStore（编辑器写入，胶囊/发送共享）；切会话清空
+  const pendingQuotes = useQuoteStore((state) => state.quotes)
   React.useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ quote?: string; chapterTitle?: string }>).detail
-      const quote = detail?.quote?.trim()
-      if (!quote) return
-      setPendingQuotes((prev) => {
-        const chapterTitle = detail?.chapterTitle
-        // 同章节同文本的去重，避免重复点击塞入相同引文
-        if (prev.some((q) => q.quote === quote && q.chapterTitle === chapterTitle)) return prev
-        return [...prev, { quote, chapterTitle }]
-      })
-    }
-    window.addEventListener('ai-panel-quote-selection', handler as EventListener)
-    return () => window.removeEventListener('ai-panel-quote-selection', handler as EventListener)
-  }, [])
-
-  React.useEffect(() => {
-    setPendingQuotes([])
+    useQuoteStore.getState().removeAll()
   }, [activeSessionId])
 
   React.useEffect(() => {
@@ -466,7 +460,7 @@ export default function AiPanel({
     } else {
       doSubmit()
     }
-    if (quotePrefix) setPendingQuotes([])
+    if (quotePrefix) useQuoteStore.getState().removeAll()
     clearSelectedContext()
   }, [clearSelectedContext, doSubmit, pendingQuotes, prompt])
 
@@ -550,26 +544,22 @@ export default function AiPanel({
           message: occurrence.message,
         })
         if (occurrence.card.status === 'pending') {
-          window.dispatchEvent(new CustomEvent('ai-propose-setting-diff', {
-            detail: {
-              ...occurrence.proposal,
-              restoreOnly: true,
-              resolutionTarget: occurrence.message.agentRunId
-                ? {
-                    sessionId: occurrence.owner.sessionId,
-                    agentRunId: occurrence.message.agentRunId,
-                    prompt: occurrence.owner.prompt,
-                  }
-                : undefined,
-            },
-          }))
+          proposeSettingDiff({
+            ...occurrence.proposal,
+            restoreOnly: true,
+            resolutionTarget: occurrence.message.agentRunId
+              ? {
+                  sessionId: occurrence.owner.sessionId,
+                  agentRunId: occurrence.message.agentRunId,
+                  prompt: occurrence.owner.prompt,
+                }
+              : undefined,
+          })
         } else {
-          window.dispatchEvent(new CustomEvent('setting-diff-resolution-hydrated', {
-            detail: {
-              ...occurrence.card,
-              ownerSessionId: occurrence.owner.sessionId,
-            },
-          }))
+          hydrateSettingDiffResolution({
+            ...occurrence.card,
+            ownerSessionId: occurrence.owner.sessionId,
+          })
         }
       }
     }
@@ -884,9 +874,7 @@ export default function AiPanel({
 
   const deleteHistorySession = React.useCallback((session: AiSession) => {
     attachmentManager.evictSession(session.id)
-    window.dispatchEvent(new CustomEvent('setting-diff-owner-evicted', {
-      detail: { bookId, sessionId: session.id },
-    }))
+    evictSettingDiffOwner(bookId, session.id)
     handleDeleteFromHistory(session)
   }, [attachmentManager, bookId, handleDeleteFromHistory])
 
@@ -978,10 +966,8 @@ export default function AiPanel({
       renderComposerTop: () => (
         <ComposerQuoteChip
           quotes={pendingQuotes}
-          onRemoveAt={(index) =>
-            setPendingQuotes((prev) => prev.filter((_, i) => i !== index))
-          }
-          onRemoveAll={() => setPendingQuotes([])}
+          onRemoveAt={(index) => useQuoteStore.getState().removeAt(index)}
+          onRemoveAll={() => useQuoteStore.getState().removeAll()}
         />
       ),
     }

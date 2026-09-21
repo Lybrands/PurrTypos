@@ -2,10 +2,11 @@ import React from 'react'
 import './ContinuationHistory.scss'
 import { PurrButton } from '@/purr-components'
 import { continuationHistory, type SourceSectionNode } from '../services/continuationHistory'
-import { useWorkspace } from './WorkspaceContext'
+import { useBookId, useWorkspaceStore } from '../stores/workspaceStore'
 
 export default function ContinuationHistory({onCount}: {onCount: (count: number) => void}) {
-  const { bookId, openUtilityTab } = useWorkspace()
+  const bookId = useBookId()
+  const openUtilityTab = useWorkspaceStore((s) => s.openUtilityTab)
   const [items, setItems] = React.useState<SourceSectionNode[]>([])
   const [next, setNext] = React.useState<number | null>(null)
   const [error, setError] = React.useState('')

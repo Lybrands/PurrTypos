@@ -1,4 +1,6 @@
 import { services } from '@/services'
+import { requestGlobalChatPrefill } from '../../stores/chatPrefillStore'
+import { useSettingsRevision } from '../../stores/settingsInvalidationStore'
 import React from 'react'
 import { useMaterialRefresh } from './useMaterialRefresh'
 import { AiChatIcon, PlusIcon, UserIcon, DeleteIcon, EditIcon, SettingsIcon, HistoryIcon } from '@/purr-components'
@@ -99,15 +101,12 @@ export default function CharacterTab({
     loadOptions()
   }, [loadCharacters, loadOptions])
 
-  // AI 工具创建/修改人物后刷新列表（面板可能与 AI 对话同屏开着）
+  // AI 工具创建/修改人物后刷新列表（修订号驱动，仅 character 变化时触发）
+  const characterRevision = useSettingsRevision('character')
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ kind?: string }>).detail
-      if (detail?.kind === 'character') loadCharacters()
-    }
-    window.addEventListener('setting-updated', handler)
-    return () => window.removeEventListener('setting-updated', handler)
-  }, [loadCharacters])
+    if (characterRevision === 0) return
+    loadCharacters()
+  }, [characterRevision, loadCharacters])
 
   React.useEffect(() => {
     onActionActiveChange?.(editModalOpen || !!deleteTarget || configOpen)
@@ -176,10 +175,7 @@ export default function CharacterTab({
 
   /** 打开 AI 全局对话并携带人物上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((c: Character) => {
-    window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
-    window.dispatchEvent(new CustomEvent('open-setting-chat', {
-      detail: { prefill: `关于人物「${c.name}」：` },
-    }))
+    requestGlobalChatPrefill(`关于人物「${c.name}」：`)
   }, [])
 
   const handleDelete = React.useCallback(async () => {

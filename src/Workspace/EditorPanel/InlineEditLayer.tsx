@@ -3,7 +3,7 @@
  * - 润色/精简/扩写/自定义 → InlineEditPopover（rewrite 模式）：AI 流式生成 → 校验式替换选区
  * - 提问 → InlineEditPopover（ask 模式）：回答不落正文，可「存为批注 / 插入正文」
  * - 批注 → AnnotationComposerPopover：手动批注，锚定选区
- * - 引用 → 把选区以块引用预填进主 AI 面板（事件 ai-panel-quote-selection）
+ * - 引用 → 把选区写入 quoteStore（AI 面板输入框上方胶囊展示，可多条）
  *
  * 架构：
  * - `InlineEditLayer` 对外唯一导出。EditorPanel 通过 props 传入 Lexical ref + 模型配置 + 上下文。
@@ -26,6 +26,7 @@ import { useAssociatedContext, useMemorySelection } from '../AiPanel/hooks'
 import SelectionBubble from './SelectionBubble'
 import InlineEditPopover, { type InlineCapture } from './InlineEditPopover'
 import AnnotationComposerPopover, { type AnnotationDraft } from './AnnotationComposerPopover'
+import { addSelectionQuote } from '../../stores/quoteStore'
 import './InlineEditLayer.scss'
 
 interface InlineEditLayerProps {
@@ -47,6 +48,8 @@ interface InlineEditLayerProps {
   bookTitle?: string
   /** 写作章节列表（用于关联章节下拉） */
   writingChapters: { id: EntityId; title: string }[]
+  /** 结果落盘成功后通知外层（标记自动保存 source） */
+  onInlineApplied?: (source: string) => void
 }
 
 export default function InlineEditLayer({
@@ -62,6 +65,7 @@ export default function InlineEditLayer({
   chapterTitle,
   bookTitle,
   writingChapters,
+  onInlineApplied,
 }: InlineEditLayerProps) {
   // Inline 弹层（改写/提问统一入口）：持有选区快照
   const [capture, setCapture] = React.useState<InlineCapture | null>(null)
@@ -128,14 +132,9 @@ export default function InlineEditLayer({
   const handleQuote = React.useCallback(() => {
     const snap = lexicalRef.current?.captureSelection()
     if (!snap) return
-    window.dispatchEvent(new CustomEvent('workspace-open-panel', {
-      detail: { panel: 'ai', open: true },
-    }))
-    window.dispatchEvent(new CustomEvent('ai-panel-quote-selection', {
-      detail: { quote: snap.text, chapterId, chapterTitle },
-    }))
+    addSelectionQuote(snap.text, chapterTitle)
     onClearSelection()
-  }, [lexicalRef, chapterId, chapterTitle, onClearSelection])
+  }, [lexicalRef, chapterTitle, onClearSelection])
 
   const handleClosePopover = React.useCallback(() => {
     setCapture(null)
@@ -184,6 +183,7 @@ export default function InlineEditLayer({
           getCurrentChapterText={getFlatText}
           onClose={handleClosePopover}
           onSaveAnnotation={handleSaveAnnotation}
+          onApplied={onInlineApplied}
           // 上下文相关
           associatedChapterIds={associatedChapterIds}
           setAssociatedChapterIds={setAssociatedChapterIds}

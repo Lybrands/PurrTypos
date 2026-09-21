@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import ast
 import inspect
-import json
-import hashlib
 from importlib import metadata
 from pathlib import Path
 
@@ -100,32 +98,38 @@ def _relative(path: Path) -> str:
     return path.relative_to(BACKEND_DIR).as_posix()
 
 
+PUBLISHED_PINS = {
+    "purra": "purra==1.0.1",
+    "purra_anthropic": "purra-anthropic==1.0.1",
+    "purra_mem0": "purra_mem0==1.0.1",
+    "purra_openai": "purra-openai==1.0.1",
+}
+
+
 @pytest.mark.parametrize("package", [purra, purra_openai, purra_anthropic, purra_mem0])
-def test_purra_is_loaded_from_the_exact_local_candidate(package):
+def test_purra_is_loaded_from_the_published_release(package):
     requirements = tuple(
         line.strip()
         for line in (BACKEND_DIR / "requirements-purra.txt").read_text(
             encoding="utf-8"
         ).splitlines()
-        if line.strip()
+        if line.strip() and not line.lstrip().startswith("#")
     )
     name = package.__name__
     package_path = Path(package.__file__).resolve()
     distribution = metadata.distribution(name)
     distribution_root = Path(distribution.locate_file("")).resolve()
 
-    manifest = json.loads((BACKEND_DIR / "purra-candidate.json").read_text())
-    artifact = next(item for item in manifest["artifacts"] if item["file"].startswith(name + "-"))
-    wheel = next((BACKEND_DIR / "vendor").glob("*/" + artifact["file"]))
-    assert hashlib.sha256(wheel.read_bytes()).hexdigest() == artifact["sha256"]
-    assert any(artifact["file"] in line for line in requirements)
+    assert PUBLISHED_PINS[name] in requirements
     assert distribution.version == PURRA_VERSION
-    direct = json.loads(distribution.read_text("direct_url.json"))
-    assert direct["archive_info"]["hashes"]["sha256"] == artifact["sha256"]
+    # PyPI 安装没有 direct_url.json；存在即说明装回了本地候选/直链产物。
+    assert distribution.read_text("direct_url.json") is None
     assert package_path == distribution_root / name / "__init__.py"
     assert "site-packages" in package_path.parts
     assert not package_path.is_relative_to((ROOT_DIR.parent / "purra").resolve())
     assert not (ROOT_DIR / "packages" / "purra").exists()
+    assert not (BACKEND_DIR / "vendor").exists()
+    assert not (BACKEND_DIR / "purra-candidate.json").exists()
 
 
 def test_provider_gateway_exports_come_from_installed_wheels():

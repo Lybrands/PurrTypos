@@ -114,29 +114,6 @@ function useProcessingStandby(
   return active && settledActivityKey === activityKey;
 }
 
-function workLogHasError(parts: AssistantTimelinePart[]): boolean {
-  return parts.some((part) => {
-    if (part.type === "contextCompaction") {
-      return part.state.status === "failed";
-    }
-    if (part.type === "delegations") {
-      return part.items.some((item) => item.status === "failed");
-    }
-    if (part.type === "operation") {
-      return part.operation.status === "failed";
-    }
-    if (part.type === "operationGroup") {
-      return getPresentationGroupStatus(part) === "failed";
-    }
-    if (part.type !== "tools") return false;
-    return part.segment.labelOutcomes?.some(
-      (outcome, labelIndex) =>
-        outcome === "context_error" &&
-        !part.segment.cachedFlags?.[labelIndex],
-    );
-  });
-}
-
 function operationPartIsActive(part: TimelineOperationPart): boolean {
   if (part.type === "operation") return part.operation.status === "running";
   if (part.type === "operationGroup") {
@@ -503,7 +480,6 @@ function AssistantOutputInner({
             .find((startedAt) => startedAt != null)}
           active={part.parts.some(operationPartIsActive)}
           activeLabel={getActiveOperationLabel(part.parts)}
-          hasError={workLogHasError(part.parts)}
         >
           {part.parts.map((item, itemIndex) => renderOperationPart(
             item,

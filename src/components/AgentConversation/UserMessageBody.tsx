@@ -5,20 +5,16 @@ export interface AgentUserMessageBodyProps {
   content: string
 }
 
-/** 普通用户消息的共享气泡；行首连续 `> ` 行渲染为选区引用块。 */
+/**
+ * 普通用户消息的共享气泡。行首 `> ` 引用行不在气泡内展示；
+ * 引用通过消息底部操作行的图标以浮层查看，见 MessageQuoteButton。
+ */
 export default function AgentUserMessageBody({
   content,
 }: AgentUserMessageBodyProps) {
   if (!content) return null
-  const { quoteLines, body } = splitUserQuote(content)
+  const { body } = splitUserQuote(content)
   return (
-    <div className="bubble-content agent-user-message__content">
-      {quoteLines.length > 0 && (
-        <blockquote className="agent-user-message__quote">
-          {quoteLines.join('\n')}
-        </blockquote>
-      )}
-      {body}
-    </div>
+    <div className="bubble-content agent-user-message__content">{body}</div>
   )
 }

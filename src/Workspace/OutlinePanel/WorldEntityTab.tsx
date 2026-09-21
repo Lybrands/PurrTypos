@@ -1,4 +1,6 @@
 import { services } from '@/services'
+import { requestGlobalChatPrefill } from '../../stores/chatPrefillStore'
+import { useSettingsRevision } from '../../stores/settingsInvalidationStore'
 import React from 'react'
 import { useMaterialRefresh } from './useMaterialRefresh'
 import {
@@ -94,15 +96,12 @@ export default function WorldEntityTab({
     loadEntities()
   }, [loadEntities])
 
-  // AI 工具创建/修改条目后刷新列表（面板可能与 AI 对话同屏开着）
+  // AI 工具创建/修改条目后刷新列表（修订号驱动，仅 entity 变化时触发）
+  const entityRevision = useSettingsRevision('entity')
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ kind?: string }>).detail
-      if (detail?.kind === 'entity') loadEntities()
-    }
-    window.addEventListener('setting-updated', handler)
-    return () => window.removeEventListener('setting-updated', handler)
-  }, [loadEntities])
+    if (entityRevision === 0) return
+    loadEntities()
+  }, [entityRevision, loadEntities])
 
   React.useEffect(() => {
     if (focusEntityId == null) return
@@ -172,10 +171,7 @@ export default function WorldEntityTab({
 
   /** 打开 AI 全局对话并携带条目上下文（不依赖章节对话区） */
   const openAiChat = React.useCallback((ent: SettingEntity) => {
-    window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
-    window.dispatchEvent(new CustomEvent('open-setting-chat', {
-      detail: { prefill: `关于${ENTITY_TYPE_LABEL[ent.entity_type] || '设定'}「${ent.name}」：` },
-    }))
+    requestGlobalChatPrefill(`关于${ENTITY_TYPE_LABEL[ent.entity_type] || '设定'}「${ent.name}」：`)
   }, [])
 
   const handleDelete = React.useCallback(async () => {

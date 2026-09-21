@@ -1,4 +1,8 @@
 import { services } from '@/services'
+import { notifySettingsUpdated } from '../../stores/settingsInvalidationStore'
+import { SETTING_TAB } from '../utilityPanelTypes'
+import { useWorkspaceStore } from '../../stores/workspaceStore'
+import { resolveSettingDiff, useAiProposalBridge } from '../../stores/aiProposalBridge'
 import React from 'react'
 import { usePurrToast } from '@/purr-components'
 import type {
@@ -161,21 +165,16 @@ export function SettingDiffProvider({
   ) => {
     const session = sessionHint ?? sessionsRef.current[sessionKey]
     if (!session) return
-    window.dispatchEvent(new CustomEvent('workspace-open-panel', {
-      detail: {
-        panel: 'setting',
-        open: true,
-        setting: {
-          tab: session.kind === 'character'
-            ? 'characters'
-            : session.kind === 'entity'
-              ? 'entities'
-              : 'background',
-          characterId: session.characterId ?? null,
-          entityId: session.entityId ?? null,
-        },
-      },
-    }))
+    useWorkspaceStore.getState().setSettingOpenRequest({
+      tab: session.kind === 'character'
+        ? 'characters'
+        : session.kind === 'entity'
+          ? 'entities'
+          : 'background',
+      characterId: session.characterId ?? null,
+      entityId: session.entityId ?? null,
+    })
+    useWorkspaceStore.getState().openUtilityTab(SETTING_TAB)
   }, [])
 
   const startDiff = React.useCallback((proposal: ProposedSettingDiff & { restoreOnly?: boolean }) => {
@@ -322,25 +321,25 @@ export function SettingDiffProvider({
     }
   }, [appMessage, bookId, openPanelForSession, updateSessions])
 
+  // AI 提议设定 diff（经 aiProposalBridge；含会话恢复的 restoreOnly 提议）
+  const settingDiffQueueLength = useAiProposalBridge((state) => state.settingDiffQueue.length)
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<ProposedSettingDiff>).detail
-      if (!detail?.kind) return
+    if (settingDiffQueueLength === 0) return
+    for (const detail of useAiProposalBridge.getState().drainSettingDiff()) {
+      if (!detail?.kind) continue
       startDiff(detail)
     }
-    window.addEventListener('ai-propose-setting-diff', handler as EventListener)
-    return () => window.removeEventListener('ai-propose-setting-diff', handler as EventListener)
-  }, [startDiff])
+  }, [settingDiffQueueLength, startDiff])
 
+  // 会话恢复：已解决的设定 diff 卡片回放（经 aiProposalBridge，逐条排空）
+  const hydrateQueueLength = useAiProposalBridge((state) => state.hydrateQueue.length)
   React.useEffect(() => {
-    const handler = (event: Event) => {
-      const card = (event as CustomEvent<
-        SettingDiffCardState & { ownerSessionId?: number }
-      >).detail
-      if (!card?.proposalId) return
+    if (hydrateQueueLength === 0) return
+    for (const card of useAiProposalBridge.getState().drainHydrations()) {
+      if (!card?.proposalId) continue
       if (card.ownerSessionId != null) {
         const ownerSessionId = Number(card.ownerSessionId)
-        if (evictedSessionIdsRef.current.has(ownerSessionId)) return
+        if (evictedSessionIdsRef.current.has(ownerSessionId)) continue
         proposalOwnerSessionRef.current.set(card.proposalId, ownerSessionId)
       }
       resolvedCardsRef.current = {
@@ -358,9 +357,7 @@ export function SettingDiffProvider({
         })
       }
     }
-    window.addEventListener('setting-diff-resolution-hydrated', handler)
-    return () => window.removeEventListener('setting-diff-resolution-hydrated', handler)
-  }, [updateSessions])
+  }, [hydrateQueueLength, updateSessions])
 
   const setOpStatus = React.useCallback<SettingDiffContextValue['setOpStatus']>(
     (sessionKey, opIndex, status, rejectReason) => {
@@ -449,7 +446,7 @@ export function SettingDiffProvider({
       [card.proposalId]: card,
     }
     setResolvedCards(resolvedCardsRef.current)
-    window.dispatchEvent(new CustomEvent('setting-diff-resolved', { detail: card }))
+    resolveSettingDiff(card)
   }, [])
 
   const activateNext = React.useCallback((sessionKey: string) => {
@@ -457,16 +454,20 @@ export function SettingDiffProvider({
     if (next) queueMicrotask(() => startDiff(next))
   }, [startDiff])
 
+  // 会话删除：逐出该会话拥有的设定 diff（经 aiProposalBridge，逐条排空）
+  const evictQueueLength = useAiProposalBridge((state) => state.evictQueue.length)
   React.useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{
-        bookId: EntityId
-        sessionId: number
-      }>).detail
-      if (!detail || String(detail.bookId) !== String(bookId ?? '')) return
-      const sessionId = Number(detail.sessionId)
-      if (!Number.isFinite(sessionId)) return
-      evictedSessionIdsRef.current.add(sessionId)
+    if (evictQueueLength === 0) return
+    for (const detail of useAiProposalBridge.getState().drainEvictions()) {
+      evictSettingDiffOwnerBody(detail)
+    }
+  }, [evictQueueLength, activateNext, bookId, updateSessions])
+
+  const evictSettingDiffOwnerBody = (detail: { bookId: import('../../types').EntityId | null; sessionId: number } | undefined) => {
+    if (!detail || String(detail.bookId) !== String(bookId ?? '')) return
+    const sessionId = Number(detail.sessionId)
+    if (!Number.isFinite(sessionId)) return
+    evictedSessionIdsRef.current.add(sessionId)
       const affected = new Set(
         occurrenceQueueRef.current.evictWhere(
           (proposal) => Number(proposal.resolutionTarget?.sessionId) === sessionId,
@@ -502,13 +503,10 @@ export function SettingDiffProvider({
         }
         return next
       })
-      for (const sessionKey of affected) {
-        queueMicrotask(() => activateNext(sessionKey))
-      }
+    for (const sessionKey of affected) {
+      queueMicrotask(() => activateNext(sessionKey))
     }
-    window.addEventListener('setting-diff-owner-evicted', handler)
-    return () => window.removeEventListener('setting-diff-owner-evicted', handler)
-  }, [activateNext, bookId, updateSessions])
+  }
 
   const exitDiff = React.useCallback<SettingDiffContextValue['exitDiff']>(async (sessionKey) => {
     const cur = sessionsRef.current[sessionKey]
@@ -617,9 +615,7 @@ export function SettingDiffProvider({
         resolution,
       })
       if (!res?.success) throw new Error('提交设定 diff 失败')
-      window.dispatchEvent(new CustomEvent('setting-updated', {
-        detail: { kind: 'character', action: 'update', id: cur.characterId, name: finalSnap.name },
-      }))
+      notifySettingsUpdated('character', { id: cur.characterId, name: finalSnap.name })
       } else if (cur.kind === 'entity') {
       const finalSnap = composeCharacterFields(cur)
       const before = cur.before as CharacterSettingSnapshot
@@ -638,9 +634,7 @@ export function SettingDiffProvider({
         resolution,
       })
       if (!res?.success) throw new Error('提交设定 diff 失败')
-      window.dispatchEvent(new CustomEvent('setting-updated', {
-        detail: { kind: 'entity', action: 'update', id: cur.entityId, name: finalSnap.name },
-      }))
+      notifySettingsUpdated('entity', { id: cur.entityId, name: finalSnap.name })
       } else {
       const beforeContent = (cur.before as { content: string }).content || ''
       const proposedContent = (cur.proposed as { content: string }).content || ''
@@ -657,9 +651,7 @@ export function SettingDiffProvider({
         resolution,
       })
       if (!res?.success) throw new Error('提交设定 diff 失败')
-      window.dispatchEvent(new CustomEvent('setting-updated', {
-        detail: { kind: 'background', action: 'update' },
-      }))
+      notifySettingsUpdated('background')
       }
 
       if (!commandLatchRef.current.canComplete(

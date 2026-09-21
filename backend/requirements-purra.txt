@@ -1,5 +1,6 @@
-# Local candidate only; run pip from the project root. See purra-candidate.json.
-./backend/vendor/purra-1.0.1/purra-1.0.1-py3-none-any.whl # sha256=ee18951c5b4719cdd6b95cd572a7e81eaac062a8035e447a5d63eff61ddecc39
-./backend/vendor/purra-1.0.1/purra_anthropic-1.0.1-py3-none-any.whl # sha256=b3427a68eb85533640f1ba4d50655c52a044ac52f2bd6910f370d37e2ce25960
-./backend/vendor/purra-1.0.1/purra_mem0-1.0.1-py3-none-any.whl # sha256=717fb15ab1804cabb9009bf0b323efa5c2dbb62fd7bea2c8d44c8b7430aeb42b
-./backend/vendor/purra-1.0.1/purra_openai-1.0.1-py3-none-any.whl # sha256=51dda6a559a7b2d072008461e5213852aee1ad674a57acebf70d1794329c13e7
+# PurrA 1.0.1 发布版（PyPI）。同版本 rev2 已包含可恢复混批 FAILED 修复，
+# 背景见 docs/design/2026-09-17-recoverable-mixed-tool-batches.md。
+purra==1.0.1
+purra-anthropic==1.0.1
+purra_mem0==1.0.1
+purra-openai==1.0.1

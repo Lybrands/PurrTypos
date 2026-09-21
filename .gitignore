@@ -13,7 +13,6 @@ backend/dist
 backend/build
 out
 release
-/backend/vendor/*.whl
 *.tsbuildinfo
 coverage/
 .cache/

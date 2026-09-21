@@ -1,15 +1,17 @@
 /**
- * 当前章节批注数据源：加载 + 增删改，监听 'chapter-annotations-changed'
- * 事件（批注弹层保存后派发）自动重载。章节/书籍切换时清空重拉。
+ * 当前章节批注数据源：加载 + 增删改，订阅 annotationsStore 的章节修订号，
+ * 批注弹层保存/更新/删除后自动重载。章节/书籍切换时清空重拉。
  */
 
 import React from 'react'
 import { services } from '@/services'
 import type { ChapterAnnotation, EntityId } from '../../types'
+import { useAnnotationsRevision } from '../../stores/annotationsStore'
 
 export function useChapterAnnotations(bookId: EntityId | null, chapterId: EntityId | null) {
   const [annotations, setAnnotations] = React.useState<ChapterAnnotation[]>([])
   const [loading, setLoading] = React.useState(false)
+  const revision = useAnnotationsRevision(bookId, chapterId)
 
   const reload = React.useCallback(async () => {
     if (bookId == null || chapterId == null) {
@@ -27,22 +29,7 @@ export function useChapterAnnotations(bookId: EntityId | null, chapterId: Entity
 
   React.useEffect(() => {
     void reload()
-  }, [reload])
-
-  React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ bookId: EntityId; chapterId: EntityId }>).detail
-      if (detail == null) return void reload()
-      if (
-        String(detail.bookId) === String(bookId) &&
-        String(detail.chapterId) === String(chapterId)
-      ) {
-        void reload()
-      }
-    }
-    window.addEventListener('chapter-annotations-changed', handler)
-    return () => window.removeEventListener('chapter-annotations-changed', handler)
-  }, [reload, bookId, chapterId])
+  }, [reload, revision])
 
   const updateAnnotation = React.useCallback(
     async (id: number, data: { note?: string; status?: 'open' | 'resolved' }) => {

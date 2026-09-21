@@ -15,7 +15,15 @@ import { PurrButton, PurrEmpty, PurrInput, PurrTooltip, usePurrToast, type PurrT
 import type { AiModelConfig, ChapterAnnotation, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useWorkspace } from '../WorkspaceContext'
+import {
+    notifyWorkspaceSearchContentChanged,
+    useActiveChapterId,
+    useActiveChapterTitle,
+    useBookId,
+    useWorkspaceStore,
+    useWritingChapters,
+  } from '../../stores/workspaceStore'
+import { useEditorCommandStore } from '../../stores/editorCommandStore'
 import LexicalEditorComponent, { editorStateToText, type LexicalEditorHandle } from './LexicalEditor'
 import { StopCircleIcon } from '@/purr-components'
 import { useDiff } from '../diff/DiffContext'
@@ -85,13 +93,10 @@ export default function EditorPanel({
   onLexicalEditor,
 }: EditorPanelProps) {
   const appMessage = usePurrToast()
-  const {
-    writingChapters: chapters,
-    activeChapterId: chapterId,
-    activeChapterTitle: chapterTitle,
-    bookId,
-    notifyWorkspaceSearchContentChanged,
-  } = useWorkspace()
+  const chapters = useWritingChapters()
+  const chapterId = useActiveChapterId()
+  const chapterTitle = useActiveChapterTitle()
+  const bookId = useBookId()
   const diff = useDiff()
   const diffActive = chapterId != null && diff.hasSession(chapterId)
   const [diffHistoryOpen, setDiffHistoryOpen] = React.useState(false)
@@ -224,25 +229,14 @@ export default function EditorPanel({
     refreshArticle(chapterId)
   }, [chapterId, refreshArticle])
 
+  // 正文被服务端更新（AI 落库 / diff 提交）→ 按章修订号重拉
+  const chapterContentRevision = useWorkspaceStore((state) =>
+    chapterId == null ? 0 : state.chapterContentRevision[String(chapterId)] ?? 0,
+  )
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const updatedId = (e as CustomEvent<{ chapterId: EntityId }>).detail?.chapterId
-      if (updatedId == null) return
-      if (updatedId === chapterId) refreshArticle(updatedId)
-    }
-    window.addEventListener('chapter-content-updated', handler)
-    return () => window.removeEventListener('chapter-content-updated', handler)
-  }, [chapterId, refreshArticle])
-
-  React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ chapterId?: EntityId | null; source?: string }>).detail ?? {}
-      if (detail.chapterId != null && detail.chapterId !== chapterId) return
-      nextSaveSourceRef.current = detail.source || 'inline_edit'
-    }
-    window.addEventListener('inline-edit-accepted', handler)
-    return () => window.removeEventListener('inline-edit-accepted', handler)
-  }, [chapterId])
+    if (chapterContentRevision === 0 || chapterId == null) return
+    refreshArticle(chapterId)
+  }, [chapterContentRevision, chapterId, refreshArticle])
 
   const scheduleAutoSave = React.useCallback((text: string) => {
     if (!chapterId) return
@@ -295,7 +289,7 @@ export default function EditorPanel({
     )
   }, [appMessage])
 
-  /** 命令面板派发的事件监听 */
+  /** 命令面板 / 快捷键命令注册（命令经 editorCommandStore 派发） */
   React.useEffect(() => {
     const onOpenHistory = () => {
       if (chapterId == null) {
@@ -314,16 +308,12 @@ export default function EditorPanel({
     const onCopyTitle = () => handleCopyToClipboard(stripChapterPrefix(chapterTitle ?? ''), '标题')
     const onCopyContent = () => handleCopyToClipboard(content ?? '', '正文')
 
-    window.addEventListener('editor-open-diff-history', onOpenHistory)
-    window.addEventListener('editor-reformat', onReformat)
-    window.addEventListener('editor-copy-title', onCopyTitle)
-    window.addEventListener('editor-copy-content', onCopyContent)
-    return () => {
-      window.removeEventListener('editor-open-diff-history', onOpenHistory)
-      window.removeEventListener('editor-reformat', onReformat)
-      window.removeEventListener('editor-copy-title', onCopyTitle)
-      window.removeEventListener('editor-copy-content', onCopyContent)
-    }
+    return useEditorCommandStore.getState().register({
+      openDiffHistory: onOpenHistory,
+      reformat: onReformat,
+      copyTitle: onCopyTitle,
+      copyContent: onCopyContent,
+    })
   }, [chapterId, chapterTitle, content, appMessage, handleCopyToClipboard, handleReformat])
 
   const handleKeyTrigger = React.useCallback((key: string, rect: DOMRect) => {
@@ -468,13 +458,13 @@ export default function EditorPanel({
             </PurrTooltip>
           ) : null}
           {dockCollapsed && onExpandDock ? (
-            <PurrTooltip title="固定展开正文边栏">
+            <PurrTooltip title="展开">
               <PurrButton
                 type="text"
                 size="small"
                 icon={<PanelToggleIcon side="right" state="collapsed" />}
                 onClick={onExpandDock}
-                aria-label="固定展开正文边栏"
+                aria-label="展开正文边栏"
               />
             </PurrTooltip>
           ) : null}
@@ -619,6 +609,9 @@ export default function EditorPanel({
           chapterTitle={chapterTitle ?? ''}
           bookTitle={_bookTitle}
           writingChapters={chapters.map((c) => ({ id: c.id, title: c.title }))}
+          onInlineApplied={(source) => {
+            nextSaveSourceRef.current = source || 'inline_edit'
+          }}
         />
       )}
 

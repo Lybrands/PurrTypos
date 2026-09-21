@@ -12,6 +12,7 @@ import {
 } from '@/purr-components'
 import type { Chapter, EntityId } from '../types'
 import type { CommandItem } from './CommandPalette'
+import { runEditorCommand } from '../stores/editorCommandStore'
 
 export interface BuildPaletteCommandsDeps {
   chapterSidebarOpen: boolean
@@ -86,7 +87,7 @@ export function buildPaletteCommands({
       icon: <HistoryIcon />,
       category: '动作',
       keywords: ['diff', 'history', '历史', '回滚'],
-      run: () => { window.dispatchEvent(new CustomEvent('editor-open-diff-history')) },
+      run: () => { runEditorCommand('openDiffHistory') },
     },
     {
       id: 'action:reformat',
@@ -95,7 +96,7 @@ export function buildPaletteCommands({
       icon: <AlignLeftIcon />,
       category: '动作',
       keywords: ['format', 'reformat', '排版'],
-      run: () => { window.dispatchEvent(new CustomEvent('editor-reformat')) },
+      run: () => { runEditorCommand('reformat') },
     },
     {
       id: 'action:copy-title',
@@ -104,7 +105,7 @@ export function buildPaletteCommands({
       icon: <CopyTitleIcon />,
       category: '动作',
       keywords: ['copy', 'title', '标题'],
-      run: () => { window.dispatchEvent(new CustomEvent('editor-copy-title')) },
+      run: () => { runEditorCommand('copyTitle') },
     },
     {
       id: 'action:copy-content',
@@ -112,7 +113,7 @@ export function buildPaletteCommands({
       icon: <CopyIcon />,
       category: '动作',
       keywords: ['copy', 'content', '正文'],
-      run: () => { window.dispatchEvent(new CustomEvent('editor-copy-content')) },
+      run: () => { runEditorCommand('copyContent') },
     },
   ]
 

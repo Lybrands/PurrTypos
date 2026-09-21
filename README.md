@@ -33,25 +33,24 @@ pip install -r backend/requirements.txt
 
 `backend/requirements.txt` 由三部分组成：
 
-- `requirements-purra.txt` — 按相对路径引用 `backend/vendor/purra-1.0.1/` 内的四个
-  PurrA 1.0.1 候选 wheel（`purra`、`purra_openai`、`purra_anthropic`、`purra_mem0`），
-  行内注释记录 SHA-256；**必须在仓库根目录执行 pip**。
+- `requirements-purra.txt` — PyPI 发布版 PurrA 1.0.1 四个包
+  （`purra`、`purra-openai`、`purra-anthropic`、`purra_mem0`）的版本锁定。
 - `requirements-runtime.txt` — FastAPI、uvicorn、aiosqlite 等运行时依赖。
-- 其余为开发 / 测试依赖（setuptools、pytest），PyInstaller 打包不会带入运行时。
+- 其余为开发 / 测试依赖（pytest），PyInstaller 打包不会带入运行时。
 
-PurrA 源码基线与 wheel 校验和集中记录在 `backend/purra-candidate.json`。开发、CI 和
-分发打包使用同一份依赖清单，无需同级 PurrA 源码目录。
+开发、CI 和分发打包使用同一份依赖清单，无需同级 PurrA 源码目录。
 
-如果已有环境安装过同版本的本地 wheel 或可编辑包，先替换这四个包，再检查完整依赖：
+如果已有环境安装过同版本的本地候选 wheel 或可编辑包，先卸载再重装，避免 pip 认为
+版本已满足而跳过替换：
 
 ```bash
-python -m pip install --force-reinstall --no-deps -r backend/requirements-purra.txt
+python -m pip uninstall -y purra purra-openai purra-anthropic purra_mem0
 python -m pip install -r backend/requirements.txt
 python -m pip check
 ```
 
-更新后重启后端进程，并运行 `python scripts/verify-purra-candidate.py` 核验实际安装内容。
-候选 wheel 通过本地验收不等同于已发布到公共仓库。
+安装来源由 `backend/tests/test_purra_package.py` 约束：必须来自 site-packages 的
+发布版，不允许 direct URL / 本地候选残留。
 
 如 Electron 二进制下载失败（"Electron failed to install correctly"），可尝试：
 
@@ -182,10 +181,8 @@ PurrTypos/
 ├── backend/                     # Python 后端（FastAPI + aiosqlite）
 │   ├── main.py                  # FastAPI 入口，CORS、路由装载、生命周期
 │   ├── requirements.txt         # = purra + runtime + 开发/测试依赖
-│   ├── requirements-purra.txt   # vendor 内 PurrA 1.0.1 本地 wheel（根目录执行 pip）
+│   ├── requirements-purra.txt   # PurrA 1.0.1 发布版（PyPI，core/openai/anthropic/mem0）
 │   ├── requirements-runtime.txt # FastAPI / uvicorn / aiosqlite 等运行时依赖
-│   ├── vendor/purra-1.0.1/      # PurrA 1.0.1 候选 wheel（core/openai/anthropic/mem0）
-│   ├── purra-candidate.json     # PurrA 源码基线与 wheel SHA-256 记录
 │   ├── purrtypos-backend.spec   # PyInstaller 打包配置
 │   ├── routers/                 # HTTP/SSE 路由层
 │   │   ├── ai.py                # /ai/chat/stream（SSE）、/ai/title、/ai/models

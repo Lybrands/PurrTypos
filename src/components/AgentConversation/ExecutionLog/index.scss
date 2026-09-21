@@ -55,11 +55,6 @@
   transform: rotate(90deg);
 }
 
-.work-log__error-icon {
-  flex-shrink: 0;
-  color: var(--danger);
-}
-
 .work-log__collapsible {
   display: grid;
   grid-template-rows: 0fr;
@@ -383,11 +378,6 @@
 
 .work-log-step-group__duration {
   margin-left: -1px;
-}
-
-.work-log-step-group__error-icon {
-  flex-shrink: 0;
-  color: var(--danger);
 }
 
 .work-log-step-group--active .work-log-step-group__toggle {

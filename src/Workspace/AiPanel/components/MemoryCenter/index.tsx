@@ -1,5 +1,7 @@
 import InheritedPlotMaterials from '../../../InheritedPlotMaterials'
 import { services } from '@/services'
+import { KNOWLEDGE_TAB } from '../../../utilityPanelTypes'
+import { useWorkspaceStore } from '../../../../stores/workspaceStore'
 import React from 'react'
 import { PurrCollapse, PurrButton, PurrEmpty, PurrInput, PurrModal, PurrRadio, PurrSelect, PurrSpace, PurrSpin, PurrSwitch, PurrTag, PurrTooltip, purrToast, usePurrConfirm } from '@/purr-components'
 import {
@@ -167,6 +169,10 @@ function structuredFieldLabel(key: string): string {
 }
 
 export default function MemoryCenter({ bookId }: MemoryCenterProps) {
+  const openKnowledgeTab = React.useCallback(
+    () => useWorkspaceStore.getState().openUtilityTab(KNOWLEDGE_TAB),
+    [],
+  )
   const confirm = usePurrConfirm()
   const [query, setQuery] = React.useState('')
   const [status, setStatus] = React.useState<UnifiedMemoryStatus | undefined>()
@@ -661,7 +667,7 @@ export default function MemoryCenter({ bookId }: MemoryCenterProps) {
         </div>
         <PurrTooltip title="创作资料库">
           <PurrButton type="text" size="small" className="memory-center-knowledge" icon={<LibraryIcon />} aria-label="打开创作资料库"
-            onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))} />
+            onClick={openKnowledgeTab} />
         </PurrTooltip>
       </div>
       {semanticUnavailable && <p className="memory-center-source-notice" role="status">

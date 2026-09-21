@@ -87,10 +87,6 @@ export default function WorkspaceUtilityPanel({
     setFullscreenTooltipOpen(false)
   }, [fullscreen])
 
-  const handleOutlineChanged = React.useCallback(() => {
-    window.dispatchEvent(new CustomEvent('chapter-outline-changed'))
-  }, [])
-
   const items = [{
     key: EDITOR_TAB_KEY,
     label: (
@@ -115,7 +111,6 @@ export default function WorkspaceUtilityPanel({
           <ChapterOutlinePanel
             target={tab.outlineTarget}
             bookId={bookId}
-            onChanged={handleOutlineChanged}
           />
         ) : null}
         {tab.kind === 'memory' ? (
@@ -182,19 +177,19 @@ export default function WorkspaceUtilityPanel({
               </PurrTooltip>
             ) : null}
             {dockCollapsed && onExpandDock ? (
-              <PurrTooltip title="固定展开工作面板">
+              <PurrTooltip title="展开">
                 <PurrButton
                   type="text"
                   size="small"
                   icon={<PanelToggleIcon side="right" state="collapsed" />}
                   onClick={onExpandDock}
                   className="workspace-utility-action-btn"
-                  aria-label="固定展开工作面板"
+                  aria-label="展开工作面板"
                 />
               </PurrTooltip>
             ) : null}
             {!dockCollapsed && onCollapse ? (
-              <PurrTooltip title="收起工作面板">
+              <PurrTooltip title="收起">
                 <PurrButton
                   type="text"
                   size="small"

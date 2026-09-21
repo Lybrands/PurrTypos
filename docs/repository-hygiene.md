@@ -12,7 +12,6 @@
 | `.cursor/rules/`、`.vscode/settings.json` | 保留项目级配置 | 当前为编码约定和通用编辑器设置；过时规则应单独修订，不能靠忽略隐藏 |
 | `.superpowers/`、`sketches/` | 仅留本地 | 工具任务进度、过程报告和一次性 HTML 原型；需长期共享的结论应整理进 `docs/` |
 | `docs/local/` | 仅留本地 | 个人笔记及包含本机数据库标识的审计快照 |
-| `backend/vendor/*.whl` | 忽略 | 遗留本地包；依赖以 requirements 为准，打包脚本跳过 vendor 并安装发布包 |
 | `dist*`、`build-resources/`、`backend/build/`、依赖、缓存、虚拟环境 | 忽略 | 可重建的本机产物 |
 | `.env*`、`local-backups/`、`*.purrbackup`、`purrtypos.db` 及 WAL/SHM | 忽略 | 本机凭据、业务数据和备份；`.env.example` 允许提交 |
 

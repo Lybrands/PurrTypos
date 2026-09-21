@@ -10,7 +10,15 @@ import { PurrButton, PurrTooltip } from '@/purr-components'
 import type { Chapter, EntityId } from '../../types'
 import ConfirmModal from '../../components/ConfirmModal'
 import ExportModal from '../../components/ExportModal'
-import { useWorkspace } from '../WorkspaceContext'
+import {
+    useActiveChapterId,
+    useBookId,
+    useEnableVolume,
+    useSearchQuery,
+    useWritingChapters,
+    useWritingOutlineId,
+    useWorkspaceStore,
+  } from '../../stores/workspaceStore'
 import { createOutlineUtilityTab } from '../utilityPanelTypes'
 import ChapterSectionNavigation from './ChapterSectionNavigation'
 import {
@@ -45,17 +53,15 @@ export default function ChapterSection({
   onItemCreated,
   onWritingChapterDeleted,
 }: ChapterSectionProps) {
-  const {
-    writingChapters: chapters,
-    activeChapterId: chapterId,
-    writingOutlineId,
-    bookId,
-    enableVolume,
-    setActiveChapter: onChapterSelect,
-    setChaptersData: onChaptersChange,
-    openUtilityTab,
-    workspaceSearchQuery,
-  } = useWorkspace()
+  const chapters = useWritingChapters()
+  const chapterId = useActiveChapterId()
+  const writingOutlineId = useWritingOutlineId()
+  const bookId = useBookId()
+  const enableVolume = useEnableVolume()
+  const onChapterSelect = useWorkspaceStore((s) => s.setActiveChapter)
+  const onChaptersChange = useWorkspaceStore((s) => s.setChaptersData)
+  const openUtilityTab = useWorkspaceStore((s) => s.openUtilityTab)
+  const workspaceSearchQuery = useSearchQuery()
 
   const [historyCount, setHistoryCount] = React.useState(0)
   const [editingChapterId, setEditingChapterId] = React.useState<EntityId | null>(null)

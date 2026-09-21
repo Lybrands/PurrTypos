@@ -36,14 +36,6 @@ export default function SettingPanel({ bookId, openRequest }: SettingPanelProps)
     applyOpenRequest(openRequest)
   }, [applyOpenRequest, openRequest])
 
-  React.useEffect(() => {
-    const handler = (e: Event) => {
-      applyOpenRequest((e as CustomEvent<OpenSettingPanelDetail>).detail)
-    }
-    window.addEventListener('open-setting-panel', handler as EventListener)
-    return () => window.removeEventListener('open-setting-panel', handler as EventListener)
-  }, [applyOpenRequest])
-
   const tabItems = [
     {
       key: 'characters',

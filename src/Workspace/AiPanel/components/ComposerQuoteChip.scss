@@ -36,11 +36,9 @@
 }
 
 // hover 展开面板（渲染在 popover 容器里，脱离面板层级）
+// 整体高度由 PurrPopover 的 maxHeight 自适应（锚点侧剩余空间 + 内部滚动）
 .composer-quote-chip__preview {
   max-width: 360px;
-  // 整体限高 + 内部滚动：引用再多也不会撑出屏幕
-  max-height: min(320px, 50vh);
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;

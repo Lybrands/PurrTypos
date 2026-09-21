@@ -37,6 +37,12 @@ export interface PurrPopoverProps {
   disabled?: boolean
   /** 触发节点最终渲染为原生 button 时保持 true；仅 span 等节点设为 false。 */
   nativeButton?: boolean
+  /**
+   * 内容自适应限高：实际高度取 min(maxHeight, 锚点所在侧的视口剩余高度)，
+   * 超出部分内部滚动。剩余高度来自 Base UI 定位层的 `--available-height`
+   * （已含翻转后的最终朝向），浮层在视口边缘不会被裁切。
+   */
+  maxHeight?: number
   zIndex?: number
 }
 
@@ -59,11 +65,16 @@ export function PurrPopover({
   mouseLeaveDelay,
   disabled,
   nativeButton = true,
+  maxHeight,
   zIndex,
 }: PurrPopoverProps) {
   const position = placementMap[placement]
   const triggers = Array.isArray(trigger) ? trigger : [trigger]
   const openOnHover = triggers.includes('hover') || triggers.includes('focus')
+  // 48px = 内边距 28 + 箭头 10 + 安全余量；--available-height 缺省时回退到 maxHeight 本身
+  const fitMaxHeight = maxHeight != null
+    ? `min(${maxHeight}px, calc(var(--available-height, ${maxHeight + 48}px) - 48px))`
+    : undefined
   return (
     <BasePopover.Root
       open={open}
@@ -106,7 +117,11 @@ export function PurrPopover({
               {title != null && <div className="purr-popover__title">{title}</div>}
               <div
                 className={['purr-popover__content', classNames?.body].filter(Boolean).join(' ')}
-                style={{ ...styles?.content, ...styles?.body }}
+                style={{
+                  ...styles?.content,
+                  ...styles?.body,
+                  ...(fitMaxHeight != null ? { maxHeight: fitMaxHeight, overflowY: 'auto' } : null),
+                }}
               >
                 {content}
               </div>

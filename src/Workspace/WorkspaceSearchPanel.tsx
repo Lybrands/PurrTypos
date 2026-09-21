@@ -1,7 +1,8 @@
 import React from 'react'
 import { CloseIcon, ChevronDownIcon, SearchIcon, ChevronUpIcon } from '@/purr-components'
 import { PurrButton, PurrInput, PurrTooltip, type PurrInputRef } from '@/purr-components'
-import { useWorkspace } from './WorkspaceContext'
+import { useWorkspaceSearch } from './hooks/useWorkspaceSearch'
+import { useSearchActiveIndex } from '../stores/workspaceStore'
 import './workspaceSearch.scss'
 
 /** 占位符提示：Mac/iOS 为 ⌘F，Windows/Linux 为 Ctrl+F */
@@ -29,12 +30,12 @@ export default function WorkspaceSearchPanel({ fixed = true, className }: Worksp
   const {
     workspaceSearchQuery,
     setWorkspaceSearchQuery,
-    workspaceSearchActiveIndex,
     goToNextWorkspaceSearch,
     goToPrevWorkspaceSearch,
     workspaceSearchMatchTotal,
-  } = useWorkspace()
+  } = useWorkspaceSearch()
 
+  const workspaceSearchActiveIndex = useSearchActiveIndex()
   const [open, setOpen] = React.useState(false)
   const inputRef = React.useRef<PurrInputRef>(null)
   const findShortcutLabel = React.useMemo(() => getFindShortcutLabel(), [])

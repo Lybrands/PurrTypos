@@ -1,3 +1,4 @@
+import { createStore } from 'zustand/vanilla'
 import type { AgentConversationMessage } from '../../agent-runtime/contracts.ts'
 import type { SettingDiffCardState } from '../../types.ts'
 
@@ -99,27 +100,29 @@ export interface BookAssistantAttachmentOwner {
 export function createBookAssistantAttachmentManager(
   ownerKey: string,
 ): BookAssistantAttachmentManager {
-  let attachmentStore: BookAssistantAttachmentStore = {}
-  let attachmentVersion = 0
-  const attachmentListeners = new Set<() => void>()
+  // zustand vanilla 承载数据与订阅；对外 API（快照/版本/订阅）保持不变
+  const store = createStore<{
+    attachments: BookAssistantAttachmentStore
+    version: number
+  }>(() => ({ attachments: {}, version: 0 }))
   const owners = new Map<string, BookAssistantAttachmentOwner>()
   const evictedSessions = new Set<number>()
 
+  const readStore = (): BookAssistantAttachmentStore =>
+    store.getState().attachments
+
   const replace = (next: BookAssistantAttachmentStore): boolean => {
-    if (next === attachmentStore) return false
-    attachmentStore = next
-    attachmentVersion += 1
-    attachmentListeners.forEach((listener) => listener())
+    if (next === readStore()) return false
+    store.setState((state) => ({ attachments: next, version: state.version + 1 }))
     return true
   }
 
   return {
     ownerKey,
-    getSnapshot: () => attachmentStore,
-    getVersion: () => attachmentVersion,
+    getSnapshot: readStore,
+    getVersion: () => store.getState().version,
     subscribe(listener) {
-      attachmentListeners.add(listener)
-      return () => attachmentListeners.delete(listener)
+      return store.subscribe(listener)
     },
     add(message, card, owner) {
       if (owner && evictedSessions.has(owner.sessionId)) return false
@@ -128,7 +131,7 @@ export function createBookAssistantAttachmentManager(
       if (owner) owners.set(card.proposalId, { ...owner, message })
       return replace(keys.reduce(
         (store, key) => reduceBookAssistantAttachment(store, key, card),
-        attachmentStore,
+        readStore(),
       ))
     },
     associate(source, target) {
@@ -138,7 +141,7 @@ export function createBookAssistantAttachmentManager(
       ])]
       const cardsByProposal = new Map<string, SettingDiffCardState>()
       for (const key of keys) {
-        for (const card of attachmentStore[key] ?? []) {
+        for (const card of readStore()[key] ?? []) {
           cardsByProposal.set(card.proposalId, card)
         }
       }
@@ -149,12 +152,12 @@ export function createBookAssistantAttachmentManager(
       }
       const cards = [...cardsByProposal.values()]
       return replace(Object.fromEntries([
-        ...Object.entries(attachmentStore),
+        ...Object.entries(readStore()),
         ...keys.map((key) => [key, cards] as const),
       ]))
     },
     resolve(detail) {
-      return replace(resolveBookAssistantAttachments(attachmentStore, detail))
+      return replace(resolveBookAssistantAttachments(readStore(), detail))
     },
     evictSession(sessionId) {
       evictedSessions.add(sessionId)
@@ -166,7 +169,7 @@ export function createBookAssistantAttachmentManager(
       if (proposalIds.size === 0) return false
       proposalIds.forEach((proposalId) => owners.delete(proposalId))
       return replace(Object.fromEntries(
-        Object.entries(attachmentStore).flatMap(([key, cards]) => {
+        Object.entries(readStore()).flatMap(([key, cards]) => {
           const retained = cards.filter(
             (card) => !proposalIds.has(card.proposalId),
           )
@@ -177,13 +180,13 @@ export function createBookAssistantAttachmentManager(
     ownerForProposal: (proposalId) => owners.get(proposalId),
     productProjection(message) {
       const cards = getBookAssistantAttachmentsForMessage(
-        attachmentStore,
+        readStore(),
         message,
       )
       if (cards.length === 0) return undefined
       const proposalIds = new Set(cards.map((card) => card.proposalId))
       const aliases: Record<string, Record<string, unknown[]>> = {}
-      for (const [key, storedCards] of Object.entries(attachmentStore)) {
+      for (const [key, storedCards] of Object.entries(readStore())) {
         for (const card of storedCards) {
           if (!proposalIds.has(card.proposalId)) continue
           const alias = aliases[card.proposalId] ?? {

@@ -1,4 +1,6 @@
 import { services } from '@/services'
+import { requestGlobalChatPrefill } from '../../stores/chatPrefillStore'
+import { useSettingsRevision } from '../../stores/settingsInvalidationStore'
 import React from 'react'
 import { useMaterialRefresh } from './useMaterialRefresh'
 import { AiChatIcon, EditIcon, HistoryIcon, ImportIcon, PaperclipIcon, PlusIcon } from '@/purr-components'
@@ -7,7 +9,7 @@ import KnowledgeMarkdownEditor, {
   appendImportedMarkdown,
 } from '@/components/KnowledgeMarkdownEditor'
 import MarkdownWithSearch from '../search/MarkdownWithSearch'
-import { useWorkspace } from '../WorkspaceContext'
+import { notifyWorkspaceSearchContentChanged, useSearchQuery } from '../../stores/workspaceStore'
 import type { EntityId, StoryBackgroundAttachment } from '../../types'
 import { useAppFeedback } from '../../hooks/useAppFeedback'
 import SettingDiffView, { useActiveSettingDiffSession } from '../settingDiff/SettingDiffView'
@@ -21,7 +23,7 @@ interface StoryBackgroundTabProps {
 export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) {
   const { message } = useAppFeedback()
   const [loadError, setLoadError] = React.useState('')
-  const { workspaceSearchQuery, notifyWorkspaceSearchContentChanged } = useWorkspace()
+  const workspaceSearchQuery = useSearchQuery()
   const [baseRevision, setBaseRevision] = React.useState<string>()
   const [inheritedBaseline, setInheritedBaseline] = React.useState('')
   const [content, setContent] = React.useState('')
@@ -64,14 +66,11 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
   React.useEffect(() => {
     editingRef.current = editing
   }, [editing])
+  const backgroundRevision = useSettingsRevision('background')
   React.useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ kind?: string }>).detail
-      if (detail?.kind === 'background' && !editingRef.current) loadContent()
-    }
-    window.addEventListener('setting-updated', handler)
-    return () => window.removeEventListener('setting-updated', handler)
-  }, [loadContent])
+    if (backgroundRevision === 0) return
+    if (!editingRef.current) loadContent()
+  }, [backgroundRevision, loadContent])
 
   React.useEffect(() => {
     notifyWorkspaceSearchContentChanged()
@@ -315,8 +314,7 @@ export default function StoryBackgroundTab({ bookId }: StoryBackgroundTabProps) 
                 size="small"
                 icon={<AiChatIcon />}
                 onClick={() => {
-                  window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'ai', open: true } }))
-                  window.dispatchEvent(new CustomEvent('open-setting-chat', { detail: { prefill: '关于小说背景设定：' } }))
+                                requestGlobalChatPrefill('关于小说背景设定：')
                 }}
               />
             </PurrTooltip>

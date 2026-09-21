@@ -66,6 +66,8 @@ interface InlineEditPopoverProps {
   onClose: () => void
   /** 「存为批注」：把回答预填进批注弹层（由外层接管锚点与保存） */
   onSaveAnnotation?: (answer: string) => void
+  /** 结果落盘成功后通知外层（标记自动保存 source） */
+  onApplied?: (source: string) => void
   // 上下文：关联章节/大纲
   associatedChapterIds: EntityId[]
   setAssociatedChapterIds: (ids: EntityId[]) => void
@@ -97,6 +99,7 @@ export default function InlineEditPopover({
   getCurrentChapterText,
   onClose,
   onSaveAnnotation,
+  onApplied,
   associatedChapterIds,
   setAssociatedChapterIds,
   associatedOutlineIds,
@@ -327,9 +330,7 @@ export default function InlineEditPopover({
       setError('原文已变化，无法定位原选区；结果已保留，可手动复制。')
       return false
     }
-    window.dispatchEvent(new CustomEvent('inline-edit-accepted', {
-      detail: { chapterId, source },
-    }))
+    onApplied?.(source)
     onClose()
     return true
   }

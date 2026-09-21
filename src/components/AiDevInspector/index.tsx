@@ -1,3 +1,5 @@
+import { KNOWLEDGE_TAB } from '../../Workspace/utilityPanelTypes'
+import { useWorkspaceStore } from '../../stores/workspaceStore'
 import React from "react";
 import { PurrButton } from "@/purr-components";
 import type { AiTaskPlan } from "../../agent-runtime";
@@ -793,7 +795,7 @@ export function ModelInputDiagnosticsCard({
             {call.novelKnowledge?.length ? <details><summary>创作资料输入凭据 · {call.novelKnowledge.length} 个片段</summary>{call.novelKnowledge.map((receipt) => <div key={receipt.evidenceId}>
               <strong>{receipt.metadata.title}</strong> · 修订 {receipt.metadata.revision.slice(0, 12)} · {receipt.metadata.reasons.join(' / ')}
               <DiagnosticText label="适用章节与知情范围" value={receipt.metadata.scope} />
-              <PurrButton onClick={() => window.dispatchEvent(new CustomEvent('workspace-open-panel', { detail: { panel: 'knowledge' } }))}>查看资料来源</PurrButton>
+              <PurrButton onClick={() => useWorkspaceStore.getState().openUtilityTab(KNOWLEDGE_TAB)}>查看资料来源</PurrButton>
             </div>)}</details> : null}
             {call.sdkRequest ? (
               <DiagnosticText label="SDK 参数核验（已脱敏）" value={call.sdkRequest} />

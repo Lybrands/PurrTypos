@@ -8,6 +8,8 @@ import { createServer } from 'vite'
 let vite
 let SettingDiffProvider
 let useSettingDiff
+let bridge = {}
+let __resetAiProposalBridgeForTests = () => {}
 
 before(async () => {
   vite = await createServer({
@@ -17,6 +19,9 @@ before(async () => {
   })
   ;({ SettingDiffProvider, useSettingDiff } = await vite.ssrLoadModule(
     '/src/Workspace/settingDiff/SettingDiffContext.tsx',
+  ))
+  ;({ __resetAiProposalBridgeForTests, ...bridge } = await vite.ssrLoadModule(
+    '/src/stores/aiProposalBridge.ts',
   ))
 })
 
@@ -72,16 +77,12 @@ test('mounted provider rejects late A proposals in B and never revives resolved 
     })
 
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent('ai-propose-setting-diff', {
-        detail: proposal('proposal-a', 'book-a'),
-      }))
+      bridge.proposeSettingDiff(proposal('proposal-a', 'book-a'))
     })
     assert.deepEqual(Object.keys(state.sessions), [])
 
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent('ai-propose-setting-diff', {
-        detail: proposal('proposal-b', 'book-b'),
-      }))
+      bridge.proposeSettingDiff(proposal('proposal-b', 'book-b'))
     })
     assert.equal(state.sessions['background:book-b'].proposalId, 'proposal-b')
 
@@ -95,13 +96,8 @@ test('mounted provider rejects late A proposals in B and never revives resolved 
       rejectedSegments: 0,
     }
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent(
-        'setting-diff-resolution-hydrated',
-        { detail: resolution },
-      ))
-      window.dispatchEvent(new window.CustomEvent('ai-propose-setting-diff', {
-        detail: proposal('proposal-b', 'book-b'),
-      }))
+      bridge.hydrateSettingDiffResolution(resolution)
+      bridge.proposeSettingDiff(proposal('proposal-b', 'book-b'))
     })
     assert.deepEqual(Object.keys(state.sessions), [])
     assert.equal(state.getResolvedCard('proposal-b').status, 'rejected')
@@ -133,51 +129,39 @@ test('mounted session eviction removes A and activates valid queued B', async ()
     return React.createElement('div')
   }
   const root = createRoot(window.document.getElementById('root'))
+  __resetAiProposalBridgeForTests()
   try {
     await act(async () => root.render(React.createElement(
       SettingDiffProvider,
       { bookId: 'book-b' },
       React.createElement(Probe),
     )))
-    await act(async () => window.dispatchEvent(new window.CustomEvent(
-      'setting-diff-resolution-hydrated',
-      {
-        detail: {
-          proposalId: 'proposal-resolved-a',
-          sessionKey: 'background:book-b',
-          kind: 'background',
-          title: '故事背景',
-          status: 'rejected',
-          acceptedSegments: 0,
-          rejectedSegments: 1,
-          ownerSessionId: 1,
-        },
-      },
-    )))
+    await act(async () => bridge.hydrateSettingDiffResolution({
+      proposalId: 'proposal-resolved-a',
+      sessionKey: 'background:book-b',
+      kind: 'background',
+      title: '故事背景',
+      status: 'rejected',
+      acceptedSegments: 0,
+      rejectedSegments: 1,
+      ownerSessionId: 1,
+    }))
     assert.equal(state.getResolvedCard('proposal-resolved-a').status, 'rejected')
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent('ai-propose-setting-diff', {
-        detail: ownedProposal('proposal-a', 1),
-      }))
-      window.dispatchEvent(new window.CustomEvent('ai-propose-setting-diff', {
-        detail: ownedProposal('proposal-b', 2),
-      }))
+      bridge.proposeSettingDiff(ownedProposal('proposal-a', 1))
+      bridge.proposeSettingDiff(ownedProposal('proposal-b', 2))
     })
     assert.equal(state.sessions['background:book-b'].proposalId, 'proposal-a')
 
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent('setting-diff-owner-evicted', {
-        detail: { bookId: 'book-b', sessionId: 1 },
-      }))
+      bridge.evictSettingDiffOwner('book-b', 1)
       await Promise.resolve()
     })
     assert.equal(state.sessions['background:book-b'].proposalId, 'proposal-b')
     assert.equal(state.getResolvedCard('proposal-resolved-a'), undefined)
 
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent('ai-propose-setting-diff', {
-        detail: ownedProposal('proposal-a-late', 1),
-      }))
+      bridge.proposeSettingDiff(ownedProposal('proposal-a-late', 1))
     })
     assert.equal(state.sessions['background:book-b'].proposalId, 'proposal-b')
   } finally {

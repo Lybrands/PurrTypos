@@ -18,6 +18,8 @@ import { hasRenderableErrorMessage } from '../AssistantOutput/errorNoticeMessage
 import { buildAssistantCopyView } from '../assistantCopy'
 import AgentMessageCopyButton from '../MessageCopyButton'
 import AgentMessageEditButton from '../MessageEditButton'
+import AgentMessageQuoteButton from '../MessageQuoteButton'
+import { splitUserQuote } from '../userQuote'
 import AgentMessageEditor from '../MessageEditor'
 import AgentMessageFooter from '../MessageFooter'
 import AgentUserMessageBody from '../UserMessageBody'
@@ -354,6 +356,8 @@ export default function ConversationViewport({
       const startEditing = canEdit
         ? () => setEditingTarget(createViewportEditTarget(sessionIdentity, index, message))
         : undefined
+      const quoteLines = splitUserQuote(message.content).quoteLines
+      const hasQuote = quoteLines.length > 0
       return (
         <article
           className={`agent-conversation__message is-user${editing ? ' is-editing' : ''}`}
@@ -372,8 +376,9 @@ export default function ConversationViewport({
               <AgentMessageFooter
                 side="user"
                 sentAt={message.sentAt}
-                actions={canCopy || startEditing ? (
+                actions={canCopy || startEditing || hasQuote ? (
                   <>
+                    {hasQuote ? <AgentMessageQuoteButton quoteLines={quoteLines} /> : null}
                     {canCopy ? <AgentMessageCopyButton content={message.content} /> : null}
                     {startEditing ? <AgentMessageEditButton onClick={startEditing} /> : null}
                   </>

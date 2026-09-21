@@ -8,6 +8,7 @@ import React from 'react'
 import { CheckIcon, CloseIcon, PurrButton, usePurrToast } from '@/purr-components'
 import { services } from '@/services'
 import type { EntityId } from '../../types'
+import { bumpAnnotationsRevision } from '../../stores/annotationsStore'
 import type { InlineCapture } from './InlineEditPopover'
 
 export interface AnnotationDraft {
@@ -85,9 +86,7 @@ export default function AnnotationComposerPopover({
       setError(res.error || '批注保存失败')
       return
     }
-    window.dispatchEvent(new CustomEvent('chapter-annotations-changed', {
-      detail: { bookId, chapterId },
-    }))
+    bumpAnnotationsRevision(bookId, chapterId)
     appMessage.success('批注已保存')
     onClose()
   }

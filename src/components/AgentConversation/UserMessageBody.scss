@@ -11,14 +11,3 @@
   line-height: 1.65;
   white-space: pre-wrap;
 }
-
-.agent-user-message__quote {
-  margin: 0 0 6px;
-  padding: 6px 10px;
-  border-left: 3px solid var(--primary, var(--border-base));
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  white-space: pre-wrap;
-}

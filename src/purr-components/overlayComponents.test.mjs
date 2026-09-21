@@ -76,6 +76,36 @@ test('anchored overlays apply explicit z-index to their positioners', async () =
   }
 })
 
+test('popover maxHeight clamps content to the anchor-side available height', async () => {
+  const { PurrPopover } = await vite.ssrLoadModule(
+    '/src/purr-components/PurrPopover/PurrPopover.tsx',
+  )
+  const makeContentDiv = (props) => {
+    const popup = portalPositioner(PurrPopover(props)).props.children
+    const inner = React.Children.toArray(popup.props.children)
+      .find((child) => String(child.props.className).includes('purr-popover__inner'))
+    return React.Children.toArray(inner.props.children).at(-1)
+  }
+
+  const clamped = makeContentDiv({
+    children: React.createElement('button', { type: 'button' }, '打开'),
+    content: '内容',
+    maxHeight: 220,
+  })
+  assert.equal(
+    clamped.props.style.maxHeight,
+    'min(220px, calc(var(--available-height, 268px) - 48px))',
+  )
+  assert.equal(clamped.props.style.overflowY, 'auto')
+
+  const plain = makeContentDiv({
+    children: React.createElement('button', { type: 'button' }, '打开'),
+    content: '内容',
+  })
+  assert.equal(plain.props.style?.maxHeight, undefined)
+  assert.equal(plain.props.style?.overflowY, undefined)
+})
+
 test('tooltip content does not create the global stacking layer', async () => {
   const { PurrTooltip } = await vite.ssrLoadModule(
     '/src/purr-components/PurrTooltip/PurrTooltip.tsx',

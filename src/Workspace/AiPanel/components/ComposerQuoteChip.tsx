@@ -37,6 +37,7 @@ export default function ComposerQuoteChip({
         mouseEnterDelay={0.12}
         mouseLeaveDelay={0.2}
         nativeButton={false}
+        maxHeight={320}
         content={
           <div className="composer-quote-chip__preview">
             {quotes.map((q, index) => (

@@ -39,25 +39,26 @@ export default function DirectorNotebook({
         <span className="director-notebook-title">章节列表</span>
         <div className="director-notebook-header-right">
           {dockCollapsed && onExpandDock ? (
-            <PurrTooltip title="固定展开章节边栏">
+            <PurrTooltip title="展开">
               <PurrButton
                 type="text"
                 size="small"
                 icon={<PanelToggleIcon side="left" state="collapsed" />}
                 onClick={onExpandDock}
                 className="director-notebook-fullscreen-btn"
+                aria-label="展开章节列表"
               />
             </PurrTooltip>
           ) : null}
           {!dockCollapsed && onCollapseDock ? (
-            <PurrTooltip title="收起章节边栏">
+            <PurrTooltip title="收起">
               <PurrButton
                 type="text"
                 size="small"
                 icon={<PanelToggleIcon side="left" state="expanded" />}
                 onClick={onCollapseDock}
                 className="director-notebook-fullscreen-btn"
-                aria-label="收起章节边栏"
+                aria-label="收起章节列表"
               />
             </PurrTooltip>
           ) : null}

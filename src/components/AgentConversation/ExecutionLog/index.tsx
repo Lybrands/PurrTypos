@@ -1,5 +1,5 @@
 import React from "react";
-import { AlertCircleIcon, ChevronRightIcon } from '@/purr-components';
+import { ChevronRightIcon } from '@/purr-components';
 import {
   applyExecutionLogAutoOpen,
   getInitialExecutionLogOpenState,
@@ -128,7 +128,6 @@ export default function ExecutionLog({
           aria-expanded={openState.open}
           aria-controls={contentId}
         >
-          {hasError ? <AlertCircleIcon className="work-log__error-icon" /> : null}
           <span>{title}</span>
           {durationText ? (
             <span className="work-log__duration">· {durationText}</span>
@@ -169,7 +168,6 @@ export interface ExecutionLogStepGroupProps {
   activeStartedAt?: number;
   active?: boolean;
   activeLabel?: string;
-  hasError?: boolean;
   children: React.ReactNode;
 }
 
@@ -180,7 +178,6 @@ export function ExecutionLogStepGroup({
   activeStartedAt,
   active = false,
   activeLabel,
-  hasError = false,
   children,
 }: ExecutionLogStepGroupProps) {
   const [open, setOpen] = React.useState(
@@ -217,18 +214,15 @@ export function ExecutionLogStepGroup({
         disabled={active}
       >
         <ChevronRightIcon className="work-log-step-group__chevron" />
-        {hasError ? (
-          <AlertCircleIcon className="work-log-step-group__error-icon" />
-        ) : null}
         <span>
           {active
             ? activeLabel
               ? `正在执行 ${activeLabel}`
               : "正在执行"
-            : "执行了"}
+            : "调用了"}
         </span>
         {!active ? (
-          <span className="work-log-step-group__count">{stepCount} 个步骤</span>
+          <span className="work-log-step-group__count">{stepCount} 个工具</span>
         ) : null}
         {totalDurationMs > 0 ? (
           <span className="work-log-step-group__duration">

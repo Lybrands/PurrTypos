@@ -2,6 +2,14 @@ import type {
   AgentChunkHost,
   AiStreamChunk,
 } from '../../../agent-runtime/chunkHandlers/types'
+import {
+  notifyChapterContentUpdated,
+  reloadWritingChapters,
+  setActiveChapter,
+  useWorkspaceStore,
+} from '../../../stores/workspaceStore'
+import { notifySettingsUpdated } from '../../../stores/settingsInvalidationStore'
+import { proposeChapterDiff } from '../../../stores/aiProposalBridge'
 
 /**
  * AI 工具 editChapterContent 不再直接落库，改为推送 diff 提议给前端，
@@ -14,16 +22,12 @@ export function handleProposedChapterDiff(
   if (!chunk.proposedChapterDiff || !host.isVisible()) return;
   const p = chunk.proposedChapterDiff;
   if (p.chapterId == null || typeof p.proposedText !== "string") return;
-  window.dispatchEvent(
-    new CustomEvent("ai-propose-chapter-diff", {
-      detail: {
-        chapterId: p.chapterId,
-        beforeText: typeof p.beforeText === "string" ? p.beforeText : "",
-        proposedText: p.proposedText,
-        source: p.source || "ai_tool_edit",
-      },
-    }),
-  );
+  proposeChapterDiff({
+    chapterId: p.chapterId,
+    beforeText: typeof p.beforeText === "string" ? p.beforeText : "",
+    proposedText: p.proposedText,
+    source: p.source || "ai_tool_edit",
+  });
 }
 
 /**
@@ -35,25 +39,29 @@ export function handleSettingUpdated(
   host: AgentChunkHost,
 ): void {
   if (!chunk.settingUpdated || !host.isVisible()) return;
-  window.dispatchEvent(
-    new CustomEvent("setting-updated", { detail: chunk.settingUpdated }),
-  );
+  const detail = chunk.settingUpdated as {
+    kind?: string;
+    action?: string;
+    id?: string | number;
+    name?: string;
+  };
+  const kind =
+    detail.kind === "character" || detail.kind === "entity" || detail.kind === "background"
+      ? detail.kind
+      : undefined;
+  if (kind) notifySettingsUpdated(kind, { id: detail.id, name: detail.name });
 }
 
+/** AI 创建章节：选中新章节并刷新目录（原 Workspace 事件监听逻辑并入） */
 export function handleChapterCreated(
   chunk: AiStreamChunk,
   host: AgentChunkHost,
 ): void {
   if (chunk.chapterCreated == null || !host.isVisible()) return;
-  window.dispatchEvent(
-    new CustomEvent("chapter-created", {
-      detail: {
-        chapterId: chunk.chapterCreated.chapterId,
-        title: chunk.chapterCreated.title,
-        parentId: chunk.chapterCreated.parentId ?? null,
-      },
-    }),
-  );
+  const { chapterId, title } = chunk.chapterCreated;
+  if (chapterId == null || !title) return;
+  setActiveChapter(chapterId, title);
+  void reloadWritingChapters(useWorkspaceStore.getState().bookId);
 }
 
 /**
@@ -65,14 +73,8 @@ export function handleChapterContentUpdated(
   host: AgentChunkHost,
 ): void {
   if (!chunk.chapterContentUpdated || !host.isVisible()) return;
-  window.dispatchEvent(
-    new CustomEvent("chapter-content-updated", {
-      detail: {
-        chapterId: chunk.chapterContentUpdated.chapterId,
-        firstContent: chunk.chapterContentUpdated.firstContent === true,
-      },
-    }),
-  );
+  if (chunk.chapterContentUpdated.chapterId == null) return;
+  notifyChapterContentUpdated(chunk.chapterContentUpdated.chapterId);
 }
 
 /**
@@ -87,15 +89,12 @@ export function handleChaptersCreated(
   const chapters = Array.isArray(chunk.chaptersCreated.chapters)
     ? chunk.chaptersCreated.chapters
     : [];
+  // 逆序选章，使最终选中本批第一章；目录最后统一刷新一次
   [...chapters].reverse().forEach((chapter) => {
     if (chapter?.chapterId == null || !chapter.title) return;
-    window.dispatchEvent(
-      new CustomEvent("chapter-created", {
-        detail: {
-          chapterId: chapter.chapterId,
-          title: chapter.title,
-        },
-      }),
-    );
+    setActiveChapter(chapter.chapterId, chapter.title);
   });
+  if (chapters.length > 0) {
+    void reloadWritingChapters(useWorkspaceStore.getState().bookId);
+  }
 }

@@ -2,7 +2,7 @@ import React from 'react'
 import { PurrButton, PurrCollapse, PurrInput, PurrModal, PurrSelect, PurrSpin, PurrTag } from '@/purr-components'
 import type { EntityId } from '../../types'
 import { novelKnowledge, type KnowledgeDocument, type KnowledgeLocator, type KnowledgePreview, type KnowledgeScope, type KnowledgeSearch, type KnowledgeSource, type KnowledgeStatus, type KnowledgeUsage } from '../../services/novelKnowledge'
-import WorkspaceContext from '../WorkspaceContext'
+import { useWritingChapters } from '../../stores/workspaceStore'
 import './index.scss'
 import SharedMaterials from './SharedMaterials'
 import Markdown from '../../components/Markdown'
@@ -19,7 +19,7 @@ const labels: Record<string, string> = {
 const label = (value: string) => labels[value] || value
 
 export default function KnowledgePanel({ bookId }: { bookId: EntityId | null }) {
-  const workspace = React.useContext(WorkspaceContext)
+  const workspace = { writingChapters: useWritingChapters() }
   const book = String(bookId ?? '')
   const [status, setStatus] = React.useState<KnowledgeStatus | null>(null)
   const [documents, setDocuments] = React.useState<KnowledgeDocument[]>([])

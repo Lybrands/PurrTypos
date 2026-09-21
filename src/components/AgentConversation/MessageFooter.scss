@@ -37,6 +37,12 @@
   display: flex;
 }
 
+// 操作行里的浮层（如「查看引用」）打开期间保持按钮可见，
+// 避免触发器随 hover 退出折叠成 0×0 导致浮层失去锚点。
+.agent-message-footer__actions:has([data-popup-open]) {
+  display: flex;
+}
+
 .agent-conversation__message:hover .agent-message-footer__time,
 .agent-conversation__message:focus-within .agent-message-footer__time {
   display: inline;

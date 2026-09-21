@@ -1,4 +1,5 @@
 import React from 'react'
+import { runEditorCommand } from '../../stores/editorCommandStore'
 
 /**
  * 全局快捷键体系：
@@ -44,7 +45,7 @@ export function useWorkspaceShortcuts({
       const key = e.key
       if (key === 'H' || key === 'h') {
         e.preventDefault()
-        window.dispatchEvent(new CustomEvent('editor-open-diff-history'))
+        runEditorCommand('openDiffHistory')
         return
       }
     }

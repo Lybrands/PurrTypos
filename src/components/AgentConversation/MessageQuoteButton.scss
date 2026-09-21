@@ -1,0 +1,9 @@
+// 「查看引用」浮层内容：限宽；高度由 PurrPopover 的 maxHeight 自适应（剩余空间 + 内部滚动）
+.agent-message-quote-popover {
+  max-width: min(360px, 78vw);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+}
