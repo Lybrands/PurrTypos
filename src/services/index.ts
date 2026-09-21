@@ -212,6 +212,12 @@ export const services = {
     getMemoryLinks: backendApi.getMemoryLinks,
     buildMemoryContext: backendApi.buildMemoryContext,
   },
+  annotations: {
+    addAnnotation: backendApi.addAnnotation,
+    updateAnnotation: backendApi.updateAnnotation,
+    deleteAnnotation: backendApi.deleteAnnotation,
+    getAnnotationsByBook: backendApi.getAnnotationsByBook,
+  },
   ai: {
     generateSessionTitle: backendApi.generateSessionTitle,
     getAgentRunSnapshot: backendApi.getAgentRunSnapshot,

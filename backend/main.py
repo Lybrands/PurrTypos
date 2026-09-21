@@ -305,6 +305,7 @@ async def lifespan(application: FastAPI):
 
         from routers import (
             ai,
+            annotations,
             articles,
             books,
             chapter_diff,
@@ -332,6 +333,7 @@ async def lifespan(application: FastAPI):
         )
 
         application.include_router(books.router, prefix="/api")
+        application.include_router(annotations.router, prefix="/api")
         application.include_router(outlines.router, prefix="/api")
         application.include_router(chapters.router, prefix="/api")
         application.include_router(articles.router, prefix="/api")

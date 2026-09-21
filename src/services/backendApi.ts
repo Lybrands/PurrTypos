@@ -156,7 +156,6 @@ function aiErrorReportSource(streamId: string): string {
   if (streamId.startsWith('chat-')) return 'workspace_chat'
   if (streamId.startsWith('inline-edit-')) return 'inline_edit'
   if (streamId.startsWith('editor-float-')) return 'editor_rewrite'
-  if (streamId.startsWith('ghost-completion-')) return 'ghost_completion'
   return 'ai_chat_stream'
 }
 
@@ -645,6 +644,21 @@ export const backendApi: BackendApi = {
   ),
   getForeshadowingByBook: (data) =>
     apiGet(`/foreshadowing/by-book?bookId=${data.bookId}${data.status ? `&status=${data.status}` : ''}`),
+
+  addAnnotation: (data) => apiPost('/annotations', data),
+  updateAnnotation: (data) => apiPut(
+    `/annotations/${data.id}`,
+    {
+      bookId: data.bookId,
+      ...('note' in data.data ? { note: data.data.note } : {}),
+      ...('status' in data.data ? { status: data.data.status } : {}),
+    },
+  ),
+  deleteAnnotation: (data) => apiDelete(
+    `/annotations/${data.id}?bookId=${encodeURIComponent(String(data.bookId))}`,
+  ),
+  getAnnotationsByBook: (data) =>
+    apiGet(`/annotations/by-book?bookId=${data.bookId}${data.chapterId ? `&chapterId=${data.chapterId}` : ''}`),
 
   createMemory: (data) => apiPost('/memories', data),
   updateMemory: ({ id, ...data }) => apiPut(`/memories/${id}`, data),

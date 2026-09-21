@@ -1,0 +1,125 @@
+// 批注：正文高亮层 + 详情/编辑弹层附加样式 + 列表抽屉
+
+// ── 编辑器头部批注计数 ────────────────────────────────────────────
+.editor-annotation-count {
+  margin-left: 2px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+// ── 正文高亮（portal 进 .editor-lexical-wrap）──────────────────────
+.annotation-highlight-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1; // 字数标尺之下、正文之上可透出背景色；pointer-events 由块自身接管
+}
+
+.annotation-highlight {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 2px;
+  background: rgba(250, 204, 21, 0.28);
+  box-shadow: inset 0 -1px 0 rgba(250, 204, 21, 0.55);
+  transition: background 0.12s ease;
+
+  &:hover {
+    background: rgba(250, 204, 21, 0.42);
+  }
+
+  &.is-resolved {
+    background: rgba(148, 163, 184, 0.16);
+    box-shadow: none;
+  }
+}
+
+// ── 弹层附加（复用 inline-edit-popover 布局）──────────────────────
+.annotation-popover-input-wrap {
+  padding: 0 var(--spacing);
+}
+
+.annotation-source-tag {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.annotation-drifted-tip {
+  margin: 0 var(--spacing) var(--spacing-sm);
+  padding: 4px var(--spacing-sm);
+  border-radius: var(--radius-sm, 4px);
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--warning, #d97706);
+  font-size: var(--font-size-sm);
+}
+
+// ── 列表抽屉 ─────────────────────────────────────────────────────
+.annotation-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.annotation-drawer-group {
+  margin-top: var(--spacing-sm);
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.annotation-drawer-row {
+  display: block;
+  width: 100%;
+  height: auto;
+  text-align: left;
+  padding: var(--spacing-sm) var(--spacing);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  background: var(--bg-surface);
+
+  &:hover {
+    border-color: var(--primary, var(--border-base));
+  }
+
+  &.is-resolved {
+    opacity: 0.6;
+  }
+}
+
+.annotation-drawer-quote {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.annotation-drawer-note {
+  margin-top: 4px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 72px;
+  overflow: hidden;
+}
+
+.annotation-drawer-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+
+  .purr-tag {
+    font-size: 11px;
+    line-height: 1.4;
+    padding: 0 4px;
+  }
+}
+
+.annotation-drawer-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}

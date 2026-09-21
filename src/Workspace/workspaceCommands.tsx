@@ -5,6 +5,8 @@ import {
   DashboardIcon,
   FileTextIcon,
   HistoryIcon,
+  LibraryIcon,
+  ManuscriptIcon,
   SettingsIcon,
   StorySettingIcon,
 } from '@/purr-components'
@@ -12,6 +14,10 @@ import type { Chapter, EntityId } from '../types'
 import type { CommandItem } from './CommandPalette'
 
 export interface BuildPaletteCommandsDeps {
+  chapterSidebarOpen: boolean
+  editorPanelActive: boolean
+  onToggleChapterSidebar: () => void
+  onToggleEditorPanel: () => void
   settingPanelActive: boolean
   dashboardPanelActive: boolean
   onToggleSettingPanel: () => void
@@ -24,6 +30,10 @@ export interface BuildPaletteCommandsDeps {
 
 /** 命令面板命令集合（面板控制 / 编辑动作 / 章节导航） */
 export function buildPaletteCommands({
+  chapterSidebarOpen,
+  editorPanelActive,
+  onToggleChapterSidebar,
+  onToggleEditorPanel,
   settingPanelActive,
   dashboardPanelActive,
   onToggleSettingPanel,
@@ -34,6 +44,24 @@ export function buildPaletteCommands({
   onOpenSettings,
 }: BuildPaletteCommandsDeps): CommandItem[] {
   const base: CommandItem[] = [
+    {
+      id: 'panel:toggle-chapters',
+      label: chapterSidebarOpen ? '收起章节列表' : '展开章节列表',
+      hint: 'Ctrl+B',
+      icon: <LibraryIcon />,
+      category: '面板',
+      keywords: ['chapter', 'sidebar', 'chapters', '章节', '目录', '列表'],
+      run: onToggleChapterSidebar,
+    },
+    {
+      id: 'panel:toggle-editor',
+      label: editorPanelActive ? '收起正文面板' : '切回正文',
+      hint: 'Ctrl+E',
+      icon: <ManuscriptIcon />,
+      category: '面板',
+      keywords: ['editor', 'manuscript', '正文', '写作'],
+      run: onToggleEditorPanel,
+    },
     {
       id: 'panel:toggle-setting',
       label: settingPanelActive ? '收起小说设定' : '打开小说设定',

@@ -10,7 +10,7 @@ export interface FloatingState {
   width: number
 }
 
-const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_layout_v6'
+const WORKSPACE_PANEL_STORAGE_KEY = 'purrtypos_workspace_layout_v7'
 
 export interface PersistedPanelState {
   left: FloatingState
@@ -24,8 +24,8 @@ function defaultRightX(width: number): number {
 }
 
 const DEFAULT_STATE: PersistedPanelState = {
-  // 默认使用窄轨道；悬停即可临时查看，点击则固定展开。
-  left: { open: false, x: 0, y: 0, width: 300 },
+  // 章节列表默认展开；收起后侧边保留常显窄条入口（点击展开 / 悬停预览）。
+  left: { open: true, x: 0, y: 0, width: 300 },
   // AI 区域内部导航，只通过 AI 内部按钮收起/展开。
   conversation: { open: true, x: 0, y: 0, width: 220 },
   // 正文与所有辅助功能共享一个右侧多标签面板。

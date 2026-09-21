@@ -3,6 +3,8 @@ import React, { Suspense, lazy } from 'react'
 import {
   DashboardIcon,
   LibraryIcon,
+  ManuscriptIcon,
+  OutlineIcon,
   StoryMemoryIcon,
   StorySettingIcon,
 } from '@/purr-components'
@@ -129,7 +131,28 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
     () => setCommandPaletteOpen((open) => !open),
     [],
   )
-  useWorkspaceShortcuts({ toggleCommandPalette })
+
+  /** 章节栏开合切换（快捷键 / 命令面板共用） */
+  const toggleChapterSidebar = React.useCallback(() => {
+    updateFloating('left', { open: !panelState.left.open })
+  }, [panelState.left.open, updateFloating])
+
+  /** 正文面板切换：面板开且当前是正文标签则收起，否则展开并切回正文 */
+  const editorTabActive = panelState.right.open && activeRightTabKey === EDITOR_TAB_KEY
+  const toggleEditorPanel = React.useCallback(() => {
+    if (panelState.right.open && activeRightTabKey === EDITOR_TAB_KEY) {
+      collapseRightPanel()
+      return
+    }
+    setActiveRightTabKey(EDITOR_TAB_KEY)
+    updateFloating('right', { open: true })
+  }, [activeRightTabKey, collapseRightPanel, panelState.right.open, updateFloating])
+
+  useWorkspaceShortcuts({
+    toggleCommandPalette,
+    onToggleChapterSidebar: toggleChapterSidebar,
+    onToggleEditorPanel: toggleEditorPanel,
+  })
 
   React.useEffect(() => {
     const handler = (e: Event) => {
@@ -317,8 +340,23 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
 
   /**
    * 顶栏工具统一在右侧「正文 / 功能」组合面板中打开对应标签。
+   * 正文入口固定在最左：写作者随时可以一键回到正文（被功能标签挤走也不迷路）。
    */
   const headerPanelToggles = React.useMemo<HeaderPanelToggle[]>(() => [
+    {
+      key: 'editor',
+      icon: <ManuscriptIcon style={{ fontSize: 16 }} />,
+      tooltip: editorTabActive ? '收起正文面板' : '正文',
+      active: editorTabActive,
+      onClick: toggleEditorPanel,
+    },
+    {
+      key: 'chapters',
+      icon: <OutlineIcon style={{ fontSize: 16 }} />,
+      tooltip: panelState.left.open ? '收起章节列表' : '章节列表',
+      active: panelState.left.open,
+      onClick: toggleChapterSidebar,
+    },
     ...(creationMode === 'continuation' ? [{
       key: 'canon',
       icon: <StoryMemoryIcon style={{ fontSize: 16 }} />,
@@ -347,11 +385,15 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
       active: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key,
       onClick: () => toggleUtilityTab(DASHBOARD_TAB),
     },
-  ], [activeUtilityTabKey, creationMode, panelState.right.open, toggleUtilityTab])
+  ], [creationMode, editorTabActive, panelState.left.open, panelState.right.open, toggleChapterSidebar, toggleEditorPanel, toggleUtilityTab])
 
   const paletteCommands = React.useMemo<CommandItem[]>(
     () =>
       buildPaletteCommands({
+        chapterSidebarOpen: panelState.left.open,
+        editorPanelActive: editorTabActive,
+        onToggleChapterSidebar: toggleChapterSidebar,
+        onToggleEditorPanel: toggleEditorPanel,
         settingPanelActive: panelState.right.open && activeUtilityTabKey === SETTING_TAB.key,
         dashboardPanelActive: panelState.right.open && activeUtilityTabKey === DASHBOARD_TAB.key,
         onToggleSettingPanel: () => toggleUtilityTab(SETTING_TAB),
@@ -362,7 +404,11 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
         onOpenSettings,
       }),
     [
+      panelState.left.open,
       panelState.right.open,
+      editorTabActive,
+      toggleChapterSidebar,
+      toggleEditorPanel,
       activeUtilityTabKey,
       toggleUtilityTab,
       writingChapters,
@@ -433,7 +479,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             className="workspace-chapter-rail"
             style={{ '--chapter-hover-width': `${panelState.left.width}px` } as React.CSSProperties}
             tabIndex={0}
-            aria-label="悬停展开章节边栏"
+            aria-label="章节列表面板（悬停展开）"
           >
             <div className="workspace-chapter-hover-panel">
               <div className="panel panel-left workspace-search-include">
@@ -505,7 +551,7 @@ export default function Workspace({ bookId, bookTitle, enableVolume = false, cre
             className="workspace-editor-rail"
             style={{ '--editor-hover-width': `${panelState.right.width}px` } as React.CSSProperties}
             tabIndex={0}
-            aria-label="悬停展开正文与工作台功能面板"
+            aria-label="正文与工作台功能面板（悬停展开）"
           >
             <div className="workspace-editor-hover-panel">
               <WorkspaceUtilityPanel

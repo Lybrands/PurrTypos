@@ -187,6 +187,9 @@ async def delete_book(bookId: str):
         await db.execute("DELETE FROM ai_memories WHERE book_id = ?", [bookId])
         await db.execute("DELETE FROM ai_foreshadowing WHERE book_id = ?", [bookId])
         await db.execute(
+            "DELETE FROM chapter_annotations WHERE book_id = ?", [bookId]
+        )
+        await db.execute(
             "DELETE FROM story_memory_versions WHERE book_id = ?",
             [bookId],
         )

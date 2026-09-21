@@ -516,7 +516,6 @@ function sourceLabel(streamId: string): string {
   if (streamId.startsWith("screenplay-")) return "剧本 Agent 对话";
   if (streamId.startsWith("inline-edit-")) return "行内改写";
   if (streamId.startsWith("editor-float-")) return "编辑器改写";
-  if (streamId.startsWith("ghost-completion-")) return "幽灵补全";
   return "AI 对话";
 }
 
@@ -524,7 +523,6 @@ function initialTaskType(streamId: string, request: AiStreamRequest): string {
   if (streamId.startsWith("screenplay-")) return "剧本 Agent 任务";
   if (streamId.startsWith("inline-edit-")) return "行内改写";
   if (streamId.startsWith("editor-float-")) return "编辑器选区改写";
-  if (streamId.startsWith("ghost-completion-")) return "幽灵补全";
   return request.chatAgentMode === "agent" ? "写作 Agent 任务" : "普通对话";
 }
 

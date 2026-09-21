@@ -22,6 +22,8 @@ export interface AgentConversationExtensions {
   composerActionMenu?: AgentComposerActionMenu
   renderSessionContext?(): React.ReactNode
   renderComposerLeading?(): React.ReactNode
+  /** 输入框上方浮动区（任务进度条同一行）：如正文选区「引用」状态条 */
+  renderComposerTop?(): React.ReactNode
   composerCommands?: AgentComposerCommand[]
   renderAssistantAttachment?(
     message: AgentConversationMessage,

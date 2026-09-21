@@ -7,26 +7,32 @@ import {
   FullscreenIcon,
   UndoIcon, RedoIcon, AlignLeftIcon,
   CopyIcon, CopyTitleIcon,
+  HighlightIcon,
   HistoryIcon,
   PanelToggleIcon,
 } from '@/purr-components'
 import { PurrButton, PurrEmpty, PurrInput, PurrTooltip, usePurrToast, type PurrTextAreaRef } from '@/purr-components'
-import type { AiModelConfig, EntityId } from '../../types'
+import type { AiModelConfig, ChapterAnnotation, EntityId } from '../../types'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useWorkspace } from '../WorkspaceContext'
-import LexicalEditorComponent, { type LexicalEditorHandle } from './LexicalEditor'
+import LexicalEditorComponent, { editorStateToText, type LexicalEditorHandle } from './LexicalEditor'
 import { StopCircleIcon } from '@/purr-components'
 import { useDiff } from '../diff/DiffContext'
 import DiffOverlay from '../diff/DiffOverlay'
 import DiffHistoryDrawer from '../diff/DiffHistoryDrawer'
 import InlineEditLayer from './InlineEditLayer'
-import GhostCompletion, { type GhostTrigger } from './GhostCompletion'
+import AnnotationListDrawer from './AnnotationListDrawer'
+import AnnotationDetailPopover from './AnnotationDetailPopover'
+import { useChapterAnnotations } from './useChapterAnnotations'
+import { resolveAnnotationRange } from './annotationAnchor'
+import { $applyFlatSelection } from './selectionAnchor'
 import ModelPicker from '../../components/AgentConversation/Composer/ModelPicker'
 import { normalizeApiProvider } from '../../modelCatalog'
 import { buildStreamOptions } from '../../agent-runtime/streamOptions'
 import { createAiStreamId } from '../../utils/aiStream'
 import './index.scss'
+import './annotations.scss'
 
 const AUTOSAVE_DELAY = 800
 
@@ -111,23 +117,64 @@ export default function EditorPanel({
   /** diff 时禁用 Inline Edit */
   const inlineEditEnabled = !diffActive
 
-  /** Ghost text 续写：与 Inline Edit 同生命周期条件 */
-  const [ghostTrigger, setGhostTrigger] = React.useState<GhostTrigger | null>(null)
-  const ghostTokenRef = React.useRef(0)
-  const handleGhostIdle = React.useCallback(
-    (payload: { prefix: string; cursorRect: DOMRect }) => {
-      ghostTokenRef.current += 1
-      setGhostTrigger({ token: ghostTokenRef.current, ...payload })
+  // ── 批注：数据 + 高亮 + 列表/详情弹层 ──────────────────────────
+  const {
+    annotations: chapterAnnotations,
+    updateAnnotation,
+    deleteAnnotation,
+  } = useChapterAnnotations(bookId, chapterId)
+  const [annotationDrawerOpen, setAnnotationDrawerOpen] = React.useState(false)
+  const [drawerFlatText, setDrawerFlatText] = React.useState('')
+  const [annotationDetail, setAnnotationDetail] = React.useState<{
+    annotation: ChapterAnnotation
+    drifted: boolean
+  } | null>(null)
+  const openAnnotationCount = chapterAnnotations.filter((a) => a.status === 'open').length
+
+  const getEditorFlatText = React.useCallback(() => {
+    const ed = lexicalInstanceRef.current
+    return ed ? editorStateToText(ed.getEditorState()) : ''
+  }, [])
+
+  const locateAnnotation = React.useCallback(
+    (annotation: ChapterAnnotation) => {
+      const ed = lexicalInstanceRef.current
+      if (!ed) return
+      const range = resolveAnnotationRange(getEditorFlatText(), annotation)
+      if (!range) {
+        appMessage.info('原文已变更，无法定位该批注')
+        return
+      }
+      ed.update(() => {
+        $applyFlatSelection(range.start, range.end)
+      })
+      const rootEl = ed.getRootElement()
+      if (rootEl) rootEl.focus({ preventScroll: true })
+      queueMicrotask(() => {
+        requestAnimationFrame(() => {
+          const domSel = window.getSelection()
+          const node = domSel?.anchorNode
+          const el =
+            node?.nodeType === Node.TEXT_NODE
+              ? node.parentElement
+              : (node as HTMLElement | null)
+          el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        })
+      })
     },
-    []
+    [appMessage, getEditorFlatText],
   )
-  const handleGhostReset = React.useCallback(() => {
-    setGhostTrigger(null)
-  }, [])
-  const handleGhostAccept = React.useCallback((text: string) => {
-    if (text) lexicalEditorRef.current?.insertAtCursor(text)
-    setGhostTrigger(null)
-  }, [])
+
+  const handleHighlightClick = React.useCallback(
+    (annotation: ChapterAnnotation) => {
+      setAnnotationDetail({
+        annotation,
+        drifted: resolveAnnotationRange(getEditorFlatText(), annotation) == null,
+      })
+    },
+    [getEditorFlatText],
+  )
+
   const searchNotifyTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const [content, setContent] = React.useState('')
   const [saveStatus, setSaveStatus] = React.useState('已保存')
@@ -450,6 +497,26 @@ export default function EditorPanel({
               }}
             />
           </PurrTooltip>
+          <PurrTooltip title="本章批注">
+            <PurrButton
+              type="text"
+              size="small"
+              icon={<HighlightIcon />}
+              aria-label="本章批注"
+              onClick={() => {
+                if (chapterId == null) {
+                  appMessage.info('请先选择章节，再查看批注')
+                  return
+                }
+                setDrawerFlatText(getEditorFlatText())
+                setAnnotationDrawerOpen(true)
+              }}
+            >
+              {openAnnotationCount > 0 && (
+                <span className="editor-annotation-count">{openAnnotationCount}</span>
+              )}
+            </PurrButton>
+          </PurrTooltip>
         </div>
       </div>
 
@@ -459,6 +526,27 @@ export default function EditorPanel({
         open={diffHistoryOpen}
         onClose={() => setDiffHistoryOpen(false)}
       />
+
+      <AnnotationListDrawer
+        open={annotationDrawerOpen}
+        onClose={() => setAnnotationDrawerOpen(false)}
+        chapterId={chapterId ?? null}
+        chapterTitle={chapterTitle ?? ''}
+        annotations={chapterAnnotations}
+        flatText={drawerFlatText}
+        onOpenDetail={(annotation, drifted) => setAnnotationDetail({ annotation, drifted })}
+      />
+
+      {annotationDetail && (
+        <AnnotationDetailPopover
+          annotation={annotationDetail.annotation}
+          drifted={annotationDetail.drifted}
+          onClose={() => setAnnotationDetail(null)}
+          onUpdate={updateAnnotation}
+          onDelete={deleteAnnotation}
+          onLocate={locateAnnotation}
+        />
+      )}
 
       <div className="editor-main">
         {diffActive && chapterId != null && (
@@ -480,9 +568,8 @@ export default function EditorPanel({
               className="editor-lexical-wrap"
               onLexicalEditor={handleLexicalEditor}
               onSelectionChange={inlineEditEnabled ? handleSelectionChange : undefined}
-              ghostEnabled={inlineEditEnabled}
-              onGhostIdle={inlineEditEnabled ? handleGhostIdle : undefined}
-              onGhostReset={inlineEditEnabled ? handleGhostReset : undefined}
+              annotations={inlineEditEnabled && chapterAnnotations.length > 0 ? chapterAnnotations : undefined}
+              onAnnotationClick={handleHighlightClick}
             />
             <div className="editor-footer">
               <div className="editor-footer-left">
@@ -532,19 +619,6 @@ export default function EditorPanel({
           chapterTitle={chapterTitle ?? ''}
           bookTitle={_bookTitle}
           writingChapters={chapters.map((c) => ({ id: c.id, title: c.title }))}
-        />
-      )}
-
-      {inlineEditEnabled && (
-        <GhostCompletion
-          trigger={ghostTrigger}
-          model={modelConfigs.find((m) => m.id === aiFloat.selectedModelId) ?? modelConfigs[0]}
-          bookId={bookId}
-          chapterId={chapterId}
-          chapterTitle={chapterTitle ?? ''}
-          bookTitle={_bookTitle}
-          onAccept={handleGhostAccept}
-          onCancel={handleGhostReset}
         />
       )}
 

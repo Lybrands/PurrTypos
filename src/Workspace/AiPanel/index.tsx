@@ -14,6 +14,7 @@ import type {
 } from '../../types'
 import type { AgentConversationMessage } from '../../agent-runtime/contracts'
 import { getActiveTaskPlan } from '../../agent-runtime/taskPlan'
+import { buildUserQuotesPrefill } from '../../components/AgentConversation/userQuote'
 import { AgentConversationPanel } from '../../components/AgentConversation'
 import { useWorkspace } from '../WorkspaceContext'
 import {
@@ -53,6 +54,8 @@ import { persistBookProposalResolution } from './proposalResolutionPersistence'
 import FavoritesModal from './components/FavoritesModal'
 import MemoryModal from './components/MemoryModal'
 import AiPanelHeader from './components/AiPanelHeader'
+import ComposerQuoteChip from './components/ComposerQuoteChip'
+import './components/ComposerQuoteChip.scss'
 import type { AiContextBarBindings } from './components/AiContextBar'
 import {
   createBookAssistantAttachmentManager,
@@ -107,6 +110,10 @@ export default function AiPanel({
     writingChapters,
   } = useWorkspace()
   const [prompt, setPromptState] = React.useState('')
+  /** 正文选区「引用」状态（可多条）：输入框上方状态条展示，发送时拼进消息 */
+  const [pendingQuotes, setPendingQuotes] = React.useState<
+    Array<{ quote: string; chapterTitle?: string }>
+  >([])
   /** 人物目录：把 Agent 工具参数中的 characterIds 解析成人物名（工具行文案用） */
   const [bookCharacters, setBookCharacters] = React.useState<Array<{ id: number; name: string }>>([])
   const [characterCatalogRevision, bumpCharacterCatalog] = React.useReducer((value: number) => value + 1, 0)
@@ -286,6 +293,28 @@ export default function AiPanel({
     return () => window.removeEventListener('open-setting-chat', handler as EventListener)
   }, [openGlobalChat])
 
+  // 正文选区「引用」：结构化状态挂在输入框上方（悬停看全文，可移除），
+  // 支持连续引用多条；发送时才拼进消息内容；切换会话即失效
+  React.useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ quote?: string; chapterTitle?: string }>).detail
+      const quote = detail?.quote?.trim()
+      if (!quote) return
+      setPendingQuotes((prev) => {
+        const chapterTitle = detail?.chapterTitle
+        // 同章节同文本的去重，避免重复点击塞入相同引文
+        if (prev.some((q) => q.quote === quote && q.chapterTitle === chapterTitle)) return prev
+        return [...prev, { quote, chapterTitle }]
+      })
+    }
+    window.addEventListener('ai-panel-quote-selection', handler as EventListener)
+    return () => window.removeEventListener('ai-panel-quote-selection', handler as EventListener)
+  }, [])
+
+  React.useEffect(() => {
+    setPendingQuotes([])
+  }, [activeSessionId])
+
   React.useEffect(() => {
     if (!pendingSettingSessionRef.current) return
     if (chatScope !== 'setting' || !sessionsLoaded) return
@@ -424,15 +453,22 @@ export default function AiPanel({
         || !conversationLifecycleRef.current.canAct(token)
       )
     ) return
+    // 引用状态拼在正文前（块引用约定，随消息持久化并在气泡里渲染成引用块）
+    const quotePrefix = buildUserQuotesPrefill(pendingQuotes)
     if (content !== undefined) {
       const trimmed = content.trim()
       if (!trimmed) return
-      doSubmit({ content: trimmed })
+      doSubmit({ content: quotePrefix + trimmed })
+    } else if (quotePrefix) {
+      const trimmed = prompt.trim()
+      if (!trimmed) return
+      doSubmit({ content: quotePrefix + trimmed })
     } else {
       doSubmit()
     }
+    if (quotePrefix) setPendingQuotes([])
     clearSelectedContext()
-  }, [clearSelectedContext, doSubmit])
+  }, [clearSelectedContext, doSubmit, pendingQuotes, prompt])
 
   const handleEditMessage = React.useCallback((index: number, content: string) => {
     const token = conversationLifecycleRef.current.currentToken()
@@ -935,13 +971,29 @@ export default function AiPanel({
     onClick: () => setFavoritesModalOpen(true),
   }]
 
+  const panelExtensions = React.useMemo(() => {
+    if (pendingQuotes.length === 0) return bookConversationExtensions
+    return {
+      ...bookConversationExtensions,
+      renderComposerTop: () => (
+        <ComposerQuoteChip
+          quotes={pendingQuotes}
+          onRemoveAt={(index) =>
+            setPendingQuotes((prev) => prev.filter((_, i) => i !== index))
+          }
+          onRemoveAll={() => setPendingQuotes([])}
+        />
+      ),
+    }
+  }, [bookConversationExtensions, pendingQuotes])
+
   return (
     <div className="ai-panel panel-main">
       <AiPanelHeader menuItems={ellipsisMenuItems} />
       <div className="ai-panel-body">
         <AgentConversationPanel
           controller={bookConversationController}
-          extensions={bookConversationExtensions}
+          extensions={panelExtensions}
           subAgentReader={services.ai}
           emptyStateTitle={chatScope !== 'setting' && effectiveChapterId == null
             ? '选择章节后开始对话'

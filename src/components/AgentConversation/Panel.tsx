@@ -314,10 +314,12 @@ export default function AgentConversationPanel({
           disabled={controller.capabilities.inputDisabled}
           submitDisabled={isComposerSubmitDisabled(controller)}
           floatingContent={(
-            (view.showTaskProgress && controller.composer.taskPlan)
+            extensions?.renderComposerTop
+            || (view.showTaskProgress && controller.composer.taskPlan)
             || showSubAgentOverview
           ) ? (
             <div className="agent-composer__floating-content">
+              {extensions?.renderComposerTop?.()}
               {view.showTaskProgress && controller.composer.taskPlan ? (
                 <TaskProgress plan={controller.composer.taskPlan} placement="topLeft" />
               ) : null}

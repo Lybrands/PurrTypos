@@ -1533,6 +1533,23 @@ export interface AiForeshadowing {
   update_time?: string;
 }
 
+/** 正文批注：锚定在章节纯文本扁平偏移上（与 editorStateToText 的 \n 拼接同规则） */
+export interface ChapterAnnotation {
+  id: number;
+  book_id: EntityId;
+  chapter_id: EntityId;
+  start_offset: number;
+  end_offset: number;
+  quoted_text: string;
+  context_before: string;
+  context_after: string;
+  note: string;
+  status: 'open' | 'resolved';
+  source: 'manual' | 'ai';
+  create_time?: string;
+  update_time?: string;
+}
+
 export type MemoryKind =
   | 'canon'
   | 'plot'
@@ -2324,6 +2341,25 @@ export interface ElectronAPI {
   updateForeshadowing: (data: { bookId: EntityId; id: number | string; data: Partial<Pick<AiForeshadowing, 'content' | 'type' | 'expected_chapter_id' | 'status' | 'resolved_chapter_id'>> }) => Promise<ApiResult<AiForeshadowing>>;
   deleteForeshadowing: (data: { bookId: EntityId; id: number | string }) => Promise<ApiResult<void>>;
   getForeshadowingByBook: (data: { bookId: EntityId; status?: '未回收' | '已回收' }) => Promise<ApiResult<AiForeshadowing[]>>;
+  // 正文批注
+  addAnnotation: (data: {
+    bookId: EntityId;
+    chapterId: EntityId;
+    startOffset: number;
+    endOffset: number;
+    quotedText: string;
+    note: string;
+    contextBefore?: string;
+    contextAfter?: string;
+    source?: 'manual' | 'ai';
+  }) => Promise<ApiResult<ChapterAnnotation>>;
+  updateAnnotation: (data: {
+    bookId: EntityId;
+    id: number;
+    data: { note?: string; status?: 'open' | 'resolved' };
+  }) => Promise<ApiResult<ChapterAnnotation>>;
+  deleteAnnotation: (data: { bookId: EntityId; id: number }) => Promise<ApiResult<void>>;
+  getAnnotationsByBook: (data: { bookId: EntityId; chapterId?: EntityId }) => Promise<ApiResult<ChapterAnnotation[]>>;
   // 长期记忆
   createMemory: (data: {
     bookId: EntityId;

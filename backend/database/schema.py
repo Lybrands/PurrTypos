@@ -1900,6 +1900,29 @@ async def init_schema(db: DatabaseConnection) -> None:
         update_time DATETIME DEFAULT CURRENT_TIMESTAMP
     )""")
 
+    # ── chapter_annotations（正文批注，锚定在章节纯文本扁平偏移上）───
+    await db.execute("""CREATE TABLE IF NOT EXISTS chapter_annotations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id TEXT NOT NULL,
+        chapter_id TEXT NOT NULL,
+        start_offset INTEGER NOT NULL,
+        end_offset INTEGER NOT NULL,
+        quoted_text TEXT NOT NULL,
+        context_before TEXT NOT NULL DEFAULT '',
+        context_after TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'resolved')),
+        source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'ai')),
+        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        update_time DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_chapter_annotations_book ON chapter_annotations(book_id)
+    """)
+    await db.execute("""CREATE INDEX IF NOT EXISTS
+        idx_chapter_annotations_chapter ON chapter_annotations(chapter_id)
+    """)
+
     # Durable business-source delivery to purra-mem0. This is an outbox only;
     # memory state/version/idempotency remain owned by the component journal.
     await db.execute("""CREATE TABLE IF NOT EXISTS memory_source_heads (

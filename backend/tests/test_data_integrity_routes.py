@@ -178,6 +178,12 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         ["book1", "chapter1", "foreshadowing"],
     )
     await temp_db.execute(
+        "INSERT INTO chapter_annotations "
+        "(book_id, chapter_id, start_offset, end_offset, quoted_text, note) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ["book1", "chapter1", 3, 8, "quoted", "note"],
+    )
+    await temp_db.execute(
         "INSERT INTO story_memory_deltas "
         "(id, book_id, chapter_id, source_revision, status) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -301,6 +307,7 @@ async def test_delete_book_cascades_related_tables_and_attachment_file(
         "ai_favorites",
         "ai_memories",
         "ai_foreshadowing",
+        "chapter_annotations",
         "story_memory_records",
         "story_memory_deltas",
         "story_memory_analysis_runs",

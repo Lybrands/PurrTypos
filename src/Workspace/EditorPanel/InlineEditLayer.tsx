@@ -1,20 +1,21 @@
 /**
- * 编辑器选中文字 → 浮出 Inline Edit 工具条 → 打开 PurrPopover 输入改写指令 → AI 流式生成 → 替换/追加/取消。
+ * 编辑器选中文字 → 浮出 Inline 工具条 → 按动作分流：
+ * - 润色/精简/扩写/自定义 → InlineEditPopover（rewrite 模式）：AI 流式生成 → 校验式替换选区
+ * - 提问 → InlineEditPopover（ask 模式）：回答不落正文，可「存为批注 / 插入正文」
+ * - 批注 → AnnotationComposerPopover：手动批注，锚定选区
+ * - 引用 → 把选区以块引用预填进主 AI 面板（事件 ai-panel-quote-selection）
  *
  * 架构：
  * - `InlineEditLayer` 对外唯一导出。EditorPanel 通过 props 传入 Lexical ref + 模型配置 + 上下文。
  * - 由 LexicalEditor 的 `onSelectionChange` 喂入 selection rect + text，触发 `SelectionBubble`。
- * - 点击 bubble 的按钮：调用 `captureSelection()` 拿到 `{ text, restore, replace }` 快照，
- *   随后打开 `InlineEditPopover` 进行 AI 流式改写；用户按「替换」时调 `replace(newText)` 落盘。
+ * - 点击 bubble 的按钮：调用 `captureSelection()` 拿到 `{ text, flatStart/End, restore, replace }` 快照，
+ *   随后打开对应弹层；落盘动作经快照校验（原文变动时按引文重定位，见 EditorHandlePlugin）。
  * - 快照机制保证了：popover 打开后即使编辑器失焦，原选区仍可被恢复与替换。
  *
  * 上下文集成：
  * - Layer 持有「关联章节/大纲」「记忆/伏笔」选区，与主 AI 面板通过 localStorage 共享同一份默认勾选；
  * - PurrPopover 顶部嵌入 `AiContextBar`：关联（章节/大纲）/ 注入（设定/伏笔）/ 提示词模板；
- * - 提交时关联章节/大纲全文与记忆/伏笔条目会作为 [参考资料] 拼入 user prompt（见 inlineEditContext）。
- *
- * 拆分：`SelectionBubble`、`InlineEditPopover`、参考资料拼装 `buildInjectedContext` 各自成文件，
- * 本文件只保留编排（选区 → 快照 → popover）与上下文 hook 接线。
+ * - 提交时当前章节全文与关联章节/大纲、记忆/伏笔条目作为 [参考资料] 拼入 user prompt（见 inlineEditContext）。
  */
 
 import React from 'react'
@@ -24,6 +25,7 @@ import MemoryModal from '../AiPanel/components/MemoryModal'
 import { useAssociatedContext, useMemorySelection } from '../AiPanel/hooks'
 import SelectionBubble from './SelectionBubble'
 import InlineEditPopover, { type InlineCapture } from './InlineEditPopover'
+import AnnotationComposerPopover, { type AnnotationDraft } from './AnnotationComposerPopover'
 import './InlineEditLayer.scss'
 
 interface InlineEditLayerProps {
@@ -61,9 +63,11 @@ export default function InlineEditLayer({
   bookTitle,
   writingChapters,
 }: InlineEditLayerProps) {
-  // 被点击过 preset 后，持有选区快照并进入 popover 模式。
+  // Inline 弹层（改写/提问统一入口）：持有选区快照
   const [capture, setCapture] = React.useState<InlineCapture | null>(null)
   const [initialPrompt, setInitialPrompt] = React.useState('')
+  // 批注弹层：手动批注或 AI 回答转批注
+  const [annotationDraft, setAnnotationDraft] = React.useState<AnnotationDraft | null>(null)
 
   // 若外部没传回调，本地兜底 state 让 popover 仍可切换
   const [localModelId, setLocalModelId] = React.useState(selectedModelId)
@@ -103,15 +107,35 @@ export default function InlineEditLayer({
 
   const [memoryModalOpen, setMemoryModalOpen] = React.useState(false)
 
-  const handleBubbleTrigger = React.useCallback(
-    (presetPrompt: string) => {
+  const getFlatText = React.useCallback(() => lexicalRef.current?.getFlatText() ?? '', [lexicalRef])
+
+  const openInlinePopover = React.useCallback(
+    (prompt: string) => {
       const snap = lexicalRef.current?.captureSelection()
       if (!snap) return
       setCapture(snap)
-      setInitialPrompt(presetPrompt)
+      setInitialPrompt(prompt)
     },
     [lexicalRef]
   )
+
+  const handleAnnotate = React.useCallback(() => {
+    const snap = lexicalRef.current?.captureSelection()
+    if (!snap) return
+    setAnnotationDraft({ capture: snap, initialNote: '', source: 'manual' })
+  }, [lexicalRef])
+
+  const handleQuote = React.useCallback(() => {
+    const snap = lexicalRef.current?.captureSelection()
+    if (!snap) return
+    window.dispatchEvent(new CustomEvent('workspace-open-panel', {
+      detail: { panel: 'ai', open: true },
+    }))
+    window.dispatchEvent(new CustomEvent('ai-panel-quote-selection', {
+      detail: { quote: snap.text, chapterId, chapterTitle },
+    }))
+    onClearSelection()
+  }, [lexicalRef, chapterId, chapterTitle, onClearSelection])
 
   const handleClosePopover = React.useCallback(() => {
     setCapture(null)
@@ -119,13 +143,30 @@ export default function InlineEditLayer({
     onClearSelection()
   }, [onClearSelection])
 
+  // ask 模式「存为批注」：关掉提问弹层，锚点沿用，AI 回答预填批注
+  const handleSaveAnnotation = React.useCallback(
+    (answer: string) => {
+      if (!capture) return
+      setAnnotationDraft({ capture, initialNote: answer, source: 'ai' })
+      setCapture(null)
+      setInitialPrompt('')
+    },
+    [capture],
+  )
+
+  const handleCloseAnnotation = React.useCallback(() => {
+    setAnnotationDraft(null)
+    onClearSelection()
+  }, [onClearSelection])
+
   return (
     <>
-      {selection && !capture && (
+      {selection && !capture && !annotationDraft && (
         <SelectionBubble
           rect={selection.rect}
-          onPreset={(p) => handleBubbleTrigger(p.prompt)}
-          onCustom={() => handleBubbleTrigger('')}
+          onAi={() => openInlinePopover('')}
+          onAnnotate={handleAnnotate}
+          onQuote={handleQuote}
         />
       )}
       {capture && activeModel && (
@@ -140,7 +181,9 @@ export default function InlineEditLayer({
           chapterId={chapterId}
           chapterTitle={chapterTitle}
           bookTitle={bookTitle}
+          getCurrentChapterText={getFlatText}
           onClose={handleClosePopover}
+          onSaveAnnotation={handleSaveAnnotation}
           // 上下文相关
           associatedChapterIds={associatedChapterIds}
           setAssociatedChapterIds={setAssociatedChapterIds}
@@ -155,6 +198,15 @@ export default function InlineEditLayer({
           selectedMemoryIds={selectedMemoryIds}
           selectedForeshadowingIds={selectedForeshadowingIds}
           onOpenMemoryModal={() => setMemoryModalOpen(true)}
+        />
+      )}
+      {annotationDraft && (
+        <AnnotationComposerPopover
+          bookId={bookId}
+          chapterId={chapterId}
+          draft={annotationDraft}
+          getFlatText={getFlatText}
+          onClose={handleCloseAnnotation}
         />
       )}
       <MemoryModal

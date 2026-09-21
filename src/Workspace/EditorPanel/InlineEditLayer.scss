@@ -64,6 +64,35 @@
     color: var(--text-primary);
   }
 
+  // 预设指令快捷条
+  &-presets {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-xs) var(--spacing) 0;
+  }
+
+  &-preset-btn {
+    height: 24px;
+    padding: 0 var(--spacing-sm);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+
+    &:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    &.is-active {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: var(--bg-hover);
+    }
+  }
+
   /* 唯一滚动容器：包住「原文 / 指令 / 结果」三段 */
   &-body {
     flex: 1 1 auto;
