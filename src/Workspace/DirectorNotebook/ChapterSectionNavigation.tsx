@@ -204,7 +204,7 @@ export default function ChapterSectionNavigation({
         {chapters.length === 0 && !showAddInput && (
           <PurrEmpty
             image={false}
-            description={<><span>暂无章节，点击 + 新建</span><br /><small>或打开 XMind 导入大纲</small></>}
+            description="暂无章节，点击 + 新建"
             className="nav-empty"
           />
         )}

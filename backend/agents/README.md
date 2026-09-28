@@ -1,8 +1,5 @@
 # Agent replacement boundary
 
-The authoritative migration plan is
-[`docs/design/2026-09-12-three-agent-purra-native-rebuild-plan.md`](../../docs/design/2026-09-12-three-agent-purra-native-rebuild-plan.md).
-
 `backend/agents/` is the canonical home for the production implementations of
 the writing, novel-analysis, and screenplay Agents. Their retired executable
 implementations have been deleted; there is no legacy create or execution

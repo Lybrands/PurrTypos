@@ -60,7 +60,7 @@ async def update_outline(outlineId: str, body: UpdateOutlineRequest):
     """
     db = get_db()
     payload: dict = {"outlineId": outlineId}
-    for field_name in ["title", "xmind_data", "file_path", "markdown_content"]:
+    for field_name in ["title", "markdown_content"]:
         val = getattr(body, field_name, None)
         if val is not None:
             payload[field_name] = val

@@ -605,9 +605,7 @@ export interface Outline {
   title: string;
   type?: "global" | "chapter" | "volume";
   sort?: number;
-  xmind_data?: string | null;
-  file_path?: string | null;
-  /** 应用内 Markdown 大纲正文，与 XMind 并行保存 */
+  /** 应用内 Markdown 大纲正文 */
   markdown_content?: string | null;
   book_id?: EntityId | null;
   parent_outline_id?: EntityId | null;
@@ -634,7 +632,6 @@ export interface OutlineHistoryListItem {
   before_type: string | null;
   markdown_preview: string | null;
   markdown_length: number;
-  xmind_length: number;
   source: OutlineHistorySource;
   note: string | null;
   create_time: string;
@@ -646,7 +643,6 @@ export interface OutlineHistoryDetail {
   before_title: string | null;
   before_type: string | null;
   before_markdown_content: string | null;
-  before_xmind_data: string | null;
   source: OutlineHistorySource;
   note: string | null;
   create_time: string;
@@ -2068,8 +2064,6 @@ export interface ElectronAPI {
   saveOutline: (data: {
     title: string;
     type?: "global" | "chapter" | "volume";
-    xmind_data?: string;
-    file_path?: string;
     book_id?: EntityId | null;
     writing_chapter_id?: EntityId | null;
     parent_outline_id?: EntityId | null;
@@ -2099,8 +2093,6 @@ export interface ElectronAPI {
   updateOutline: (data: {
     outlineId: EntityId;
     title?: string;
-    xmind_data?: string;
-    file_path?: string;
     markdown_content?: string | null;
   }) => Promise<ApiResult<Outline>>;
   listOutlineHistory: (data: {

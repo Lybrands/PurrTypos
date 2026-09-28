@@ -81,3 +81,41 @@ async def test_get_associable_outlines_flattens_batched_volume_groups(
         "volume", "chapter", "volume", "chapter", "volume", "chapter",
     ]
     assert all("chapters" not in row for row in rows)
+
+
+async def test_retired_import_payload_migration_preserves_text_and_history(
+    temp_db: DatabaseConnection,
+):
+    from database.schema import init_schema
+    from database.crud.outlines import update_outline, restore_outline_from_history
+    from database.crud.outline_history import list_outline_history
+
+    outline = await save_outline(temp_db, {
+        "title": "Text outline", "markdown_content": "Original text",
+    })
+    oid = outline["id"]
+    await update_outline(temp_db, {"outlineId": oid, "markdown_content": "Updated text"})
+    history = await list_outline_history(temp_db, oid)
+    # Reproduce the retired schema and payloads in an isolated database.
+    await temp_db.execute("ALTER TABLE outlines ADD COLUMN xmind_data TEXT")
+    await temp_db.execute("ALTER TABLE outlines ADD COLUMN file_path TEXT")
+    await temp_db.execute("ALTER TABLE outline_history ADD COLUMN before_xmind_data TEXT")
+    await temp_db.execute(
+        "UPDATE outlines SET xmind_data = ?, file_path = ? WHERE id = ?",
+        ["retired payload", "/old/outline.xmind", oid],
+    )
+    await temp_db.execute("UPDATE outline_history SET before_xmind_data = 'retired snapshot'")
+
+    await init_schema(temp_db)
+    await init_schema(temp_db)  # Safe on subsequent startups.
+
+    row = await temp_db.fetch_one("SELECT * FROM outlines WHERE id = ?", [oid])
+    assert row["markdown_content"] == "Updated text"
+    assert "xmind_data" not in row and "file_path" not in row
+    columns = await temp_db.fetch_all("PRAGMA table_info(outline_history)")
+    assert "before_xmind_data" not in {column["name"] for column in columns}
+    assert await list_outline_history(temp_db, oid) == history
+    restored = await restore_outline_from_history(temp_db, history[0]["id"])
+    assert restored["markdown_content"] == "Original text"
+    assert len(await list_outline_history(temp_db, oid)) == 2
+    assert (await temp_db.fetch_one("PRAGMA integrity_check"))["integrity_check"] == "ok"

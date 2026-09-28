@@ -60,8 +60,6 @@ async def save_outline(
     if isinstance(data, str):
         title = data
         outline_type = "chapter"
-        xmind_data = None
-        file_path = None
         markdown_content = None
         book_id = None
         writing_chapter_id = None
@@ -69,8 +67,6 @@ async def save_outline(
     else:
         title = data.get("title", "")
         outline_type = data.get("type") or "chapter"
-        xmind_data = data.get("xmind_data")
-        file_path = data.get("file_path")
         markdown_content = data.get("markdown_content")
         book_id = data.get("book_id")
         writing_chapter_id = data.get("writing_chapter_id")
@@ -90,8 +86,8 @@ async def save_outline(
         if all_global:
             keep_id = all_global[0]["id"]
             await db.execute(
-                "UPDATE outlines SET title = ?, xmind_data = ?, file_path = ? WHERE id = ?",
-                [title, xmind_data, file_path, keep_id],
+                "UPDATE outlines SET title = ? WHERE id = ?",
+                [title, keep_id],
             )
             for dup in all_global[1:]:
                 await db.execute(
@@ -118,11 +114,11 @@ async def save_outline(
     sort = (int(max_sort["m"]) if max_sort else 0) + 1
     new_id = short_id8()
     await db.execute(
-        "INSERT INTO outlines (id, title, type, sort, xmind_data, file_path, "
+        "INSERT INTO outlines (id, title, type, sort, "
         "markdown_content, book_id, writing_chapter_id, parent_outline_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            new_id, title, outline_type, sort, xmind_data, file_path,
+            new_id, title, outline_type, sort,
             markdown_content, book_id, writing_chapter_id, parent_outline_id,
         ],
     )
@@ -158,11 +154,6 @@ async def update_outline(
     if "title" in data:
         parts.append("title = ?")
         vals.append(data["title"])
-    if "xmind_data" in data:
-        parts.append("xmind_data = ?")
-        vals.append(data["xmind_data"])
-        parts.append("file_path = ?")
-        vals.append(data.get("file_path"))
     if "markdown_content" in data:
         parts.append("markdown_content = ?")
         vals.append(data["markdown_content"])
@@ -171,7 +162,7 @@ async def update_outline(
 
     if history_source:
         prev = await db.fetch_one(
-            "SELECT title, type, markdown_content, xmind_data "
+            "SELECT title, type, markdown_content "
             "FROM outlines WHERE id = ?",
             [outline_id],
         )
@@ -184,7 +175,6 @@ async def update_outline(
                     before_title=prev.get("title"),
                     before_type=prev.get("type"),
                     before_markdown_content=prev.get("markdown_content"),
-                    before_xmind_data=prev.get("xmind_data"),
                     source=history_source,
                     note=history_note,
                 )
@@ -216,7 +206,7 @@ async def restore_outline_from_history(
 
     outline_id = str(target["outline_id"])
     current = await db.fetch_one(
-        "SELECT title, type, markdown_content, xmind_data "
+        "SELECT title, type, markdown_content "
         "FROM outlines WHERE id = ?",
         [outline_id],
     )
@@ -229,16 +219,14 @@ async def restore_outline_from_history(
         before_title=current.get("title"),
         before_type=current.get("type"),
         before_markdown_content=current.get("markdown_content"),
-        before_xmind_data=current.get("xmind_data"),
         source=f"rollback_of:{history_id}",
         note=f"恢复至 #{history_id}",
     )
 
-    parts = ["title = ?", "markdown_content = ?", "xmind_data = ?"]
+    parts = ["title = ?", "markdown_content = ?"]
     vals: list[Any] = [
         target.get("before_title"),
         target.get("before_markdown_content"),
-        target.get("before_xmind_data"),
     ]
     vals.append(outline_id)
     await db.execute(
@@ -298,8 +286,6 @@ async def get_or_create_global_outline(
         "title": "总纲",
         "type": "global",
         "book_id": book_id,
-        "xmind_data": None,
-        "file_path": None,
     })
     return await get_global_outline(db, book_id)
 

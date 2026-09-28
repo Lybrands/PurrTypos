@@ -127,8 +127,8 @@ class SqliteWritingMaterialRepository:
             await self._db.execute(
                 "INSERT INTO outline_history "
                 "(outline_id, before_title, before_type, before_markdown_content, "
-                "before_xmind_data, source) VALUES (?, ?, ?, ?, ?, 'ai')",
-                [row["id"], row.get("title"), row.get("type"), previous, row.get("xmind_data")],
+                "source) VALUES (?, ?, ?, ?, 'ai')",
+                [row["id"], row.get("title"), row.get("type"), previous],
             )
             await self._db.execute(
                 "UPDATE outlines SET markdown_content = ? WHERE id = ?",
@@ -553,7 +553,7 @@ class SqliteWritingMaterialRepository:
     async def _require_global_outline(self, scope: WritingReadScope) -> dict[str, Any]:
         await self._validate_scope(scope)
         rows = await self._db.fetch_all(
-            "SELECT id, title, type, markdown_content, xmind_data FROM outlines "
+            "SELECT id, title, type, markdown_content FROM outlines "
             "WHERE book_id = ? AND type = 'global' ORDER BY create_time, id LIMIT 2",
             [scope.book_id],
         )

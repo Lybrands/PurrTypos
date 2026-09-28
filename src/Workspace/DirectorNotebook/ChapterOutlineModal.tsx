@@ -2,7 +2,7 @@ import { services } from '@/services'
 import React from 'react'
 import { PurrAlert, PurrButton } from '@/purr-components'
 import { PurrSpin, usePurrToast } from '@/purr-components'
-import { FileAddIcon, ExportIcon } from '@/purr-components'
+import { FileAddIcon } from '@/purr-components'
 import type { Chapter, EntityId, Outline } from '../../types'
 import OutlineMarkdownPane, { type OutlineMarkdownPaneRef } from '../OutlinePanel/OutlineMarkdownPane'
 import './ChapterOutlineModal.scss'
@@ -30,7 +30,6 @@ export interface ChapterOutlinePanelProps {
  * - 没有大纲记录时一键创建：
  *   - chapter / volume → `saveOutline({type, writing_chapter_id, book_id})`
  *   - global → `ensureGlobalOutline(bookId)`
- * - 已有 XMind 大纲时显示提示条 + 「打开源文件」入口（XMind 上传/换图保留给后续）
  * - 从辅助面板卸载前自动 flushSave，保证草稿不丢
  */
 export default function ChapterOutlinePanel({
@@ -42,7 +41,6 @@ export default function ChapterOutlinePanel({
   const [outline, setOutline] = React.useState<Outline | null>(null)
   const [error, setError] = React.useState<string>('')
   const [creating, setCreating] = React.useState(false)
-  const [openingSource, setOpeningSource] = React.useState(false)
   const paneRef = React.useRef<OutlineMarkdownPaneRef | null>(null)
 
   const mode = target?.mode ?? 'chapter'
@@ -131,17 +129,6 @@ export default function ChapterOutlinePanel({
     }
   }, [mode, chapter, bookId, creating, appMessage])
 
-  const handleOpenSource = React.useCallback(async () => {
-    if (!outline?.file_path) return
-    setOpeningSource(true)
-    try {
-      const res = await services.files.openFilePath(outline.file_path)
-      if (!res.success) appMessage.error('打开失败：' + (res.error || ''))
-    } finally {
-      setOpeningSource(false)
-    }
-  }, [outline?.file_path, appMessage])
-
   React.useEffect(() => () => {
     void paneRef.current?.flushSave()
   }, [])
@@ -183,27 +170,6 @@ export default function ChapterOutlinePanel({
           </div>
         ) : (
           <>
-            {outline.file_path && (
-              <PurrAlert
-                type="info"
-                showIcon
-                className="chapter-outline-modal-alert"
-                message={
-                  <span>
-                    该大纲有 XMind 思维导图文件，当前面板只能编辑文本部分。
-                    <PurrButton
-                      type="link"
-                      size="small"
-                      icon={<ExportIcon />}
-                      loading={openingSource}
-                      onClick={handleOpenSource}
-                    >
-                      打开源文件
-                    </PurrButton>
-                  </span>
-                }
-              />
-            )}
             <div className="chapter-outline-modal-pane">
               <OutlineMarkdownPane
                 ref={paneRef}

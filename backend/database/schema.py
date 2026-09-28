@@ -632,8 +632,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         type TEXT DEFAULT 'chapter',
         sort INTEGER DEFAULT 0,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        xmind_data TEXT DEFAULT NULL,
-        file_path TEXT DEFAULT NULL,
         book_id TEXT DEFAULT NULL,
         parent_outline_id TEXT DEFAULT NULL,
         writing_chapter_id TEXT DEFAULT NULL,
@@ -641,8 +639,6 @@ async def init_schema(db: DatabaseConnection) -> None:
     )""")
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN type TEXT DEFAULT 'chapter'")
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN sort INTEGER DEFAULT 0")
-    await _try_exec(db, "ALTER TABLE outlines ADD COLUMN xmind_data TEXT DEFAULT NULL")
-    await _try_exec(db, "ALTER TABLE outlines ADD COLUMN file_path TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN book_id TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN parent_outline_id TEXT DEFAULT NULL")
     await _try_exec(db, "ALTER TABLE outlines ADD COLUMN writing_chapter_id TEXT DEFAULT NULL")
@@ -2364,7 +2360,6 @@ async def init_schema(db: DatabaseConnection) -> None:
         before_title TEXT DEFAULT NULL,
         before_type TEXT DEFAULT NULL,
         before_markdown_content TEXT DEFAULT NULL,
-        before_xmind_data TEXT DEFAULT NULL,
         source TEXT NOT NULL DEFAULT 'user',
         note TEXT DEFAULT NULL,
         create_time DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -2373,6 +2368,17 @@ async def init_schema(db: DatabaseConnection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_outline_history_outline "
         "ON outline_history(outline_id, create_time DESC)"
     )
+
+    # Retire imported mind-map payloads while preserving text and revision IDs.
+    async with db.transaction():
+        for table, retired_columns in (
+            ("outlines", ("xmind_data", "file_path")),
+            ("outline_history", ("before_xmind_data",)),
+        ):
+            columns = await _table_columns(db, table)
+            for column in retired_columns:
+                if column in columns:
+                    await db.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
 
     # ── chapter_diff_history ─────────────────────────────────────
     # AI 改正文产生的 diff 历史；commit 时同时落盘 articles

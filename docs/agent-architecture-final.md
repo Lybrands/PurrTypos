@@ -2,8 +2,7 @@
 
 > 历史状态：本文记录早期 Writing Agent 三层架构的完成状态。下文的“当前”只指
 > 当时快照，路径可能已经删除，不能作为实现入口或兼容合同。现行代码所有权见
-> [`backend/agents/README.md`](../backend/agents/README.md)，迁移状态见
-> [三个 Agent PurrA-native 重构计划](design/2026-09-12-three-agent-purra-native-rebuild-plan.md)。
+> [`backend/agents/README.md`](../backend/agents/README.md)。
 
 当前共享对话契约见[三类 Agent 共享对话规范](design/shared-agent-conversation-contract.md)。下文“断开连接必须 canceled”为历史描述，已由“订阅断开不取消，显式命令取消”替代。
 
