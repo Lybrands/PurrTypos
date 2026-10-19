@@ -24,6 +24,7 @@ import { shortUuid } from '../utils/common'
 import { useDatabaseActions } from './useDatabaseActions'
 import { useMemoryAutosave, type MemoryConfigurationPatch } from './useMemoryAutosave'
 import './index.scss'
+import WebResearchSettings from './WebResearchSettings'
 import {
   AGENT_OPERATION_MODE_OPTIONS,
   type AgentOperationMode,
@@ -505,7 +506,7 @@ export default function SettingsPage({
           {activeTab === 'general' && (
             <div className="settings-section">
               <h2 className="settings-section-title">通用</h2>
-              <p className="settings-section-desc">通用相关配置将在此展示。</p>
+              <WebResearchSettings />
               <PurrCheckbox
                 checked={syncOutlineChapter}
                 onChange={(e) => onSyncOutlineChapterChange(e.target.checked)}

@@ -14,6 +14,7 @@ const { registerNovelKnowledgeIpc } = require('./novel_knowledge_ipc')
 const knowledgeHostSecret = require('node:crypto').randomBytes(32).toString('hex')
 const { configureAppIcon } = require('./app_icon')
 const { createAgentPowerSaveManager } = require('./agent_power_save')
+const { configureExternalLinks } = require('./external_links')
 
 const replacementAcceptance = [
   'PURRTYPOS_NOVEL_ANALYSIS_REPLACEMENT_ACCEPTANCE',
@@ -71,6 +72,7 @@ function createWindow() {
     titleBarStyle: 'default',
     show: false,
   })
+  configureExternalLinks(mainWindow, shell)
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5174')

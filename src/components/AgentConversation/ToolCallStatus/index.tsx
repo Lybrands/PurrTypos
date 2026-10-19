@@ -21,6 +21,16 @@ export interface ToolCallStatusProps {
   activeItemStartedAt?: number
 }
 
+export function ToolCallLabel({ text }: { text: string }) {
+  const batch = /^(.*) (等 \d+ 个网页)$/.exec(text)
+  return (
+    <span className="bubble-tool-call-label" title={text}>
+      <span className="bubble-tool-call-label-text">{batch ? batch[1] : text}</span>
+      {batch ? <span className="bubble-tool-call-label-count">{batch[2]}</span> : null}
+    </span>
+  )
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${Math.max(1, Math.round(ms))}ms`
   const totalSeconds = Math.max(1, Math.round(ms / 1000))
@@ -52,7 +62,7 @@ function renderToolRow(row: ToolCallRow, now: number) {
         className="bubble-tool-call-line bubble-tool-call-line--failed"
       >
         <span className="bubble-tool-call-spacer" aria-hidden />
-        <span>{row.text}</span>
+        <ToolCallLabel text={row.text} />
         {renderDuration(row, now)}
         <span className="bubble-tool-call-failed-tag">调用失败</span>
       </div>
@@ -76,7 +86,7 @@ function renderToolRow(row: ToolCallRow, now: number) {
       ) : (
         <ClockIcon className="bubble-tool-call-icon bubble-tool-call-icon--pending" />
       )}
-      <span>{row.text}</span>
+      <ToolCallLabel text={row.text} />
       {renderDuration(row, now)}
     </div>
   )

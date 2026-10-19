@@ -65,6 +65,8 @@ export const KNOWN_TOOL_CALL_LABELS = {
   readSourcePassages: "精读关键原文",
   resolveForeshadowing: "回收伏笔",
   searchMemories: "检索长期记忆",
+  searchWeb: "搜索公开网页",
+  readWebPages: "读取网页资料",
   searchSourceMaterial: "检索原作素材",
   searchSparkIdeas: "检索设定",
   updateCharacter: "更新人物设定",
@@ -341,6 +343,29 @@ export function toolCallDisplayRow(
 ): { label: string; outcome: ToolCallLabelOutcome } {
   try {
     switch (name) {
+      case "searchWeb":
+        return { label: `搜索公开网页${displayQuerySuffix(args.query)}`, outcome: "ok" };
+      case "readWebPages": {
+        const pages = Array.isArray(args.pages)
+          ? args.pages.filter((page): page is Record<string, unknown> =>
+            Boolean(page) && typeof page === "object" && !Array.isArray(page))
+          : [];
+        if (!pages.length) return { label: "读取网页资料", outcome: "ok" };
+        const continued = pages.filter((page) => page.continuation === true).length;
+        const mixed = continued > 0 && continued < pages.length;
+        const names = pages.map((page, index) => {
+          const title = displayQuery(page.title, 24);
+          const host = displayQuery(page.host, 40);
+          const target = title || host || `网页${index + 1}`;
+          return `${target}${mixed && page.continuation === true ? "·续读" : ""}`;
+        });
+        return {
+          label: pages.length === 1
+            ? `${continued === pages.length ? "续读" : "读取"} 1 个网页（${names[0]}）`
+            : `${continued === pages.length ? "续读" : "读取"} ${names.join("、")} 等 ${pages.length} 个网页`,
+          outcome: "ok",
+        };
+      }
       case "getChapterContent":
       case "readWritingChapters": {
         const chapterTitleArg =

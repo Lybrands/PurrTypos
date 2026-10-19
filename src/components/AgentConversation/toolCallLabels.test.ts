@@ -94,6 +94,29 @@ test('writing search tools surface the queried text', () => {
   )
 })
 
+test('web tools distinguish searches, sources and continuation without exposing opaque ids', () => {
+  assert.equal(toolCallDisplayRow('searchWeb', { query: '杭州 今日天气' }, [], []).label,
+    '搜索公开网页“杭州 今日天气”')
+  const source = { title: '杭州市气象台天气预报', host: 'hangzhou.gov.cn' }
+  assert.equal(toolCallDisplayRow('readWebPages', { pages: [source] }, [], []).label,
+    '读取 1 个网页（杭州市气象台天气预报）')
+  assert.equal(toolCallDisplayRow('readWebPages', { pages: [{ ...source, continuation: true }] }, [], []).label,
+    '续读 1 个网页（杭州市气象台天气预报）')
+  assert.equal(toolCallDisplayRow('readWebPages', { pages: [{ host: 'example.com' }] }, [], []).label,
+    '读取 1 个网页（example.com）')
+  assert.equal(toolCallDisplayRow('readWebPages', { pages: [{ sourceId: 'web_opaque' }] }, [], []).label,
+    '读取 1 个网页（网页1）')
+  assert.equal(toolCallDisplayRow('readWebPages', {}, [], []).label,
+    '读取网页资料')
+  assert.equal(toolCallDisplayRow('readWebPages', { pages: [source, { title: '来源二' }, { title: '来源三', continuation: true }] }, [], []).label,
+    '读取 杭州市气象台天气预报、来源二、来源三·续读 等 3 个网页')
+  assert.equal(toolCallDisplayRow('readWebPages', { pages: Array.from({ length: 5 }, (_, i) => ({ title: `来源${i + 1}`, continuation: true })) }, [], []).label,
+    '续读 来源1、来源2、来源3、来源4、来源5 等 5 个网页')
+  assert.equal(toolCallDisplayRow('searchWeb', {}, [], []).label, '搜索公开网页')
+  assert.equal(toolCallDisplayRow('searchWeb', { query: 'x'.repeat(300) }, [], []).label,
+    `搜索公开网页“${'x'.repeat(40)}…”`)
+})
+
 test('writing memory reads summarize counts and kinds', () => {
   assert.equal(
     toolCallDisplayRow('readWritingMemories', {

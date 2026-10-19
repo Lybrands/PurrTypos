@@ -2590,4 +2590,7 @@ async def init_schema(db: DatabaseConnection) -> None:
     from database.writing_tool_cache_schema import init_writing_tool_cache_schema
     await init_writing_tool_cache_schema(db)
 
+    from database.web_research_schema import init_web_research_schema
+    await init_web_research_schema(db)
+
     # TODO: migrateEntityIdsToText8 – placeholder for entity ID migration

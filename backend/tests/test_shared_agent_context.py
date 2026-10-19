@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
@@ -8,6 +10,9 @@ from application.shared_agent_context import (
     AGENT_FINAL_RESPONSE_CONTEXT,
     AGENT_INPUT_POLICY_CONTEXT,
     AGENT_PUBLIC_PROGRESS_CONTEXT,
+    AGENT_CURRENT_TIME_CONTEXT,
+    TimeAwarePublicFactsProvider,
+    with_current_time,
     SharedAgentContextProvider,
 )
 from domains.agent_policy import (
@@ -17,6 +22,7 @@ from domains.agent_policy import (
 from purra.contracts import (
     AgentMessage,
     AgentRunRequest,
+    AgentRunResult,
     ContextBlock,
     ContextBudget,
     ContextBundle,
@@ -27,6 +33,8 @@ from purra.contracts import (
 )
 from purra.errors import ContractViolationError
 from purra.api import PlanningMode
+from purra.output import PublicFact, PublicFactBundle
+from purra.json_values import thaw_json_value
 
 
 class _DomainContextProvider:
@@ -91,18 +99,21 @@ async def test_shared_policy_is_phase_aware_and_domain_independent(mode):
 
     assert [block.name for block in planning.blocks] == [
         AGENT_INPUT_POLICY_CONTEXT,
+        AGENT_CURRENT_TIME_CONTEXT,
         "domain_policy",
     ]
     assert [block.name for block in execution.blocks] == [
         AGENT_INPUT_POLICY_CONTEXT,
         AGENT_PUBLIC_PROGRESS_CONTEXT,
         AGENT_FINAL_RESPONSE_CONTEXT,
+        AGENT_CURRENT_TIME_CONTEXT,
         "domain_policy",
     ]
     assert [block.name for block in task.blocks] == [
         AGENT_INPUT_POLICY_CONTEXT,
         AGENT_PUBLIC_PROGRESS_CONTEXT,
         AGENT_FINAL_RESPONSE_CONTEXT,
+        AGENT_CURRENT_TIME_CONTEXT,
         "domain_policy",
     ]
     assert execution.blocks[2].content == build_agent_final_response_policy()
@@ -128,7 +139,7 @@ async def test_internal_reactive_units_do_not_receive_public_or_planner_policy(p
             request, _budget(), TaskContextRequest(task_spec=TaskSpec(goal="part"))
         )
     )
-    assert [block.name for block in bundle.blocks] == [AGENT_INPUT_POLICY_CONTEXT, "domain_policy"]
+    assert [block.name for block in bundle.blocks] == [AGENT_INPUT_POLICY_CONTEXT, AGENT_CURRENT_TIME_CONTEXT, "domain_policy"]
 
 
 @pytest.mark.asyncio
@@ -148,7 +159,7 @@ async def test_internal_artifact_can_expose_progress_without_a_public_final_resp
     )
     assert [block.name for block in bundle.blocks] == [
         AGENT_INPUT_POLICY_CONTEXT,
-        AGENT_PUBLIC_PROGRESS_CONTEXT, "domain_policy",
+        AGENT_PUBLIC_PROGRESS_CONTEXT, AGENT_CURRENT_TIME_CONTEXT, "domain_policy",
     ]
     assert bundle.blocks[1].content == build_agent_public_progress_policy()
 
@@ -163,17 +174,18 @@ async def test_public_reactive_response_keeps_only_applicable_shared_policy():
         assert [block.name for block in bundle.blocks] == [
             AGENT_INPUT_POLICY_CONTEXT,
             *([AGENT_PUBLIC_PROGRESS_CONTEXT] if tools_enabled else []),
-            AGENT_FINAL_RESPONSE_CONTEXT, "domain_policy",
+            AGENT_FINAL_RESPONSE_CONTEXT, AGENT_CURRENT_TIME_CONTEXT, "domain_policy",
         ]
 
 
 @pytest.mark.asyncio
-async def test_domain_cannot_replace_a_shared_policy_block():
+@pytest.mark.parametrize("name", [AGENT_FINAL_RESPONSE_CONTEXT, AGENT_CURRENT_TIME_CONTEXT])
+async def test_domain_cannot_replace_a_shared_policy_block(name):
     class _CollisionProvider:
         async def build_context(self, request, budget, signal=None):
             del request, budget, signal
             return ContextBundle(blocks=(ContextBlock(
-                name=AGENT_FINAL_RESPONSE_CONTEXT,
+                name=name,
                 content="domain override",
                 token_count=1,
             ),))
@@ -212,3 +224,99 @@ async def test_shared_input_labels_preserve_domain_evidence_receipts():
     assert dict(source.host_metadata) == {'receipt': 'source-1', 'inputSource': 'source_text', 'instructionTrust': 'data'}
     assert bundle.blocks[0].name == AGENT_INPUT_POLICY_CONTEXT
     assert bundle.blocks[0].host_metadata['instructionTrust'] == 'host_policy'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset,hour,day", [(8, 2, 19), (-7, 11, 18), (0, 18, 18)])
+async def test_current_time_uses_host_local_day_with_explicit_offset(offset, hour, day):
+    instant = datetime(2026, 10, 18, 18, 14, 41, tzinfo=timezone.utc)
+    local = instant.astimezone(timezone(timedelta(hours=offset)))
+    provider = SharedAgentContextProvider(_DomainContextProvider(), clock=lambda: local)
+    request = replace(_request(), messages=(AgentMessage(role="user", content="查询今日杭州天气，旧回答说今天是6月5日"),))
+    bundle = await provider.build_context(request, _budget())
+    block = next(b for b in bundle.blocks if b.name == AGENT_CURRENT_TIME_CONTEXT)
+    value = json.loads(block.content.splitlines()[1])
+    assert value["currentDate"] == f"2026-10-{day}"
+    assert value["currentTime"] == f"{hour:02d}:14:41"
+    assert value["localDateTime"] == local.isoformat(timespec="seconds")
+    assert value["utcDateTime"] == instant.isoformat(timespec="seconds")
+    assert value["utcOffset"] == f"{offset:+03d}:00"
+    assert value["timezone"] == local.tzname()
+    assert not block.untrusted
+    assert block.host_metadata["instructionTrust"] == "host_context"
+    assert block.token_count > 0
+    assert "不得凭模型记忆猜测当前日期" in block.content
+    assert "用户明确指定的日期、时区和故事内时间" in block.content
+    assert "网页的发布时间、预报日期和历史对话日期不代表当前日期" in block.content
+    assert request.messages[0].content.endswith("6月5日")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["execution", "planning", "task"])
+async def test_each_context_build_refreshes_time_across_local_midnight(phase):
+    zone = timezone(timedelta(hours=8))
+    times = iter([datetime(2026, 10, 18, 23, 59, 59, tzinfo=zone), datetime(2026, 10, 19, 0, 0, 1, tzinfo=zone)])
+    provider = SharedAgentContextProvider(_DomainContextProvider(), clock=lambda: next(times))
+    contents = []
+    for _ in range(2):
+        if phase == "task":
+            bundle = await provider.build_task_context(_request(), _budget(), TaskContextRequest(task_spec=TaskSpec(goal="test")))
+        else:
+            build = provider.build_planning_context if phase == "planning" else provider.build_context
+            bundle = await build(_request(), _budget())
+        blocks = [b for b in bundle.blocks if b.name == AGENT_CURRENT_TIME_CONTEXT]
+        assert len(blocks) == 1
+        contents.append(json.loads(blocks[0].content.splitlines()[1]))
+    assert contents[0]["currentDate"] == "2026-10-18"
+    assert contents[1]["currentDate"] == "2026-10-19"
+
+
+@pytest.mark.asyncio
+async def test_clock_without_timezone_is_rejected_instead_of_guessing():
+    provider = SharedAgentContextProvider(_DomainContextProvider(), clock=lambda: datetime(2026, 10, 18))
+    with pytest.raises(ContractViolationError, match="must include a timezone"):
+        await provider.build_context(_request(), _budget())
+
+
+@pytest.mark.asyncio
+async def test_one_host_snapshot_replaces_caller_time_and_survives_final_public_projection(monkeypatch):
+    reference = datetime(2026, 10, 18, 23, 59, 59, tzinfo=timezone(timedelta(hours=8)))
+    monkeypatch.setattr("application.shared_agent_context._host_local_now", lambda: reference)
+    request = with_current_time(replace(_request(), metadata={
+        "keep": True, "agentCurrentTime": {"localDateTime": "2026-06-05T12:00:00+00:00", "timezone": "UTC"},
+    }))
+    assert request.metadata["keep"] is True
+    assert request.metadata["agentCurrentTime"]["localDateTime"] == "2026-10-18T23:59:59+08:00"
+    monkeypatch.setattr("application.shared_agent_context._host_local_now", lambda: reference + timedelta(seconds=2))
+    bundle = await SharedAgentContextProvider(_DomainContextProvider()).build_context(request, _budget())
+    block = next(b for b in bundle.blocks if b.name == AGENT_CURRENT_TIME_CONTEXT)
+
+    class Facts:
+        async def facts_for(self, run_id, result):
+            assert run_id == result.run_id
+            return PublicFactBundle(facts=(PublicFact("assistantAnswer", "用户要求查询6月5日的历史天气。"),), resource_refs=("resource://report/test",))
+
+    first = TimeAwarePublicFactsProvider(Facts(), request)
+    wrapped = TimeAwarePublicFactsProvider(first, request)
+    facts = await wrapped.facts_for("run-1", AgentRunResult(run_id="run-1", status="done", final_response="test"))
+    assert [f.key for f in facts.facts] == ["assistantAnswer", "referenceTime"]
+    assert facts.facts[0].value == "用户要求查询6月5日的历史天气。"
+    assert facts.resource_refs == ("resource://report/test",)
+    assert thaw_json_value(facts.facts[-1].value) == json.loads(block.content.splitlines()[1])
+    assert facts.facts[-1].value["currentDate"] == "2026-10-18"
+
+
+def test_default_clock_uses_operating_system_timezone(monkeypatch):
+    import time
+    from application.shared_agent_context import _host_local_now
+    if not hasattr(time, "tzset"):
+        pytest.skip("timezone override requires POSIX tzset")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("TZ", "UTC+07")
+            time.tzset()
+            now = _host_local_now()
+            assert now.utcoffset() == timedelta(hours=-7)
+            assert abs((now.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()) < 2
+    finally:
+        time.tzset()

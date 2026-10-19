@@ -2686,6 +2686,8 @@ export interface ElectronAPI {
 }
 
 export interface GeneralSettings {
+  /** 显式允许新建写作/剧本问答任务使用免费的公开网页搜索。 */
+  web_search_enabled?: boolean;
   model_descriptors?: Array<Record<string, unknown>>;
   sync_outline_chapter: boolean;
   /** Agent 运行期间允许屏幕关闭，但阻止系统挂起本地任务。 */

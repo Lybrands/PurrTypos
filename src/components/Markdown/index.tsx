@@ -7,6 +7,11 @@ import "./index.scss";
 
 const REMARK_PLUGINS = [remarkGfm];
 const MARKDOWN_COMPONENTS: Components = {
+  a: ({ href, children }) => (
+    /^https?:\/\//i.test(href ?? '')
+      ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+      : <a href={href}>{children}</a>
+  ),
   table: ({ children }) => (
     <div className="agent-markdown__table-scroll">
       <table>{children}</table>

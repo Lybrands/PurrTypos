@@ -8,7 +8,7 @@ import type { AgentConversationMessage } from "../../../agent-runtime";
 import type { CanonicalOperation } from "../../../agent-runtime/canonicalOutput";
 import { getAgentProcessingLabel } from "../../../agent-runtime/outputPresentation.ts";
 import Markdown from "../../Markdown";
-import ToolCallStatus from "../ToolCallStatus";
+import ToolCallStatus, { ToolCallLabel } from "../ToolCallStatus";
 import ToolApproval from "../ToolApproval";
 import ExecutionLog, { ExecutionLogStepGroup } from "../ExecutionLog";
 import DelegationStatus from "../DelegationStatus";
@@ -220,7 +220,7 @@ function CanonicalOperationRow({
       ) : (
         <CheckCircleIcon className="bubble-tool-call-icon" />
       )}
-      <span>{text}</span>
+      <ToolCallLabel text={text} />
       {durationMs != null ? (
         <span className="bubble-tool-call-duration">
           · {formatOperationDuration(durationMs)}
@@ -270,7 +270,7 @@ function CanonicalOperationGroupRow({
       ) : (
         <CheckCircleIcon className="bubble-tool-call-icon" />
       )}
-      <span>{text}</span>
+      <ToolCallLabel text={text} />
       {durationMs != null ? (
         <span className="bubble-tool-call-duration">
           · {formatOperationDuration(durationMs)}

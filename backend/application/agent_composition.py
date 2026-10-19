@@ -73,7 +73,9 @@ from application.agent_profile_registry import (
 from application.agent_tool_presentation import (
     enforce_agent_tool_catalog_presentation,
 )
-from application.shared_agent_context import with_shared_agent_context
+from application.shared_agent_context import (
+    TimeAwarePublicFactsProvider, with_current_time, with_shared_agent_context,
+)
 from application.public_commentary_output import PublicCommentaryOutputProcessor
 from application.assistant_text_facts import AssistantTextFactsProvider
 from application.model_runtime import with_adapter_public_progress
@@ -123,6 +125,9 @@ from infrastructure.persistence.sqlite_long_task_repository import (
 from infrastructure.persistence import approval_store
 from infrastructure.persistence.sqlite_approval_gateway import SqliteApprovalGateway
 from config import AGENT_APPROVAL_TIMEOUT_SECONDS
+from application.web_research import WebResearchPublicFactsProvider, WebResearchService
+from agents.shared.web_research_tools import with_web_research_tools
+from domains.web_research import GRANT_KEY, request_allows_web
 
 
 logger = logging.getLogger(__name__)
@@ -218,7 +223,7 @@ def _host_component_bindings(profile_id: str):
     return {
         role: AgentComponentBinding(
             f"{prefix}.{role}",
-            "2" if role == "contextProvider" else "1",
+            "3" if role == "contextProvider" else "1",
         )
         for role in (
             "contextProvider",
@@ -330,6 +335,7 @@ class AgentComposition:
             provider_capabilities or ProviderCapabilityCache()
         )
         self._memory_resource = memory_resource
+        self._web_research = WebResearchService(db)
         self._profiles = tuple(
             factory(
                 db=db,
@@ -572,7 +578,8 @@ class AgentComposition:
                 resolved,
                 model=with_adapter_public_progress(resolved.model),
             )
-        return resolved
+        resolved = await self._web_research.prepare_request(resolved, run_id=run_id)
+        return with_current_time(resolved)
 
     async def resolve_context_claims(
         self,
@@ -685,7 +692,7 @@ class AgentComposition:
             else frozenset(ToolExecutionMode(mode) for mode in allowed_tool_modes)
         )
         tool_catalog = _compose_tool_catalog(
-            adapter.tool_catalog,
+            with_web_research_tools(adapter.tool_catalog, self._web_research),
             profile_id=profile.id,
             extras=extras,
             allowed_modes=normalized_modes,
@@ -834,6 +841,14 @@ class AgentComposition:
                 options,
                 committed_result_facts_provider=AssistantTextFactsProvider(self._db),
             )
+        if options.committed_result_facts_provider is not None:
+            options = replace(options, committed_result_facts_provider=TimeAwarePublicFactsProvider(
+                options.committed_result_facts_provider, request,
+            ))
+            if request_allows_web(request):
+                options = replace(options, committed_result_facts_provider=WebResearchPublicFactsProvider(
+                    options.committed_result_facts_provider, self._web_research.repository,
+                ))
 
         binding = options.binding
         profile = self._profile_registry.for_request(request)
@@ -858,6 +873,8 @@ class AgentComposition:
         expected["modelTaskIdentity"] = _model_task_identity(
             request.model, options.reasoning_mode,
         )
+        if GRANT_KEY in request.metadata:
+            expected[GRANT_KEY] = request.metadata[GRANT_KEY]
         for name, value in expected.items():
             current = attributes.get(name)
             if current not in (None, "") and current != value:

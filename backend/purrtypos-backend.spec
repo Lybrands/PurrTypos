@@ -11,6 +11,7 @@ From backend/:
 from __future__ import annotations
 
 import os
+from PyInstaller.utils.hooks import collect_all
 
 _spec_dir = os.path.dirname(os.path.abspath(SPEC))
 
@@ -86,10 +87,19 @@ _hiddenimports = [
     "infrastructure.models.capabilities",
 ]
 
+# DDGS discovers engine modules dynamically; extraction packages carry rules,
+# language stoplists and compiled libraries that static import tracing misses.
+_binaries = []
+for _package in ("ddgs", "primp", "feedparser", "trafilatura", "justext", "courlan", "htmldate", "tld", "dateparser", "babel", "lxml_html_clean", "aiohttp"):
+    _package_datas, _package_binaries, _package_imports = collect_all(_package)
+    _datas.extend(_package_datas)
+    _binaries.extend(_package_binaries)
+    _hiddenimports.extend(_package_imports)
+
 a = Analysis(
     [os.path.join(_spec_dir, "main.py")],
     pathex=[_spec_dir],
-    binaries=[],
+    binaries=_binaries,
     datas=_datas,
     hiddenimports=_hiddenimports,
     hookspath=[],

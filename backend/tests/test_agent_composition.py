@@ -4,6 +4,7 @@ from application.model_runtime import context_window_tokens
 import asyncio
 import json
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -324,7 +325,8 @@ async def test_composition_consumes_explicit_profile_capabilities(
 
     profile = created[0]
     assert composition.agent_profile_ids == ("fake",)
-    assert prepared.metadata == {"prepared": True}
+    assert prepared.metadata["prepared"] is True
+    assert prepared.metadata["agentCurrentTime"]["localDateTime"]
     assert policies == (profile.judge_policy,)
     assert core._preset is not None
     assert core._preset.id == "fake"
@@ -494,7 +496,9 @@ async def test_static_profile_defaults_have_no_side_effects(
     )
 
     assert isinstance(profile, AgentProfile)
-    assert await composition.prepare_request(request) is request
+    prepared = await composition.prepare_request(request)
+    assert replace(prepared, metadata=request.metadata) == request
+    assert prepared.metadata["agentCurrentTime"]["localDateTime"]
     assert composition.create_response_judge_policies(request) == ()
     assert profile.context_provider_factory() is None
     assert profile.task_admission() is None
@@ -630,7 +634,7 @@ async def test_product_composition_registers_product_profiles(
             assert isinstance(provider, SharedAgentContextProvider)
             assert (
                 core._preset.component_bindings["contextProvider"].revision
-                == "2"
+                == "3"
             )
     finally:
         await composition.shutdown()
@@ -1713,6 +1717,159 @@ async def test_composed_route_reuses_observed_required_tool_choice_capability():
         },
     }
     assert composition.released == ["run-1", "run-2"]
+
+
+@pytest.mark.asyncio
+async def test_each_writing_turn_sends_host_time_through_web_tools_and_final_response(
+    temp_db: DatabaseConnection,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    await temp_db.execute("INSERT INTO books (id, title) VALUES ('book-1', '时间上下文测试')")
+    await temp_db.execute("INSERT INTO settings (key, value) VALUES ('web_search_enabled', 'true')")
+    local_now = datetime(2026, 10, 18, 23, 59, 59, tzinfo=timezone(timedelta(hours=8)))
+    monkeypatch.setattr("application.shared_agent_context._host_local_now", lambda: local_now)
+    sent_times = []
+    queries = []
+
+    class Search:
+        async def search(self, query, language, count):
+            queries.append(query)
+            return [], []
+
+    async def provider(_key, messages, options, _provider, signal=None):
+        # These are the actual messages handed to the protocol adapter, after
+        # Core context assembly and budgeting, including the final-public call.
+        clocks = [m for m in messages if str(m.get("content", "")).startswith(
+            "Host-provided context block 'agent_current_time':\n"
+        )]
+        has_tools = bool(options.get("tools"))
+        if has_tools:
+            assert len(clocks) == 1
+            assert clocks[0]["role"] in ("system", "developer")
+            value = json.loads(clocks[0]["content"].splitlines()[2])
+        else:
+            facts = json.loads(messages[-1]["content"])["facts"]
+            value = next(f["value"] for f in facts if f["key"] == "referenceTime")
+        assert value["localDateTime"] == local_now.isoformat(timespec="seconds")
+        assert value["utcOffset"] == "+08:00"
+        sent_times.append(value["localDateTime"])
+        has_result = any(m["role"] == "tool" for m in messages)
+
+        async def chunks():
+            if has_tools and not has_result:
+                yield {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": f"weather-{value['currentDate']}", "type": "function",
+                    "function": {"name": "searchWeb", "arguments": json.dumps({
+                        "query": f"杭州 天气 {value['currentDate']}", "language": "zh", "maxResults": 1,
+                    }, ensure_ascii=False)},
+                }]}, "finish_reason": "tool_calls"}]}
+            else:
+                yield {"choices": [{"delta": {"content": f"本轮日期为{value['currentDate']}，检索未返回可确认的天气资料。"}, "finish_reason": "stop"}]}
+
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
+
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", provider)
+    composition = _writing_composition(temp_db)
+    composition._web_research.search_provider = Search()
+    set_agent_composition(composition)
+    try:
+        for reference in (
+            datetime(2026, 10, 18, 23, 59, 59, tzinfo=local_now.tzinfo),
+            datetime(2026, 10, 19, 0, 0, 1, tzinfo=local_now.tzinfo),
+        ):
+            local_now = reference
+            start = len(sent_times)
+            response = await chat_stream(ChatStreamRequest(
+                messages=[
+                    {"role": "user", "content": "你好"},
+                    {"role": "assistant", "content": "今天是2026年6月5日。"},
+                    {"role": "user", "content": "查询今日杭州的天气"},
+                ],
+                apiKey="key", apiProvider="openai", options=_fixture_model_options(),
+                enableAgentTools=True, bookId="book-1", chatAgentMode="agent", contextWindow="200k",
+            ))
+            events = await _collect(response)
+            assert events[-1]["runResult"]["status"] == "done", events[-1]
+            assert reference.date().isoformat() in provider_text(events)
+            assert "6月5日" not in provider_text(events)
+            assert sent_times[start:] == [reference.isoformat(timespec="seconds")] * 3
+        assert queries == ["杭州 天气 2026-10-18", "杭州 天气 2026-10-19"]
+    finally:
+        await composition.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_agent_reads_five_known_sources_in_one_tool_round(
+    temp_db: DatabaseConnection, monkeypatch: pytest.MonkeyPatch,
+):
+    from domains.web_research import SearchHit, WebPage
+    await temp_db.execute("INSERT INTO books (id, title) VALUES ('book-1', '批量读取测试')")
+    await temp_db.execute("INSERT INTO settings (key, value) VALUES ('web_search_enabled', 'true')")
+    requests, tool_calls, downloads = [], [], []
+
+    class Search:
+        async def search(self, *args):
+            return [SearchHit(f"来源{i}", f"https://example.com/{i}", "相关资料", "fixture") for i in range(5)], []
+
+    class Reader:
+        async def read(self, url):
+            downloads.append(url)
+            return WebPage(url, "公开正文资料。" * 1_000)
+
+    async def provider(_key, messages, options, _provider, signal=None):
+        requests.append(messages)
+        observations = [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
+        name, args = None, None
+        if options.get("tools"):
+            names = {t["function"]["name"] for t in options["tools"]}
+            assert "readWebPages" in names and "readWebPage" not in names
+            description = next(t["function"]["description"] for t in options["tools"] if t["function"]["name"] == "readWebPages")
+            assert "5 项 1600" in description and "bodyBudget.maxCharactersPerPage" in description
+            if not observations:
+                name, args = "searchWeb", {"query": "公开资料", "maxResults": 5}
+            elif "query" in observations[-1]:
+                name, args = "readWebPages", {"pages": [{"sourceId": r["sourceId"]} for r in observations[-1]["results"]]}
+            else:
+                assert len(observations[-1]["results"]) == 5
+                assert all(r["success"] for r in observations[-1]["results"])
+                assert sum(len(r["content"]) for r in observations[-1]["results"]) == 8_000
+                assert observations[-1]["bodyBudget"] == {
+                    "pageCount": 5, "maxTotalCharacters": 8_000, "maxCharactersPerPage": 1_600,
+                }
+        else:
+            facts = json.loads(messages[-1]["content"])["facts"]
+            budgets = next(f["value"] for f in facts if f["key"] == "webPageReadingBudgets")
+            assert budgets == [{"pageCount": 5, "maxTotalCharacters": 8_000, "maxCharactersPerPage": 1_600}]
+        async def chunks():
+            if name:
+                tool_calls.append((name, args))
+                yield {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": f"call-{len(tool_calls)}", "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }]}, "finish_reason": "tool_calls"}]}
+            else:
+                yield {"choices": [{"delta": {"content": "已读取五个来源的资料。"}, "finish_reason": "stop"}]}
+        return {"applied_generation_limit": options.get("max_tokens"), "stream": chunks(), "model": "model"}
+
+    monkeypatch.setattr("infrastructure.models.provider_router.create_chat_stream", provider)
+    composition = _writing_composition(temp_db)
+    composition._web_research.search_provider = Search()
+    composition._web_research.reader = Reader()
+    set_agent_composition(composition)
+    try:
+        response = await chat_stream(ChatStreamRequest(
+            messages=[{"role": "user", "content": "查找并读取五个相关的公开资料"}],
+            apiKey="key", apiProvider="openai", options=_fixture_model_options(),
+            enableAgentTools=True, bookId="book-1", chatAgentMode="agent", contextWindow="200k",
+        ))
+        events = await _collect(response)
+        assert events[-1]["runResult"]["status"] == "done", events[-1]
+        assert [name for name, _ in tool_calls] == ["searchWeb", "readWebPages"]
+        assert len(tool_calls[1][1]["pages"]) == 5
+        assert len(downloads) == 5
+        assert len(requests) == 4  # search, batch read, candidate, final-public
+    finally:
+        await composition.shutdown()
 
 
 @pytest.mark.asyncio

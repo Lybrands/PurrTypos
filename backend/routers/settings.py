@@ -13,6 +13,7 @@ from application.provider_capacity_policy import (
 )
 from application.run_provenance import digest_model_endpoint
 from infrastructure.models.profiles.descriptors import model_descriptors
+from domains.web_research import SETTING_KEY as WEB_SEARCH_SETTING
 
 router = APIRouter(tags=["settings"])
 AGENT_PREVENT_SYSTEM_SLEEP_SETTING = "agent_prevent_system_sleep"
@@ -76,6 +77,8 @@ async def get_agent_power_state():
 async def set_settings(body: SetSettingsRequest):
     db = get_db()
     for key, value in body.data.items():
+        if key == WEB_SEARCH_SETTING and type(value) is not bool:
+            raise HTTPException(status_code=422, detail="联网搜索开关必须为布尔值")
         if key == "model_descriptors":
             continue
         if key == "ai_model_configs" and isinstance(value, list):

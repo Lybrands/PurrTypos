@@ -150,6 +150,14 @@ Agent 分为三个产品形态：小说写作（工作台 AI 面板）、小说�
 `backend/skills`，也不存在旧 SkillCatalog 回退路径。Agent 目录的依赖方向与
 实现版本路由规则见 [`backend/agents/README.md`](backend/agents/README.md)。
 
+### 免费联网资料
+
+在「设置 → 通用 → 允许 Agent 联网查资料」打开开关后，新建的写作 Agent 和剧本普通问答任务可以搜索公开资料并读取网页正文，无需搜索 API Key。检索词先发送给 Bing，失败时尝试 DuckDuckGo、Brave；网页由本机读取。开关默认关闭，纯问答、小说原文分析及子 Agent 不获得联网工具。
+
+搜索与正文提取不收取供应商 API 费用，生成模型仍按原有服务计费。免费搜索可能受到限流或改版影响，结果需核对来源。选型、实际限制和验证记录见 [免费联网搜索技术选型与实现](docs/design/2026-10-16-web-search-technical-selection.md)。
+
+网页读取工具 `readWebPages` 每次接受 1–5 页，批内最多两页并发，正文合计最多 8,000 字符。已知多个相关来源时可合并读取以减少工具调用和模型往返；各个未缓存网页仍分别发起 HTTP 请求，每 Run 最多六次新页面访问尝试。
+
 ## 项目结构
 
 ```

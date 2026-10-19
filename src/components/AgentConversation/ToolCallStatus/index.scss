@@ -5,7 +5,9 @@
 
 .bubble-tool-call-line {
   display: flex;
-  align-items: flex-start; // 文本换行时 icon 顶部对齐
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
   gap: 6px;
   font-size: var(--font-size-sm);
   color: var(--text-muted);
@@ -19,7 +21,6 @@
   .bubble-tool-call-icon {
     font-size: 14px;
     flex-shrink: 0;
-    margin-top: 3px; // 与首行文本视觉对齐（行高 1.6）
   }
 
   .bubble-tool-call-icon--pending {
@@ -31,12 +32,30 @@
   }
 }
 
+.bubble-tool-call-label {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.bubble-tool-call-label-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bubble-tool-call-label-count {
+  flex: 0 0 auto;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
 // 失败行不展示图标，用等宽占位保持与其他行对齐
 .bubble-tool-call-spacer {
   flex-shrink: 0;
   width: 14px;
   height: 1em;
-  margin-top: 3px;
 }
 
 // 行尾「调用失败」标注：与行文字同色，静默提示
@@ -48,5 +67,6 @@
 
 .bubble-tool-call-duration {
   flex: 0 0 auto;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }

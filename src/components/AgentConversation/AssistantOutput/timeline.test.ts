@@ -217,6 +217,40 @@ test('planning uses public narration instead of an executable operation row', ()
   }
 })
 
+test('web operation details render during execution and after canonical event replay', () => {
+  for (const [toolName, toolArguments, label] of [
+    ['searchWeb', { query: '杭州 今日天气' }, '搜索公开网页“杭州 今日天气”'],
+    ['readWebPages', { pages: [{ title: '天气预报', host: 'hangzhou.gov.cn', continuation: false }] }, '读取 1 个网页（天气预报）'],
+    ['readWebPages', { pages: [{ title: '天气预报', host: 'hangzhou.gov.cn', continuation: true }] }, '续读 1 个网页（天气预报）'],
+    ['readWebPages', { pages: [{ title: '来源1' }, { title: '来源2', continuation: true }, { title: '来源3' }] }, '读取 来源1、来源2·续读、来源3 等 3 个网页'],
+  ] as const) {
+    const started: CanonicalOutputEvent = {
+      eventId: 'web-start', runId: 'run-1', turnId: null,
+      invocationId: null, outputStreamId: null, sequence: 1,
+      source: 'runtime', kind: 'operation.started', channel: 'operation', visibility: 'public',
+      occurredAt: '2026-10-19T00:00:00Z', emittedAt: '2026-10-19T00:00:00Z',
+      payload: {
+        operationId: 'web-1', kind: 'tool',
+        display: { labelKey: 'agent.operation.tool', labelParams: {
+          toolName, toolArguments,
+          displayNames: { 'zh-CN': toolName === 'searchWeb' ? '搜索公开网页' : '读取网页资料' },
+        } },
+      },
+    }
+    const finished: CanonicalOutputEvent = {
+      ...started, eventId: 'web-finish', sequence: 2, kind: 'operation.finished',
+      payload: { operationId: 'web-1', status: 'succeeded' },
+    }
+    for (const events of [[started], [started, finished]]) {
+      const output = events.reduce(reduceCanonicalOutput, initialCanonicalOutputState())
+      const parts = buildAssistantTimeline({
+        role: 'assistant', content: '', canonicalOutput: output,
+      }, { messageIndex: 0, isStreaming: events.length === 1 })
+      assert.deepEqual(parts.filter((part) => part.type === 'operation').map((part) => part.label), [label])
+    }
+  }
+})
+
 test('canonical timeline filters model operations, localizes tools, and groups consecutive work once', () => {
   const base = initialCanonicalOutputState()
   const operation = (operationId: string, kind: string, status: 'running' | 'succeeded') => ({

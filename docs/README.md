@@ -5,6 +5,7 @@
 - [三个 Agent 当前代码边界](../backend/agents/README.md)
 - [共享对话与执行规范](design/shared-agent-conversation-contract.md)
 - [模型请求公共入口与适配规范](design/2026-09-06-model-request-boundary-refactor.md)
+- [免费联网搜索技术选型与实现](design/2026-10-16-web-search-technical-selection.md)
 - [写作技法 v1 契约](design/2026-09-07-writing-techniques-p0-contracts.md)
 - [共享 Markdown 创作资料](design/2026-09-07-shared-markdown-creation-materials.md)
 - [仓库文件与忽略规则](repository-hygiene.md)
