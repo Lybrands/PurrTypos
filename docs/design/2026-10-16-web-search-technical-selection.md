@@ -23,7 +23,7 @@ Bing RSS 是公开网页输出方式，不是已获得 SLA 的商业搜索 API�
 - DDGS 官方说明支持多个搜索后端，代码使用同步 HTTP 与结果解析。[官方仓库](https://github.com/deedy5/ddgs)、[9.16.0 发布包](https://pypi.org/project/ddgs/9.16.0/)。
 - 本次实际检查安装包发现其 Bing HTML 后端 `disabled=True`，不在启用引擎表内。DDGS 对不存在的后端会回退 auto；实现因此先检查配置后端是否启用，再发起请求，避免将禁用 Bing 误标成真正的 Bing 结果。
 - 本机直接测试 DDGS 的 DuckDuckGo、Brave、Yahoo、Google、Startpage、Mojeek 路径，没有获得可用结果；一次 Brave HTTP 诊断返回 429。这些结果只描述本次网络和时点，不能推广为这些引擎永久不可用。
-- 固定 Bing 搜索地址的 RSS 请求返回 HTTP 200 / XML，并在两个公开中英文查询上各返回 10 个条目；产品适配器只保留最多 5 条。此结果推动主要搜索路径选择 RSS，不把 DDGS 单独调通函数视为完成接入。
+- 固定 Bing 搜索地址的 RSS 请求返回 HTTP 200 / XML，并在两个公开中英文查询上各返回 10 个条目；当时产品适配器只保留最多 5 条（当前上限见下文）。此结果推动主要搜索路径选择 RSS，不把 DDGS 单独调通函数视为完成接入。
 - feedparser 从内存中的响应字节解析 RSS，不让解析库自行联网。锁定 6.0.14。[官方文档](https://feedparser.readthedocs.io/en/latest/)。
 - Trafilatura 支持将 HTML 转为正文并过滤部分噪声；启发式提取仍可能漏掉正文或纳入页面提示。提取成功不等于事实已验证，也不能保证全文完整。[官方 Python 文档](https://trafilatura.readthedocs.io/en/latest/usage-python.html)。
 - aiohttp 支持连接器、resolver、CookieJar 和手动重定向控制，适合将请求边界集中实现。[官方客户端文档](https://docs.aiohttp.org/en/stable/client_advanced.html)。
@@ -50,7 +50,7 @@ Bing RSS 是公开网页输出方式，不是已获得 SLA 的商业搜索 API�
 | [sqlite_web_research_repository.py](../../backend/infrastructure/persistence/sqlite_web_research_repository.py) | 原子调用预留、幂等回放、Run 范围来源和有限正文 |
 | [web_research_tools.py](../../backend/agents/shared/web_research_tools.py) | 两个 PurrA 工具、中文操作标签、按请求启用 |
 | [agent_composition.py](../../backend/application/agent_composition.py) | 统一装配、宿主授权准备与 binding 留存 |
-| [web_research_schema.py](../../backend/database/web_research_schema.py) | 两张表和 Run 删除清理触发器 |
+| [web_research_schema.py](../../backend/database/web_research_schema.py) | 三张表和 Run 删除清理触发器 |
 | [WebResearchSettings.tsx](../../src/SettingsPage/WebResearchSettings.tsx) | 显式开关、功能与模型用量提示、加载/保存失败反馈 |
 | [external_links.js](../../electron/external_links.js) | Electron 外部 HTTP(S) 来源链接交给系统浏览器 |
 
@@ -59,18 +59,26 @@ Bing RSS 是公开网页输出方式，不是已获得 SLA 的商业搜索 API�
 ## 5. 工具与证据合同
 
 ```text
-searchWeb(query, language="zh"|"en", maxResults=1..5)
-  → success, query, results[{sourceId, title, url, excerpt, backend,
-      retrievedAt, publishedAt:null, evidenceKind:"search_excerpt"}], warnings
+searchWeb(queries=[{query, language?:"zh"|"en"}, ...],
+          maxResults?:1..20=10, researchMode?:"standard"|"extended"="standard")
+  // 1–3 个查询；相同语言与规范化关键词在批内去重
+  → success, queries[{query, language, success, resultCount, code?, error?, warnings?}],
+    results[{sourceId, title, url, excerpt, backend,
+      retrievedAt, publishedAt:null, evidenceKind:"search_excerpt"}], warnings,
+    queryBudget:{limit:6,used,remaining}, readBudget:{limit:8|12,used,remaining}, untrusted:true
 
 readWebPages(pages=[{sourceId, offset?}, ...]) // 1–5 项，offset 默认 0
-  → success:true, untrusted:true,
+  → success:true, untrusted:true, queryBudget, readBudget,
     bodyBudget:{pageCount, maxTotalCharacters:8000, maxCharactersPerPage}, results:[
       {success:true, sourceId, title, url, contentRevisionId, content,
         offset, nextOffset, truncated, retrievedAt, evidenceKind:"page_extract", untrusted:true}
       或 {success:false, sourceId, offset, code, error, title?, url?, untrusted:true}
     ]
 ```
+
+搜索批次先规范化空白，同语言同关键词只执行一次，报告仍保持输入顺序。多个查询按上游排名交错合并，用去除锚点、默认端口和已知追踪参数后的 URL 键去重，读取仍使用来源原 URL；保留语义查询参数。候选总数受 `maxResults` 限制，每条最多返回 300 字符摘要，不将各查询的完整结果列表重复返回。上游不足时明确提示，不自动追加查询凑数。批内每个实际查询单独预留额度，部分失败保留成功来源；全部失败返回 `success:false`。候选增多不是相关性或事实支持率提高的证明。
+
+标准模式读取上限为 8；复杂、多维、跨语言或证据不足时 Agent 可在搜索中选择 `researchMode=extended` 提升至 12。额度持久化到 Run 独立记录，后续 standard 不降级，跨服务重启保持；模型不能传入任意数值突破上限。返回的 `queryBudget/readBudget` 是完成时快照，幂等重放保持原快照。无额外配置项；先筛选再读取，证据足够时停止。
 
 来源编号由宿主生成并绑定当前 Run；模型不能将任意 URL、API 地址或凭据传入读取工具。搜索返回 URL 也经过公开 URL 校验。服务会保留标题、URL、摘要及有限正文，历史工具回执可重放；暂不提供跨 Run 来源复用或独立来源卡片界面。
 
@@ -88,10 +96,10 @@ readWebPages(pages=[{sourceId, offset?}, ...]) // 1–5 项，offset 默认 0
 
 | 项目 | 已实现限制 |
 | --- | --- |
-| 查询长度与返回规模 | 1–300 字，最多 5 条 |
-| 每个获授权根 Run | 最多 6 次新搜索、6 次新页面读取；子 Agent 无联网授权 |
-| 搜索外发路径 | 一次搜索先 RSS，再显式 DDGS DuckDuckGo/Brave；一次工具调用最多触达这三个配置入口，非“一次调用只有一个 HTTP 请求” |
-| 搜索总等待 | 25 秒；RSS HTTP 时限 8 秒，DDGS 每个后端 6 秒 |
+| 查询长度与返回规模 | 每查询 1–300 字，单次 1–3 项、最多两路并发；每查询及合并候选默认 10、最多 20 条；每条返回摘要最多 300 字符 |
+| 每个获授权根 Run | 最多 6 个实际查询，失败也计数；默认 8 次新网页访问，显式 extended 可提高至 12，失败也计数；子 Agent 无联网授权 |
+| 搜索外发路径 | 一次搜索先 RSS，再显式 DDGS DuckDuckGo/Brave；每个实际查询最多触达这三个配置入口，非“一次调用只有一个 HTTP 请求” |
+| 搜索等待 | 每查询 25 秒；批内两路并发，第三项等待空闲槽；RSS HTTP 时限 8 秒，DDGS 每个后端 6 秒 |
 | RSS 下载 | 最大 1 MB，直接解析响应字节；非 RSS、超限、无可用结果进入后备路径 |
 | 正文下载 | 仅 HTTP(S) 的 80/443 端口；单次总时限 25 秒，连接 5 秒、HTTP 20 秒；最多 5 次请求的重定向链 |
 | 正文大小 | 单页解压后最多 2 MB，保留提取文本前 24,000 字符；整批正文合计最多 8,000 字符，每项最多 `min(4000, floor(8000 / 输入项数))` 字符，5 项时各 1,600 字符；失败或重复项不重分配窗口，续读以实际 `nextOffset` 为准 |
@@ -100,7 +108,7 @@ readWebPages(pages=[{sourceId, offset?}, ...]) // 1–5 项，offset 默认 0
 | 缓存/回放 | 同一 toolCallId 返回原回执；正文分页读取本 Run 的已存文本，不重复访问外网 |
 | 留存 | 来源与有界正文随 Run 保留，删除 Run 时由数据库触发器清理 |
 
-调用开始前，SQLite 事务检查权限和幂等。读取批次保存整个有序输入的摘要和统一结果，不按批次扣读取额度；逐页下载使用确定性的子回执，仍按实际新页面访问尝试计数，失败尝试也占额度。缓存分页不占外网读取额度，不同服务实例并发不能突破每 Run 六次上限。请求中断留下未完成回执，同一调用标识不会自动重新访问外网；已完成页面缓存可被新的调用复用。查询相同但调用标识不同仍计搜索次数，首期没有跨调用查询缓存、刷新或自动 TTL。
+调用开始前，SQLite 事务检查权限和幂等。读取批次保存整个有序输入的摘要和统一结果，不按批次扣读取额度；逐页下载使用确定性的子回执，仍按实际新页面访问尝试计数，失败尝试也占额度。缓存分页不占外网读取额度，不同服务实例并发不能突破每 Run 当前读取上限。请求中断留下未完成回执，同一调用标识不会自动重新访问外网；已完成页面缓存可被新的调用复用。查询相同但调用标识不同仍计搜索次数，首期没有跨调用查询缓存、刷新或自动 TTL。
 
 DDGS 是同步库，取消等待不能强行终止已在执行的原生 HTTP；该工作继续占用有限槽直到结束，但取消标记阻止它在当前请求结束后继续访问下一后备引擎。RSS 与正文 HTTP 可以随协程取消。实现没有验证码绕过、无限重试、代理池或收费回退。
 

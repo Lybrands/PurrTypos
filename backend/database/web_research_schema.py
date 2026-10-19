@@ -2,6 +2,10 @@
 
 
 async def init_web_research_schema(db):
+    await db.execute("""CREATE TABLE IF NOT EXISTS web_research_run_limits (
+        run_id TEXT PRIMARY KEY,
+        read_limit INTEGER NOT NULL CHECK(read_limit IN (8, 12))
+    )""")
     await db.execute("""CREATE TABLE IF NOT EXISTS web_research_attempts (
         run_id TEXT NOT NULL,
         call_id TEXT NOT NULL,
@@ -25,8 +29,10 @@ async def init_web_research_schema(db):
         page_truncated INTEGER NOT NULL DEFAULT 0,
         UNIQUE(run_id, url)
     )""")
-    await db.execute("""CREATE TRIGGER IF NOT EXISTS web_research_delete_run
+    await db.execute("DROP TRIGGER IF EXISTS web_research_delete_run")
+    await db.execute("""CREATE TRIGGER web_research_delete_run
         AFTER DELETE ON ai_agent_runs BEGIN
         DELETE FROM web_research_attempts WHERE run_id = OLD.id;
         DELETE FROM web_research_sources WHERE run_id = OLD.id;
+        DELETE FROM web_research_run_limits WHERE run_id = OLD.id;
     END""")

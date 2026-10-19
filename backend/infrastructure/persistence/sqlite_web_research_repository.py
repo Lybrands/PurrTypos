@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from domains.web_research import (
-    CONTRACT_VERSION, GRANT_KEY, MAX_READS, MAX_SEARCHES, SETTING_KEY,
+    CONTRACT_VERSION, GRANT_KEY, MAX_READS, EXTENDED_MAX_READS, MAX_SEARCHES, SETTING_KEY,
     WebResearchError,
 )
 
@@ -43,7 +43,7 @@ class SqliteWebResearchRepository:
         ):
             raise WebResearchError("web_search_not_authorized", "本次任务未获得联网资料权限。")
 
-    async def reserve(self, run_id, call_id, kind, arguments, *, external=True):
+    async def reserve(self, run_id, call_id, kind, arguments, *, external=True, read_limit=None):
         digest = hashlib.sha256(encode(arguments).encode()).hexdigest()
         async with self.db.transaction():
             await self.authorize(run_id)
@@ -59,14 +59,38 @@ class SqliteWebResearchRepository:
             count = await self.db.fetch_one(
                 "SELECT COUNT(*) AS n FROM web_research_attempts WHERE run_id = ? AND kind = ? AND external_request = 1", [run_id, kind],
             )
-            limit = MAX_SEARCHES if kind == "search" else MAX_READS
+            limit = MAX_SEARCHES if kind == "search" else await self.read_limit(run_id)
             if external and int(count["n"]) >= limit:
                 raise WebResearchError("web_budget_exhausted", "本轮联网调用已达上限，请依据已有资料回答并说明缺口。")
             await self.db.execute(
                 "INSERT INTO web_research_attempts (run_id, call_id, kind, arguments_digest, external_request) VALUES (?, ?, ?, ?, ?)",
                 [run_id, call_id, kind, digest, int(external)],
             )
+            if read_limit is not None:
+                if read_limit not in (MAX_READS, EXTENDED_MAX_READS):
+                    raise ValueError("Unsupported web reading limit")
+                await self.db.execute(
+                    "INSERT INTO web_research_run_limits(run_id,read_limit) VALUES (?,?) "
+                    "ON CONFLICT(run_id) DO UPDATE SET read_limit=MAX(read_limit,excluded.read_limit)",
+                    [run_id, read_limit],
+                )
         return None
+
+    async def read_limit(self, run_id):
+        row = await self.db.fetch_one("SELECT read_limit FROM web_research_run_limits WHERE run_id = ?", [run_id])
+        return row["read_limit"] if row else MAX_READS
+
+    async def budgets(self, run_id):
+        rows = await self.db.fetch_all(
+            "SELECT kind,COUNT(*) AS n FROM web_research_attempts WHERE run_id = ? "
+            "AND external_request = 1 GROUP BY kind", [run_id],
+        )
+        used = {row["kind"]: row["n"] for row in rows}
+        read_limit = await self.read_limit(run_id)
+        return {
+            "queryBudget": {"limit": MAX_SEARCHES, "used": used.get("search", 0), "remaining": max(0, MAX_SEARCHES - used.get("search", 0))},
+            "readBudget": {"limit": read_limit, "used": used.get("read", 0), "remaining": max(0, read_limit - used.get("read", 0))},
+        }
 
     async def finish(self, run_id, call_id, result):
         await self.db.execute(

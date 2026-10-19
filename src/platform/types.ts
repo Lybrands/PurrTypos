@@ -11,7 +11,15 @@ export interface RuntimeCapabilities {
   directoryExport: boolean
 }
 
+export interface WindowChromeState {
+  fullscreen: boolean
+}
+
 export type DesktopBridge = PlatformApi & {
+  platform?: string
+  setWindowTheme?: (theme: 'light' | 'dark') => Promise<void>
+  getWindowChromeState?: () => Promise<WindowChromeState>
+  onWindowChromeStateChanged?: (listener: (state: WindowChromeState) => void) => () => void
   showNotification?: (data: { title: string; body: string; tag?: string }) => Promise<void>
   refreshAgentPowerSaveState?: () => Promise<void>
   selectNovelKnowledge?: (bookId: string) => Promise<import('../types').ApiResult<{ selectionToken: string }>>

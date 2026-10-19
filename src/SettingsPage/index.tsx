@@ -1,7 +1,7 @@
 import React from 'react'
 import AppHeader from '../components/AppHeader'
 import { CheckIcon, CopyIcon, DeleteIcon, EditIcon, ExportIcon, ImportIcon, PlusIcon } from '@/purr-components'
-import { PurrButton, PurrCheckbox, PurrForm, PurrInput, PurrInputNumber, PurrModal, PurrRadio, PurrSelect, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
+import { PurrButton, PurrForm, PurrInput, PurrInputNumber, PurrModal, PurrRadio, PurrSelect, PurrSlider, PurrSwitch, PurrTag, PurrTooltip } from '@/purr-components'
 import type { AiModelConfig, AiProviderCapacityPolicy, MemoryEmbeddingConfig } from '../types'
 import {
   AI_BUILTIN_MODEL_PROFILES,
@@ -54,8 +54,6 @@ interface SettingsPageProps {
   ) => Promise<void>
   onClose: () => void
   onHome: () => void
-  syncOutlineChapter: boolean
-  onSyncOutlineChapterChange: (value: boolean) => void
   agentPreventSystemSleep: boolean
   onAgentPreventSystemSleepChange: (value: boolean) => void
   agentOperationMode: AgentOperationMode
@@ -72,8 +70,6 @@ export default function SettingsPage({
   onSaveMemoryConfiguration,
   onClose,
   onHome,
-  syncOutlineChapter,
-  onSyncOutlineChapterChange,
   agentPreventSystemSleep,
   onAgentPreventSystemSleepChange,
   agentOperationMode,
@@ -507,12 +503,6 @@ export default function SettingsPage({
             <div className="settings-section">
               <h2 className="settings-section-title">通用</h2>
               <WebResearchSettings />
-              <PurrCheckbox
-                checked={syncOutlineChapter}
-                onChange={(e) => onSyncOutlineChapterChange(e.target.checked)}
-              >
-                点击章节大纲或章节列表时，同步切换另一侧选中项
-              </PurrCheckbox>
               <div className="settings-preference-row">
                 <div className="settings-preference-copy">
                   <strong>Agent 运行时防止系统休眠</strong>

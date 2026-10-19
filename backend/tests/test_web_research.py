@@ -76,7 +76,7 @@ async def test_explicit_grant_and_tool_catalog_are_persistable(setup):
     assert "readWebPage" not in {item.schema.name for item in catalog.registrations()}
     assert catalog.enabled_names(request()) == frozenset()
     result = await catalog.get("searchWeb").call_handler(
-        ExecutionState(run_id="web-run"), {"query": "气象"}, ToolCall(id="call-1", name="searchWeb", arguments_json='{"query":"气象"}'),
+        ExecutionState(run_id="web-run"), {"queries": [{"query": "气象"}]}, ToolCall(id="call-1", name="searchWeb", arguments_json='{"queries":[{"query":"气象"}]}'),
     )
     assert json.loads(result.content)["results"][0]["sourceId"]
     assert result.error_code is None
@@ -94,7 +94,7 @@ async def test_registered_web_tool_executes_through_purra_gateway(setup):
         gateway=CoreToolExecutor(catalog),
         request=ToolBatchRequest(
             run_id="web-run", invocation_id="web-invocation",
-            calls=(ToolCall(id="native-call", name="searchWeb", arguments_json='{"query":"公开资料"}'),),
+            calls=(ToolCall(id="native-call", name="searchWeb", arguments_json='{"queries":[{"query":"公开资料"}]}'),),
             allowed_tool_names=frozenset(catalog.enabled_names(prepared)),
             state=ExecutionState(run_id="web-run"),
         ),
@@ -141,8 +141,8 @@ async def test_web_operation_details_survive_checkpoint_roundtrip_without_page_b
         return json.loads(result.results[0].content)
 
     state = ExecutionState(run_id="web-run")
-    search = await execute(state, "searchWeb", "display-search", {"query": "杭州\n 今日天气", "maxResults": 1})
-    assert output.events[0].display["labelParams"]["toolArguments"] == {"query": "杭州 今日天气"}
+    search = await execute(state, "searchWeb", "display-search", {"queries": [{"query": "杭州\n 今日天气"}], "maxResults": 1})
+    assert output.events[0].display["labelParams"]["toolArguments"] == {"queries": [{"query": "杭州 今日天气", "language": "zh"}], "researchMode": "standard"}
     # The same thawed state shape used when restoring a persisted checkpoint.
     restored = ExecutionState(run_id="web-run", domain=thaw_json_mapping(freeze_json_mapping(state.domain)))
     source_id = search["results"][0]["sourceId"]
@@ -166,10 +166,10 @@ async def test_web_display_projection_bounds_untrusted_text_and_hides_unknown_so
     catalog = with_web_research_tools(InMemoryToolCatalog(()), service)
     state = ExecutionState(run_id="web-run")
     params = catalog.get("searchWeb").operation_display_params(
-        state, freeze_json_mapping({"query": "x" * 300, "language": "en", "maxResults": 5}), None,
+        state, freeze_json_mapping({"queries": [{"query": "x" * 300, "language": "en"}], "maxResults": 5}), None,
     )
-    assert len(params["toolArguments"]["query"]) == 120
-    assert set(params["toolArguments"]) == {"query"}
+    assert len(params["toolArguments"]["queries"][0]["query"]) == 120
+    assert set(params["toolArguments"]) == {"queries", "researchMode"}
     params = catalog.get("readWebPages").operation_display_params(
         state, freeze_json_mapping({"pages": [{"sourceId": "unknown-opaque-id"}]}), None,
     )
@@ -198,27 +198,27 @@ async def test_resume_does_not_retrofit_access_and_current_disable_revokes_calls
     assert resumed.metadata["webResearch"]["enabled"]
     await db.execute("UPDATE settings SET value = 'false' WHERE key = 'web_search_enabled'")
     with pytest.raises(WebResearchError, match="关闭"):
-        await service.search("web-run", "disabled", {"query": "公开资料"})
+        await service.search("web-run", "disabled", {"queries": [{"query": "公开资料"}]})
     assert service.search_provider.calls == 0
 
 
 @pytest.mark.asyncio
 async def test_search_replay_has_stable_sources_and_no_second_request(setup):
     _, service = setup
-    first = await service.search("web-run", "lookup", {"query": "气象", "language": "zh"})
-    again = await service.search("web-run", "lookup", {"query": "气象", "language": "zh"})
+    first = await service.search("web-run", "lookup", {"queries": [{"query": "气象", "language": "zh"}]})
+    again = await service.search("web-run", "lookup", {"queries": [{"query": "气象", "language": "zh"}]})
     assert first == again
     assert first["results"][0]["evidenceKind"] == "search_excerpt"
     assert first["results"][0]["publishedAt"] is None
     assert service.search_provider.calls == 1
     with pytest.raises(WebResearchError, match="不一致"):
-        await service.search("web-run", "lookup", {"query": "改掉参数"})
+        await service.search("web-run", "lookup", {"queries": [{"query": "改掉参数"}]})
 
 
 @pytest.mark.asyncio
 async def test_page_pagination_is_local_stable_and_scoped(setup):
     db, service = setup
-    search = await service.search("web-run", "s1", {"query": "气象"})
+    search = await service.search("web-run", "s1", {"queries": [{"query": "气象"}]})
     source_id = search["results"][0]["sourceId"]
     batch = await service.read_pages("web-run", "r1", {"pages": [{"sourceId": source_id}]})
     first = batch["results"][0]
@@ -239,6 +239,7 @@ async def test_page_pagination_is_local_stable_and_scoped(setup):
     await db.execute("DELETE FROM ai_agent_runs WHERE id = 'web-run'")
     assert await db.fetch_all("SELECT * FROM web_research_sources") == []
     assert await db.fetch_all("SELECT * FROM web_research_attempts") == []
+    assert await db.fetch_all("SELECT * FROM web_research_run_limits") == []
 
 
 @pytest.mark.asyncio
@@ -246,10 +247,10 @@ async def test_atomic_budget_survives_new_service_instances(setup):
     db, service = setup
     other = WebResearchService(db, search=Search(), reader=Reader())
     results = await asyncio.gather(*[
-        (service if i % 2 else other).search("web-run", f"parallel-{i}", {"query": "公开资料"}) for i in range(10)
+        (service if i % 2 else other).search("web-run", f"parallel-{i}", {"queries": [{"query": "公开资料"}]}) for i in range(10)
     ], return_exceptions=True)
-    assert sum(isinstance(result, dict) for result in results) == 6
-    assert sum(isinstance(result, WebResearchError) and result.code == "web_budget_exhausted" for result in results) == 4
+    assert sum(isinstance(result, dict) and result["success"] for result in results) == 6
+    assert sum(isinstance(result, dict) and result.get("code") == "web_budget_exhausted" for result in results) == 4
 
 
 @pytest.mark.asyncio
@@ -258,11 +259,11 @@ async def test_failed_search_is_an_observation_and_retains_budget(setup):
     async def failing(*args):
         raise WebResearchError("web_search_unavailable", "受限流影响")
     service.search_provider.search = failing
-    payload = await service.search("web-run", "fail", {"query": "公开资料"})
+    payload = await service.search("web-run", "fail", {"queries": [{"query": "公开资料"}]})
     assert payload["success"] is False and payload["code"] == "web_search_unavailable"
-    assert "results" not in payload
-    assert payload == await service.search("web-run", "fail", {"query": "公开资料"})
-    assert (await db.fetch_one("SELECT COUNT(*) AS n FROM web_research_attempts"))["n"] == 1
+    assert payload["results"] == []
+    assert payload == await service.search("web-run", "fail", {"queries": [{"query": "公开资料"}]})
+    assert (await db.fetch_one("SELECT COUNT(*) AS n FROM web_research_attempts WHERE kind = 'search' AND external_request = 1"))["n"] == 1
 
 
 @pytest.mark.asyncio
@@ -273,14 +274,14 @@ async def test_cancel_does_not_record_a_fake_result_or_blindly_resend(setup):
         started.set()
         await asyncio.Event().wait()
     service.search_provider.search = waiting
-    task = asyncio.create_task(service.search("web-run", "cancel", {"query": "公开资料"}, stop))
+    task = asyncio.create_task(service.search("web-run", "cancel", {"queries": [{"query": "公开资料"}]}, stop))
     await started.wait()
     stop.set()
     with pytest.raises(OperationCanceled):
         await task
     assert (await db.fetch_one("SELECT result_json FROM web_research_attempts"))["result_json"] is None
     with pytest.raises(WebResearchError, match="中断"):
-        await service.search("web-run", "cancel", {"query": "公开资料"})
+        await service.search("web-run", "cancel", {"queries": [{"query": "公开资料"}]})
 
 
 @pytest.mark.parametrize("url", [

@@ -8,6 +8,35 @@ import pytest
 from database.connection import DatabaseConnection
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_value", ["true", "false"])
+async def test_startup_removes_retired_outline_sync_setting_and_preserves_other_preferences(
+    tmp_path: Path, legacy_value: str,
+):
+    preferences = [
+        ("web_search_enabled", "true"),
+        ("agent_prevent_system_sleep", "false"),
+        ("ai_model_configs", '[{"id":"local-model"}]'),
+    ]
+    with sqlite3.connect(tmp_path / "purrtypos.db") as connection:
+        connection.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '')")
+        connection.executemany("INSERT INTO settings (key, value) VALUES (?, ?)", [
+            ("sync_outline_chapter", legacy_value), *preferences,
+        ])
+
+    # Reopening also checks that the cleanup is safe to run on every startup.
+    for _ in range(2):
+        db = DatabaseConnection(tmp_path)
+        try:
+            await db.init()
+            assert await db.fetch_one("SELECT value FROM settings WHERE key = 'sync_outline_chapter'") is None
+            assert await db.fetch_all("SELECT key, value FROM settings ORDER BY key") == [
+                {"key": key, "value": value} for key, value in sorted(preferences)
+            ]
+        finally:
+            await db.close()
+
+
 def _seed_legacy_storage(
     path: Path,
     *,

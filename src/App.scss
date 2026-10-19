@@ -132,7 +132,9 @@
 }
 
 .app-page-loading {
+  position: relative;
   flex: 1;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -142,7 +144,7 @@
 .app-global-actions {
   position: fixed;
   top: 0;
-  right: 0;
+  right: var(--window-controls-right);
   height: var(--header-height);
   display: flex;
   align-items: center;

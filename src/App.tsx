@@ -11,6 +11,7 @@ import {
 } from 'react-router-dom'
 import { PurrSpin, usePurrToast } from '@/purr-components'
 import GlobalActions from './components/GlobalActions'
+import DesktopWindowDragRegion from './components/DesktopWindowDragRegion'
 import {
   Book,
   type AiModelConfig,
@@ -45,6 +46,15 @@ type Page = 'home' | 'screenplay' | 'bookshelf' | 'writingMethods' | 'skills' | 
 type BooksStatus = 'idle' | 'loading' | 'loaded'
 type SettingsLocationState = { returnTo?: string }
 const LAST_OPENED_BOOK_STORAGE_KEY = 'purr-typos:last-opened-book-id'
+
+function AppPageLoading() {
+  return (
+    <div className="app-page-loading">
+      <DesktopWindowDragRegion />
+      <PurrSpin size="large" />
+    </div>
+  )
+}
 
 function getStoredLastOpenedBookId(): EntityId | null {
   try {
@@ -107,7 +117,6 @@ export default function App() {
     () => modelConfigs.filter((config) => config.apiKey?.trim()),
     [modelConfigs],
   )
-  const [syncOutlineChapter, setSyncOutlineChapter] = React.useState(false)
   const [agentPreventSystemSleep, setAgentPreventSystemSleep] = React.useState(false)
   const [agentOperationMode, setAgentOperationModeState] = React.useState<AgentOperationMode>(DEFAULT_AGENT_OPERATION_MODE)
 
@@ -115,7 +124,6 @@ export default function App() {
     services.settings.getSettings().then((res) => {
       if (!res.success || !res.data) return
       if (res.data.model_descriptors) installModelDescriptors(res.data.model_descriptors)
-      setSyncOutlineChapter(!!res.data.sync_outline_chapter)
       setAgentPreventSystemSleep(res.data.agent_prevent_system_sleep === true)
       const operationMode = normalizeAgentOperationMode(res.data.agent_operation_mode)
       setAgentOperationModeState(operationMode)
@@ -184,11 +192,6 @@ export default function App() {
       void services.settings.setSettings({ ai_model_configs: next })
       return next
     })
-  }, [])
-
-  const handleSyncOutlineChapterChange = React.useCallback((value: boolean) => {
-    setSyncOutlineChapter(value)
-    services.settings.setSettings({ sync_outline_chapter: value })
   }, [])
 
   const handleAgentPreventSystemSleepChange = React.useCallback(async (value: boolean) => {
@@ -338,13 +341,14 @@ export default function App() {
   return (
     <div className={`app-root app-root--${page} app-root--ambient-${ambientPage}`}>
       <div className="app-ambient-glow" aria-hidden="true" />
+      {page === 'home' && !showSettings && <DesktopWindowDragRegion />}
       {page === 'home' && !showSettings && (
         <div className="app-global-actions">
           <GlobalActions onOpenSettings={handleOpenSettings} />
         </div>
       )}
       <main className="app-main">
-        <Suspense fallback={<div className="app-page-loading"><PurrSpin size="large" /></div>}>
+        <Suspense fallback={<AppPageLoading />}>
           <Routes location={contentLocation}>
             <Route path="/" element={(
               <HomePage
@@ -406,10 +410,9 @@ export default function App() {
                 onOpenSettings={handleOpenSettings}
                 modelConfigs={configuredModelConfigs}
                 onUpdateModelConfig={updateModelConfig}
-                syncOutlineChapter={syncOutlineChapter}
                 onReady={handleWorkspaceReady}
               />
-            ) : <div className="app-page-loading"><PurrSpin size="large" /></div>} />
+            ) : <AppPageLoading />} />
             <Route path="/settings" element={null} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
@@ -417,7 +420,7 @@ export default function App() {
       </main>
       {showSettings && (
         <div className="app-settings-overlay">
-          <Suspense fallback={<PurrSpin size="large" />}>
+          <Suspense fallback={<AppPageLoading />}>
             <SettingsPage
               modelConfigs={modelConfigs}
               onSaveModelConfigs={saveModelConfigs}
@@ -428,8 +431,6 @@ export default function App() {
               onSaveMemoryConfiguration={saveMemoryConfiguration}
               onClose={handleCloseSettings}
               onHome={() => navigate('/', { replace: true })}
-              syncOutlineChapter={syncOutlineChapter}
-              onSyncOutlineChapterChange={handleSyncOutlineChapterChange}
               agentPreventSystemSleep={agentPreventSystemSleep}
               onAgentPreventSystemSleepChange={handleAgentPreventSystemSleepChange}
               agentOperationMode={agentOperationMode}

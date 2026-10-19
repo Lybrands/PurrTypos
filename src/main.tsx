@@ -7,8 +7,12 @@ import {
 import { ThemeProvider } from './contexts/ThemeContext'
 import App from './App'
 import { runtimeCapabilities } from './platform'
+import { initializeWindowChrome } from './platform/windowChrome'
 import { PurrConfirmProvider, PurrToastProvider, PurrTooltipProvider } from '@/purr-components'
 import './index.scss'
+
+const disposeWindowChrome = initializeWindowChrome()
+import.meta.hot?.dispose(disposeWindowChrome)
 
 function AppProviders() {
   return (

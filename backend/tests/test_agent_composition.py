@@ -1760,7 +1760,7 @@ async def test_each_writing_turn_sends_host_time_through_web_tools_and_final_res
                 yield {"choices": [{"delta": {"tool_calls": [{
                     "index": 0, "id": f"weather-{value['currentDate']}", "type": "function",
                     "function": {"name": "searchWeb", "arguments": json.dumps({
-                        "query": f"杭州 天气 {value['currentDate']}", "language": "zh", "maxResults": 1,
+                        "queries": [{"query": f"杭州 天气 {value['currentDate']}", "language": "zh"}], "maxResults": 1,
                     }, ensure_ascii=False)},
                 }]}, "finish_reason": "tool_calls"}]}
             else:
@@ -1805,10 +1805,11 @@ async def test_agent_reads_five_known_sources_in_one_tool_round(
     from domains.web_research import SearchHit, WebPage
     await temp_db.execute("INSERT INTO books (id, title) VALUES ('book-1', '批量读取测试')")
     await temp_db.execute("INSERT INTO settings (key, value) VALUES ('web_search_enabled', 'true')")
-    requests, tool_calls, downloads = [], [], []
+    requests, tool_calls, downloads, searches = [], [], [], []
 
     class Search:
         async def search(self, *args):
+            searches.append(args)
             return [SearchHit(f"来源{i}", f"https://example.com/{i}", "相关资料", "fixture") for i in range(5)], []
 
     class Reader:
@@ -1826,8 +1827,10 @@ async def test_agent_reads_five_known_sources_in_one_tool_round(
             description = next(t["function"]["description"] for t in options["tools"] if t["function"]["name"] == "readWebPages")
             assert "5 项 1600" in description and "bodyBudget.maxCharactersPerPage" in description
             if not observations:
-                name, args = "searchWeb", {"query": "公开资料", "maxResults": 5}
-            elif "query" in observations[-1]:
+                name, args = "searchWeb", {"queries": [{"query": "公开资料"}, {"query": "public sources", "language": "en"}], "maxResults": 5, "researchMode": "extended"}
+            elif "queries" in observations[-1]:
+                assert observations[-1]["queryBudget"]["used"] == 2
+                assert observations[-1]["readBudget"]["limit"] == 12
                 name, args = "readWebPages", {"pages": [{"sourceId": r["sourceId"]} for r in observations[-1]["results"]]}
             else:
                 assert len(observations[-1]["results"]) == 5
@@ -1867,6 +1870,7 @@ async def test_agent_reads_five_known_sources_in_one_tool_round(
         assert [name for name, _ in tool_calls] == ["searchWeb", "readWebPages"]
         assert len(tool_calls[1][1]["pages"]) == 5
         assert len(downloads) == 5
+        assert len(searches) == 2
         assert len(requests) == 4  # search, batch read, candidate, final-public
     finally:
         await composition.shutdown()

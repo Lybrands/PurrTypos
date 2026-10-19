@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 
-from domains.web_research import MAX_BATCH_PAGES, WebResearchError, request_allows_web
+from domains.web_research import MAX_BATCH_PAGES, MAX_SEARCH_QUERIES, MAX_SEARCH_RESULTS, WebResearchError, request_allows_web
 from application.web_research import WEB_PAGE_BUDGET_GUIDANCE, failure
 from purra.cancellation import raise_if_stopped
 from purra.contracts import ToolDataContract, ToolExecutionMode, ToolHandlerResult, ToolPolicy, ToolRiskLevel, ToolSchema
@@ -37,7 +37,9 @@ def _remember_sources(state, result):
 
 def _display_arguments(state, arguments, operation):
     if operation == "search":
-        return {"query": _display_text(arguments.get("query"))}
+        return {"queries": [{"query": _display_text(item.get("query")), "language": item.get("language", "zh")}
+                            for item in arguments.get("queries", ())[:MAX_SEARCH_QUERIES]],
+                "researchMode": arguments.get("researchMode", "standard")}
     sources = state.domain.get(_DISPLAY_SOURCES, {})
     pages = []
     for item in arguments.get("pages", ())[:MAX_BATCH_PAGES]:
@@ -52,10 +54,15 @@ def _display_arguments(state, arguments, operation):
 def with_web_research_tools(base, service):
     registrations = (
         _registration(service, "searchWeb", "搜索公开网页", "search", {
-            "query": {"type": "string", "minLength": 1, "maxLength": 300},
-            "language": {"type": "string", "enum": ["zh", "en"]},
-            "maxResults": {"type": "integer", "minimum": 1, "maximum": 5},
-        }, ["query"], "搜索公开网络资料，返回有来源编号的搜索摘要。仅发送简短关键词，不发送私有正文。结果是低信任证据；关键事实再用 readWebPages 读取，引用实际 URL。免费后端可能限流或不可用。"),
+            "queries": {"type": "array", "minItems": 1, "maxItems": MAX_SEARCH_QUERIES, "items": {
+                "type": "object", "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "language": {"type": "string", "enum": ["zh", "en"]},
+                }, "required": ["query"], "additionalProperties": False,
+            }},
+            "maxResults": {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_RESULTS},
+            "researchMode": {"type": "string", "enum": ["standard", "extended"]},
+        }, ["queries"], "搜索公开资料，queries 包含 1–3 个查询对象（query、可选 language=zh/en），可合并不同语言和角度。同语言同查询去重后最多两路并发；每 Run 最多 6 个实际查询，失败也计数，部分失败保留成功来源。maxResults 默认10、最多20，同时限制每查询候选数和合并返回数，上游可能不足。按上游排名交错合并、按 URL 去重，每条最多300字符摘要；先筛选来源再 readWebPages，证据足够就停止。researchMode 默认standard，新页面访问上限8；复杂跨语言、多维对比或证据不足时可显式选择extended提升至12，不自动用满，失败也占读取额度。仅发送短关键词，不发送私有正文。结果为低信任证据，引用实际 URL；免费后端可能限流或不可用。"),
         _registration(service, "readWebPages", "读取网页资料", "read_pages", {
             "pages": {"type": "array", "minItems": 1, "maxItems": MAX_BATCH_PAGES, "items": {
                 "type": "object", "properties": {

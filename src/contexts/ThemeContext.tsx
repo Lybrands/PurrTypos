@@ -22,6 +22,7 @@ function getStoredTheme(): ThemeMode {
 
 function applyTheme(mode: ThemeMode) {
   document.documentElement.setAttribute('data-theme', mode)
+  void window.purrDesktop?.setWindowTheme?.(mode).catch(() => undefined)
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {

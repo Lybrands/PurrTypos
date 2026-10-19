@@ -4,6 +4,14 @@ const { contextBridge, ipcRenderer } = require('electron')
 // AI streaming, and all other application services are called through the
 // renderer's standard HTTP/SSE service layer.
 contextBridge.exposeInMainWorld('purrDesktop', {
+  platform: process.platform,
+  setWindowTheme: (theme) => ipcRenderer.invoke('set-window-theme', theme),
+  getWindowChromeState: () => ipcRenderer.invoke('get-window-chrome-state'),
+  onWindowChromeStateChanged: (listener) => {
+    const handler = (_event, state) => listener(state)
+    ipcRenderer.on('window-chrome-state-changed', handler)
+    return () => ipcRenderer.removeListener('window-chrome-state-changed', handler)
+  },
   showNotification: (data) => ipcRenderer.invoke('show-agent-notification', data),
   refreshAgentPowerSaveState: () => ipcRenderer.invoke('refresh-agent-power-save-state'),
   selectNovelKnowledge: (bookId) => ipcRenderer.invoke('novel-knowledge-select', bookId),

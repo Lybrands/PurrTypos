@@ -2330,6 +2330,7 @@ async def init_schema(db: DatabaseConnection) -> None:
         key TEXT PRIMARY KEY,
         value TEXT DEFAULT ''
     )""")
+    await db.execute("DELETE FROM settings WHERE key = 'sync_outline_chapter'")
 
     # ── story_background ─────────────────────────────────────────
     await db.execute("""CREATE TABLE IF NOT EXISTS story_background (

@@ -343,8 +343,17 @@ export function toolCallDisplayRow(
 ): { label: string; outcome: ToolCallLabelOutcome } {
   try {
     switch (name) {
-      case "searchWeb":
-        return { label: `搜索公开网页${displayQuerySuffix(args.query)}`, outcome: "ok" };
+      case "searchWeb": {
+        const queries = Array.isArray(args.queries)
+          ? args.queries.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+          : [];
+        const action = args.researchMode === "extended" ? "扩展搜索" : "搜索";
+        if (queries.length > 1) {
+          return { label: `${action} ${queries.length} 组关键词（${queries.map(item => `${item.language === "en" ? "英文" : "中文"}${displayQuerySuffix(item.query)}`).join("、")}）`, outcome: "ok" };
+        }
+        // Persisted operations from the earlier schema retain their query text.
+        return { label: `${action}公开网页${displayQuerySuffix(queries[0]?.query ?? args.query)}`, outcome: "ok" };
+      }
       case "readWebPages": {
         const pages = Array.isArray(args.pages)
           ? args.pages.filter((page): page is Record<string, unknown> =>

@@ -34,6 +34,8 @@
 
 /* 项目设计令牌：温暖、克制的桌面写作工具视觉。 */
 :root {
+  --window-controls-left: 0px;
+  --window-controls-right: 0px;
   /* ─── 字体：阿里巴巴普惠体为默认 ─────────────────── */
   --font-family: 'Alibaba PuHuiTi', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
     'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Microsoft YaHei', sans-serif,
@@ -156,6 +158,47 @@
   --transition-base: 180ms cubic-bezier(0.2, 0, 0, 1);
   --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
   color-scheme: light;
+}
+
+/* Only the desktop bridge enables native controls; browser previews keep their layout. */
+:root:is([data-desktop-platform='darwin'], [data-desktop-platform='win32'])[data-window-fullscreen='false'][data-window-controls-overlay='true'] {
+  // Native controls keep their size in DIP while page zoom changes CSS pixels.
+  --header-height: max(52px, env(titlebar-area-height, 52px));
+}
+
+:root[data-desktop-platform='darwin'][data-window-fullscreen='false'] {
+  --window-controls-left: 84px;
+
+  &[data-window-controls-overlay='true'] {
+    --window-controls-left: max(84px, env(titlebar-area-x, 84px));
+  }
+}
+
+:root[data-desktop-platform='win32'][data-window-fullscreen='false'] {
+  --window-controls-right: 138px;
+
+  &[data-window-controls-overlay='true'] {
+    --window-controls-left: max(0px, env(titlebar-area-x, 0px));
+    --window-controls-right: max(
+      0px,
+      calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 138px)))
+    );
+  }
+}
+
+.desktop-window-drag-region {
+  display: none;
+}
+
+:root:is([data-desktop-platform='darwin'], [data-desktop-platform='win32']) .desktop-window-drag-region {
+  position: absolute;
+  z-index: 8;
+  top: 0;
+  left: var(--window-controls-left);
+  right: var(--window-controls-right);
+  display: block;
+  height: var(--header-height);
+  -webkit-app-region: drag;
 }
 
 /* 深色主题 */

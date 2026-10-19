@@ -220,23 +220,24 @@ async def test_batch_replay_survives_restart_and_checks_entire_ordered_input(set
         with pytest.raises(WebResearchError, match="不一致"):
             await other.read_pages("web-run", "stable", changed)
     with pytest.raises(WebResearchError, match="不一致"):
-        await other.search("web-run", "stable", {"query": "公开资料"})
+        await other.search("web-run", "stable", {"queries": [{"query": "公开资料"}]})
 
 
 @pytest.mark.asyncio
 async def test_quota_counts_new_page_attempts_and_allows_cached_pagination_at_limit(setup):
     db, service = setup
-    rows = await sources(service, 8)
+    rows = await sources(service, 10)
     await service.read_pages("web-run", "first-five", pages(rows[:5]))
+    await service.read_pages("web-run", "next-three", pages(rows[5:8]))
     other = WebResearchService(db, reader=service.reader)
-    mixed = await other.read_pages("web-run", "remaining", pages([rows[5], rows[6], rows[0]]))
-    assert sum(r.get("code") == "web_budget_exhausted" for r in mixed["results"]) == 1
+    mixed = await other.read_pages("web-run", "remaining", pages([rows[8], rows[9], rows[0]]))
+    assert sum(r.get("code") == "web_budget_exhausted" for r in mixed["results"]) == 2
     assert mixed["results"][2]["success"]
-    assert service.reader.calls == 6
+    assert service.reader.calls == 8
     continuation = await other.read_pages("web-run", "cached", {"pages": [{"sourceId": rows[0]["id"], "offset": 4_000}]})
     assert continuation["results"][0]["success"]
-    assert service.reader.calls == 6
-    assert (await db.fetch_one("SELECT SUM(external_request) AS n FROM web_research_attempts WHERE kind = 'read'"))["n"] == 6
+    assert service.reader.calls == 8
+    assert (await db.fetch_one("SELECT SUM(external_request) AS n FROM web_research_attempts WHERE kind = 'read'"))["n"] == 8
     assert not any(r["external_request"] for r in await db.fetch_all("SELECT external_request FROM web_research_attempts WHERE kind = 'read_batch'"))
 
 
@@ -247,9 +248,9 @@ async def test_concurrent_service_instances_cannot_bypass_run_read_limit(setup):
     other = WebResearchService(db, reader=service.reader)
     batches = await asyncio.gather(service.read_pages("web-run", "a", pages(rows[:5])), other.read_pages("web-run", "b", pages(rows[5:])))
     results = [r for batch in batches for r in batch["results"]]
-    assert sum(r["success"] for r in results) == 6
-    assert sum(r.get("code") == "web_budget_exhausted" for r in results) == 4
-    assert service.reader.calls == 6
+    assert sum(r["success"] for r in results) == 8
+    assert sum(r.get("code") == "web_budget_exhausted" for r in results) == 2
+    assert service.reader.calls == 8
 
 
 @pytest.mark.asyncio
@@ -354,14 +355,15 @@ async def test_real_tool_events_reach_frontend_timeline_via_persisted_sse_wire(s
         ), Sink())
         return json.loads(result.results[0].content)
     try:
-        search_result = await execute("searchWeb", "find", {"query": "资料", "maxResults": count})
+        search_queries = [{"query": "资料"}] if count == 1 else [{"query": "资料", "language": "zh"}, {"query": "sources", "language": "en"}]
+        search_result = await execute("searchWeb", "find", {"queries": search_queries, "maxResults": count})
         args = {"pages": [{"sourceId": r["sourceId"]} for r in search_result["results"]]}
         first = await execute("readWebPages", "read", args)
         await execute("readWebPages", "continue", {"pages": [{"sourceId": r["sourceId"], "offset": r["nextOffset"]} for r in first["results"]]})
         events = await composition.output_repository.list_events("web-run", after_sequence=0)
         wire = [canonical_output_to_sse_chunk(event) for event in events]
         names = "、".join(f"来源{i + 1}" for i in range(count))
-        expected = ["搜索公开网页“资料”", *[
+        expected = ["搜索公开网页“资料”" if count == 1 else "搜索 2 组关键词（中文“资料”、英文“sources”）", *[
             f"{action} 1 个网页（{names}）" if count == 1 else f"{action} {names} 等 {count} 个网页"
             for action in ("读取", "续读")
         ]]

@@ -219,7 +219,7 @@ test('planning uses public narration instead of an executable operation row', ()
 
 test('web operation details render during execution and after canonical event replay', () => {
   for (const [toolName, toolArguments, label] of [
-    ['searchWeb', { query: '杭州 今日天气' }, '搜索公开网页“杭州 今日天气”'],
+    ['searchWeb', { queries: [{ query: '杭州 今日天气' }] }, '搜索公开网页“杭州 今日天气”'],
     ['readWebPages', { pages: [{ title: '天气预报', host: 'hangzhou.gov.cn', continuation: false }] }, '读取 1 个网页（天气预报）'],
     ['readWebPages', { pages: [{ title: '天气预报', host: 'hangzhou.gov.cn', continuation: true }] }, '续读 1 个网页（天气预报）'],
     ['readWebPages', { pages: [{ title: '来源1' }, { title: '来源2', continuation: true }, { title: '来源3' }] }, '读取 来源1、来源2·续读、来源3 等 3 个网页'],

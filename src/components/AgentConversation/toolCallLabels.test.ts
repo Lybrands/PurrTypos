@@ -95,7 +95,7 @@ test('writing search tools surface the queried text', () => {
 })
 
 test('web tools distinguish searches, sources and continuation without exposing opaque ids', () => {
-  assert.equal(toolCallDisplayRow('searchWeb', { query: '杭州 今日天气' }, [], []).label,
+  assert.equal(toolCallDisplayRow('searchWeb', { queries: [{ query: '杭州 今日天气' }] }, [], []).label,
     '搜索公开网页“杭州 今日天气”')
   const source = { title: '杭州市气象台天气预报', host: 'hangzhou.gov.cn' }
   assert.equal(toolCallDisplayRow('readWebPages', { pages: [source] }, [], []).label,
@@ -229,4 +229,18 @@ test('screenplay read targets list projected chapter titles', () => {
     }, [], [], undefined).label,
     '读取剧本任务依赖：第1章、第2章、第3章等 5 项',
   )
+})
+
+
+test('batch web searches display query count, language and extended mode', () => {
+  const queries = [{ query: 'Python 官方文档', language: 'zh' }, { query: 'Python documentation', language: 'en' }]
+  assert.equal(toolCallDisplayRow('searchWeb', { queries }, [], []).label,
+    '搜索 2 组关键词（中文“Python 官方文档”、英文“Python documentation”）')
+  assert.equal(toolCallDisplayRow('searchWeb', { queries, researchMode: 'extended' }, [], []).label,
+    '扩展搜索 2 组关键词（中文“Python 官方文档”、英文“Python documentation”）')
+  assert.equal(toolCallDisplayRow('searchWeb', { queries: queries.slice(0, 1), researchMode: 'extended' }, [], []).label,
+    '扩展搜索公开网页“Python 官方文档”')
+  // Existing persisted operations keep their original text after the schema change.
+  assert.equal(toolCallDisplayRow('searchWeb', { query: '旧记录' }, [], []).label,
+    '搜索公开网页“旧记录”')
 })

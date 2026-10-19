@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage, clipboard, Notification, powerSaveBlocker } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, protocol, nativeImage, nativeTheme, clipboard, Notification, powerSaveBlocker } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
@@ -15,6 +15,7 @@ const knowledgeHostSecret = require('node:crypto').randomBytes(32).toString('hex
 const { configureAppIcon } = require('./app_icon')
 const { createAgentPowerSaveManager } = require('./agent_power_save')
 const { configureExternalLinks } = require('./external_links')
+const { createWindowChrome } = require('./window_chrome')
 
 const replacementAcceptance = [
   'PURRTYPOS_NOVEL_ANALYSIS_REPLACEMENT_ACCEPTANCE',
@@ -43,6 +44,7 @@ if (!isDev) {
 
 let mainWindow = null
 let appIcon = null
+const windowChrome = createWindowChrome({ ipcMain, nativeTheme, getWindow: () => mainWindow })
 const backendProcess = createBackendProcessManager({ app, processEnv: { ...process.env, PURRTYPOS_KNOWLEDGE_HOST_SECRET: knowledgeHostSecret } })
 const agentPowerSave = createAgentPowerSaveManager({
   powerSaveBlocker,
@@ -69,9 +71,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    titleBarStyle: 'default',
+    ...windowChrome.getWindowOptions(),
     show: false,
   })
+  windowChrome.attachWindow(mainWindow)
   configureExternalLinks(mainWindow, shell)
 
   if (isDev) {

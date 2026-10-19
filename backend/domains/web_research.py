@@ -4,18 +4,37 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SETTING_KEY = "web_search_enabled"
 GRANT_KEY = "webResearch"
 CONTRACT_VERSION = 1
 MAX_SEARCHES = 6
-MAX_READS = 6
+MAX_READS = 8
+EXTENDED_MAX_READS = 12
+MAX_SEARCH_QUERIES = 3
+DEFAULT_SEARCH_RESULTS = 10
+MAX_SEARCH_RESULTS = 20
+SEARCH_EXCERPT_CHARS = 300
+SEARCH_CONCURRENCY = 2
 MAX_PAGE_CHARS = 24_000
 PAGE_CHARS = 4_000
 MAX_BATCH_PAGES = 5
 MAX_BATCH_BODY_CHARS = 8_000
 PAGE_READ_CONCURRENCY = 2
+
+
+def source_key(value: str) -> str:
+    """Deduplicate tracking variants without changing the URL used to read."""
+    parsed = urlsplit(public_url(value))
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    if parsed.port and parsed.port != (443 if parsed.scheme == "https" else 80):
+        host += f":{parsed.port}"
+    query = [(key, val) for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+             if not key.lower().startswith("utm_") and key.lower() not in {"gclid", "fbclid"}]
+    return urlunsplit((parsed.scheme, host, parsed.path, urlencode(sorted(query)), ""))
 
 
 class WebResearchError(ValueError):
