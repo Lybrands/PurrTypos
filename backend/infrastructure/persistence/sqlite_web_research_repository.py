@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from domains.web_research import (
     CONTRACT_VERSION, GRANT_KEY, MAX_READS, EXTENDED_MAX_READS, MAX_SEARCHES, SETTING_KEY,
-    WebResearchError,
+    PROVIDER_SETTING, API_KEY_SETTING, SearchConfiguration, WebResearchError,
 )
 
 
@@ -27,6 +27,12 @@ class SqliteWebResearchRepository:
     async def enabled(self):
         row = await self.db.fetch_one("SELECT value FROM settings WHERE key = ?", [SETTING_KEY])
         return bool(row and row["value"] == "true")
+
+    async def search_configuration(self):
+        rows = await self.db.fetch_all("SELECT key,value FROM settings WHERE key IN (?,?)", [PROVIDER_SETTING, API_KEY_SETTING])
+        values = {row["key"]: row["value"] for row in rows}
+        provider = values.get(PROVIDER_SETTING, "deepseek")
+        return SearchConfiguration(provider if provider in ("deepseek", "free") else "deepseek", (values.get(API_KEY_SETTING) or "").strip())
 
     async def authorize(self, run_id):
         if not run_id or not await self.enabled():
@@ -110,9 +116,11 @@ class SqliteWebResearchRepository:
 
     async def add_source(self, run_id, hit):
         await self.db.execute(
-            "INSERT OR IGNORE INTO web_research_sources (id, run_id, url, title, excerpt, backend, retrieved_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [f"web_{uuid4().hex}", run_id, hit.url, hit.title, hit.excerpt, hit.backend, now()],
+            "INSERT INTO web_research_sources (id, run_id, url, title, excerpt, backend, retrieved_at, published_at, relevance_score, authority) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(run_id,url) DO UPDATE SET title=excluded.title,excerpt=excluded.excerpt,backend=excluded.backend,"
+            "retrieved_at=excluded.retrieved_at,published_at=excluded.published_at,relevance_score=excluded.relevance_score,authority=excluded.authority",
+            [f"web_{uuid4().hex}", run_id, hit.url, hit.title, hit.excerpt, hit.backend, now(), hit.published_at, hit.relevance_score, hit.authority],
         )
         return await self.db.fetch_one("SELECT * FROM web_research_sources WHERE run_id = ? AND url = ?", [run_id, hit.url])
 

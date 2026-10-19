@@ -150,11 +150,11 @@ Agent 分为三个产品形态：小说写作（工作台 AI 面板）、小说�
 `backend/skills`，也不存在旧 SkillCatalog 回退路径。Agent 目录的依赖方向与
 实现版本路由规则见 [`backend/agents/README.md`](backend/agents/README.md)。
 
-### 免费联网资料
+### 联网资料
 
-在「设置 → 通用 → 允许 Agent 联网查资料」打开开关后，新建的写作 Agent 和剧本普通问答任务可以搜索公开资料并读取网页正文，无需搜索 API Key。检索词先发送给 Bing，失败时尝试 DuckDuckGo、Brave；网页由本机读取。开关默认关闭，纯问答、小说原文分析及子 Agent 不获得联网工具。
+在「设置 → 通用 → 允许 Agent 联网查资料」打开开关后，新建的写作 Agent 和剧本普通问答任务可以搜索公开资料并读取网页正文。搜索服务默认 DeepSeek 优先，配置独立 API Key 后使用其官方 Search API；无 Key 时自动使用免费搜索，也可主动选择免费搜索。免费检索先 Bing、失败时尝试 DuckDuckGo/Brave；网页正文由本机读取。开关默认关闭，纯问答、小说原文分析及子 Agent 不获得联网工具。
 
-搜索与正文提取不收取供应商 API 费用，生成模型仍按原有服务计费。免费搜索可能受到限流或改版影响，结果需核对来源。选型、实际限制和验证记录见 [免费联网搜索技术选型与实现](docs/design/2026-10-16-web-search-technical-selection.md)。
+DeepSeek 搜索按服务商规则计费；免费搜索与本机正文提取不收取搜索供应商 API 费用，生成模型仍按原有服务计费。免费搜索可能受到限流或改版影响，结果需核对来源。当前配置与降级合同见 [DeepSeek 搜索接入](docs/design/2026-10-19-deepseek-search.md)，免费路径及历史验证见 [免费联网搜索技术选型与实现](docs/design/2026-10-16-web-search-technical-selection.md)。
 
 搜索工具 `searchWeb` 每次接受 1–3 个中英文查询，最多两路并发；每查询及合并去重后的候选默认 10 条、最多 20 条，每条摘要最多 300 字符。每 Run 最多 6 个实际查询（失败也计数），返回查询与读取额度快照。上游可能不足，证据足够时提前停止。
 

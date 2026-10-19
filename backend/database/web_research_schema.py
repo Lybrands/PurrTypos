@@ -27,8 +27,15 @@ async def init_web_research_schema(db):
         page_url TEXT,
         page_retrieved_at TEXT,
         page_truncated INTEGER NOT NULL DEFAULT 0,
+        published_at TEXT,
+        relevance_score REAL,
+        authority INTEGER,
         UNIQUE(run_id, url)
     )""")
+    columns = {row["name"] for row in await db.fetch_all("PRAGMA table_info(web_research_sources)")}
+    for name, sql_type in (("published_at", "TEXT"), ("relevance_score", "REAL"), ("authority", "INTEGER")):
+        if name not in columns:
+            await db.execute(f"ALTER TABLE web_research_sources ADD COLUMN {name} {sql_type}")
     await db.execute("DROP TRIGGER IF EXISTS web_research_delete_run")
     await db.execute("""CREATE TRIGGER web_research_delete_run
         AFTER DELETE ON ai_agent_runs BEGIN

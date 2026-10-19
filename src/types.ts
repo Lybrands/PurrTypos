@@ -2686,8 +2686,12 @@ export interface ElectronAPI {
 }
 
 export interface GeneralSettings {
-  /** 显式允许新建写作/剧本问答任务使用免费的公开网页搜索。 */
+  /** 显式允许新建写作/剧本问答任务搜索公开网页。 */
   web_search_enabled?: boolean;
+  web_search_provider?: 'deepseek' | 'free';
+  /** 仅用于更新密钥；读取设置不会返回此字段，空字符串表示删除。 */
+  web_search_deepseek_api_key?: string;
+  readonly web_search_deepseek_api_key_configured?: boolean;
   model_descriptors?: Array<Record<string, unknown>>;
   /** Agent 运行期间允许屏幕关闭，但阻止系统挂起本地任务。 */
   agent_prevent_system_sleep?: boolean;

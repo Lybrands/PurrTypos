@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SETTING_KEY = "web_search_enabled"
+PROVIDER_SETTING = "web_search_provider"
+API_KEY_SETTING = "web_search_deepseek_api_key"
+KEY_CONFIGURED_SETTING = "web_search_deepseek_api_key_configured"
 GRANT_KEY = "webResearch"
 CONTRACT_VERSION = 1
 MAX_SEARCHES = 6
@@ -49,6 +52,19 @@ class SearchHit:
     url: str
     excerpt: str
     backend: str
+    published_at: str | None = None
+    relevance_score: float | None = None
+    authority: int | None = None
+
+
+@dataclass(frozen=True)
+class SearchConfiguration:
+    provider: str = "deepseek"
+    api_key: str = field(default="", repr=False)
+
+    @property
+    def active_provider(self):
+        return "deepseek" if self.provider == "deepseek" and self.api_key else "free"
 
 
 @dataclass(frozen=True)

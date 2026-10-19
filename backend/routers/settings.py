@@ -13,7 +13,8 @@ from application.provider_capacity_policy import (
 )
 from application.run_provenance import digest_model_endpoint
 from infrastructure.models.profiles.descriptors import model_descriptors
-from domains.web_research import SETTING_KEY as WEB_SEARCH_SETTING
+from application.web_research_settings import validate_search_settings, public_search_settings
+from domains.web_research import API_KEY_SETTING
 
 router = APIRouter(tags=["settings"])
 AGENT_PREVENT_SYSTEM_SLEEP_SETTING = "agent_prevent_system_sleep"
@@ -35,6 +36,9 @@ async def get_settings():
     data: dict = {}
     for r in rows:
         raw = r["value"] or ""
+        if r["key"] == API_KEY_SETTING:
+            data[API_KEY_SETTING] = raw
+            continue
         # Attempt to JSON-decode non-string values stored by new code
         try:
             parsed = json.loads(raw)
@@ -44,7 +48,7 @@ async def get_settings():
     if isinstance(data.get("ai_model_configs"), list):
         data["ai_model_configs"] = [upgrade_model_config(c) for c in data["ai_model_configs"]]
     data["model_descriptors"] = model_descriptors()
-    return {"success": True, "data": data}
+    return {"success": True, "data": public_search_settings(data)}
 
 
 @router.get("/runtime/agent-power-state")
@@ -76,34 +80,37 @@ async def get_agent_power_state():
 @router.put("/settings")
 async def set_settings(body: SetSettingsRequest):
     db = get_db()
-    for key, value in body.data.items():
-        if key == WEB_SEARCH_SETTING and type(value) is not bool:
-            raise HTTPException(status_code=422, detail="联网搜索开关必须为布尔值")
-        if key == "model_descriptors":
-            continue
-        if key == "ai_model_configs" and isinstance(value, list):
-            value = [upgrade_model_config(c) for c in value]
-        if key == PROVIDER_CAPACITY_POLICY_SETTING_KEY:
-            try:
-                value = normalize_provider_capacity_policies(value)
-            except ValueError as error:
-                raise HTTPException(status_code=422, detail=str(error)) from error
-            await _save_provider_capacity_policies(db, value)
-            continue
-        serialized = _serialize_value(value)
-        existing = await db.fetch_one(
-            "SELECT key FROM settings WHERE key = ?", [key]
-        )
-        if existing:
-            await db.execute(
-                "UPDATE settings SET value = ? WHERE key = ?",
-                [serialized, key],
+    try:
+        data = validate_search_settings(body.data)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    async with db.transaction():
+        for key, value in data.items():
+            if key == "model_descriptors":
+                continue
+            if key == "ai_model_configs" and isinstance(value, list):
+                value = [upgrade_model_config(c) for c in value]
+            if key == PROVIDER_CAPACITY_POLICY_SETTING_KEY:
+                try:
+                    value = normalize_provider_capacity_policies(value)
+                except ValueError as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
+                await _save_provider_capacity_policies(db, value)
+                continue
+            serialized = _serialize_value(value)
+            existing = await db.fetch_one(
+                "SELECT key FROM settings WHERE key = ?", [key]
             )
-        else:
-            await db.execute(
-                "INSERT INTO settings (key, value) VALUES (?, ?)",
-                [key, serialized],
-            )
+            if existing:
+                await db.execute(
+                    "UPDATE settings SET value = ? WHERE key = ?",
+                    [serialized, key],
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?)",
+                    [key, serialized],
+                )
     return {"success": True}
 
 

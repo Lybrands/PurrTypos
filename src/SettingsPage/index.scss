@@ -558,3 +558,31 @@
     justify-content: flex-start;
   }
 }
+
+.settings-web-research {
+  max-width: 620px;
+}
+
+.settings-web-research-options {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 12px 0 0 15px;
+  padding: 3px 0 3px 16px;
+  border-left: 2px solid var(--border-light);
+
+  .settings-field { max-width: 100%; }
+}
+
+.settings-web-research-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settings-web-research-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+}

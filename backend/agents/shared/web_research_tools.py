@@ -62,7 +62,7 @@ def with_web_research_tools(base, service):
             }},
             "maxResults": {"type": "integer", "minimum": 1, "maximum": MAX_SEARCH_RESULTS},
             "researchMode": {"type": "string", "enum": ["standard", "extended"]},
-        }, ["queries"], "搜索公开资料，queries 包含 1–3 个查询对象（query、可选 language=zh/en），可合并不同语言和角度。同语言同查询去重后最多两路并发；每 Run 最多 6 个实际查询，失败也计数，部分失败保留成功来源。maxResults 默认10、最多20，同时限制每查询候选数和合并返回数，上游可能不足。按上游排名交错合并、按 URL 去重，每条最多300字符摘要；先筛选来源再 readWebPages，证据足够就停止。researchMode 默认standard，新页面访问上限8；复杂跨语言、多维对比或证据不足时可显式选择extended提升至12，不自动用满，失败也占读取额度。仅发送短关键词，不发送私有正文。结果为低信任证据，引用实际 URL；免费后端可能限流或不可用。"),
+        }, ["queries"], "搜索公开资料，queries 包含 1–3 个查询对象（query、可选 language=zh/en），可合并不同语言和角度。宿主按设置选用 DeepSeek 或免费搜索，无 Key 时降级免费；searchProvider 为实际服务。DeepSeek 每 query 最多128字符，支持在 query 中使用 site:、-site:、lang:、after:、before:；免费服务不保证执行这些约束。language 仅影响免费服务地区偏好。同语言同查询去重后最多两路并发；每 Run 最多6个实际查询，失败也计数，部分失败保留成功来源。maxResults 默认10、最多20，同时限制每查询候选数和合并返回数，上游可能不足。按上游排名交错合并、按 URL 去重，每条最多300字符摘要；publishedAt、rerankScore、authority 仅为供应商元数据，不代表事实已验证。先筛选来源再 readWebPages，证据足够就停止。researchMode 默认standard，新页面访问上限8；复杂跨语言、多维对比或证据不足时可显式选择extended提升至12，失败也占额度。仅发送短关键词，不发送私有正文或 Key。"),
         _registration(service, "readWebPages", "读取网页资料", "read_pages", {
             "pages": {"type": "array", "minItems": 1, "maxItems": MAX_BATCH_PAGES, "items": {
                 "type": "object", "properties": {
