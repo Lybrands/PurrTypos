@@ -1,5 +1,7 @@
 # 免费联网搜索技术选型与实现
 
+> 历史方案与验证记录，不代表当前行为。现行实现仅使用 DeepSeek Search/Fetch，见 [联网资料合同](../design/2026-10-19-deepseek-search.md) 与 [当前验证](../validation/2026-10-20-deepseek-only.md)。
+
 本文件记录免费路径的选型与限制。2026-10-19 起增加可选 DeepSeek Search API，当前路由、Key 配置和降级合同见 [DeepSeek 搜索接入](2026-10-19-deepseek-search.md)。
 
 更新日期：2026-10-19。工作分支：`feat/1.0.1`；基线：`main` / `9bb366a7`。约束：中英文资料都重要；搜索和正文提取不依赖收费 API、免费试用额度或搜索 API Key。生成模型原有的 token 费用不在这个“免费”范围内。

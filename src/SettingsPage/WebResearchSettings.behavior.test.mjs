@@ -28,7 +28,6 @@ before(async () => {
         if (id === '\0web-settings-primitives') return `import React from 'react';
           const remember = (key, props) => { globalThis.__webSettingsFixture.controls[key] = props; };
           export function PurrSwitch(props) { remember('switch', props); return React.createElement('button', {role:'switch', 'aria-label':props['aria-label'], disabled:props.disabled, onClick:()=>props.onChange(!props.checked)}, String(props.checked)); }
-          export function PurrSelect(props) { remember('select', props); return React.createElement('select', {'aria-label':props['aria-label'],value:props.value,disabled:props.disabled,onChange:e=>props.onChange(e.target.value)}, props.options.map(o=>React.createElement('option',{key:o.value,value:o.value},o.label))); }
           export const PurrInput = {Password: (props) => { remember('password', props); const {onPressEnter,...inputProps}=props; return React.createElement('input', {...inputProps,type:'password'}); }};
           export function PurrButton({size,...props}) { return React.createElement('button', {...props,type:'button'}); }
         `
@@ -65,27 +64,23 @@ async function mount({ data = {}, loadFailed = false } = {}) {
   }}
 }
 
-test('search settings cascade from permission to provider to write-only key and actual fallback',async () => {
+test('search settings expose only DeepSeek permission and write-only key',async () => {
   const ui = await mount()
   try {
     assert.equal(document.querySelector('select'),null)
     await act(async () => fixture.controls.switch.onChange(true))
-    assert.match(ui.text(),/未配置 API Key，当前使用免费搜索/)
+    assert.match(ui.text(),/未配置 API Key，联网搜索和网页读取暂不可用/)
     assert.equal(document.querySelector('input').type,'password')
     await act(async () => fixture.controls.password.onChange({target:{value:'  sk-fixture-new-key  '}}))
-    assert.match(ui.text(),/当前使用免费搜索/) // draft does not switch providers before saving
+    assert.match(ui.text(),/暂不可用/) // A key draft is inactive until saved.
     await ui.click('保存 API Key')
     assert.deepEqual(fixture.writes.at(-1),{web_search_deepseek_api_key:'sk-fixture-new-key'})
-    assert.match(ui.text(),/当前使用 DeepSeek 搜索/)
+    assert.match(ui.text(),/已配置 DeepSeek API Key/)
     assert.equal(document.querySelector('input').value,'')
-    await act(async () => fixture.controls.select.onChange('free'))
-    assert.equal(document.querySelector('input'),null)
-    assert.match(ui.text(),/当前使用免费搜索/)
-    await act(async () => fixture.controls.select.onChange('deepseek'))
-    assert.match(ui.text(),/当前使用 DeepSeek 搜索/)
+    assert.equal(document.querySelector('select'),null)
     await ui.click('删除 API Key')
     assert.deepEqual(fixture.writes.at(-1),{web_search_deepseek_api_key:''})
-    assert.match(ui.text(),/未配置 API Key，当前使用免费搜索/)
+    assert.match(ui.text(),/未配置 API Key，联网搜索和网页读取暂不可用/)
     await act(async () => fixture.controls.switch.onChange(false))
     assert.equal(document.querySelector('select'),null)
     assert.equal(fixture.writes.filter(patch=>Object.hasOwn(patch,'web_search_deepseek_api_key')).length,2)
@@ -93,19 +88,17 @@ test('search settings cascade from permission to provider to write-only key and 
 })
 
 test('saved key is never hydrated into the input and failed writes preserve confirmed settings',async () => {
-  const ui = await mount({data:{web_search_enabled:true,web_search_provider:'deepseek',web_search_deepseek_api_key_configured:true}})
+  const ui = await mount({data:{web_search_enabled:true,web_search_deepseek_api_key_configured:true}})
   try {
     assert.equal(document.querySelector('input').value,'')
     assert.match(document.querySelector('input').placeholder,/已保存/)
     fixture.put = async () => ({success:false})
-    await act(async () => fixture.controls.select.onChange('free'))
-    assert.match(ui.text(),/当前使用 DeepSeek 搜索/)
     await act(async () => fixture.controls.password.onChange({target:{value:'sk-replacement'}}))
     await ui.click('更新 API Key')
     assert.equal(document.querySelector('input').value,'sk-replacement')
     await ui.click('删除 API Key')
-    assert.match(ui.text(),/当前使用 DeepSeek 搜索/)
-    assert.equal(fixture.errors.length,3)
+    assert.match(ui.text(),/已配置 DeepSeek API Key/)
+    assert.equal(fixture.errors.length,2)
     assert.ok(fixture.errors.every(text=>!text.includes('sk-replacement')))
   } finally { await ui.close() }
 })
@@ -115,12 +108,12 @@ test('pending saves block duplicate submissions and loading failure blocks permi
   try {
     let resolve
     fixture.put = patch => { fixture.writes.push(patch); return new Promise(done=>{resolve=done}) }
-    await act(async () => { fixture.controls.select.onChange('free'); fixture.controls.switch.onChange(false) })
+    await act(async () => { fixture.controls.switch.onChange(false); fixture.controls.switch.onChange(false) })
     assert.equal(fixture.writes.length,1)
-    assert.equal(document.querySelector('select').disabled,true)
+    assert.equal(document.querySelector('[role="switch"]').disabled,true)
     await act(async () => resolve({success:true}))
-    assert.match(ui.text(),/当前使用免费搜索/)
-    assert.equal(document.querySelector('select').disabled,false)
+    assert.equal(document.querySelector('input'),null)
+    assert.equal(document.querySelector('[role="switch"]').disabled,false)
   } finally { await ui.close() }
   const failed = await mount({loadFailed:true})
   try {

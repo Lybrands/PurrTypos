@@ -1,5 +1,7 @@
 # DeepSeek 搜索配置与免费降级验证
 
+> 历史方案与验证记录，不代表当前行为。现行实现仅使用 DeepSeek Search/Fetch，见 [联网资料合同](../design/2026-10-19-deepseek-search.md) 与 [当前验证](../validation/2026-10-20-deepseek-only.md)。
+
 日期：2026-10-19，分支 `feat/deepseek-search`。范围见 [接入合同](../design/2026-10-19-deepseek-search.md)。本次未提交、推送或修改用户书籍。DeepSeek 的请求与元数据字段依据当日官方 Search API 文档实现，没有接入 Fetch API。
 
 ## 已验证

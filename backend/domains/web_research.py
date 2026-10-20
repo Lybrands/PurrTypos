@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SETTING_KEY = "web_search_enabled"
-PROVIDER_SETTING = "web_search_provider"
 API_KEY_SETTING = "web_search_deepseek_api_key"
 KEY_CONFIGURED_SETTING = "web_search_deepseek_api_key_configured"
 GRANT_KEY = "webResearch"
@@ -59,12 +58,7 @@ class SearchHit:
 
 @dataclass(frozen=True)
 class SearchConfiguration:
-    provider: str = "deepseek"
     api_key: str = field(default="", repr=False)
-
-    @property
-    def active_provider(self):
-        return "deepseek" if self.provider == "deepseek" and self.api_key else "free"
 
 
 @dataclass(frozen=True)
@@ -72,6 +66,7 @@ class WebPage:
     url: str
     text: str
     truncated: bool = False
+    title: str = ""
 
 
 def public_ip(value: str) -> bool:

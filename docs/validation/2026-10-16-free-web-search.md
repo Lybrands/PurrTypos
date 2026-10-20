@@ -1,5 +1,7 @@
 # 免费联网搜索验证
 
+> 历史方案与验证记录，不代表当前行为。现行实现仅使用 DeepSeek Search/Fetch，见 [联网资料合同](../design/2026-10-19-deepseek-search.md) 与 [当前验证](../validation/2026-10-20-deepseek-only.md)。
+
 以下按验证时间保留历史证据；当前搜索规模与本次结果见文末“批量查询与候选扩容”。
 
 日期：2026-10-16。工作目录：PurrTypos / main。范围：[免费联网搜索实现](../design/2026-10-16-web-search-technical-selection.md)。

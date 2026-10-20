@@ -2688,7 +2688,6 @@ export interface ElectronAPI {
 export interface GeneralSettings {
   /** 显式允许新建写作/剧本问答任务搜索公开网页。 */
   web_search_enabled?: boolean;
-  web_search_provider?: 'deepseek' | 'free';
   /** 仅用于更新密钥；读取设置不会返回此字段，空字符串表示删除。 */
   web_search_deepseek_api_key?: string;
   readonly web_search_deepseek_api_key_configured?: boolean;
