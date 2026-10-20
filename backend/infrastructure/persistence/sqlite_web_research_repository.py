@@ -1,4 +1,4 @@
-"""Durable authorization, limits and replay for free public-web tools."""
+"""Durable authorization, limits and replay for public-web tools."""
 from __future__ import annotations
 
 import hashlib
@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from domains.web_research import (
     CONTRACT_VERSION, GRANT_KEY, MAX_READS, EXTENDED_MAX_READS, MAX_SEARCHES, SETTING_KEY,
-    PROVIDER_SETTING, API_KEY_SETTING, SearchConfiguration, WebResearchError,
+    API_KEY_SETTING, SearchConfiguration, WebResearchError,
 )
 
 
@@ -29,10 +29,8 @@ class SqliteWebResearchRepository:
         return bool(row and row["value"] == "true")
 
     async def search_configuration(self):
-        rows = await self.db.fetch_all("SELECT key,value FROM settings WHERE key IN (?,?)", [PROVIDER_SETTING, API_KEY_SETTING])
-        values = {row["key"]: row["value"] for row in rows}
-        provider = values.get(PROVIDER_SETTING, "deepseek")
-        return SearchConfiguration(provider if provider in ("deepseek", "free") else "deepseek", (values.get(API_KEY_SETTING) or "").strip())
+        row = await self.db.fetch_one("SELECT value FROM settings WHERE key = ?", [API_KEY_SETTING])
+        return SearchConfiguration(((row or {}).get("value") or "").strip())
 
     async def authorize(self, run_id):
         if not run_id or not await self.enabled():
@@ -133,7 +131,8 @@ class SqliteWebResearchRepository:
 
     async def save_page(self, run_id, source_id, page):
         await self.db.execute(
-            "UPDATE web_research_sources SET page_text = ?, page_retrieved_at = ?, page_truncated = ?, page_url = ? "
+            "UPDATE web_research_sources SET page_text = ?, page_retrieved_at = ?, page_truncated = ?, page_url = ?, "
+            "title = CASE WHEN ? != '' THEN ? ELSE title END "
             "WHERE run_id = ? AND id = ? AND page_text IS NULL",
-            [page.text, now(), int(page.truncated), page.url, run_id, source_id],
+            [page.text, now(), int(page.truncated), page.url, page.title, page.title, run_id, source_id],
         )

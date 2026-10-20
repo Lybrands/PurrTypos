@@ -2,6 +2,7 @@
 
 
 async def init_web_research_schema(db):
+    await db.execute("DELETE FROM settings WHERE key = 'web_search_provider'")
     await db.execute("""CREATE TABLE IF NOT EXISTS web_research_run_limits (
         run_id TEXT PRIMARY KEY,
         read_limit INTEGER NOT NULL CHECK(read_limit IN (8, 12))

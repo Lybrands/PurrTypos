@@ -10,7 +10,7 @@ import pytest
 from application.web_research import WebResearchService
 from domains.web_research import SearchHit, WebPage, WebResearchError
 from purra.cancellation import OperationCanceled
-from tests.test_web_research import setup, install_http  # shared temporary DB and HTTP doubles
+from tests.test_web_research import setup  # shared temporary DB
 
 
 async def sources(service, count):
@@ -205,7 +205,7 @@ async def test_offset_errors_are_per_page_and_do_not_consume_new_page_quota(setu
 
 
 @pytest.mark.asyncio
-async def test_batch_replay_survives_restart_and_checks_entire_ordered_input(setup):
+async def test_batch_replay_survives_restart_and_checks_entire_ordered_input(setup, monkeypatch):
     db, service = setup
     rows = await sources(service, 3)
     args = pages(rows)
@@ -213,7 +213,7 @@ async def test_batch_replay_survives_restart_and_checks_entire_ordered_input(set
     other = WebResearchService(db)
     async def no_network(*args):
         raise AssertionError("replay must use its durable receipt")
-    other.reader.read = no_network
+    monkeypatch.setattr("infrastructure.deepseek_web_search.DeepSeekPageReader.read", no_network)
     explicit_offsets = {"pages": [{**item, "offset": 0} for item in args["pages"]]}
     assert await other.read_pages("web-run", "stable", explicit_offsets) == first
     for changed in (pages(rows[:1]), pages(list(reversed(rows))), {"pages": [{"sourceId": rows[0]["id"], "offset": 1}]}):
@@ -313,20 +313,8 @@ async def test_cancelled_partial_batch_preserves_completed_page_cache(setup):
 
 
 @pytest.mark.asyncio
-async def test_batch_reader_keeps_redirect_ssrf_guard_per_page(setup, monkeypatch):
-    from infrastructure.web_research import PublicPageReader
-    _, service = setup
-    rows = await sources(service, 1)
-    calls = install_http(monkeypatch, [{"status": 302, "headers": {"Location": "http://127.0.0.1:18321/settings"}}])
-    service.reader = PublicPageReader()
-    result = await service.read_pages("web-run", "ssrf", pages(rows))
-    assert result["results"][0]["code"] == "web_url_blocked"
-    assert calls == [rows[0]["url"]]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("count", [1, 5])
-async def test_real_tool_events_reach_frontend_timeline_via_persisted_sse_wire(setup, count):
+async def test_real_tool_events_reach_frontend_timeline_via_persisted_sse_wire(setup, count, monkeypatch):
     from agents.shared.web_research_tools import with_web_research_tools
     from application.agent_tool_presentation import enforce_agent_tool_catalog_presentation
     from application.composition_factory import create_agent_composition
@@ -336,10 +324,19 @@ async def test_real_tool_events_reach_frontend_timeline_via_persisted_sse_wire(s
     from purra.tools import InMemoryToolCatalog
     from purra.tools.executor import CoreToolExecutor
 
-    db, service = setup
-    async def search(*args):
-        return [SearchHit(f"来源{i + 1}", f"https://example.com/{i}", "摘要", "fixture") for i in range(count)], []
-    service.search_provider.search = search
+    from tests.test_deepseek_web_search import configure, mock_http, result
+    import httpx
+    db, _ = setup
+    await configure(db)
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if request.url.path.endswith('/fetch'):
+            index = int(json.loads(request.content)['url'].rsplit('/', 1)[-1])
+            return httpx.Response(200, json={'title': f'来源{index + 1}', 'content': '公开正文内容。' * 1000})
+        return httpx.Response(200, json={'results': [result(title=f'来源{i + 1}', url=f'https://example.com/{i}') for i in range(count)]})
+    mock_http(monkeypatch, handler)
+    service = WebResearchService(db)
     composition = create_agent_composition(db)
     catalog = enforce_agent_tool_catalog_presentation("batch-web", with_web_research_tools(InMemoryToolCatalog(()), service))
     executor = CoreToolExecutor(catalog, operation_controller=AgentOperationController(composition.output_processor))
@@ -391,6 +388,6 @@ assert.deepEqual(labels(), expected);
             (root / "src/components/AgentConversation/AssistantOutput/timeline.ts").as_uri(),
         ], input=json.dumps({"wire": wire, "expected": expected}, ensure_ascii=False), text=True, capture_output=True, timeout=15)
         assert completed.returncode == 0, completed.stderr
-        assert service.reader.calls == count
+        assert len(requests) == (1 if count == 1 else 2) + count
     finally:
         await composition.shutdown()

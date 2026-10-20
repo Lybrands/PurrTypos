@@ -1,5 +1,5 @@
 import React from 'react'
-import { PurrButton, PurrInput, PurrSelect, PurrSwitch } from '@/purr-components'
+import { PurrButton, PurrInput, PurrSwitch } from '@/purr-components'
 import { services } from '../services'
 import { useAppFeedback } from '../hooks/useAppFeedback'
 import type { GeneralSettings } from '../types'
@@ -7,7 +7,6 @@ import type { GeneralSettings } from '../types'
 export default function WebResearchSettings() {
   const { message } = useAppFeedback()
   const [enabled, setEnabled] = React.useState(false)
-  const [provider, setProvider] = React.useState<'deepseek' | 'free'>('deepseek')
   const [keyConfigured, setKeyConfigured] = React.useState(false)
   const [keyDraft, setKeyDraft] = React.useState('')
   const [loading, setLoading] = React.useState(true)
@@ -21,7 +20,6 @@ export default function WebResearchSettings() {
       if (!result.success || !result.data) throw new Error('settings unavailable')
       if (active) {
         setEnabled(result.data.web_search_enabled === true)
-        setProvider(result.data.web_search_provider === 'free' ? 'free' : 'deepseek')
         setKeyConfigured(result.data.web_search_deepseek_api_key_configured === true)
       }
     }).catch(() => {
@@ -60,7 +58,7 @@ export default function WebResearchSettings() {
       <div className="settings-preference-row">
         <div className="settings-preference-copy">
           <strong>允许 Agent 联网查资料</strong>
-          <p>搜索和读取公开网页资料，可能增加模型用量和响应时间。</p>
+          <p>通过 DeepSeek 搜索和读取公开网页，需配置 API Key，可能增加服务费用、模型用量和响应时间。</p>
           {loadFailed && <p role="alert">联网搜索设置读取失败，请重新打开设置页。</p>}
         </div>
         <PurrSwitch
@@ -73,47 +71,31 @@ export default function WebResearchSettings() {
       {enabled && !loading && !loadFailed && (
         <div className="settings-web-research-options">
           <div className="settings-field">
-            <span className="settings-field-label">搜索服务</span>
-            <PurrSelect
-              aria-label="搜索服务"
-              value={provider}
+            <label className="settings-field-label" htmlFor="web-search-deepseek-key">DeepSeek API Key</label>
+            <PurrInput.Password
+              id="web-search-deepseek-key"
+              aria-label="DeepSeek 搜索 API Key"
+              autoComplete="off"
+              spellCheck={false}
+              maxLength={512}
               disabled={disabled}
-              options={[{ value: 'deepseek', label: 'DeepSeek 优先' }, { value: 'free', label: '免费搜索' }]}
-              onChange={(value: 'deepseek' | 'free') => {
-                void save({ web_search_provider: value }, () => { setProvider(value); setKeyDraft('') })
-              }}
+              value={keyDraft}
+              placeholder={keyConfigured ? '已保存，输入新 Key 可替换' : '输入 DeepSeek API Key'}
+              onChange={(event) => setKeyDraft(event.target.value)}
+              onPressEnter={() => { if (keyDraft.trim() && !disabled) saveKey(keyDraft.trim()) }}
             />
-          </div>
-          {provider === 'deepseek' && (
-            <div className="settings-field">
-              <label className="settings-field-label" htmlFor="web-search-deepseek-key">DeepSeek API Key</label>
-              <PurrInput.Password
-                id="web-search-deepseek-key"
-                aria-label="DeepSeek 搜索 API Key"
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={512}
-                disabled={disabled}
-                value={keyDraft}
-                placeholder={keyConfigured ? '已保存，输入新 Key 可替换' : '输入 DeepSeek API Key'}
-                onChange={(event) => setKeyDraft(event.target.value)}
-                onPressEnter={() => { if (keyDraft.trim() && !disabled) saveKey(keyDraft.trim()) }}
-              />
-              <div className="settings-web-research-key-actions">
-                <PurrButton size="small" disabled={disabled || !keyDraft.trim()} onClick={() => saveKey(keyDraft.trim())}>
-                  {keyConfigured ? '更新 API Key' : '保存 API Key'}
-                </PurrButton>
-                {keyConfigured && <PurrButton size="small" disabled={disabled} onClick={() => saveKey('')}>删除 API Key</PurrButton>}
-              </div>
-              <p className="settings-web-research-hint">DeepSeek 搜索按服务商规则计费。</p>
+            <div className="settings-web-research-key-actions">
+              <PurrButton size="small" disabled={disabled || !keyDraft.trim()} onClick={() => saveKey(keyDraft.trim())}>
+                {keyConfigured ? '更新 API Key' : '保存 API Key'}
+              </PurrButton>
+              {keyConfigured && <PurrButton size="small" disabled={disabled} onClick={() => saveKey('')}>删除 API Key</PurrButton>}
             </div>
-          )}
+            <p className="settings-web-research-hint">搜索和网页读取按 DeepSeek 服务规则计费。</p>
+          </div>
           <p className="settings-web-research-hint" role="status">
-            {provider === 'deepseek' && keyConfigured
-              ? '当前使用 DeepSeek 搜索。'
-              : provider === 'deepseek'
-                ? '未配置 API Key，当前使用免费搜索。'
-                : '当前使用免费搜索。'}
+            {keyConfigured
+              ? '已配置 DeepSeek API Key。'
+              : '未配置 API Key，联网搜索和网页读取暂不可用。'}
           </p>
         </div>
       )}
